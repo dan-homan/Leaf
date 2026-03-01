@@ -43,6 +43,8 @@ def main():
                         help="PGN output file (default: match_<engine1>_<engine2>.pgn)")
     parser.add_argument("--openings", default=None, metavar="FILE",
                         help="Openings file (.epd or .pgn); randomly ordered")
+    parser.add_argument("--ponder", action="store_true", default=False,
+                        help="Enable pondering (default: off)")
     args = parser.parse_args()
 
     # Validate concurrency
@@ -85,7 +87,7 @@ def main():
         cutechess_cli,
         "-engine", f"cmd={exe1}", f"name={name1}", "proto=xboard", f"dir={run_dir}",
         "-engine", f"cmd={exe2}", f"name={name2}", "proto=xboard", f"dir={run_dir}",
-        "-each",   f"tc={args.time_control}",
+        "-each",   f"tc={args.time_control}", *(["ponder"] if args.ponder else []),
         "-concurrency", str(args.concurrency),
         "-rounds", rounds_arg,
         "-recover",
@@ -103,7 +105,7 @@ def main():
         cmd += ["-openings", f"file={args.openings}", f"format={fmt}", "order=random"]
 
     print(f"Match:       {name1}  vs  {name2}")
-    print(f"Games:       {args.games}   Concurrency: {args.concurrency}   TC: {args.time_control}")
+    print(f"Games:       {args.games}   Concurrency: {args.concurrency}   TC: {args.time_control}   Ponder: {'on' if args.ponder else 'off'}")
     print(f"PGN output:  {pgn_out}")
     if args.openings:
         print(f"Openings:    {args.openings}")
