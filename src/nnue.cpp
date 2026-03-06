@@ -378,6 +378,12 @@ void nnue_update_accumulator(NNUEAccumulator &acc,
             add_feat(acc.acc[opp_sd], acc.psqt[opp_sd],
                      halfkav2_feature(opp_sd, opp_king, to,   KING, mover_sd));
 
+            // King capture: remove the captured piece from the opponent's accumulator.
+            if (capt_pt) {
+                sub_feat(acc.acc[opp_sd], acc.psqt[opp_sd],
+                         halfkav2_feature(opp_sd, opp_king, to, capt_pt, mover_sd ^ 1));
+            }
+
             if (mtype & CASTLE) {
                 int rook_from, rook_to;
                 if (mover_sd == WHITE) {
@@ -462,6 +468,12 @@ void nnue_record_delta(NNUEAccumulator &acc,
         fi = halfkav2_feature(opp_sd, opp_king, to,   KING, mover_sd);
         if (fi >= 0) acc.add[opp_sd][acc.n_add[opp_sd]++] = fi;
 
+        // King capture: remove the captured piece from the opponent's accumulator.
+        if (capt_pt) {
+            fi = halfkav2_feature(opp_sd, opp_king, to, capt_pt, mover_sd ^ 1);
+            if (fi >= 0) acc.sub[opp_sd][acc.n_sub[opp_sd]++] = fi;
+        }
+
         if (mtype & CASTLE) {
             int rook_from, rook_to;
             if (mover_sd == WHITE) {
@@ -542,6 +554,59 @@ void nnue_apply_delta(NNUEAccumulator &acc,
     }
     acc.dirty[0] = acc.dirty[1] = false;
     acc.computed = true;
+
+#ifdef NNUE_CHECK_LAZY
+    // Diagnostic: verify lazy result against full-refresh
+    {
+        NNUEAccumulator ref;
+        ref.dirty[0] = ref.dirty[1] = true;
+        nnue_init_accumulator(ref, pos);
+        for (int p = 0; p < 2; p++) {
+            for (int j = 0; j < NNUE_HALF_DIMS; j++) {
+                if (acc.acc[p][j] != ref.acc[p][j]) {
+                    fprintf(stderr, "LAZY_MISMATCH persp=%d j=%d lazy=%d ref=%d parent=%d "
+                            "n_sub=%d n_add=%d need_refresh=%d\n",
+                            p, j, (int)acc.acc[p][j], (int)ref.acc[p][j],
+                            (int)parent_acc.acc[p][j],
+                            (int)acc.n_sub[p], (int)acc.n_add[p], (int)acc.need_refresh[p]);
+                    // Print sub features and their weight at dim j
+                    for (int k = 0; k < acc.n_sub[p]; k++) {
+                        int fi = acc.sub[p][k];
+                        fprintf(stderr, "  SUB[%d] fi=%d w[j]=%d\n",
+                                k, fi, (int)ft_weights[(int64_t)fi * NNUE_HALF_DIMS + j]);
+                    }
+                    for (int k = 0; k < acc.n_add[p]; k++) {
+                        int fi = acc.add[p][k];
+                        fprintf(stderr, "  ADD[%d] fi=%d w[j]=%d\n",
+                                k, fi, (int)ft_weights[(int64_t)fi * NNUE_HALF_DIMS + j]);
+                    }
+                    // Scan ref features for this perspective and print those whose
+                    // weight at dim j is non-zero (to identify the missing/extra feature).
+                    {
+                        int ksq = pos.plist[p][KING][1];
+                        fprintf(stderr, "  Ref features (persp=%d ksq=%d):\n", p, ksq);
+                        for (int side = 0; side < 2; side++) {
+                            for (int ptype = PAWN; ptype <= KING; ptype++) {
+                                for (int i = 1; i <= pos.plist[side][ptype][0]; i++) {
+                                    int psq = pos.plist[side][ptype][i];
+                                    int fi = halfkav2_feature(p, ksq, psq, ptype, side);
+                                    if (fi >= 0) {
+                                        int w = (int)ft_weights[(int64_t)fi * NNUE_HALF_DIMS + j];
+                                        if (w != 0)
+                                            fprintf(stderr, "  feat fi=%d side=%d ptype=%d psq=%d w[j]=%d\n",
+                                                    fi, side, ptype, psq, w);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    goto done_check;
+                }
+            }
+        }
+        done_check:;
+    }
+#endif
 }
 
 // ---------------------------------------------------------------------------

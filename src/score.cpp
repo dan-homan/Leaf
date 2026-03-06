@@ -51,8 +51,10 @@ int position::score_pos(game_rec *gr, ts_thread_data *tdata NNUE_ACC_DEF)
          return wtm ? cached : -cached;
        }
      }
-     // Refresh any dirty accumulator halves (king moved in this subtree)
-     if (1 || nnue_acc->dirty[WHITE] || nnue_acc->dirty[BLACK])
+     // Refresh any dirty accumulator halves (king moved in this subtree).
+     // In lazy-accumulator mode the search calls nnue_apply_delta before
+     // invoking score_pos, so dirty should already be false here.
+     if (nnue_acc->dirty[WHITE] || nnue_acc->dirty[BLACK])
        nnue_init_accumulator(*nnue_acc, *this);
      int pc = 2;  // two kings
      for (int s = 0; s < 2; s++)
