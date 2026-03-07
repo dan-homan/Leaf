@@ -208,11 +208,9 @@ def bias_delta_stats(orig, upd):
 def print_summary(orig, upd):
     has_counts = upd.get('_has_counts', False)
 
-    print("\n┌─────────────────────────────────────────────────────────────────────────┐")
-    print("│              Weight change summary (all stacks combined)               │")
-    print("├──────────┬──────────────┬───────────────┬───────────┬─────────────────┤")
-    print("│  Layer   │  Changed     │  % Changed    │  Δ range  │  mean ± std     │")
-    print("├──────────┼──────────────┼───────────────┼───────────┼─────────────────┤")
+    print("\n┌──────────┬────────────────┬───────────────┬───────────────┬─────────────────┐")
+    print("│  Layer   │    Changed     │   % Changed   │    Δ range    │   mean ± std    │")
+    print("├──────────┼────────────────┼───────────────┼───────────────┼─────────────────┤")
 
     for layer_name, key_w, key_b in [
             ('FC0 wts',  'fc0_w',   'fc0_bias'),
@@ -222,17 +220,17 @@ def print_summary(orig, upd):
         all_o = np.concatenate(orig[key_w])
         all_u = np.concatenate(upd[key_w])
         s = delta_stats(all_o, all_u)
-        print(f"│ {layer_name:<8} │ {s['n_changed']:>6}/{s['n']:<5} │ {s['pct']:>12.2f}% │"
-              f" [{s['dmin']:+4d},{s['dmax']:+4d}] │ {s['dmean']:+7.3f} ± {s['dstd']:.3f}  │")
+        print(f"│ {layer_name:<8} │ {s['n_changed']:>6}/{s['n']:<7} │ {s['pct']:>12.2f}% │"
+              f" [{s['dmin']:+4d},{s['dmax']:+4d}]   │ {s['dmean']:+7.3f} ± {s['dstd']:.3f} │")
 
         # biases (int32)
         all_ob = np.concatenate(orig[key_b])
         all_ub = np.concatenate(upd[key_b])
         sb = bias_delta_stats(all_ob, all_ub)
-        print(f"│ {layer_name[:-3]+'bis':<8} │ {sb['n_changed']:>6}/{sb['n']:<5} │ {sb['pct']:>12.2f}% │"
-              f" [{sb['dmin']:+4d},{sb['dmax']:+4d}] │ {sb['dmean']:+7.3f} ± {sb['dstd']:.3f}  │")
+        print(f"│ {layer_name[:-3]+'bis':<8} │ {sb['n_changed']:>6}/{sb['n']:<7} │ {sb['pct']:>12.2f}% │"
+              f" [{sb['dmin']:+4d},{sb['dmax']:+4d}]   │ {sb['dmean']:+7.3f} ± {sb['dstd']:.3f} │")
 
-    print("└──────────┴──────────────┴───────────────┴───────────┴─────────────────┘")
+    print("└──────────┴────────────────┴───────────────┴───────────────┴─────────────────┘")
 
     # Per-stack breakdown
     print("\nPer-stack FC1 weight changes:")
@@ -362,7 +360,7 @@ def plot_fc1_per_stack(orig, upd, save):
     return fig
 
 
-def plot_delta_heatmaps(orig, upd, save):
+def _plot_delta_heatmaps_unused(orig, upd, save):
     """Show delta (updated − original) as heatmaps for FC0 and FC1."""
     fig, axes = plt.subplots(2, N_STACKS, figsize=(18, 6))
     fig.suptitle('FC weight deltas (updated − original) — each cell = one weight',
@@ -403,7 +401,7 @@ def plot_delta_heatmaps(orig, upd, save):
     return fig
 
 
-def plot_bias_changes(orig, upd, save):
+def _plot_bias_changes_unused(orig, upd, save):
     """Show FC bias changes (int32) for each layer and stack."""
     fig, axes = plt.subplots(1, 3, figsize=(15, 4))
     fig.suptitle('FC bias changes (updated − original, int32 scale)', fontsize=11)
@@ -483,8 +481,6 @@ def main():
 
     plot_overview(orig, upd, args.save)
     plot_fc1_per_stack(orig, upd, args.save)
-    plot_delta_heatmaps(orig, upd, args.save)
-    plot_bias_changes(orig, upd, args.save)
 
     if not args.no_show:
         plt.show()
