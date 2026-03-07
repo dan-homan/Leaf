@@ -36,6 +36,10 @@ game_rec::game_rec() {
 	force_mode = 0;
 	program_run = 1;
 
+#if TDLEAF
+	td_game.n_plies = 0;
+#endif
+
 	/* tree search parameters */
 
         // declared in initializer of tree_search
@@ -55,7 +59,11 @@ void game_rec::setboard(const char inboard[256], const char ms, const char castl
   learn_count = 0; learned = 0;
 
   // game is not over
-  over = 0; 
+  over = 0;
+
+#if TDLEAF
+  td_game.n_plies = 0;
+#endif
 
   // reset time control variables
   mttc = omttc;

@@ -13,9 +13,10 @@ if($ARGV[0]) {
 }
 $filename = "EXchess_v" . $vers;
 
-if($ARGV[1]) {
-    $extra_arg = "-D $ARGV[1]";
-} 
+$extra_arg = "";
+for my $i (1..$#ARGV) {
+    $extra_arg .= " -D $ARGV[$i]";
+}
 
 if(-e "./$filename") { 
     print "File $filename already exists!  Overwrite (y/n)? ";

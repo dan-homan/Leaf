@@ -15,6 +15,9 @@
 #if NNUE
 #include "../src/nnue.cpp"
 #endif
+#if TDLEAF
+#include "../src/tdleaf.cpp"
+#endif
 #include "../src/check.cpp"
 #include "../src/book.cpp"
 #include "../src/sort.cpp"

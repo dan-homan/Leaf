@@ -56,9 +56,15 @@
 #endif
 
 // NNUE evaluation (Stockfish HalfKAv2-hm compatible)
-// Compile with -D NNUE=1 and place nn-eba324f53044.nnue next to the binary.
+// Compile with -D NNUE=1 and place nn-ad9b42354671.nnue next to the binary.
 #ifndef NNUE
  #define NNUE 0
+#endif
+
+// TDLeaf(λ) online learning for the NNUE FC layers.
+// Requires NNUE=1.  Compile with -D NNUE=1 -D TDLEAF=1.
+#ifndef TDLEAF
+ #define TDLEAF 0
 #endif
 
 // define 64 bit integers and zero values for unsigned long long

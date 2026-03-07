@@ -110,4 +110,52 @@ void nnue_apply_delta(NNUEAccumulator &acc,
 // piece_count: total pieces on board (for layer-stack selection).
 int nnue_evaluate(const NNUEAccumulator &acc, int stm, int piece_count);
 
+// ---------------------------------------------------------------------------
+// TDLeaf(λ) support — only compiled when TDLEAF=1
+// ---------------------------------------------------------------------------
+#if TDLEAF
+
+// Intermediate activations saved during the FP32 forward pass (for backprop).
+struct NNUEActivations {
+    float l0_in  [NNUE_L0_INPUT];    // SqrCReLU output from acc pairs
+    float fc0_raw[NNUE_L0_SIZE];     // FC0 pre-activation (int32 cast to float)
+    float fc1_in [NNUE_L1_PADDED];   // dual-activation output (indices 0..29 active)
+    float fc1_raw[NNUE_L1_SIZE];     // FC1 pre-activation
+    float fc2_in [NNUE_L2_PADDED];   // CReLU output
+    float fc2_raw;                    // FC2 dot-product output (before passthrough add)
+    float fwdOut;                     // passthrough: fc0_raw[15] * 9600/8128
+    float positional;                 // fc2_raw + fwdOut
+    int   stack;                      // layer stack index
+};
+
+// Initialise FP32 shadow copies from the just-loaded int8 arrays.
+// Called once at end of nnue_load().
+void nnue_init_fp32_weights();
+
+// FP32 forward pass — mirrors nnue_evaluate() but saves activations for backprop.
+// acc[0] = BLACK perspective, acc[1] = WHITE perspective (raw int16).
+// wtm: true if White to move (determines stm perspective layout for FC0 input).
+void nnue_forward_fp32(const int16_t acc[2][NNUE_HALF_DIMS],
+                       const int32_t psqt[2][NNUE_PSQT_BKTS],
+                       bool wtm, NNUEActivations &act);
+
+// Accumulate per-weight gradients for one position into the static grad arrays.
+// grad_scale = alpha * e_t * sigmoid_gradient — applied inside.
+void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale);
+
+// Apply accumulated gradients (zero them afterwards).
+void nnue_apply_gradients();
+
+// Requantize FP32 weights → int8 arrays used by the live forward pass.
+// Must be called after nnue_apply_gradients().  Also clears the score hash.
+void nnue_requantize_fc();
+
+// Save FC-only weights (all 8 stacks) to a companion file.  Returns true on success.
+bool nnue_save_fc_weights(const char *path);
+
+// Load FC-only weights from companion file, overriding what nnue_load() loaded.
+bool nnue_load_fc_weights(const char *path);
+
+#endif // TDLEAF
+
 #endif // NNUE_H

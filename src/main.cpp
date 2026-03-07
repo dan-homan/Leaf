@@ -159,6 +159,16 @@ int main(int argc, char *argv[])
     }
     if (nnue_available) write_out("NNUE evaluation loaded.\n");
     else                write_out("NNUE file not found, using classical evaluation.\n");
+#if TDLEAF
+    if (nnue_available) {
+      // Attempt to load previously learned FC weights (companion file).
+      char tdleaf_path[512];
+      snprintf(tdleaf_path, sizeof(tdleaf_path), "%s%s",
+               exec_path, "nn-ad9b42354671.tdleaf.bin");
+      if (!nnue_load_fc_weights(tdleaf_path))
+          nnue_load_fc_weights("nn-ad9b42354671.tdleaf.bin");
+    }
+#endif
   }
 #endif
 
@@ -475,6 +485,17 @@ void make_move()
      //---------------------------
      game.best = game.ts.search(game.pos, time_limit, game.T, &game);
      assert(!game.searching);
+#if TDLEAF && NNUE
+     if (nnue_available) {
+       int pc = 2;
+       for (int _s = 0; _s < 2; _s++)
+         for (int _pt = PAWN; _pt <= QUEEN; _pt++)
+           pc += game.pos.plist[_s][_pt][0];
+       tdleaf_record_ply(game.td_game,
+                         game.ts.tdata[0].n[0].acc,
+                         game.ts.g_last, (bool)game.pos.wtm, pc);
+     }
+#endif
      //---------------------------
      // Adjust remaining time
      //---------------------------
@@ -592,7 +613,19 @@ void make_move()
    } 
 
    // update the quasi-legal moves in this situation
-   game.pos.allmoves(&game.movelist, &game.ts.tdata[0]);     
+   game.pos.allmoves(&game.movelist, &game.ts.tdata[0]);
+
+#if TDLEAF && NNUE
+   // If the game just ended via checkmate/stalemate/draw, trigger TDLeaf update.
+   if (game.over && nnue_available && game.td_game.n_plies > 0) {
+     float td_result = 0.5f;
+     if (strstr(game.overstring, "1-0"))  td_result = 1.0f;
+     else if (strstr(game.overstring, "0-1")) td_result = 0.0f;
+     tdleaf_update_after_game(game.td_game, td_result,
+                              "nn-ad9b42354671.tdleaf.bin");
+     game.td_game.n_plies = 0;  // prevent double-trigger
+   }
+#endif
 
 }
 
@@ -992,7 +1025,22 @@ void parse_command()
 #endif
   else if((!strcmp(response, "save") || !strcmp(response, "SR")) && !xboard) { save_game(); }
   else if(!strcmp(response, "quit")) { game.over = 1; game.program_run = 0;  }
-  else if(!strcmp(response, "result")) { game.over = 1;  }
+  else if(!strcmp(response, "result")) {
+    game.over = 1;
+#if TDLEAF && NNUE
+    if (nnue_available && game.td_game.n_plies > 0) {
+      // xboard sends: "result 1-0 {description}" or "0-1" or "1/2-1/2"
+      char result_str[20] = "";
+      cin >> result_str;
+      float td_result = 0.5f;
+      if (!strcmp(result_str, "1-0"))      td_result = 1.0f;
+      else if (!strcmp(result_str, "0-1")) td_result = 0.0f;
+      tdleaf_update_after_game(game.td_game, td_result,
+                               "nn-ad9b42354671.tdleaf.bin");
+      game.td_game.n_plies = 0;
+    }
+#endif
+  }
   else if(!strcmp(response, "setvalue")) { 
     char par_string[50]; float par_val;
     cin >> par_string >> par_val;

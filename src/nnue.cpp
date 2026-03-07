@@ -319,6 +319,9 @@ bool nnue_load(const char *path)
     fclose(f);
     nnue_available = true;
     printf("NNUE: all %d stacks loaded OK\n", NNUE_LAYER_STACKS);
+#if TDLEAF
+    nnue_init_fp32_weights();
+#endif
     return true;
 }
 
@@ -854,3 +857,359 @@ int nnue_evaluate(const NNUEAccumulator &acc, int stm, int piece_count)
     }
     return score;
 }
+
+// ===========================================================================
+// TDLeaf(λ) support — compiled only when TDLEAF=1
+// ===========================================================================
+#if TDLEAF
+
+#include <cmath>
+#include "tdleaf.h"
+#include "hash.h"   // score_table, SCORE_SIZE, score_rec — for cache invalidation
+
+// ---------------------------------------------------------------------------
+// FP32 shadow copies of FC weights (natural output-major layout)
+// ---------------------------------------------------------------------------
+static float l0_weights_f32[NNUE_LAYER_STACKS][NNUE_L0_SIZE * NNUE_L0_INPUT];
+static float l0_biases_f32 [NNUE_LAYER_STACKS][NNUE_L0_SIZE];
+static float l1_weights_f32[NNUE_LAYER_STACKS][NNUE_L1_SIZE * NNUE_L1_PADDED];
+static float l1_biases_f32 [NNUE_LAYER_STACKS][NNUE_L1_SIZE];
+static float l2_weights_f32[NNUE_LAYER_STACKS][NNUE_L2_PADDED];
+static float l2_bias_f32   [NNUE_LAYER_STACKS];
+
+// Gradient accumulators (zeroed before each game, filled by nnue_accumulate_gradients)
+static float grad_l0_w[NNUE_LAYER_STACKS][NNUE_L0_SIZE * NNUE_L0_INPUT];
+static float grad_l0_b[NNUE_LAYER_STACKS][NNUE_L0_SIZE];
+static float grad_l1_w[NNUE_LAYER_STACKS][NNUE_L1_SIZE * NNUE_L1_PADDED];
+static float grad_l1_b[NNUE_LAYER_STACKS][NNUE_L1_SIZE];
+static float grad_l2_w[NNUE_LAYER_STACKS][NNUE_L2_PADDED];
+static float grad_l2_b[NNUE_LAYER_STACKS];
+
+// ---------------------------------------------------------------------------
+// nnue_init_fp32_weights — dequantize int8 → float after nnue_load()
+// ---------------------------------------------------------------------------
+void nnue_init_fp32_weights()
+{
+    const float q_scale = 1.0f / (float)(1 << NNUE_WEIGHT_SHIFT); // 1/64
+
+    for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
+        // FC0: vdotq layout → natural [o * L0_INPUT + i]
+        for (int o = 0; o < NNUE_L0_SIZE; o++) {
+            int ob = o / 4, k = o % 4;
+            l0_biases_f32[s][o] = (float)l0_biases[s][o] * q_scale * q_scale;
+            for (int i = 0; i < NNUE_L0_INPUT; i++) {
+                int ib = i / 4, j = i % 4;
+                l0_weights_f32[s][o * NNUE_L0_INPUT + i] =
+                    (float)l0_weights[s][ib * 64 + ob * 16 + k * 4 + j] * q_scale;
+            }
+        }
+        // FC1: vdotq layout → natural [o * PADDED + i]
+        for (int o = 0; o < NNUE_L1_SIZE; o++) {
+            int ob = o / 4, k = o % 4;
+            l1_biases_f32[s][o] = (float)l1_biases[s][o] * q_scale * q_scale;
+            for (int i = 0; i < NNUE_L1_PADDED; i++) {
+                int ib = i / 4, j = i % 4;
+                l1_weights_f32[s][o * NNUE_L1_PADDED + i] =
+                    (float)l1_weights[s][ib * 128 + ob * 16 + k * 4 + j] * q_scale;
+            }
+        }
+        // FC2: natural layout (32 weights, 1 output)
+        l2_bias_f32[s] = (float)out_biases[s] * q_scale * q_scale;
+        for (int i = 0; i < NNUE_L2_PADDED; i++)
+            l2_weights_f32[s][i] = (float)out_weights[s][i] * q_scale;
+    }
+    memset(grad_l0_w, 0, sizeof(grad_l0_w));
+    memset(grad_l0_b, 0, sizeof(grad_l0_b));
+    memset(grad_l1_w, 0, sizeof(grad_l1_w));
+    memset(grad_l1_b, 0, sizeof(grad_l1_b));
+    memset(grad_l2_w, 0, sizeof(grad_l2_w));
+    memset(grad_l2_b, 0, sizeof(grad_l2_b));
+    printf("NNUE TDLeaf: FP32 weights initialised (%d stacks)\n", NNUE_LAYER_STACKS);
+}
+
+// ---------------------------------------------------------------------------
+// nnue_forward_fp32 — FP32 forward pass, saves activations for backprop
+// ---------------------------------------------------------------------------
+void nnue_forward_fp32(const int16_t acc[2][NNUE_HALF_DIMS],
+                       const int32_t psqt[2][NNUE_PSQT_BKTS],
+                       bool wtm, NNUEActivations &act)
+{
+    int stm = wtm ? 1 : 0;  // WHITE=1, BLACK=0
+
+    // 1. SqrCReLU from raw accumulator: pair (acc[i], acc[i+512]) for each perspective
+    //    Layout: [stm_512 | opp_512]
+    for (int p = 0; p < 2; p++) {
+        int persp = (p == 0) ? stm : (stm ^ 1);
+        float *out = act.l0_in + p * 512;
+        const int16_t *a = acc[persp];
+        for (int i = 0; i < 512; i++) {
+            float va = (float)a[i];
+            float vb = (float)a[i + 512];
+            if (va < 0.0f) va = 0.0f; else if (va > 127.0f) va = 127.0f;
+            if (vb < 0.0f) vb = 0.0f; else if (vb > 127.0f) vb = 127.0f;
+            float sq = (va * vb) * (1.0f / 128.0f);  // >> 7
+            out[i] = (sq > 127.0f) ? 127.0f : sq;
+        }
+    }
+
+    // Layer stack from piece count is not available here; use stored stack index.
+    // The caller fills act.stack before calling this function.
+    int s = act.stack;
+
+    // 2. FC0: [L0_INPUT → L0_SIZE] with FP32 weights
+    for (int o = 0; o < NNUE_L0_SIZE; o++) {
+        float sum = l0_biases_f32[s][o];
+        const float *w = &l0_weights_f32[s][o * NNUE_L0_INPUT];
+        for (int i = 0; i < NNUE_L0_INPUT; i++)
+            sum += w[i] * act.l0_in[i];
+        act.fc0_raw[o] = sum;
+    }
+
+    // 3. Dual activation of FC0 outputs 0..14 → FC1 input [0..29], padding [30..31]=0
+    //    SqrCReLU: clamp(0,127, fc0_raw^2 >> 19)   (same formula as int path)
+    //    CReLU:    clamp(0,127, fc0_raw >> 6)
+    for (int o = 0; o < NNUE_L0_DIRECT; o++) {
+        float raw = act.fc0_raw[o];
+        // SqrCReLU (using float arithmetic, equivalent to int version)
+        float sq = (raw * raw) * (1.0f / (1 << 19));
+        act.fc1_in[o] = (sq < 0.0f) ? 0.0f : (sq > 127.0f) ? 127.0f : sq;
+        // CReLU
+        float v = raw * (1.0f / 64.0f);
+        act.fc1_in[NNUE_L0_DIRECT + o] = (v < 0.0f) ? 0.0f : (v > 127.0f) ? 127.0f : v;
+    }
+    act.fc1_in[NNUE_L0_DIRECT * 2]     = 0.0f;
+    act.fc1_in[NNUE_L0_DIRECT * 2 + 1] = 0.0f;
+
+    // 4. FC1: [L1_PADDED → L1_SIZE]
+    for (int o = 0; o < NNUE_L1_SIZE; o++) {
+        float sum = l1_biases_f32[s][o];
+        const float *w = &l1_weights_f32[s][o * NNUE_L1_PADDED];
+        for (int i = 0; i < NNUE_L1_PADDED; i++)
+            sum += w[i] * act.fc1_in[i];
+        act.fc1_raw[o] = sum;
+    }
+
+    // 5. CReLU on FC1 output → FC2 input
+    for (int o = 0; o < NNUE_L1_SIZE; o++) {
+        float v = act.fc1_raw[o] * (1.0f / 64.0f);
+        act.fc2_in[o] = (v < 0.0f) ? 0.0f : (v > 127.0f) ? 127.0f : v;
+    }
+
+    // 6. FC2: [L2_PADDED → 1]
+    float fc2 = l2_bias_f32[s];
+    for (int i = 0; i < NNUE_L2_PADDED; i++)
+        fc2 += l2_weights_f32[s][i] * act.fc2_in[i];
+    act.fc2_raw = fc2;
+
+    // 7. Passthrough + final positional
+    act.fwdOut    = act.fc0_raw[NNUE_L0_DIRECT] * (9600.0f / 8128.0f);
+    act.positional = act.fc2_raw + act.fwdOut;
+
+    // PSQT diff is not included in activations (it is constant w.r.t. FC weights)
+    (void)psqt;
+}
+
+// ---------------------------------------------------------------------------
+// nnue_accumulate_gradients — backprop one position, add to grad arrays
+// grad_scale = alpha * e_t * d_t * (1-d_t) / K * (100 / 5776)
+// ---------------------------------------------------------------------------
+void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale)
+{
+    int s = act.stack;
+
+    // 7. ∂loss/∂positional = grad_scale  (d_score_cp/d_positional = 100/5776 absorbed)
+    float g_pos = grad_scale;
+
+    // 6. FC2 backward: g_pos → grad of fc2_raw = g_pos
+    float g_fc2_raw = g_pos;
+    // grad w.r.t. FC2 weights and bias
+    for (int i = 0; i < NNUE_L2_PADDED; i++)
+        grad_l2_w[s][i] += g_fc2_raw * act.fc2_in[i];
+    grad_l2_b[s] += g_fc2_raw;
+    // grad w.r.t. fc2_in[i]
+    float g_fc2_in[NNUE_L2_PADDED];
+    for (int i = 0; i < NNUE_L2_PADDED; i++)
+        g_fc2_in[i] = g_fc2_raw * l2_weights_f32[s][i];
+
+    // 5. CReLU inverse: ∂fc2_in/∂fc1_raw = 1/64 if fc1_raw in (0, 127*64)
+    float g_fc1_raw[NNUE_L1_SIZE];
+    for (int o = 0; o < NNUE_L1_SIZE; o++) {
+        float v = act.fc1_raw[o] * (1.0f / 64.0f);
+        g_fc1_raw[o] = (v > 0.0f && v < 127.0f) ? g_fc2_in[o] * (1.0f / 64.0f) : 0.0f;
+    }
+
+    // 4. FC1 backward
+    for (int o = 0; o < NNUE_L1_SIZE; o++) {
+        if (g_fc1_raw[o] == 0.0f) continue;
+        for (int i = 0; i < NNUE_L1_PADDED; i++)
+            grad_l1_w[s][o * NNUE_L1_PADDED + i] += g_fc1_raw[o] * act.fc1_in[i];
+        grad_l1_b[s][o] += g_fc1_raw[o];
+    }
+    // grad w.r.t. fc1_in[i]
+    float g_fc1_in[NNUE_L1_PADDED] = {};
+    for (int o = 0; o < NNUE_L1_SIZE; o++) {
+        if (g_fc1_raw[o] == 0.0f) continue;
+        const float *w = &l1_weights_f32[s][o * NNUE_L1_PADDED];
+        for (int i = 0; i < NNUE_L1_PADDED; i++)
+            g_fc1_in[i] += g_fc1_raw[o] * w[i];
+    }
+
+    // 3. Dual-activation inverse → g_fc0_raw[0..14]
+    float g_fc0_raw[NNUE_L0_SIZE] = {};
+    for (int o = 0; o < NNUE_L0_DIRECT; o++) {
+        float raw = act.fc0_raw[o];
+        // SqrCReLU gradient: d(clamp(0,127, raw^2/2^19))/d(raw) = 2*raw/2^19 when in range
+        float sq = (raw * raw) * (1.0f / (1 << 19));
+        if (sq > 0.0f && sq < 127.0f)
+            g_fc0_raw[o] += g_fc1_in[o] * 2.0f * raw * (1.0f / (float)(1 << 19));
+        // CReLU gradient: d(clamp(0,127, raw/64))/d(raw) = 1/64 when in range
+        float v = raw * (1.0f / 64.0f);
+        if (v > 0.0f && v < 127.0f)
+            g_fc0_raw[o] += g_fc1_in[NNUE_L0_DIRECT + o] * (1.0f / 64.0f);
+    }
+    // Passthrough output[15]: ∂fwdOut/∂fc0_raw[15] = 9600/8128
+    g_fc0_raw[NNUE_L0_DIRECT] += g_pos * (9600.0f / 8128.0f);
+
+    // 2. FC0 backward (stop here — not training FT)
+    for (int o = 0; o < NNUE_L0_SIZE; o++) {
+        if (g_fc0_raw[o] == 0.0f) continue;
+        for (int i = 0; i < NNUE_L0_INPUT; i++)
+            grad_l0_w[s][o * NNUE_L0_INPUT + i] += g_fc0_raw[o] * act.l0_in[i];
+        grad_l0_b[s][o] += g_fc0_raw[o];
+    }
+}
+
+// ---------------------------------------------------------------------------
+// nnue_apply_gradients — update FP32 weights from accumulators, then zero them
+// ---------------------------------------------------------------------------
+void nnue_apply_gradients()
+{
+    for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
+        for (int i = 0; i < NNUE_L0_SIZE * NNUE_L0_INPUT; i++)
+            l0_weights_f32[s][i] -= grad_l0_w[s][i];
+        for (int i = 0; i < NNUE_L0_SIZE; i++)
+            l0_biases_f32[s][i] -= grad_l0_b[s][i];
+        for (int i = 0; i < NNUE_L1_SIZE * NNUE_L1_PADDED; i++)
+            l1_weights_f32[s][i] -= grad_l1_w[s][i];
+        for (int i = 0; i < NNUE_L1_SIZE; i++)
+            l1_biases_f32[s][i] -= grad_l1_b[s][i];
+        for (int i = 0; i < NNUE_L2_PADDED; i++)
+            l2_weights_f32[s][i] -= grad_l2_w[s][i];
+        l2_bias_f32[s] -= grad_l2_b[s];
+    }
+    memset(grad_l0_w, 0, sizeof(grad_l0_w));
+    memset(grad_l0_b, 0, sizeof(grad_l0_b));
+    memset(grad_l1_w, 0, sizeof(grad_l1_w));
+    memset(grad_l1_b, 0, sizeof(grad_l1_b));
+    memset(grad_l2_w, 0, sizeof(grad_l2_w));
+    memset(grad_l2_b, 0, sizeof(grad_l2_b));
+}
+
+// ---------------------------------------------------------------------------
+// nnue_requantize_fc — FP32 → int8 for the live inference arrays
+// ---------------------------------------------------------------------------
+void nnue_requantize_fc()
+{
+    const float q_scale = (float)(1 << NNUE_WEIGHT_SHIFT); // 64
+    const float b_scale = q_scale * q_scale;                // 4096 (bias quantization)
+
+    for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
+        // FC0 weights: natural → vdotq layout
+        for (int o = 0; o < NNUE_L0_SIZE; o++) {
+            int ob = o / 4, k = o % 4;
+            int bq = (int)roundf(l0_biases_f32[s][o] * b_scale);
+            l0_biases[s][o] = (bq < -2147483647) ? -2147483647 :
+                              (bq >  2147483647) ?  2147483647 : bq;
+            for (int i = 0; i < NNUE_L0_INPUT; i++) {
+                int ib = i / 4, j = i % 4;
+                int q = (int)roundf(l0_weights_f32[s][o * NNUE_L0_INPUT + i] * q_scale);
+                if (q < -127) q = -127; if (q > 127) q = 127;
+                l0_weights[s][ib * 64 + ob * 16 + k * 4 + j] = (int8_t)q;
+            }
+        }
+        // FC1 weights: natural → vdotq layout
+        for (int o = 0; o < NNUE_L1_SIZE; o++) {
+            int ob = o / 4, k = o % 4;
+            int bq = (int)roundf(l1_biases_f32[s][o] * b_scale);
+            l1_biases[s][o] = (bq < -2147483647) ? -2147483647 :
+                              (bq >  2147483647) ?  2147483647 : bq;
+            for (int i = 0; i < NNUE_L1_PADDED; i++) {
+                int ib = i / 4, j = i % 4;
+                int q = (int)roundf(l1_weights_f32[s][o * NNUE_L1_PADDED + i] * q_scale);
+                if (q < -127) q = -127; if (q > 127) q = 127;
+                l1_weights[s][ib * 128 + ob * 16 + k * 4 + j] = (int8_t)q;
+            }
+        }
+        // FC2 weights: natural layout (no reorder needed)
+        int bq = (int)roundf(l2_bias_f32[s] * b_scale);
+        out_biases[s] = (bq < -2147483647) ? -2147483647 :
+                        (bq >  2147483647) ?  2147483647 : bq;
+        for (int i = 0; i < NNUE_L2_PADDED; i++) {
+            int q = (int)roundf(l2_weights_f32[s][i] * q_scale);
+            if (q < -127) q = -127; if (q > 127) q = 127;
+            out_weights[s][i] = (int8_t)q;
+        }
+    }
+    // Clear score hash — cached evaluations are now stale.
+    if (score_table && SCORE_SIZE > 0)
+        memset(score_table, 0, SCORE_SIZE * sizeof(score_rec));
+}
+
+// ---------------------------------------------------------------------------
+// nnue_save_fc_weights / nnue_load_fc_weights — companion .tdleaf.bin file
+// File layout: magic(4) + version(4) + 8 stacks × [FC0_b + FC0_w + FC1_b +
+//              FC1_w + FC2_b + FC2_w]  all in int32/int8 as used by inference.
+// ---------------------------------------------------------------------------
+static const uint32_t TDLEAF_MAGIC   = 0x544D4C46u; // "TMLF"
+static const uint32_t TDLEAF_VERSION = 1u;
+
+bool nnue_save_fc_weights(const char *path)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f) { fprintf(stderr, "TDLeaf: cannot write %s\n", path); return false; }
+    fwrite(&TDLEAF_MAGIC,   4, 1, f);
+    fwrite(&TDLEAF_VERSION, 4, 1, f);
+    for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
+        fwrite(l0_biases[s],  sizeof(int32_t), NNUE_L0_SIZE,                f);
+        fwrite(l0_weights[s], sizeof(int8_t),  NNUE_L0_SIZE * NNUE_L0_INPUT, f);
+        fwrite(l1_biases[s],  sizeof(int32_t), NNUE_L1_SIZE,                f);
+        fwrite(l1_weights[s], sizeof(int8_t),  NNUE_L1_SIZE * NNUE_L1_PADDED, f);
+        fwrite(&out_biases[s],  sizeof(int32_t), 1,              f);
+        fwrite(out_weights[s],  sizeof(int8_t),  NNUE_L2_PADDED, f);
+    }
+    fclose(f);
+    return true;
+}
+
+bool nnue_load_fc_weights(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    uint32_t magic = 0, version = 0;
+    fread(&magic,   4, 1, f);
+    fread(&version, 4, 1, f);
+    if (magic != TDLEAF_MAGIC || version != TDLEAF_VERSION) {
+        fprintf(stderr, "TDLeaf: bad magic/version in %s\n", path);
+        fclose(f); return false;
+    }
+    for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
+        if (fread(l0_biases[s],  sizeof(int32_t), NNUE_L0_SIZE, f) != (size_t)NNUE_L0_SIZE ||
+            fread(l0_weights[s], sizeof(int8_t),  NNUE_L0_SIZE * NNUE_L0_INPUT, f)
+                != (size_t)(NNUE_L0_SIZE * NNUE_L0_INPUT) ||
+            fread(l1_biases[s],  sizeof(int32_t), NNUE_L1_SIZE, f) != (size_t)NNUE_L1_SIZE ||
+            fread(l1_weights[s], sizeof(int8_t),  NNUE_L1_SIZE * NNUE_L1_PADDED, f)
+                != (size_t)(NNUE_L1_SIZE * NNUE_L1_PADDED) ||
+            fread(&out_biases[s],  sizeof(int32_t), 1, f) != 1 ||
+            fread(out_weights[s],  sizeof(int8_t),  NNUE_L2_PADDED, f) != (size_t)NNUE_L2_PADDED) {
+            fprintf(stderr, "TDLeaf: read error in %s (stack %d)\n", path, s);
+            fclose(f); return false;
+        }
+    }
+    fclose(f);
+    // Sync FP32 copies from the newly loaded int8 arrays.
+    nnue_init_fp32_weights();
+    printf("TDLeaf: loaded FC weights from %s\n", path);
+    return true;
+}
+
+#endif // TDLEAF
