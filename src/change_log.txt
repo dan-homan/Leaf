@@ -1,3 +1,76 @@
+
+
+
+
+Changes since 2017_12_24
+2026_03_01 to 2026_03_09 -- Major new feature: NNUE evaluation and TDLeaf(λ) online learning.
+               New files: src/nnue.h, src/nnue.cpp, src/tdleaf.h, src/tdleaf.cpp.
+               Build with: perl comp.pl <vers> NNUE=1  (add TDLEAF=1 for learning).
+
+NNUE Evaluation (NNUE=1):
+2026_03_01 -- Added HalfKAv2_hm NNUE evaluation compatible with Stockfish 15.1.
+               Network file: nn-ad9b42354671.nnue (47 MB, 22,528 features, 8 layer stacks).
+               Architecture: feature transformer (1024 int16/perspective + 8 int32 PSQT) →
+               FC0 (1024→16, SqrCReLU) → FC1 (30→32) → FC2 (32→1).
+               Score formula: (psqt_diff/2 + positional) * 100/5776  (Stockfish 15.1 exact).
+               NNUE eval added to score.cpp with score hash probe/store (+22% NPS).
+               Lazy incremental accumulator updates at exec_move sites in search.cpp.
+
+2026_03_01 -- NEON optimizations for Apple M1 (arm64):
+               FC0: vdotq_s32 with weight reorder ib*64+ob*16+k*4+j layout (+7% NPS).
+               FC1: fused dual-activation loop + vdotq reorder (+4% NPS).
+               Lazy accumulator fully implemented via nnue_apply_delta (+17% NPS).
+               Total NNUE speedup: ~1.9x slower than classical (870K vs 1,645K NPS).
+
+2026_03_06 -- Fixed king-capture bug in lazy accumulator: when a king captures a piece,
+               the captured piece was not subtracted from the opponent incremental accumulator
+               in nnue_record_delta and nnue_update_accumulator.  Verified via NNUE_CHECK_LAZY.
+
+2026_03_07 -- Fixed own-king feature: halfkav2_feature() was returning -1 (skip) for own
+               king, but Stockfish includes it in the PS_KING=640 slot.  Major eval error.
+             -- Fixed SqrCReLU: was clamping fc0 to [0,127] before squaring, zeroing all
+               negative inputs.  Correct: square the raw int32 value first, then clamp:
+               output = clamp(0, 127, fc0_raw^2 >> 19).  Stockfish-exact.
+             -- Unified score formula to (psqt_diff/2 + positional) * 100/5776.
+             -- Match result after all three fixes: v2026_03_07a vs classical = 92W-8D-0L
+               (96.0%, 100 games).  NNUE now dominates classical eval despite lower NPS.
+
+TDLeaf(λ) Online Learning (NNUE=1 TDLEAF=1):
+2026_03_07 -- Implemented TDLeaf(λ) reinforcement learning (Baxter, Tridgell & Weaver 2000).
+               Trains all NNUE weights (FC0/FC1/FC2, FT, PSQT) from self-play games.
+               TD errors computed backward over PV leaf scores; gradients accumulated
+               via full FP32 forward/backward pass after each game.
+               FT/PSQT updated sparsely (only active feature rows per game).
+               Weights persisted to companion .tdleaf.bin file (v3 format) after each game.
+             -- Fixed wtm sign bug in gradient accumulation: gradients from white-to-move
+               and black-to-move plies were canceling; adding wtm_sign factor fixed this.
+             -- Fixed FP32 shadow scale bugs in nnue_init_fp32_weights and nnue_requantize_fc.
+             -- Learning rates: TDLEAF_ALPHA=200 (FC+FT), NNUE_FT_LR_SCALE=1.0,
+               NNUE_PSQT_LR_SCALE=1000 (large value needed: grad_scale≈2e-4 while
+               PSQT weights are at int32 scale ~5776/pawn).
+
+2026_03_08 -- Added --init-nnue --write-nnue mode: creates a randomly initialised .nnue
+               from scratch (no source .nnue needed) using N(mean,std) distributions
+               measured from nn-ad9b42354671.nnue for FC layers, N(-0.71,44.41) for FT
+               weights, and signed piece values for PSQT (pawn=5776, knight/bishop=17328,
+               rook=28880, queen=51984).  Enables training from a fresh random network.
+
+Infrastructure:
+2026_03_08 -- comp.pl: added OVERWRITE flag to skip interactive overwrite prompt.
+             -- tdleaf_selfplay.py: engine name resolution now prefers CWD over the
+               script directory, so the script works correctly when invoked from
+               learn/ or other directories without resolving engines to run/.
+             -- Fixed .tdleaf.bin save path to use exec_dir (same as load path),
+               preventing saves landing in the wrong directory when launched via
+               cutechess-cli or other GUIs.  Also fixed exec_path parse loop limit.
+             -- Added learn/ directory for training runs; symlinks to comp.pl and
+               tdleaf_selfplay.py.
+             -- Archived unused src/ files (MinGW/old release build scripts, FLTK
+               GUI source) to archives/src/.
+             -- Added src/NNUE.md and src/TDLEAF_PLAN.md as implementation references.
+
+-------------- old change log below -------------------
+
 Changes since 7.97b
 2017_12_24 -- Major change is doing depth reductions based only on movelist location
               below a certain depth.  A few other minor changes, tested separately,
