@@ -32,10 +32,6 @@ FT_INPUTS = 22528 # HalfKAv2_hm feature count
 PSQT_BKTS = 8     # PSQT buckets
 
 # Byte sizes
-FT_SECTION = (HALF_DIMS * 2 +               # FT biases  (int16)
-              FT_INPUTS * HALF_DIMS * 2 +    # FT weights (int16)
-              FT_INPUTS * PSQT_BKTS * 4)     # FT PSQT   (int32)
-
 STACK_BYTES = (4 +                           # stack hash
                L0_SIZE * 4 +                 # FC0 biases (int32)
                L0_SIZE * L0_INPUT +          # FC0 weights (int8)
@@ -146,27 +142,59 @@ def _read_leb128_section_i32(f, count):
 # File readers
 # ---------------------------------------------------------------------------
 
+def _skip_leb128_or_raw_i16(f, count):
+    """Skip a LEB128-compressed or raw int16 section without decoding it."""
+    magic = f.read(17)
+    if magic == LEB128_MAGIC:
+        nbytes = struct.unpack('<I', f.read(4))[0]
+        f.seek(nbytes, 1)
+    else:
+        f.seek(-17 + count * 2, 1)
+
+
+def _skip_leb128_or_raw_i32(f, count):
+    """Skip a LEB128-compressed or raw int32 section without decoding it."""
+    magic = f.read(17)
+    if magic == LEB128_MAGIC:
+        nbytes = struct.unpack('<I', f.read(4))[0]
+        f.seek(nbytes, 1)
+    else:
+        f.seek(-17 + count * 4, 1)
+
+
 def read_nnue_fc(path):
     """
     Read FC layers from a .nnue file.  Weights are in output-major natural
     layout as stored in the file.  Returns dict of lists (one entry per stack).
-    """
-    file_size = os.path.getsize(path)
-    header_size = file_size - FT_SECTION - N_STACKS * STACK_BYTES
-    if header_size < 0:
-        sys.exit(f"Error: {path} too small — not a valid .nnue file?")
 
+    Navigates the header and FT section dynamically so it works for both
+    raw and LEB128-compressed .nnue files (e.g. written by nnue_write_nnue).
+    """
     data = {k: [] for k in ('fc0_bias', 'fc0_w', 'fc1_bias', 'fc1_w', 'fc2_bias', 'fc2_w')}
     with open(path, 'rb') as f:
-        f.seek(header_size + FT_SECTION)
+        # Parse fixed header
+        version_b = f.read(4)
+        if len(version_b) < 4:
+            sys.exit(f"Error: {path} too small — not a valid .nnue file?")
+        f.read(4)                                        # file hash
+        desc_size = struct.unpack('<I', f.read(4))[0]
+        f.seek(desc_size, 1)                             # skip description
+        f.read(4)                                        # ft_hash
+
+        # Skip FT section (LEB128 or raw)
+        _skip_leb128_or_raw_i16(f, HALF_DIMS)                    # FT biases
+        _skip_leb128_or_raw_i16(f, FT_INPUTS * HALF_DIMS)        # FT weights
+        _skip_leb128_or_raw_i32(f, FT_INPUTS * PSQT_BKTS)        # PSQT weights
+
+        # FC stacks
         for _ in range(N_STACKS):
             f.read(4)   # skip stack hash
-            data['fc0_bias'].append(np.frombuffer(f.read(L0_SIZE * 4),       dtype=np.int32).copy())
-            data['fc0_w'   ].append(np.frombuffer(f.read(L0_SIZE * L0_INPUT),dtype=np.int8 ).reshape(L0_SIZE, L0_INPUT).copy())
-            data['fc1_bias'].append(np.frombuffer(f.read(L1_SIZE * 4),       dtype=np.int32).copy())
-            data['fc1_w'   ].append(np.frombuffer(f.read(L1_SIZE * L1_PADDED),dtype=np.int8).reshape(L1_SIZE, L1_PADDED).copy())
-            data['fc2_bias'].append(np.frombuffer(f.read(4),                 dtype=np.int32).copy())
-            data['fc2_w'   ].append(np.frombuffer(f.read(L2_PADDED),         dtype=np.int8 ).copy())
+            data['fc0_bias'].append(np.frombuffer(f.read(L0_SIZE * 4),        dtype=np.int32).copy())
+            data['fc0_w'   ].append(np.frombuffer(f.read(L0_SIZE * L0_INPUT), dtype=np.int8 ).reshape(L0_SIZE, L0_INPUT).copy())
+            data['fc1_bias'].append(np.frombuffer(f.read(L1_SIZE * 4),        dtype=np.int32).copy())
+            data['fc1_w'   ].append(np.frombuffer(f.read(L1_SIZE * L1_PADDED),dtype=np.int8 ).reshape(L1_SIZE, L1_PADDED).copy())
+            data['fc2_bias'].append(np.frombuffer(f.read(4),                  dtype=np.int32).copy())
+            data['fc2_w'   ].append(np.frombuffer(f.read(L2_PADDED),          dtype=np.int8 ).copy())
     return data
 
 
