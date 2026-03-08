@@ -1130,13 +1130,25 @@ static bool     *ft_dirty         = nullptr;  // which feature rows are non-zero
 // produce non-zero outputs from game 1, so gradients can flow to all weights.
 //
 // Measured statistics from nn-ad9b42354671.nnue:
-//   FC0 weights (16×1024 int8):  mean=+0.2368  std= 8.4252
-//   FC0 biases  (16 int32):      mean=+332.10  std=2936.56
-//   FC1 weights (32×32  int8):   mean=-1.0989  std=18.3019
-//   FC1 biases  (32 int32):      mean=-400.08  std=2510.30
-//   FC2 weights (32     int8):   mean=+1.0977  std=76.3777
-//   FC2 biases  (1 int32/stack): mean=+1241.75 std=1218.46
+//   FT biases   (1024  int16):        mean=  +3.34  std=   96.48
+//   FT weights  (22528×1024 int16):   mean=  -0.71  std=   44.41
+//   FC0 weights (16×1024 int8):       mean= +0.2368 std=   8.4252
+//   FC0 biases  (16 int32):           mean=+332.10  std=2936.56
+//   FC1 weights (32×32  int8):        mean= -1.0989 std=  18.3019
+//   FC1 biases  (32 int32):           mean=-400.08  std=2510.30
+//   FC2 weights (32     int8):        mean= +1.0977 std=  76.3777
+//   FC2 biases  (1 int32/stack):      mean=+1241.75 std=1218.46
+//
+// FT biases and weights must be non-zero so the accumulator is non-zero,
+// giving non-zero SqrCReLU outputs and thus non-zero FC0 weight gradients.
+// Both ft_weights (int16, used for inference) and ft_weights_f32 (float,
+// used for backprop) are initialised together; nnue_apply_gradients later
+// keeps them in sync for dirty feature rows.
 // ---------------------------------------------------------------------------
+#define INIT_FT_B_MEAN    3.3398f
+#define INIT_FT_B_STD    96.4788f
+#define INIT_FT_W_MEAN   -0.7119f
+#define INIT_FT_W_STD    44.4149f
 #define INIT_FC0_W_MEAN   0.2368f
 #define INIT_FC0_W_STD    8.4252f
 #define INIT_FC0_B_MEAN 332.1016f
@@ -1190,9 +1202,19 @@ void nnue_init_zero_weights()
     memset(grad_l2_w, 0, sizeof(grad_l2_w));
     memset(grad_l2_b, 0, sizeof(grad_l2_b));
 
-    // ---- FT biases: zero (int16 array, no float shadow) ----
-    if (ft_biases)
-        memset(ft_biases, 0, NNUE_HALF_DIMS * sizeof(int16_t));
+    // ---- FT biases: random init from N(mean,std) — gives non-zero accumulator ----
+    // FT biases have no float shadow and are not updated by TDLeaf; this is a
+    // fixed warm-start so SqrCReLU outputs (and FC0 weight gradients) are non-zero.
+    if (ft_biases) {
+        std::normal_distribution<float> ft_b_dist(INIT_FT_B_MEAN, INIT_FT_B_STD);
+        for (int k = 0; k < NNUE_HALF_DIMS; k++) {
+            float v = ft_b_dist(rng);
+            // clip to int16 range (actual SF15.1 range is [-240, +612])
+            if (v < -32767.f) v = -32767.f;
+            if (v >  32767.f) v =  32767.f;
+            ft_biases[k] = (int16_t)v;
+        }
+    }
 
     // ---- FT weights: zero; PSQT: 100 cp/piece equivalent ----
     // score_cp = (psqt_diff/2)*100/5776
@@ -1204,7 +1226,16 @@ void nnue_init_zero_weights()
     if (ft_weights_f32) {
         size_t ft_sz   = (size_t)NNUE_FT_INPUTS * NNUE_HALF_DIMS;
         size_t psqt_sz = (size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS;
-        memset(ft_weights_f32,   0, ft_sz   * sizeof(float));
+        {
+            std::normal_distribution<float> ft_w_dist(INIT_FT_W_MEAN, INIT_FT_W_STD);
+            for (size_t i = 0; i < ft_sz; i++) {
+                float v = ft_w_dist(rng);
+                if (v < -32767.f) v = -32767.f;
+                if (v >  32767.f) v =  32767.f;
+                ft_weights_f32[i] = v;
+                ft_weights[i]     = (int16_t)v;
+            }
+        }
         memset(psqt_weights_f32, 0, psqt_sz * sizeof(float));
         memset(ft_weights_cnt,   0, ft_sz   * sizeof(uint32_t));
         memset(psqt_weights_cnt, 0, psqt_sz * sizeof(uint32_t));
@@ -1234,7 +1265,7 @@ void nnue_init_zero_weights()
     // Sync all int8/int16/int32 inference arrays from the zeroed float shadows.
     nnue_requantize_fc();
     nnue_zero_initialized = true;
-    printf("NNUE TDLeaf: FC initialised random N(mean,std) from SF15.1; FT=0; PSQT=100cp/pawn\n");
+    printf("NNUE TDLeaf: FC+FT initialised random N(mean,std) from SF15.1; PSQT=100cp/pawn\n");
 }
 
 // ---------------------------------------------------------------------------
