@@ -25,14 +25,16 @@
 // ---------------------------------------------------------------------------
 static const float TDLEAF_LAMBDA          = 0.7f;   // eligibility trace decay
 static const float TDLEAF_ALPHA           = 200.0f;  // learning rate for FC layers
-// FT/PSQT learning rate — much smaller than FC because FT weights are int16 (256× finer
-// than int8) and are shared across all positions.  If you change this, also update
-// NNUE_FT_LR_SCALE in nnue.h to match TDLEAF_ALPHA_FT / TDLEAF_ALPHA.
-static const float TDLEAF_ALPHA_FT        = 200.0f; //0.078f; // learning rate for FT/PSQT weights
-// FT/PSQT learning rate scale = TDLEAF_ALPHA_FT / TDLEAF_ALPHA.
-// Update this whenever changing those constants in tdleaf.h.
-// Default: 0.078 / 20.0 = 0.0004
-static const float NNUE_FT_LR_SCALE = 1.000f; //0.0039f;
+// FT learning rate — much smaller than FC because FT weights are int16 (256× finer
+// than int8) and are shared across all positions.
+static const float TDLEAF_ALPHA_FT        = 200.0f; // learning rate for FT weights
+// FT learning rate scale applied inside nnue_accumulate_gradients to g_acc[p][d].
+static const float NNUE_FT_LR_SCALE = 1.000f;
+// PSQT learning rate scale applied inside nnue_accumulate_gradients to g_psqt_diff.
+// Separate from NNUE_FT_LR_SCALE so PSQT can be tuned independently.
+// grad_scale already encodes TDLEAF_ALPHA × e[t] × sigmoid_grad × cp_factor;
+// the raw PSQT gradient is grad_scale × 0.5, so this multiplier is a pure LR knob.
+static const float NNUE_PSQT_LR_SCALE = 0.3f;
 //
 static const float TDLEAF_K               = 400.0f; // sigmoid temperature (centipawns)
 static const int   TDLEAF_MIN_PLIES       = 8;      // skip games shorter than this

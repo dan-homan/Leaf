@@ -1549,7 +1549,8 @@ void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale)
     //   psqt_diff = psqt[stm][stack] - psqt[opp][stack]
     //   ∂score_cp/∂psqt_diff = cp_factor/2 (half of the cp_factor used for positional)
     //   g_psqt_diff = grad_scale × 0.5  (grad_scale already includes cp_factor for positional)
-    //   grad_psqt_w[fi × PSQT_BKTS + stack] += NNUE_FT_LR_SCALE × g_psqt_diff × (+1 for stm, -1 for opp)
+    //   grad_psqt_w[fi × PSQT_BKTS + stack] += NNUE_PSQT_LR_SCALE × g_psqt_diff × (+1 for stm, -1 for opp)
+    //   NNUE_PSQT_LR_SCALE is tuned independently of NNUE_FT_LR_SCALE (see tdleaf.h).
     float g_psqt_diff = grad_scale * 0.5f;
     for (int p = 0; p < 2; p++) {
         int persp       = (p == 0) ? stm_p : (stm_p ^ 1);
@@ -1563,7 +1564,7 @@ void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale)
             for (int d = 0; d < NNUE_HALF_DIMS; d++)
                 gfw[d] += NNUE_FT_LR_SCALE * g_a[d];
             grad_psqt_w[fi * NNUE_PSQT_BKTS + s] +=
-                NNUE_FT_LR_SCALE * g_psqt_diff * psqt_sign;
+                NNUE_PSQT_LR_SCALE * g_psqt_diff * psqt_sign;
         }
     }
 }
