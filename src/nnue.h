@@ -83,7 +83,11 @@ bool nnue_load(const char *path);
 
 // Write current FC weights into a complete .nnue file (FT copied verbatim from
 // the loaded source).  Useful for exporting TDLeaf-trained weights.
+// Backs up dst_path → dst_path.bak before writing.
 bool nnue_write_nnue(const char *dst_path);
+
+// Rename path → path.bak if path exists.  Called before any destructive write.
+void nnue_backup_file(const char *path);
 
 // Full accumulator refresh from the current position.
 void nnue_init_accumulator(NNUEAccumulator &acc, const struct position &pos);

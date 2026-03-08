@@ -334,6 +334,22 @@ bool nnue_load(const char *path)
 static bool nnue_zero_initialized = false;
 
 // ---------------------------------------------------------------------------
+// nnue_backup_file — rename path → path.bak if path exists.
+// ---------------------------------------------------------------------------
+void nnue_backup_file(const char *path)
+{
+    FILE *probe = fopen(path, "rb");
+    if (!probe) return;  // nothing to back up
+    fclose(probe);
+    char bak[FILENAME_MAX + 4];
+    snprintf(bak, sizeof(bak), "%s.bak", path);
+    if (rename(path, bak) == 0)
+        fprintf(stderr, "NNUE: backed up '%s' -> '%s'\n", path, bak);
+    else
+        fprintf(stderr, "NNUE: warning: could not back up '%s'\n", path);
+}
+
+// ---------------------------------------------------------------------------
 // nnue_write_nnue — write current FC weights into a complete .nnue file.
 // FT data is copied verbatim from the originally loaded .nnue source.
 // The architecture description is updated:
@@ -387,6 +403,8 @@ bool nnue_write_nnue(const char *dst_path)
     else
         snprintf(new_desc, sizeof(new_desc), "%s Trained by EXchess TDLeaf", orig_desc);
     uint32_t new_desc_size = (uint32_t)strlen(new_desc);
+
+    nnue_backup_file(dst_path);
 
     FILE *dst = fopen(dst_path, "wb");
     if (!dst) {

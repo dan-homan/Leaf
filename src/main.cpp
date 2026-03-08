@@ -171,6 +171,8 @@ int main(int argc, char *argv[])
         if (strcmp(argv[ai], "--init-tdleaf-zero") == 0) { init_zero = true; break; }
       if (init_zero) {
         fprintf(stderr, "TDLeaf: initializing from zero (FC/FT=0, PSQT=100cp/piece).\n");
+        nnue_backup_file(tdleaf_path);
+        nnue_backup_file(NNUE_TDLEAF_BIN);
         nnue_init_zero_weights();
         if (!nnue_save_fc_weights(tdleaf_path))
             nnue_save_fc_weights(NNUE_TDLEAF_BIN);
