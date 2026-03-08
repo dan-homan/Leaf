@@ -16,6 +16,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <algorithm>
+#include <random>
 #include "define.h"
 #include "chess.h"
 #include "nnue.h"
@@ -1120,18 +1121,61 @@ static float    *grad_psqt_w      = nullptr;  // PSQT weight gradients
 static bool     *ft_dirty         = nullptr;  // which feature rows are non-zero
 
 // ---------------------------------------------------------------------------
-// nnue_init_zero_weights — fresh-start: zero FC/FT, PSQT = 100 cp/piece
+// nnue_init_zero_weights — fresh-start FC initialisation + material-only PSQT
+//
+// FC layers are initialised with random values drawn from normal distributions
+// whose parameters were measured from nn-ad9b42354671.nnue (Stockfish 15.1).
+// Weights are clipped to the int8 range [-127, 127] after sampling.
+// Using realistic random init (rather than zero) ensures activation functions
+// produce non-zero outputs from game 1, so gradients can flow to all weights.
+//
+// Measured statistics from nn-ad9b42354671.nnue:
+//   FC0 weights (16×1024 int8):  mean=+0.2368  std= 8.4252
+//   FC0 biases  (16 int32):      mean=+332.10  std=2936.56
+//   FC1 weights (32×32  int8):   mean=-1.0989  std=18.3019
+//   FC1 biases  (32 int32):      mean=-400.08  std=2510.30
+//   FC2 weights (32     int8):   mean=+1.0977  std=76.3777
+//   FC2 biases  (1 int32/stack): mean=+1241.75 std=1218.46
 // ---------------------------------------------------------------------------
+#define INIT_FC0_W_MEAN   0.2368f
+#define INIT_FC0_W_STD    8.4252f
+#define INIT_FC0_B_MEAN 332.1016f
+#define INIT_FC0_B_STD 2936.5617f
+#define INIT_FC1_W_MEAN  -1.0989f
+#define INIT_FC1_W_STD   18.3019f
+#define INIT_FC1_B_MEAN -400.0820f
+#define INIT_FC1_B_STD  2510.2978f
+#define INIT_FC2_W_MEAN   1.0977f
+#define INIT_FC2_W_STD   76.3777f
+#define INIT_FC2_B_MEAN 1241.7500f
+#define INIT_FC2_B_STD  1218.4550f
+
 void nnue_init_zero_weights()
 {
-    // ---- FC layers: all weights and biases to zero ----
+    // ---- FC layers: random init from measured Stockfish 15.1 distributions ----
+    std::mt19937 rng(42);  // fixed seed for reproducibility
+    auto rnd_w = [&](float mean, float std) -> float {
+        std::normal_distribution<float> d(mean, std);
+        float v = d(rng);
+        return (v < -127.f) ? -127.f : (v > 127.f) ? 127.f : v;
+    };
+    auto rnd_b = [&](float mean, float std) -> float {
+        std::normal_distribution<float> d(mean, std);
+        return d(rng);
+    };
+
     for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
-        memset(l0_weights_f32[s], 0, sizeof(l0_weights_f32[s]));
-        memset(l0_biases_f32[s],  0, sizeof(l0_biases_f32[s]));
-        memset(l1_weights_f32[s], 0, sizeof(l1_weights_f32[s]));
-        memset(l1_biases_f32[s],  0, sizeof(l1_biases_f32[s]));
-        memset(l2_weights_f32[s], 0, sizeof(l2_weights_f32[s]));
-        l2_bias_f32[s] = 0.0f;
+        for (int i = 0; i < NNUE_L0_SIZE * NNUE_L0_INPUT; i++)
+            l0_weights_f32[s][i] = rnd_w(INIT_FC0_W_MEAN, INIT_FC0_W_STD);
+        for (int i = 0; i < NNUE_L0_SIZE; i++)
+            l0_biases_f32[s][i]  = rnd_b(INIT_FC0_B_MEAN, INIT_FC0_B_STD);
+        for (int i = 0; i < NNUE_L1_SIZE * NNUE_L1_PADDED; i++)
+            l1_weights_f32[s][i] = rnd_w(INIT_FC1_W_MEAN, INIT_FC1_W_STD);
+        for (int i = 0; i < NNUE_L1_SIZE; i++)
+            l1_biases_f32[s][i]  = rnd_b(INIT_FC1_B_MEAN, INIT_FC1_B_STD);
+        for (int i = 0; i < NNUE_L2_PADDED; i++)
+            l2_weights_f32[s][i] = rnd_w(INIT_FC2_W_MEAN, INIT_FC2_W_STD);
+        l2_bias_f32[s] = rnd_b(INIT_FC2_B_MEAN, INIT_FC2_B_STD);
     }
     memset(l0_weights_cnt, 0, sizeof(l0_weights_cnt));
     memset(l0_biases_cnt,  0, sizeof(l0_biases_cnt));
@@ -1151,24 +1195,46 @@ void nnue_init_zero_weights()
         memset(ft_biases, 0, NNUE_HALF_DIMS * sizeof(int16_t));
 
     // ---- FT weights: zero; PSQT: 100 cp/piece equivalent ----
-    // score_cp = psqt_diff/2 * 100/5776  →  psqt_w = 100*2*5776/100 = 11552
-    static const float PSQT_100CP = 11552.0f;
+    // score_cp = (psqt_diff/2)*100/5776
+    // For 1 extra own piece of type pt: psqt_diff = 2*V → score = V*100/5776.
+    // Set V(pawn)=5776 → 100 cp; scale other pieces proportionally.
+    // Each feature fi gets +V if the piece is own (pside==persp), -V if opponent.
+    // This way psqt[stm]-psqt[opp] = 2*V*N for N extra own pieces of that type.
+    static const float PSQT_VAL[7] = {0.f, 5776.f, 17328.f, 17328.f, 28880.f, 51984.f, 0.f};
     if (ft_weights_f32) {
         size_t ft_sz   = (size_t)NNUE_FT_INPUTS * NNUE_HALF_DIMS;
         size_t psqt_sz = (size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS;
-        memset(ft_weights_f32, 0, ft_sz * sizeof(float));
-        for (size_t i = 0; i < psqt_sz; i++) psqt_weights_f32[i] = PSQT_100CP;
+        memset(ft_weights_f32,   0, ft_sz   * sizeof(float));
+        memset(psqt_weights_f32, 0, psqt_sz * sizeof(float));
         memset(ft_weights_cnt,   0, ft_sz   * sizeof(uint32_t));
         memset(psqt_weights_cnt, 0, psqt_sz * sizeof(uint32_t));
         memset(grad_ft_w,        0, ft_sz   * sizeof(float));
         memset(grad_psqt_w,      0, psqt_sz * sizeof(float));
         memset(ft_dirty,         0, NNUE_FT_INPUTS * sizeof(bool));
+
+        // Enumerate all possible features and assign signed piece values.
+        // Conflicts between mirror-symmetric (ksq) pairs always write the same value.
+        for (int persp = 0; persp < 2; persp++) {
+            for (int ksq = 0; ksq < 64; ksq++) {
+                for (int psq = 0; psq < 64; psq++) {
+                    for (int ptype = PAWN; ptype <= KING; ptype++) {
+                        for (int pside = 0; pside < 2; pside++) {
+                            int fi = halfkav2_feature(persp, ksq, psq, ptype, pside);
+                            if (fi < 0 || fi >= NNUE_FT_INPUTS) continue;
+                            float val = (pside == persp ? 1.f : -1.f) * PSQT_VAL[ptype];
+                            for (int b = 0; b < NNUE_PSQT_BKTS; b++)
+                                psqt_weights_f32[fi * NNUE_PSQT_BKTS + b] = val;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // Sync all int8/int16/int32 inference arrays from the zeroed float shadows.
     nnue_requantize_fc();
     nnue_zero_initialized = true;
-    printf("NNUE TDLeaf: initialised FC/FT=0, PSQT=100 cp/piece (11552 int32 per feature)\n");
+    printf("NNUE TDLeaf: FC initialised random N(mean,std) from SF15.1; FT=0; PSQT=100cp/pawn\n");
 }
 
 // ---------------------------------------------------------------------------
