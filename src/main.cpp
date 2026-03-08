@@ -156,6 +156,10 @@ int main(int argc, char *argv[])
       if (strcmp(argv[ai], "--init-nnue") == 0) { init_nnue_mode = true; break; }
 
     if (init_nnue_mode) {
+#if !TDLEAF
+      fprintf(stderr, "--init-nnue requires a TDLEAF build (compile with -D TDLEAF=1)\n");
+      return 1;
+#else
       // Verify --write-nnue is also present.
       bool has_write = false;
       for (int ai = 1; ai < argc - 1; ai++)
@@ -169,6 +173,7 @@ int main(int argc, char *argv[])
       nnue_init_fp32_weights();
       nnue_init_zero_weights();
       // Fall through to the --write-nnue handler below, which will write and exit.
+#endif
     } else {
       char nnue_path[FILENAME_MAX];
       snprintf(nnue_path, sizeof(nnue_path), "%s%s", exec_path, NNUE_NET);
