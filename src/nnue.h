@@ -81,6 +81,10 @@ extern bool nnue_available;
 // Load a HalfKAv2_hm .nnue file. Returns true on success.
 bool nnue_load(const char *path);
 
+// Write current FC weights into a complete .nnue file (FT copied verbatim from
+// the loaded source).  Useful for exporting TDLeaf-trained weights.
+bool nnue_write_nnue(const char *dst_path);
+
 // Full accumulator refresh from the current position.
 void nnue_init_accumulator(NNUEAccumulator &acc, const struct position &pos);
 

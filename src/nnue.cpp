@@ -45,6 +45,10 @@ static int8_t  l1_weights[NNUE_LAYER_STACKS][NNUE_L1_SIZE * NNUE_L1_PADDED];
 static int32_t out_biases [NNUE_LAYER_STACKS];
 static int8_t  out_weights[NNUE_LAYER_STACKS][NNUE_L2_PADDED];
 
+// Path of the currently loaded .nnue file and per-stack hashes (for nnue_write_nnue).
+static char    nnue_loaded_path[FILENAME_MAX] = "";
+static uint32_t nnue_stack_hashes[NNUE_LAYER_STACKS] = {};
+
 // ---------------------------------------------------------------------------
 // HalfKAv2_hm lookup tables
 // ---------------------------------------------------------------------------
@@ -254,7 +258,7 @@ bool nnue_load(const char *path)
 
     for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
         uint32_t stack_hash = read_u32(f);
-        (void)stack_hash;  // hash value not verified
+        nnue_stack_hashes[s] = stack_hash;  // saved for nnue_write_nnue()
 
         // FC0
         if (fread(l0_biases[s], sizeof(int32_t), NNUE_L0_SIZE, f) != (size_t)NNUE_L0_SIZE)
@@ -318,10 +322,110 @@ bool nnue_load(const char *path)
 
     fclose(f);
     nnue_available = true;
+    strncpy(nnue_loaded_path, path, FILENAME_MAX - 1);
     printf("NNUE: all %d stacks loaded OK\n", NNUE_LAYER_STACKS);
 #if TDLEAF
     nnue_init_fp32_weights();
 #endif
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// nnue_write_nnue — write current FC weights into a complete .nnue file.
+// The header and FT section are copied verbatim from the originally loaded
+// .nnue file; only the 8 FC layer stacks are replaced with the current
+// (possibly TDLeaf-trained) weights.
+// ---------------------------------------------------------------------------
+bool nnue_write_nnue(const char *dst_path)
+{
+    if (!nnue_available || !nnue_loaded_path[0]) {
+        fprintf(stderr, "nnue_write_nnue: no net loaded\n");
+        return false;
+    }
+
+    FILE *src = fopen(nnue_loaded_path, "rb");
+    if (!src) {
+        fprintf(stderr, "nnue_write_nnue: cannot open source '%s'\n", nnue_loaded_path);
+        return false;
+    }
+
+    // The 8 FC stacks occupy the last NNUE_LAYER_STACKS * 17640 bytes of the file.
+    const long STACK_BYTES = 4                             // hash
+                           + (long)NNUE_L0_SIZE * 4        // FC0 biases
+                           + (long)NNUE_L0_SIZE * NNUE_L0_INPUT  // FC0 weights
+                           + (long)NNUE_L1_SIZE * 4        // FC1 biases
+                           + (long)NNUE_L1_SIZE * NNUE_L1_PADDED // FC1 weights
+                           + 4                             // FC2 bias
+                           + (long)NNUE_L2_PADDED;         // FC2 weights
+
+    fseek(src, 0, SEEK_END);
+    long file_size = ftell(src);
+    long ft_end    = file_size - (long)NNUE_LAYER_STACKS * STACK_BYTES;
+    rewind(src);
+
+    FILE *dst = fopen(dst_path, "wb");
+    if (!dst) {
+        fprintf(stderr, "nnue_write_nnue: cannot create '%s'\n", dst_path);
+        fclose(src);
+        return false;
+    }
+
+    // Copy header + FT section verbatim.
+    char buf[65536];
+    long remaining = ft_end;
+    while (remaining > 0) {
+        size_t chunk = (remaining > (long)sizeof(buf)) ? sizeof(buf) : (size_t)remaining;
+        size_t nr = fread(buf, 1, chunk, src);
+        if (nr == 0) break;
+        fwrite(buf, 1, nr, dst);
+        remaining -= (long)nr;
+    }
+    fclose(src);
+
+    // Write each FC stack with current weights, reversing the vdotq reordering.
+    const size_t fc0_w = (size_t)NNUE_L0_SIZE * NNUE_L0_INPUT;
+    const size_t fc1_w = (size_t)NNUE_L1_SIZE * NNUE_L1_PADDED;
+    int8_t *tmp = new int8_t[fc0_w > fc1_w ? fc0_w : fc1_w];
+
+    for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
+        fwrite(&nnue_stack_hashes[s], 4, 1, dst);
+
+        // FC0 biases
+        fwrite(l0_biases[s], sizeof(int32_t), NNUE_L0_SIZE, dst);
+        // FC0 weights: un-reorder from vdotq layout back to output-major [o * INPUT + i]
+        for (int o = 0; o < NNUE_L0_SIZE; o++) {
+            int ob = o / 4, k = o % 4;
+            for (int i = 0; i < NNUE_L0_INPUT; i++) {
+                int ib = i / 4, j = i % 4;
+                tmp[o * NNUE_L0_INPUT + i] = l0_weights[s][ib * 64 + ob * 16 + k * 4 + j];
+            }
+        }
+        fwrite(tmp, 1, fc0_w, dst);
+
+        // FC1 biases
+        fwrite(l1_biases[s], sizeof(int32_t), NNUE_L1_SIZE, dst);
+        // FC1 weights: un-reorder back to output-major [o * PADDED + i]
+#ifdef __ARM_FEATURE_DOTPROD
+        for (int o = 0; o < NNUE_L1_SIZE; o++) {
+            int ob = o / 4, k = o % 4;
+            for (int i = 0; i < NNUE_L1_PADDED; i++) {
+                int ib = i / 4, j = i % 4;
+                tmp[o * NNUE_L1_PADDED + i] = l1_weights[s][ib * 128 + ob * 16 + k * 4 + j];
+            }
+        }
+#else
+        memcpy(tmp, l1_weights[s], fc1_w);
+#endif
+        fwrite(tmp, 1, fc1_w, dst);
+
+        // FC2 bias + weights
+        fwrite(&out_biases[s], sizeof(int32_t), 1, dst);
+        fwrite(out_weights[s], sizeof(int8_t), NNUE_L2_PADDED, dst);
+    }
+
+    delete[] tmp;
+    fclose(dst);
+    printf("NNUE: wrote %s\n", dst_path);
     return true;
 }
 

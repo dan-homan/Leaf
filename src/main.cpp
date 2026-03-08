@@ -153,9 +153,9 @@ int main(int argc, char *argv[])
     // Stockfish 17 SFNNv9 default net (HalfKAv2_hm, ~45 MB compressed)
     // Download from: https://github.com/official-stockfish/networks
     // Try exec directory first, then current directory
-    snprintf(nnue_path, sizeof(nnue_path), "%s%s", exec_path, "nn-ad9b42354671.nnue");
+    snprintf(nnue_path, sizeof(nnue_path), "%s%s", exec_path, NNUE_NET);
     if (!nnue_load(nnue_path)) {
-      nnue_load("nn-ad9b42354671.nnue");
+      nnue_load(NNUE_NET);
     }
     if (nnue_available) write_out("NNUE evaluation loaded.\n");
     else                write_out("NNUE file not found, using classical evaluation.\n");
@@ -164,10 +164,10 @@ int main(int argc, char *argv[])
       // Attempt to load previously learned weights (companion .tdleaf.bin file).
       char tdleaf_path[512];
       snprintf(tdleaf_path, sizeof(tdleaf_path), "%s%s",
-               exec_path, "nn-ad9b42354671.tdleaf.bin");
+               exec_path, NNUE_TDLEAF_BIN);
       bool loaded = nnue_load_fc_weights(tdleaf_path);
       if (!loaded)
-          loaded = nnue_load_fc_weights("nn-ad9b42354671.tdleaf.bin");
+          loaded = nnue_load_fc_weights(NNUE_TDLEAF_BIN);
       if (!loaded) {
         // Check for --init-tdleaf-zero command-line switch.
         bool init_zero = false;
@@ -177,7 +177,7 @@ int main(int argc, char *argv[])
           fprintf(stderr, "TDLeaf: initializing from zero (FC/FT=0, PSQT=100cp/piece).\n");
           nnue_init_zero_weights();
           if (!nnue_save_fc_weights(tdleaf_path))
-              nnue_save_fc_weights("nn-ad9b42354671.tdleaf.bin");
+              nnue_save_fc_weights(NNUE_TDLEAF_BIN);
         } else {
           fprintf(stderr, "TDLeaf: no weights file found — using pretrained .nnue weights.\n"
                           "TDLeaf: run with --init-tdleaf-zero to start training from scratch.\n");
@@ -185,6 +185,24 @@ int main(int argc, char *argv[])
       }
     }
 #endif
+  }
+#endif
+
+#if NNUE
+  // Handle --write-nnue <filename>: export current NNUE weights (FC trained via TDLeaf,
+  // FT copied verbatim from the loaded .nnue) to a complete .nnue file, then exit.
+  for (int ai = 1; ai < argc; ai++) {
+    if (strcmp(argv[ai], "--write-nnue") == 0 && ai + 1 < argc) {
+      if (!nnue_available) {
+        fprintf(stderr, "--write-nnue: no NNUE loaded\n");
+        return 1;
+      }
+      if (!nnue_write_nnue(argv[ai + 1])) {
+        fprintf(stderr, "--write-nnue: failed to write %s\n", argv[ai + 1]);
+        return 1;
+      }
+      return 0;
+    }
   }
 #endif
 
@@ -641,7 +659,7 @@ void make_move()
      if (strstr(game.overstring, "1-0"))  td_result = 1.0f;
      else if (strstr(game.overstring, "0-1")) td_result = 0.0f;
      tdleaf_update_after_game(game.td_game, td_result,
-                              "nn-ad9b42354671.tdleaf.bin");
+                              NNUE_TDLEAF_BIN);
      game.td_game.n_plies = 0;  // prevent double-trigger
    }
 #endif
@@ -1055,7 +1073,7 @@ void parse_command()
       if (!strcmp(result_str, "1-0"))      td_result = 1.0f;
       else if (!strcmp(result_str, "0-1")) td_result = 0.0f;
       tdleaf_update_after_game(game.td_game, td_result,
-                               "nn-ad9b42354671.tdleaf.bin");
+                               NNUE_TDLEAF_BIN);
       game.td_game.n_plies = 0;
     }
 #endif

@@ -15,7 +15,20 @@ $filename = "EXchess_v" . $vers;
 
 $extra_arg = "";
 for my $i (1..$#ARGV) {
-    $extra_arg .= " -D $ARGV[$i]";
+    my $arg = $ARGV[$i];
+    # NNUE_NET=filename and NNUE_TDLEAF_BIN=filename need string-literal quoting.
+    # Also auto-derive NNUE_TDLEAF_BIN from NNUE_NET when only NNUE_NET is given.
+    if ($arg =~ /^NNUE_NET=(.+)$/) {
+        my $net = $1;
+        (my $tdleaf = $net) =~ s/\.nnue$/.tdleaf.bin/;
+        $extra_arg .= " \"-D NNUE_NET=\\\"$net\\\"\"";
+        $extra_arg .= " \"-D NNUE_TDLEAF_BIN=\\\"$tdleaf\\\"\"";
+    } elsif ($arg =~ /^NNUE_TDLEAF_BIN=(.+)$/) {
+        my $val = $1;
+        $extra_arg .= " \"-D NNUE_TDLEAF_BIN=\\\"$val\\\"\"";
+    } else {
+        $extra_arg .= " -D $arg";
+    }
 }
 
 if(-e "./$filename") { 

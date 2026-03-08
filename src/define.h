@@ -56,9 +56,19 @@
 #endif
 
 // NNUE evaluation (Stockfish HalfKAv2-hm compatible)
-// Compile with -D NNUE=1 and place nn-ad9b42354671.nnue next to the binary.
+// Compile with -D NNUE=1 and place the net file next to the binary.
 #ifndef NNUE
  #define NNUE 0
+#endif
+
+// Default .nnue file to load.  Override at compile time:
+//   perl comp.pl MYVER NNUE=1 NNUE_NET=nn-newnet.nnue
+// The companion .tdleaf.bin name is derived from NNUE_NET automatically.
+#ifndef NNUE_NET
+ #define NNUE_NET "nn-ad9b42354671.nnue"
+#endif
+#ifndef NNUE_TDLEAF_BIN
+ #define NNUE_TDLEAF_BIN "nn-ad9b42354671.tdleaf.bin"
 #endif
 
 // TDLeaf(λ) online learning for the NNUE FC layers.
