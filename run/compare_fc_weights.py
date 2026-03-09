@@ -568,9 +568,9 @@ def plot_overview(orig, upd, save):
         ax = axes[row, 0]
         bins = np.arange(-128, 130) - 0.5
         ax.hist(all_orig, bins=bins, color='steelblue', alpha=0.75, density=True,
-                label=nnue_name)
-        ax.hist(all_upd,  bins=bins, color='lightcoral', alpha=0.40, density=True,
-                label=tdleaf_name)
+                label=nnue_name, zorder=1)
+        ax.hist(all_upd,  bins=bins, color='lightcoral', alpha=0.50, density=True,
+                label=tdleaf_name, zorder=2)
         ax.set_title(f'{layer_name}\nweight distribution')
         ax.set_xlabel('weight value')
         ax.set_ylabel('density')
@@ -609,7 +609,8 @@ def plot_overview(orig, upd, save):
         ax.set_xlabel('stack')
         ax.set_ylabel('% weights changed')
 
-    plt.tight_layout(rect=[0, 0, 1, 0.93])   # leave headroom for suptitle
+    plt.tight_layout()
+    fig.subplots_adjust(top=0.92)   # nudge down just enough for suptitle
     if save:
         fig.savefig('fc_compare_overview.png', dpi=150)
         print("Saved fc_compare_overview.png")
