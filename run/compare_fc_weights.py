@@ -546,11 +546,11 @@ def print_summary(orig, upd, ft_data=None):
 def plot_overview(orig, upd, save):
     """3×3 figure: one row per FC layer.  Cols: orig dist | delta dist | per-stack bar."""
     fig, axes = plt.subplots(3, 3, figsize=(16, 11))
-    nnue_name   = getattr(orig,  '_name', 'original .nnue')
-    tdleaf_name = getattr(upd,   '_name', 'updated .tdleaf.bin')
+    nnue_name   = orig.get('_name', 'original .nnue')
+    tdleaf_name = upd.get('_name',  'updated .tdleaf.bin')
 
     fig.suptitle(f'FC weight comparison\n'
-                 f'blue = {nnue_name}   orange = delta (updated − original)',
+                 f'blue = {nnue_name}   light red = {tdleaf_name}   orange = delta',
                  fontsize=11)
 
     layers = [
@@ -564,14 +564,18 @@ def plot_overview(orig, upd, save):
         all_upd  = np.concatenate(upd[key]).ravel().astype(np.int32)
         delta    = all_upd - all_orig
 
-        # --- col 0: original weight distribution ---
+        # --- col 0: original weight distribution + file-2 overplot ---
         ax = axes[row, 0]
         bins = np.arange(-128, 130) - 0.5
-        ax.hist(all_orig, bins=bins, color='steelblue', alpha=0.75, density=True)
-        ax.set_title(f'{layer_name}\noriginal distribution')
+        ax.hist(all_orig, bins=bins, color='steelblue', alpha=0.75, density=True,
+                label=nnue_name)
+        ax.hist(all_upd,  bins=bins, color='lightcoral', alpha=0.40, density=True,
+                label=tdleaf_name)
+        ax.set_title(f'{layer_name}\nweight distribution')
         ax.set_xlabel('weight value')
         ax.set_ylabel('density')
         ax.set_xlim(-130, 130)
+        ax.legend(fontsize=7, loc='upper right')
 
         # --- col 1: delta distribution ---
         ax = axes[row, 1]
@@ -605,7 +609,7 @@ def plot_overview(orig, upd, save):
         ax.set_xlabel('stack')
         ax.set_ylabel('% weights changed')
 
-    plt.tight_layout()
+    plt.tight_layout(rect=[0, 0, 1, 0.93])   # leave headroom for suptitle
     if save:
         fig.savefig('fc_compare_overview.png', dpi=150)
         print("Saved fc_compare_overview.png")
@@ -766,7 +770,6 @@ def main():
     print_summary(orig, upd, ft_data)
 
     plot_overview(orig, upd, args.save)
-    plot_fc1_per_stack(orig, upd, args.save)
 
     if not args.no_show:
         plt.show()
