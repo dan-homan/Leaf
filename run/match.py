@@ -272,25 +272,25 @@ def main():
     # Gauntlet summary table
     if gauntlet:
         col_w = 32
-        print("=" * 74)
+        sep   = "=" * 76
+        dash  = "-" * 74
+        print(sep)
         print(f"  GAUNTLET SUMMARY — {name1}")
-        print("=" * 74)
-        print(f"  {'Opponent':<{col_w}} {'Games':>6} {'W':>5} {'D':>5} {'L':>5}  "
-              f"{'Score%':>7}  {'Elo diff':>14}")
-        print("  " + "-" * 70)
+        print(sep)
+        print(f"  {'Opponent':<{col_w}} {'Games':>5} {'W':>4} {'D':>4} {'L':>4}  "
+              f"{'Score%':>7}  {'Elo diff':>10}")
+        print("  " + dash)
         for name2, w, d, l, elo, elo_err in gauntlet_results:
             n   = w + d + l
             pct = (w + 0.5 * d) / n * 100 if n else 0
             elo_s = (f"{elo:+.0f} ±{elo_err:.0f}" if elo is not None else "n/a")
-            print(f"  {name2:<{col_w}} {n:>6} {w:>5} {d:>5} {l:>5}  {pct:>6.1f}%  {elo_s:>14}")
-        print("  " + "-" * 70)
+            print(f"  {name2:<{col_w}} {n:>5} {w:>4} {d:>4} {l:>4}  {pct:>6.1f}%  {elo_s:>10}")
+        print("  " + dash)
         n_tot   = grand_w + grand_d + grand_l
         pct_tot = (grand_w + 0.5 * grand_d) / n_tot * 100 if n_tot else 0
-        tot_elo, tot_elo_err = elo_from_wdl(grand_w, grand_d, grand_l)
-        tot_elo_s = (f"{tot_elo:+.0f} ±{tot_elo_err:.0f}" if tot_elo is not None else "n/a")
-        print(f"  {'TOTAL':<{col_w}} {n_tot:>6} {grand_w:>5} {grand_d:>5} {grand_l:>5}  "
-              f"{pct_tot:>6.1f}%  {tot_elo_s:>14}")
-        print("=" * 74)
+        print(f"  {'TOTAL':<{col_w}} {n_tot:>5} {grand_w:>4} {grand_d:>4} {grand_l:>4}  "
+              f"{pct_tot:>6.1f}%  {'':>10}")
+        print(sep)
 
     elif multi:
         print(f"All {args.iterations} iterations complete "
