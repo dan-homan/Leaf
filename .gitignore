@@ -4,7 +4,9 @@
 # tb_src/ is local only (tablebases source, not tracked)
 tb_src/
 
-# Except src/, docs/, scripts/, run/*.py, run/*.txt, learn/, and this file
+# Except src/, docs/, scripts/, logos/, run/*.py, run/*.txt, learn/, and this file
+!logos/
+!logos/**
 !src/
 !src/**
 !docs/

@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Epoch Chess Engine — Logo</title>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700;900&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: #0e0e0e;
+    color: white;
+    font-family: 'Space Mono', monospace;
+    padding: 60px 40px;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 60px;
+  }
+
+  h1 {
+    font-family: 'Space Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 0.3em;
+    text-transform: uppercase;
+    color: #555;
+  }
+
+  /* ── Full card ── */
+  .epoch-card {
+    background: #080808;
+    border: 1px solid #1a1a1a;
+    padding: 60px 50px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0;
+    position: relative;
+    overflow: hidden;
+    width: 500px;
+  }
+
+  .epoch-card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+    background: linear-gradient(90deg, #c8a96e, #e8c97e, #c8a96e);
+  }
+
+  .epoch-rings {
+    position: absolute;
+    right: -20px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 180px;
+    height: 180px;
+    opacity: 0.07;
+  }
+
+  .epoch-rings circle {
+    fill: none;
+    stroke: #c8a96e;
+  }
+
+  .epoch-label {
+    font-family: 'Space Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 0.5em;
+    text-transform: uppercase;
+    color: #c8a96e;
+    margin-bottom: 16px;
+  }
+
+  .epoch-name {
+    font-family: 'Cinzel', serif;
+    font-size: 72px;
+    font-weight: 900;
+    letter-spacing: -0.02em;
+    line-height: 1;
+    color: #f0e8d0;
+    position: relative;
+    z-index: 1;
+  }
+
+  .epoch-name span {
+    color: #c8a96e;
+  }
+
+  .epoch-divider {
+    width: 48px;
+    height: 1px;
+    background: #c8a96e;
+    margin: 20px 0;
+    opacity: 0.6;
+  }
+
+  .epoch-tagline {
+    font-family: 'Space Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 0.25em;
+    color: #555;
+    text-transform: uppercase;
+  }
+
+  .epoch-chess-icon {
+    position: absolute;
+    bottom: 24px;
+    right: 30px;
+    font-size: 32px;
+    opacity: 0.15;
+    filter: sepia(1);
+  }
+
+  /* ── Compact wordmark ── */
+  .compact {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 18px 28px;
+    background: #080808;
+    border: 1px solid #2a2218;
+  }
+
+  .compact .c-symbol {
+    font-family: 'Cinzel', serif;
+    font-size: 28px;
+    font-weight: 900;
+    color: #c8a96e;
+  }
+
+  .compact .c-text {
+    font-family: 'Cinzel', serif;
+    font-size: 16px;
+    font-weight: 700;
+    color: #f0e8d0;
+    letter-spacing: 0.1em;
+  }
+
+  .label {
+    font-family: 'Space Mono', monospace;
+    font-size: 8px;
+    letter-spacing: 0.4em;
+    text-transform: uppercase;
+    color: #333;
+    text-align: center;
+  }
+
+  section {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+  }
+</style>
+</head>
+<body>
+
+<h1>Epoch Chess Engine — Logo Designs</h1>
+
+<!-- Full card -->
+<section>
+  <div class="epoch-card">
+    <svg class="epoch-rings" viewBox="0 0 180 180">
+      <circle cx="90" cy="90" r="85" stroke-width="1"/>
+      <circle cx="90" cy="90" r="65" stroke-width="1"/>
+      <circle cx="90" cy="90" r="45" stroke-width="1"/>
+      <circle cx="90" cy="90" r="25" stroke-width="1"/>
+      <line x1="90" y1="5" x2="90" y2="175" stroke="#c8a96e" stroke-width="0.5"/>
+      <line x1="5" y1="90" x2="175" y2="90" stroke="#c8a96e" stroke-width="0.5"/>
+    </svg>
+    <div class="epoch-label">Chess Engine</div>
+    <div class="epoch-name">EP<span>O</span>CH</div>
+    <div class="epoch-divider"></div>
+    <div class="epoch-tagline">A new era of play</div>
+    <div class="epoch-chess-icon">♛</div>
+  </div>
+  <div class="label">Full card — Dark gold / Cinzel serif</div>
+</section>
+
+<!-- Compact wordmark -->
+<section>
+  <div class="compact">
+    <div class="c-symbol">♛</div>
+    <div class="c-text">EPOCH</div>
+  </div>
+  <div class="label">Compact wordmark</div>
+</section>
+
+</body>
+</html>
