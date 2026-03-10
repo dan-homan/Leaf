@@ -14,6 +14,40 @@ may need to be raised further, or the grad computation for PSQT reviewed.  FT bi
 similarly benefit from empirical testing.  A short grid search varying each scale
 independently across 500–1000-game runs would establish good defaults.
 
+### Epoch-based replay for TDLeaf training
+
+The current TDLeaf implementation is fully online: weights are updated after
+each game and the game record is discarded.  A cheap alternative is to store
+each game's leaf positions after self-play and make K additional passes through
+them, recomputing the NNUE evaluation at each stored leaf with the updated
+weights and applying the TD error on each pass.  The search is not re-run —
+only the forward and backward NNUE passes at the fixed stored positions.
+
+**Cost estimate (Flavor B — fixed leaves, recompute NNUE only):**
+- Per-position: ~1–5 μs forward pass + ~10–15 μs backward pass
+- Per-game (~80 leaf positions): ~1 ms per epoch
+- 4,000 games × 10 epochs ≈ 40 seconds of additional compute — negligible
+
+**Memory:**
+- Storing board states only (accumulator recomputed each pass): ~160 MB for 4,000 games
+- Storing accumulators (2 × 1024 int16 per position): ~1.3 GB for 4,000 games
+
+**Caveats:**
+- TDLeaf is on-policy: the stored leaf positions were found by an earlier
+  version of the network.  Re-using them with updated weights is an off-policy
+  approximation.  Empirically (cf. experience replay in DQN) this works well
+  for small K, but degrades as the stored positions become stale relative to
+  the current network.  K = 2–5 is a reasonable starting range; beyond ~5
+  epochs over the same data instability is likely.
+- The leaf *positions* themselves would change if the search were re-run with
+  updated weights.  Flavor B accepts this as an approximation in exchange for
+  the large reduction in compute cost vs. re-running the full search (Flavor A),
+  which would cost the same as replaying all games × number of epochs.
+
+**Recommendation:** implement Flavor B with K configurable at build or run
+time.  Run a 500-game ablation comparing K=1 (current), K=2, and K=4 on the
+same starting network and measure Elo gain per wall-clock hour.
+
 ### Bias initialisation
 FC biases and FT biases are currently initialised from the SF15.1 distribution (random
 N(μ,σ)).  Consider initialising all biases to 0 and letting TDLeaf learn them from
