@@ -1,6 +1,9 @@
 # Ignore everything by default
 *
 
+# tb_src/ is local only (tablebases source, not tracked)
+tb_src/
+
 # Except src/, docs/, scripts/, run/*.py, run/*.txt, learn/, and this file
 !src/
 !src/**

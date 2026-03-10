@@ -53,7 +53,7 @@ inline square SqFindOne (square *sq, piece pi)
 }
 
 #undef piece
-#include "tb/tbindex.c"
+#include "../tb_src/tbindex.c"
 #undef square
 
 #include "chess.h"
