@@ -233,6 +233,34 @@ N iterations of M-game self-play matches via `scripts/match.py`, tracking cumula
 counts across sessions, and exporting the trained weights to a new `.nnue` file named
 `<net_base>-<total_games>g.nnue`.  Fischer Random (Chess960) is the default opening
 randomisation method.
+
+### Fresh network initialization (`--init-nnue`)
+
+When starting from scratch, run:
+```sh
+perl src/comp.pl init NNUE=1 TDLEAF=1 OVERWRITE
+./run/Epoch_vinit --init-nnue --write-nnue learn/nn-fresh.nnue
+```
+
+**FC / FT weights:** drawn from Gaussian distributions whose parameters were
+measured empirically from the Stockfish 15.1 network (`nn-ad9b42354671.nnue`).
+
+**PSQT weights:** each feature draws its magnitude independently from a uniform
+distribution over a per-piece-type range, then is signed by perspective:
+own pieces (`pside == persp`) receive `+V`, opponent pieces receive `−V`.
+
+| Piece  | Range (cp)   | int32 units (`cp × 5776/100`) |
+|--------|--------------|-------------------------------|
+| Pawn   | 80 – 120 cp  | [4621, 6931]                  |
+| Knight | 250 – 450 cp | [14440, 26001]                |
+| Bishop | 250 – 450 cp | [14440, 26001]                |
+| Rook   | 400 – 700 cp | [23104, 40432]                |
+| Queen  | 900 – 1400 cp| [51984, 80864]                |
+| King   | 0 cp         | 0 (fixed)                     |
+
+This gives TDLeaf a realistic material prior with per-feature diversity,
+rather than a single fixed value, so the PSQT surface is not perfectly flat
+at the start of training.
 Key hyperparameters (in `src/tdleaf.h`):
 
 | Constant | Value | Notes |

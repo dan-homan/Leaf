@@ -1,5 +1,18 @@
 Changes since 2017_12_24
 
+2026_03_11 -- PSQT initialization: uniform random per piece type (--init-nnue).
+               Replace fixed 100cp/piece PSQT prior with independent uniform draws
+               per feature, one per piece type.  Ranges (centipawns → int32 units):
+                 Pawn   80–120 cp  → [4621,  6931]
+                 Knight 250–450 cp → [14440, 26001]
+                 Bishop 250–450 cp → [14440, 26001]
+                 Rook   400–700 cp → [23104, 40432]
+                 Queen  900–1400 cp→ [51984, 80864]
+                 King   0 cp       → 0 (fixed)
+               Sign convention preserved: own pieces get +V, opponent pieces -V,
+               consistent with the side-to-move PSQT accumulator convention.
+               Conversion: V = cp × 5776 / 100.
+
 2026_03_11 -- x86-64 performance optimizations.
 
              Build system (src/comp.pl):
