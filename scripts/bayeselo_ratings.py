@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-bayeselo_ratings.py -- compute a relative Elo rating list from a PGN file.
+bayeselo_ratings.py -- compute a relative Elo rating list from one or more PGN files.
 
 Usage:
-    python3 scripts/bayeselo_ratings.py <pgn_file> [options]
+    python3 scripts/bayeselo_ratings.py <pgn_file> [<pgn_file> ...] [options]
+
+Multiple PGN files are combined before analysis (bayeselo reads them sequentially).
 
 Options:
     --bayeselo PATH   path to the bayeselo binary
@@ -33,7 +35,7 @@ def parse_args():
         description="Compute a Bayesian Elo rating list from a PGN file.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument("pgn", help="PGN file to analyse")
+    p.add_argument("pgn", nargs="+", help="PGN file(s) to analyse (combined before analysis)")
     p.add_argument("--bayeselo", default=DEFAULT_BAYESELO,
                    help="path to the bayeselo binary")
     p.add_argument("--min", type=int, default=0, dest="min_games",
@@ -45,17 +47,15 @@ def parse_args():
     return p.parse_args()
 
 
-def run_bayeselo(bayeselo_bin, pgn_path, min_games, advantage, drawelo):
-    pgn_path = os.path.abspath(pgn_path)
-
+def run_bayeselo(bayeselo_bin, pgn_paths, min_games, advantage, drawelo):
     mm_flags = ""
     if advantage:
         mm_flags += " 1"
     if drawelo:
         mm_flags = (mm_flags or " 0") + " 1"
 
-    commands = "\n".join([
-        f"readpgn {pgn_path}",
+    read_cmds = [f"readpgn {os.path.abspath(p)}" for p in pgn_paths]
+    commands = "\n".join(read_cmds + [
         "elo",
         f"mm{mm_flags}",
         f"ratings {min_games}",
@@ -122,8 +122,12 @@ def parse_ratings(raw_output):
     return games_loaded, rows
 
 
-def print_ratings(games_loaded, rows, pgn_path):
-    print(f"\nBayesian Elo ratings — {os.path.basename(pgn_path)}")
+def print_ratings(games_loaded, rows, pgn_paths):
+    if len(pgn_paths) == 1:
+        label = os.path.basename(pgn_paths[0])
+    else:
+        label = f"{len(pgn_paths)} PGN files combined"
+    print(f"\nBayesian Elo ratings — {label}")
     print(f"{games_loaded} games loaded, {len(rows)} players rated\n")
 
     if not rows:
@@ -150,8 +154,9 @@ def print_ratings(games_loaded, rows, pgn_path):
 def main():
     args = parse_args()
 
-    if not os.path.isfile(args.pgn):
-        sys.exit(f"Error: PGN file not found: {args.pgn}")
+    for pgn in args.pgn:
+        if not os.path.isfile(pgn):
+            sys.exit(f"Error: PGN file not found: {pgn}")
     if not os.path.isfile(args.bayeselo):
         sys.exit(f"Error: bayeselo binary not found: {args.bayeselo}")
 
