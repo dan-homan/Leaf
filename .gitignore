@@ -15,6 +15,7 @@ tb_src/
 !scripts/**
 !.gitignore
 !README.md
+!CLAUDE.md
 !run/
 run/*
 !run/*.py
