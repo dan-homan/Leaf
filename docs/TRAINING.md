@@ -45,7 +45,7 @@ After training, a test tournament was run among all network snapshots plus two r
 | Positions | Fischer Random, no opening book |
 | Tablebases | Disabled |
 | Time control | 10+0.1 s/move |
-| Total games | 6,027 |
+| Total games | 6,500 |
 
 **Reference engines:**
 
@@ -62,11 +62,11 @@ Computed with `scripts/bayeselo_ratings.py` (BayesElo, maximum-likelihood).  Rat
 
 | Rank | Engine | Elo | ± | Games | Score | Oppo | Draws |
 |-----:|--------|----:|--:|------:|------:|-----:|------:|
-| 1 | EXchess_classic | +1054 | 152 | 1,000 | 100% | +76 | 0% |
+| 1 | EXchess_classic | +1055 | 152 | 1,000 | 100% | +76 | 0% |
 | 2 | Epoch_vnn-fresh-260309-8000g | +135 | 14 | 3,500 | 71% | −19 | 11% |
 | 3 | EXchess_classic_material | +40 | 19 | 1,000 | 45% | +76 | 22% |
-| 4 | Epoch_vnn-fresh-260309-4000g | +18 | 15 | 3,027 | 59% | +19 | 12% |
-| 5 | Epoch_vnn-fresh-260309-2000g | −139 | 31 | 527 | 17% | +129 | 17% |
+| 4 | Epoch_vnn-fresh-260309-4000g | +18 | 13 | 3,500 | 60% | −3 | 14% |
+| 5 | Epoch_vnn-fresh-260309-2000g | −140 | 21 | 1,000 | 22% | +76 | 21% |
 | 6 | Epoch_vnn-fresh-260309-1000g | −271 | 26 | 1,000 | 12% | +76 | 11% |
 | 7 | Epoch_vnn-fresh-260309-500g | −353 | 32 | 1,000 | 8% | +76 | 7% |
 | 8 | Epoch_vnn-fresh-260309 (0g) | −484 | 44 | 1,000 | 4% | +76 | 3% |
@@ -97,7 +97,8 @@ The rate of improvement is declining with game count, falling from ~0.26 Elo/gam
 | EXchess_classic_material | 246 | 113 | 141 | 60.5% |
 | EXchess_classic | 1 | 1 | 498 | 0.3% |
 
-The 8000g network is competitive with the material-only classical eval (60.5% score) and dominates all earlier snapshots.  It remains far below the classical eval — losing 498 of 500 games against `EXchess_classic`.
+The 8000g network is above the material-only classical eval (60.5%) and dominates all earlier snapshots.  It remains far below the classical eval — losing 498 of 500 games against `EXchess_classic`.
+
 
 ---
 
@@ -105,7 +106,7 @@ The 8000g network is competitive with the material-only classical eval (60.5% sc
 
 1. **Monotonic improvement, but decelerating.**  Every snapshot is stronger than the last, but the Elo gain per game drops sharply: from ~0.26 at the start to ~0.03 between 4000 and 8000 games.  The network is still improving at 8000 games but may be approaching a ceiling under the current training conditions (3+0.05 TC, Fischer Random, no hyperparameter tuning).
 
-2. **Crossing the material-only threshold.**  Between 4000 and 8000 games the network surpasses a pure material eval (8000g scores 60.5% vs `EXchess_classic_material`), meaning it has learned meaningful positional patterns from self-play.
+2. **Crossing the material-only threshold.**  The 4000g network is statistically equal to the material-only eval (49.5%); the 8000g network is clearly above it (60.5%).  The crossing of this threshold occurs between 4000 and 8000 games, meaning the network begins learning meaningful positional patterns beyond raw material sometime in that window.
 
 3. **Large gap to classical eval.**  The 8000g net is ~919 Elo below `EXchess_classic` in this pool.  This is expected: the classical eval encodes decades of chess knowledge; a self-trained network at this game count is not expected to match it.  Closing this gap is the long-term goal.
 
