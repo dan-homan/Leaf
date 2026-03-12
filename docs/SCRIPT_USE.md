@@ -18,9 +18,9 @@ cd run/
 # Head-to-head, 200 games
 python3 match.py Leaf_vA Leaf_vB -n 200 -c 4 -tc 5+0.05
 
-# Multi-iteration (engines restart between iterations — read-only TDLeaf
-# engine picks up the latest weights at the start of each new match)
-python3 match.py Leaf_vtrain Leaf_vtrain_ro -n 500 -i 10 --wait 500
+# Multi-iteration symmetric self-play (both engines learn; restart between
+# iterations so each picks up the merged .tdleaf.bin weights)
+python3 match.py Leaf_vtrain_a Leaf_vtrain_b -n 500 -i 10 --wait 500
 
 # Gauntlet: probe engine vs multiple opponents; all games appended to one PGN
 python3 match.py Leaf_vnew Leaf_v1 Leaf_v2 Leaf_v3 \
@@ -62,14 +62,15 @@ python3 training_run.py
 The script prompts for:
 
 1. **Starting network** — existing `.nnue` file or a freshly random-initialised one
-2. **Build** — compiles a training binary (`NNUE=1 TDLEAF=1`) and a read-only binary
-   (`TDLEAF_READONLY=1`) via `src/comp.pl`
+2. **Build** — compiles two training binaries (`_a` and `_b`, both `NNUE=1 TDLEAF=1`)
+   via `src/comp.pl`; both write to the shared `.tdleaf.bin` (symmetric self-play)
 3. **Continuity** — whether to continue from an existing `.tdleaf.bin` or start fresh
 4. **Match parameters** — games/iteration, iteration count, TC, concurrency, wait, Fischer Random
 
-After each iteration the read-only binary reloads the updated `.tdleaf.bin` so it
-plays with the latest trained weights.  On completion the trained weights are
-exported to `<net_base>-<total_games>g.nnue`.
+Both binaries are full learners: every game produces gradient updates from both sides
+of the board, doubling the signal per game.  Concurrent writes are safe via the
+`flock`+delta-merge mechanism in `nnue_save_fc_weights`.  On completion the trained
+weights are exported to `<net_base>-<total_games>g.nnue`.
 
 Game counts accumulate in a `<net_base>.games` sidecar file across multiple runs on
 the same network.

@@ -21,7 +21,7 @@ The network is a statistically plausible but chess-naïve starting point — it 
 | Parameter | Value |
 |-----------|-------|
 | Algorithm | TDLeaf(λ), online, all layers updated |
-| Training format | Self-play: `Leaf_vtrain` (learning) vs `Leaf_vtrain_ro` (read-only) |
+| Training format | Self-play: `Leaf_vtrain` (learning) vs `Leaf_vtrain_ro` (read-only); superseded by symmetric self-play (`_a` vs `_b`) as of 2026-03-12 |
 | Positions | Fischer Random (Chess960), random starting position each game |
 | Opening book | None |
 | Tablebases | Disabled |

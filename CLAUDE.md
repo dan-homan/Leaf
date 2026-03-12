@@ -132,12 +132,12 @@ python3 scripts/compare_nnue_learning.py learn/nn-fresh.nnue learn/nn-fresh.tdle
 perl src/comp.pl init_nnue NNUE=1 TDLEAF=1 OVERWRITE
 ./run/Leaf_vinit_nnue --init-nnue --write-nnue learn/nn-fresh.nnue
 
-# 2. Build training binaries
-perl src/comp.pl train_fresh NNUE=1 NNUE_NET=learn/nn-fresh.nnue TDLEAF=1 OVERWRITE
-perl src/comp.pl train_fresh_ro NNUE=1 NNUE_NET=learn/nn-fresh.nnue TDLEAF=1 TDLEAF_READONLY=1 OVERWRITE
+# 2. Build training binaries (symmetric self-play: both engines learn)
+perl src/comp.pl train_fresh_a NNUE=1 NNUE_NET=learn/nn-fresh.nnue TDLEAF=1 OVERWRITE
+perl src/comp.pl train_fresh_b NNUE=1 NNUE_NET=learn/nn-fresh.nnue TDLEAF=1 OVERWRITE
 
 # 3. Run training matches (from learn/)
-python3 match.py Leaf_vtrain_fresh Leaf_vtrain_fresh_ro -c 5 -tc 0:03+0.05 --wait 500 -n 500
+python3 match.py Leaf_vtrain_fresh_a Leaf_vtrain_fresh_b -c 5 -tc 0:03+0.05 --wait 500 -n 500
 ```
 
 ---

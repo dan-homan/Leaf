@@ -1,5 +1,13 @@
 Changes since 2017_12_24
 
+2026_03_12 -- Symmetric self-play training (training_run.py).
+               Both engines in a training run are now full learners (NNUE=1 TDLEAF=1).
+               The read-only binary (_ro, TDLEAF_READONLY=1) is no longer used in the
+               standard training workflow.  Both _a and _b binaries write to the shared
+               .tdleaf.bin; the existing flock+delta-merge mechanism in
+               nnue_save_fc_weights handles concurrent writes safely.  This doubles
+               the gradient signal per game with no engine source changes.
+
 2026_03_11 -- Flavor B epoch-based replay for TDLeaf(λ) (TDLEAF=1).
                After each game, the completed TDGameRecord is pushed into a
                static ring buffer (TDLEAF_REPLAY_BUF_N=8 games, ~36 MB BSS).
