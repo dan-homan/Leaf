@@ -7,9 +7,10 @@
 #
 # What this script does:
 #   1. Asks for a starting .nnue file or offers to initialise a fresh random one.
-#   2. Builds a training binary and a read-only binary for the chosen network
-#      (via comp.pl in run/), then moves both binaries to learn/ so all
-#      training files live together.
+#   2. Builds two training binaries for the chosen network (symmetric self-play;
+#      both write to the shared .tdleaf.bin via the flock+delta-merge mechanism
+#      in nnue.cpp), then moves both binaries to learn/ so all training files
+#      live together.
 #   3. Checks for an existing .tdleaf.bin (continue or start fresh).
 #   4. Asks for match parameters, then runs match.py for N games × I iterations.
 #      PGN files land in  learn/pgn/<net_base>/  so all PGNs for a given net
@@ -137,23 +138,23 @@ def main():
     # -----------------------------------------------------------------------
     print()
     print("Building executables:")
-    train_ver = f"train_{net_base}"
-    ro_ver    = f"train_{net_base}_ro"
-    train_exe = os.path.join(learn_dir, f"Leaf_v{train_ver}")
-    ro_exe    = os.path.join(learn_dir, f"Leaf_v{ro_ver}")
-    nnue_flag = f"NNUE_NET={net_filename}"
+    train_ver  = f"train_{net_base}_a"
+    train_ver2 = f"train_{net_base}_b"
+    train_exe  = os.path.join(learn_dir, f"Leaf_v{train_ver}")
+    train_exe2 = os.path.join(learn_dir, f"Leaf_v{train_ver2}")
+    nnue_flag  = f"NNUE_NET={net_filename}"
 
     rebuild = True
-    if os.path.isfile(train_exe) and os.path.isfile(ro_exe):
+    if os.path.isfile(train_exe) and os.path.isfile(train_exe2):
         rebuild = ask_yes_no("  Both executables already exist.  Rebuild?", default="n")
 
     if rebuild:
-        print(f"  Building training binary  (Leaf_v{train_ver}) ...")
+        print(f"  Building training binary A (Leaf_v{train_ver}) ...")
         if not build_binary(train_ver, ["NNUE=1", "TDLEAF=1", nnue_flag]):
             print("  Build failed.", file=sys.stderr)
             sys.exit(1)
-        print(f"  Building read-only binary (Leaf_v{ro_ver}) ...")
-        if not build_binary(ro_ver, ["NNUE=1", "TDLEAF=1", "TDLEAF_READONLY=1", nnue_flag]):
+        print(f"  Building training binary B (Leaf_v{train_ver2}) ...")
+        if not build_binary(train_ver2, ["NNUE=1", "TDLEAF=1", nnue_flag]):
             print("  Build failed.", file=sys.stderr)
             sys.exit(1)
         print("  Build complete.")
@@ -240,8 +241,8 @@ def main():
     print()
     print("=" * 62)
     print(f"  Net in:           {net_filename}")
-    print(f"  Training binary:  Leaf_v{train_ver}")
-    print(f"  Read-only binary: Leaf_v{ro_ver}")
+    print(f"  Training binary A: Leaf_v{train_ver}")
+    print(f"  Training binary B: Leaf_v{train_ver2}")
     print(f"  Games this run:   {total_new:,}  ({n_iters} iter × {n_games} games)")
     print(f"  Prior games:      {prior_games:,}")
     print(f"  Total after run:  {total_after:,}")
@@ -266,7 +267,7 @@ def main():
     match_cmd = [
         sys.executable, match_py,
         train_exe,          # absolute path — match.py passes these straight to cutechess
-        ro_exe,
+        train_exe2,
         "-n", str(n_games),
         "-i", str(n_iters),
         "-tc", tc,
