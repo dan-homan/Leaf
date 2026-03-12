@@ -8,8 +8,8 @@ Planned investigations, improvements, and open questions.
 
 ### Learning rate tuning
 The current LR scales are initial guesses and have not been systematically tuned.
-PSQT in particular appears to learn very slowly — `NNUE_PSQT_LR_SCALE` (currently 1000)
-may need to be raised further, or the grad computation for PSQT reviewed.  FT bias
+PSQT in particular appears to learn very slowly — `NNUE_PSQT_LR_SCALE` raised to 10000
+(from 1000) to accelerate PSQT learning; further tuning may be needed.  FT bias
 (`NNUE_FT_BIAS_LR_SCALE = 10`) and FC bias (`NNUE_FC_BIAS_LR_SCALE = 1000`) scales
 similarly benefit from empirical testing.  A short grid search varying each scale
 independently across 500–1000-game runs would establish good defaults.

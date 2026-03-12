@@ -25,15 +25,13 @@ Changes since 2017_12_24
                ply's gradient by 1/(1 + variance/TDLEAF_ID_VAR_SIGMA2).
                Both approaches apply in replay passes as well as the live pass.
 
-2026_03_11 -- PSQT initialization: uniform random per piece type (--init-nnue).
-               Replaced fixed 100cp/piece PSQT prior with independent uniform draws
-               per piece type.  Ranges (centipawns → int32 units):
-                 Pawn   80–120 cp  → [4621,  6931]
-                 Knight 250–450 cp → [14440, 26001]
-                 Bishop 250–450 cp → [14440, 26001]
-                 Rook   400–700 cp → [23104, 40432]
-                 Queen  900–1400 cp→ [51984, 80864]
-                 King   0 cp       → 0 (fixed)
+2026_03_11 -- PSQT initialization and learning rate (--init-nnue).
+               PSQT now initialised from classical evaluator piece values (score.h)
+               instead of uniform random ranges.  Values (cp → int32 units via *5776/100):
+                 Pawn=100→5776, Knight=377→21776, Bishop=399→23046,
+                 Rook=596→34425, Queen=1197→69144, King=0.
+               All FC and FT biases now initialised to zero (were random N(μ,σ) from SF15.1).
+               NNUE_PSQT_LR_SCALE raised from 1000 to 10000 to accelerate PSQT learning.
 
 2026_03_11 -- x86-64 performance optimizations.
                AVX2 SIMD (nnue.cpp): SqrCReLU, FC0, and FC1 hot paths ported to
