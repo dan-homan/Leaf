@@ -60,16 +60,16 @@ After training, a test tournament was run among all network snapshots plus two r
 
 Computed with `scripts/bayeselo_ratings.py` (BayesElo, maximum-likelihood).  Ratings are relative within this pool.
 
-| Rank | Engine | Elo | ± | Games | Score | Oppo | Draws |
-|-----:|--------|----:|--:|------:|------:|-----:|------:|
-| 1 | EXchess_classic | +1055 | 152 | 1,000 | 100% | +76 | 0% |
-| 2 | Epoch_vnn-fresh-260309-8000g | +135 | 14 | 3,500 | 71% | −19 | 11% |
-| 3 | EXchess_classic_material | +40 | 19 | 1,000 | 45% | +76 | 22% |
-| 4 | Epoch_vnn-fresh-260309-4000g | +18 | 13 | 3,500 | 60% | −3 | 14% |
-| 5 | Epoch_vnn-fresh-260309-2000g | −140 | 21 | 1,000 | 22% | +76 | 21% |
-| 6 | Epoch_vnn-fresh-260309-1000g | −271 | 26 | 1,000 | 12% | +76 | 11% |
-| 7 | Epoch_vnn-fresh-260309-500g | −353 | 32 | 1,000 | 8% | +76 | 7% |
-| 8 | Epoch_vnn-fresh-260309 (0g) | −484 | 44 | 1,000 | 4% | +76 | 3% |
+| Rank | Engine                        |  Elo  |  ±  | Games | Score |  Oppo | Draws |
+|-----:|-------------------------------|------:|----:|------:|------:|------:|------:|
+|    1 | EXchess_classic               | +1055 | 152 | 1,000 |  100% |   +76 |    0% |
+|    2 | Epoch_vnn-fresh-260309-8000g  |  +135 |  14 | 3,500 |   71% |   −19 |   11% |
+|    3 | EXchess_classic_material      |   +40 |  19 | 1,000 |   45% |   +76 |   22% |
+|    4 | Epoch_vnn-fresh-260309-4000g  |   +18 |  13 | 3,500 |   60% |    −3 |   14% |
+|    5 | Epoch_vnn-fresh-260309-2000g  |  −140 |  21 | 1,000 |   22% |   +76 |   21% |
+|    6 | Epoch_vnn-fresh-260309-1000g  |  −271 |  26 | 1,000 |   12% |   +76 |   11% |
+|    7 | Epoch_vnn-fresh-260309-500g   |  −353 |  32 | 1,000 |    8% |   +76 |    7% |
+|    8 | Epoch_vnn-fresh-260309 (0g)   |  −484 |  44 | 1,000 |    4% |   +76 |    3% |
 
 ### Progress by Game Count
 

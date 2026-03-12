@@ -245,29 +245,27 @@ perl src/comp.pl init NNUE=1 TDLEAF=1 OVERWRITE
 **FC / FT weights:** drawn from Gaussian distributions whose parameters were
 measured empirically from the Stockfish 15.1 network (`nn-ad9b42354671.nnue`).
 
-**PSQT weights:** each feature draws its magnitude independently from a uniform
-distribution over a per-piece-type range, then is signed by perspective:
-own pieces (`pside == persp`) receive `+V`, opponent pieces receive `−V`.
+**PSQT weights:** initialised from the classical evaluator's piece values (`score.h`),
+signed by perspective: own pieces (`pside == persp`) receive `+V`, opponent pieces receive `−V`.
 
-| Piece  | Range (cp)   | int32 units (`cp × 5776/100`) |
-|--------|--------------|-------------------------------|
-| Pawn   | 80 – 120 cp  | [4621, 6931]                  |
-| Knight | 250 – 450 cp | [14440, 26001]                |
-| Bishop | 250 – 450 cp | [14440, 26001]                |
-| Rook   | 400 – 700 cp | [23104, 40432]                |
-| Queen  | 900 – 1400 cp| [51984, 80864]                |
-| King   | 0 cp         | 0 (fixed)                     |
+| Piece  | Classical (cp) | int32 units (`cp × 5776/100`) |
+|--------|---------------|-------------------------------|
+| Pawn   | 100 cp        | 5,776                         |
+| Knight | 377 cp        | 21,776                        |
+| Bishop | 399 cp        | 23,046                        |
+| Rook   | 596 cp        | 34,425                        |
+| Queen  | 1197 cp       | 69,144                        |
+| King   | 0 cp          | 0                             |
 
-This gives TDLeaf a realistic material prior with per-feature diversity,
-rather than a single fixed value, so the PSQT surface is not perfectly flat
-at the start of training.
+This gives TDLeaf a principled, deterministic starting point that matches Epoch's own
+material scale, rather than random values with no positional content.
 Key hyperparameters (in `src/tdleaf.h`):
 
 | Constant | Value | Notes |
 |----------|-------|-------|
 | `TDLEAF_ALPHA` | 200 | Learning rate for FC and FT layers |
 | `NNUE_FT_LR_SCALE` | 1.0 | FT accumulator LR multiplier (no extra scale needed) |
-| `NNUE_PSQT_LR_SCALE` | 1000 | PSQT LR multiplier (large: PSQT bypasses FC chain) |
+| `NNUE_PSQT_LR_SCALE` | 10000 | PSQT LR multiplier (large: PSQT bypasses FC chain) |
 | `NNUE_FC_BIAS_LR_SCALE` | 1000 | FC bias LR multiplier (wtm_sign cancellation fix) |
 | `NNUE_FT_BIAS_LR_SCALE` | 10 | FT bias LR multiplier (shared-bias cancellation fix) |
 | `TDLEAF_LAMBDA` | 0.7 | Eligibility trace decay |

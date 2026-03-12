@@ -42,18 +42,19 @@ Because this is the exact network shipped with Stockfish 15.1, Epoch's forward p
 **2. Playing-strength baseline.**
 A network trained from scratch by Epoch itself (via TDLeaf(λ) self-play) will initially be weaker than `nn-ad9b42354671.nnue`, which represents years of Stockfish training data.  Match results against the Stockfish net provide the clearest measure of training progress: the goal is to close the gap, then surpass it with a network tuned to Epoch's own search characteristics.  Current result with the SF15.1 net: **92W–8D–0L (96.0%)** vs the classical Epoch eval at 10+0.1s/move.
 
-**3. Weight statistics for random initialisation.**
-The SF15.1 net's weight distributions (means and standard deviations per layer, measured empirically) are used to initialise a fresh network when training from scratch.  Epoch can generate a randomly initialised `.nnue` with `--init-nnue --write-nnue <file>`, sampling FC weights from measured Gaussian distributions and PSQT values from signed piece-value priors.  This avoids starting from zero (which is a very poor prior for chess) while remaining independent of the Stockfish training data for weights.
+**3. Weight initialisation for fresh training.**
+Epoch can generate a fresh `.nnue` with `--init-nnue --write-nnue <file>`.  FC and FT weights are sampled from Gaussian distributions measured from the SF15.1 network; all biases are zero; PSQT is set to classical piece values.
 
-| Layer | Distribution used for random init |
-|-------|----------------------------------|
+| Layer | Initialisation |
+|-------|---------------|
 | FC0 weights | N(0.24, 8.43), truncated ±127 |
 | FC1 weights | N(−1.10, 18.30), truncated ±127 |
 | FC2 weights | N(1.10, 30.0), truncated ±127 (ref σ=76.38 reduced; see note below) |
+| FC/FT biases | 0 (zero) |
 | FT weights (int16) | N(−0.71, 44.41) |
-| PSQT | Signed piece values: pawn ±5,776; knight/bishop ±17,328; rook ±28,880; queen ±51,984 |
+| PSQT | Classical piece values: Pawn=5,776; Knight=21,776; Bishop=23,046; Rook=34,425; Queen=69,144; King=0 (units: cp × 5776/100), signed ± by perspective |
 
-All int8 weights use **rejection sampling** (truncated Gaussian): samples outside ±127 are discarded and redrawn rather than clipped, avoiding artificial density spikes at the int8 boundaries.  The FC2 σ is intentionally lower than the measured SF15.1 value of 76.38 — the reference net's wide, near-bimodal FC2 distribution is the *result* of training, not a useful prior; σ=76.38 would clip roughly 20% of samples to ±127, producing chaotic initial evaluations.  σ=30 avoids all clipping while retaining enough diversity; training pushes FC2 weights to their learned magnitudes naturally.
+All int8 weights use **rejection sampling** (truncated Gaussian): samples outside ±127 are discarded and redrawn rather than clipped, avoiding artificial density spikes at the int8 boundaries.  The FC2 σ is intentionally lower than the measured SF15.1 value of 76.38 — the reference net's wide, near-bimodal FC2 distribution is the *result* of training, not a useful prior; σ=76.38 would clip roughly 20% of samples to ±127, producing chaotic initial evaluations.  σ=30 avoids all clipping while retaining enough diversity; training pushes FC2 weights to their learned magnitudes naturally.  Biases are zero-initialised because random N(μ,σ) from an unrelated distribution adds noise with no useful prior.
 
 The network file itself is not modified by Epoch.  All trained weights are stored in a companion **`.tdleaf.bin`** file and loaded on top of (or instead of) the base network at startup.
 
