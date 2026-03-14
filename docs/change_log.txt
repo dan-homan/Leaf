@@ -1,5 +1,10 @@
 Changes since 2017_12_24
 
+2026_03_14 -- Time management: raise MOVE_OVERHEAD_CS 2 → 5 (search.h, search.cpp).
+               50 ms is more representative of real-world interface/OS latency.
+               min_cushion floor in search.cpp is now derived from MOVE_OVERHEAD_CS
+               directly (was hardcoded 3) so both mechanisms stay in sync.
+
 2026_03_14 -- Time management: buffer for small-increment time controls (search.h, search.cpp, main.cpp).
                Prevents time forfeits at fast controls with increment < 0.1 seconds.
                Three changes:

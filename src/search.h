@@ -21,7 +21,7 @@ int NO_ROOT_LMR_SCORE = 85;
 int EXTEND_TIME_SCORE = 15;
 // Per-move overhead buffer (centiseconds) reserved when increment < 0.1s
 // Accounts for interface latency and OS scheduling jitter
-int MOVE_OVERHEAD_CS = 2;
+int MOVE_OVERHEAD_CS = 5;
 
 // Margin for verifying null move
 int VERIFY_MARGIN = 200;
