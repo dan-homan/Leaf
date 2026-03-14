@@ -1,5 +1,16 @@
 Changes since 2017_12_24
 
+2026_03_14 -- TDLeaf: non-blocking file lock in nnue_save_fc_weights() (nnue.cpp).
+               Previously used LOCK_EX (blocking), which serialised all 10 concurrent
+               training processes at game end — causing the next game to start while the
+               engine was still blocked, charging the delay to white's clock and producing
+               ~36–40 time forfeits per 100 games at 0:03+0.05.
+               Now uses LOCK_EX | LOCK_NB: if the lock is held by another process, the
+               save is skipped and a "deferring save" message is logged to stderr.
+               Accumulated weight deltas are retained in memory and flushed on the next
+               successful save, so no training signal is lost.
+               Result: 0 time forfeits in 100-game test (down from ~40).
+
 2026_03_14 -- Time management: raise MOVE_OVERHEAD_CS 2 → 5 (search.h, search.cpp).
                50 ms is more representative of real-world interface/OS latency.
                min_cushion floor in search.cpp is now derived from MOVE_OVERHEAD_CS

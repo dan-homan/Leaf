@@ -1933,6 +1933,8 @@ static const uint32_t TDLEAF_VERSION = 4u;
 //   how = LOCK_EX (exclusive write) or LOCK_SH (shared read)
 // Returns the lock fd on success, -1 on failure.
 // ---------------------------------------------------------------------------
+// Returns lock fd on success, -2 if lock is busy (EWOULDBLOCK, caller should skip),
+// or -1 on a real error.
 static int tdleaf_acquire_lock(const char *path, int how)
 {
     char lock_path[FILENAME_MAX];
@@ -1943,18 +1945,34 @@ static int tdleaf_acquire_lock(const char *path, int how)
         return -1;
     }
     if (flock(fd, how) != 0) {
-        fprintf(stderr, "TDLeaf: flock failed on %s\n", lock_path);
+        int err = errno;
         close(fd);
+        if (err == EWOULDBLOCK)
+            return -2;  // lock held by another process — caller decides what to do
+        fprintf(stderr, "TDLeaf: flock failed on %s\n", lock_path);
         return -1;
     }
     return fd;
 }
 static void tdleaf_release_lock(int fd) { if (fd >= 0) close(fd); }
 
+// Counts how many saves were deferred because the lock was held by another process.
+// Accumulated deltas are NOT lost — they are flushed on the next successful save.
+static uint64_t tdleaf_save_skip_count = 0;
+
 bool nnue_save_fc_weights(const char *path)
 {
-    // ---- Acquire exclusive lock ----------------------------------------
-    int lock_fd = tdleaf_acquire_lock(path, LOCK_EX);
+    // ---- Acquire exclusive lock (non-blocking) -------------------------
+    // If another process holds the lock, skip this save rather than blocking.
+    // Accumulated deltas are preserved in memory and flushed on the next
+    // successful save, so no training signal is lost — just deferred.
+    int lock_fd = tdleaf_acquire_lock(path, LOCK_EX | LOCK_NB);
+    if (lock_fd == -2) {
+        tdleaf_save_skip_count++;
+        fprintf(stderr, "TDLeaf: lock busy — deferring save (deferred: %llu)\n",
+                (unsigned long long)tdleaf_save_skip_count);
+        return true;  // not an error; deltas will be written next time
+    }
     if (lock_fd < 0) {
         fprintf(stderr, "TDLeaf: cannot acquire exclusive lock for %s\n", path);
         return false;
