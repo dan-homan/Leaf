@@ -117,9 +117,21 @@ def main():
         net_file       = os.path.join(learn_dir, net_filename)
         do_random_init = True
     else:
+        # Show .nnue files available in learn/ to help catch typos.
+        nnue_files = sorted(f for f in os.listdir(learn_dir) if f.endswith(".nnue"))
+        if nnue_files:
+            print("  Available in learn/:")
+            for f in nnue_files:
+                print(f"    {f}")
+        else:
+            print("  (no .nnue files found in learn/)")
         while True:
             net_path = ask("Path to .nnue file").strip()
             if os.path.isfile(net_path):
+                break
+            # Also accept bare filenames relative to learn/.
+            if os.path.isfile(os.path.join(learn_dir, net_path)):
+                net_path = os.path.join(learn_dir, net_path)
                 break
             print(f"  File not found: {net_path}")
         net_filename   = os.path.basename(net_path)

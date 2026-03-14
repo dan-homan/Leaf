@@ -6,6 +6,28 @@ Planned investigations, improvements, and open questions.
 
 ## TDLeaf(λ) Training
 
+### LR decay via update counts or other schedule
+
+Explore mechanisms to reduce the effective learning rate as training progresses,
+so that early games make large corrections and later games make smaller refinements:
+
+- **Count-based Kalman (already implemented as Phase 1 in BAYESIAN_UPDATE.md):**
+  `K = P0 / (P0 + cnt × R)` decays the per-weight Kalman gain from 1 → 0 as the
+  per-weight update count `cnt` grows.  Currently bypassed because `TDLEAF_BAYES_R = 1.0`
+  and `TDLEAF_MAX_UPDATE_FRAC = 1.0` together act as a flat cap rather than a schedule.
+  Worth enabling properly and ablating against the flat-LR baseline.
+
+- **Global step schedule:** a single session-level counter (games played) driving a
+  shared LR multiplier — simpler than per-weight counts, easier to reason about.
+
+- **Cosine / polynomial decay:** standard ML schedules applied to `TDLEAF_ALPHA` or
+  the Kalman P0/R ratio.
+
+- **Adam with appropriate LR:** Adam was attempted (see ADAM_UPDATE.md) but proved
+  unstable for pre-trained weights because it amplifies small near-zero gradients to a
+  full ±LR step.  Revisit with a much smaller LR (e.g. 0.01–0.05) or gradient
+  clipping before Adam normalisation.
+
 ### Learning rate tuning
 The current LR scales are initial guesses and have not been systematically tuned.
 PSQT in particular appears to learn very slowly — `NNUE_PSQT_LR_SCALE` raised to 10000
