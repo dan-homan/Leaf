@@ -43,18 +43,18 @@ Because this is the exact network shipped with Stockfish 15.1, Leaf's forward pa
 A network trained from scratch by Leaf itself (via TDLeaf(λ) self-play) will initially be weaker than `nn-ad9b42354671.nnue`, which represents years of Stockfish training data.  Match results against the Stockfish net provide the clearest measure of training progress: the goal is to close the gap, then surpass it with a network tuned to Leaf's own search characteristics.  Current result with the SF15.1 net: **92W–8D–0L (96.0%)** vs the classical Leaf eval at 10+0.1s/move.
 
 **3. Weight initialisation for fresh training.**
-Leaf can generate a fresh `.nnue` with `--init-nnue --write-nnue <file>`.  FC and FT weights are sampled from Gaussian distributions measured from the SF15.1 network; all biases are zero; PSQT is set to classical piece values.
+Leaf can generate a fresh `.nnue` with `--init-nnue --write-nnue <file>`.  FC and FT weights use zero-mean Gaussians (He/Kaiming principle); FC0's std is reduced to limit saturation at the 1024-input fan-in; all biases are zero; PSQT is seeded from the classical piece-square tables, differentiated by game stage across the 8 buckets.
 
-| Layer | Initialisation |
-|-------|---------------|
-| FC0 weights | N(0.24, 8.43), truncated ±127 |
-| FC1 weights | N(−1.10, 18.30), truncated ±127 |
-| FC2 weights | N(1.10, 30.0), truncated ±127 (ref σ=76.38 reduced; see note below) |
-| FC/FT biases | 0 (zero) |
-| FT weights (int16) | N(−0.71, 44.41) |
-| PSQT | Classical piece values: Pawn=5,776; Knight=21,776; Bishop=23,046; Rook=34,425; Queen=69,144; King=0 (units: cp × 5776/100), signed ± by perspective |
+| Layer | Distribution | Notes |
+|-------|-------------|-------|
+| FT weights (int16) | N(0, 44.41) | Zero mean; std calibrated to ~30-feature sum |
+| FC0 weights (int8) | N(0, 3.0) | He-adjusted: ~3% sat vs ~24% at old σ=8.4 |
+| FC1 weights (int8) | N(0, 18.30) | Zero mean; 30 inputs, low saturation risk |
+| FC2 weights (int8) | N(0, 30.0) | Zero mean; output layer |
+| FC/FT biases | 0 (zero) | |
+| PSQT | Classical material + piece-square, per game stage | Bucket 0=opening, 6–7=endgame |
 
-All int8 weights use **rejection sampling** (truncated Gaussian): samples outside ±127 are discarded and redrawn rather than clipped, avoiding artificial density spikes at the int8 boundaries.  The FC2 σ is intentionally lower than the measured SF15.1 value of 76.38 — the reference net's wide, near-bimodal FC2 distribution is the *result* of training, not a useful prior; σ=76.38 would clip roughly 20% of samples to ±127, producing chaotic initial evaluations.  σ=30 avoids all clipping while retaining enough diversity; training pushes FC2 weights to their learned magnitudes naturally.  Biases are zero-initialised because random N(μ,σ) from an unrelated distribution adds noise with no useful prior.
+All int8 weights use **rejection sampling** (truncated Gaussian): samples outside ±127 are discarded and redrawn rather than clipped, avoiding artificial density spikes at the int8 boundaries.  Biases are zero-initialised because random N(μ,σ) from an unrelated distribution adds noise with no useful prior.  See [`docs/NNUE.md`](docs/NNUE.md) for the He-adjustment derivation and the PSQT bucket-to-stage mapping.
 
 The network file itself is not modified by Leaf.  All trained weights are stored in a companion **`.tdleaf.bin`** file and loaded on top of (or instead of) the base network at startup.
 

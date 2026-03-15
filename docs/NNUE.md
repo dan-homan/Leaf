@@ -242,23 +242,87 @@ perl src/comp.pl init NNUE=1 TDLEAF=1 OVERWRITE
 ./run/Leaf_vinit --init-nnue --write-nnue learn/nn-fresh.nnue
 ```
 
-**FC / FT weights:** drawn from Gaussian distributions whose parameters were
-measured empirically from the Stockfish 15.1 network (`nn-ad9b42354671.nnue`).
+**FC / FT weights:** drawn from zero-mean Gaussian distributions.  FC0's std is
+reduced from the Stockfish 15.1 measured value to limit neuron saturation at
+initialization (see rationale below).
 
-**PSQT weights:** initialised from the classical evaluator's piece values (`score.h`),
-signed by perspective: own pieces (`pside == persp`) receive `+V`, opponent pieces receive `−V`.
+| Layer | Distribution | Notes |
+|-------|-------------|-------|
+| FT weights (int16) | N(0, 44.41) | Calibrated to ~30-feature accumulator summation |
+| FC0 weights (int8) | N(0, 3.0) | He-adjusted for 1024-input fan-in; see below |
+| FC1 weights (int8) | N(0, 18.30) | 30 inputs; SF15.1 std retained, mean zeroed |
+| FC2 weights (int8) | N(0, 30.0) | Output layer; std retained, mean zeroed |
+| All biases | 0 | Zero-init throughout |
 
-| Piece  | Classical (cp) | int32 units (`cp × 5776/100`) |
-|--------|---------------|-------------------------------|
-| Pawn   | 100 cp        | 5,776                         |
-| Knight | 377 cp        | 21,776                        |
-| Bishop | 399 cp        | 23,046                        |
-| Rook   | 596 cp        | 34,425                        |
-| Queen  | 1197 cp       | 69,144                        |
-| King   | 0 cp          | 0                             |
+All int8 weights use **rejection sampling**: values outside ±127 are discarded and
+redrawn rather than clipped, avoiding density spikes at the int8 boundaries.
 
-This gives TDLeaf a principled, deterministic starting point that matches Leaf's own
-material scale, rather than random values with no positional content.
+**Why zero means?**  The Stockfish 15.1 weight means (+0.24 FC0, −1.10 FC1, +1.10 FC2,
+−0.71 FT) are the endpoint of a fully-converged training run, not a useful prior for
+TDLeaf.  They create a systematic directional bias in every neuron from game 1 — the
+network must first cancel this bias before it can learn signal.  Zero mean (the He/Kaiming
+principle) eliminates this wasted capacity.
+
+**Why FC0 std = 3.0?**  FC0 has 1024 inputs, making it by far the most sensitive layer
+to per-weight std.  The SqrCReLU inputs feeding FC0 are in [0, 127]; with zero-mean FT
+weights (std 44.4) and ~30 active features per position, the accumulator dimensions sit
+near N(0, 243) and the SqrCReLU pairing gives inputs with E[x²] ≈ 2200.  The saturation
+rate of active FC0 neurons scales as:
+
+```
+std(raw >> 6) ≈ 23.5 × σ_w
+P(sat at 127)  ≈ P(Z > 127 / std(raw>>6))
+
+σ_w = 8.4  (old)  →  std(raw>>6) ≈ 197,  ~24% saturation
+σ_w = 3.0  (new)  →  std(raw>>6) ≈  70,  ~ 3% saturation  ✓
+```
+
+3% saturation matches He initialization's design target for ReLU-family activations.
+The standard He formula (σ = √(2/n)) maps to < 0.1 int8 units at this quantization
+scale and is numerically inapplicable; σ = 3.0 is the smallest int8-representable std
+that achieves the He saturation target.  FC1 (30 inputs) and FC2 (output layer) are
+far less sensitive to their std and retain the SF15.1 measured values.
+
+**PSQT weights:** initialised from the classical evaluator's material values and
+piece-square tables (`score.h`), with each of the 8 PSQT buckets mapped to an
+interpolated classical game stage.  Sign convention: own pieces (`pside == persp`)
+receive `+V`, opponent pieces receive `−V`.
+
+The 8 PSQT buckets span opening → endgame via effective gstage = 2b for bucket b:
+
+| Bucket | Effective gstage | Classical stage(s) | Character |
+|--------|------------------|--------------------|-----------|
+| 0 | 0 | Stage 0 only | Pure opening |
+| 1 | 2 | Stage 0 → 1 (50/50) | Opening–early MG |
+| 2 | 4 | Stage 1 only | Early middlegame |
+| 3 | 6 | Stage 1 → 2 (50/50) | Early–late MG |
+| 4 | 8 | Stage 2 only | Late middlegame |
+| 5 | 10 | Stage 2 → 3 (50/50) | Late MG–endgame |
+| 6 | 12 | Stage 3 only | Endgame |
+| 7 | 14 | Stage 3 (capped) | Deep endgame |
+
+Interpolation formula (mirrors `score.cpp`):
+```
+psq_val = ((4−rem) × piece_sq[stage][ptype][sq] + rem × piece_sq[next][ptype][sq]) / 4
+```
+where `stage = g/4`, `rem = g%4`, `next = min(stage+1, 3)`.  White pieces use
+`whitef[sq]` (rank-flip); black pieces index directly.  Scale: `cp × 5776/100`.
+
+Material values (same as classical `value[]` in score.h):
+
+| Piece  | Material (cp) | int32 units (`cp × 5776/100`) |
+|--------|--------------|-------------------------------|
+| Pawn   | 100          | 5,776                         |
+| Knight | 377          | 21,776                        |
+| Bishop | 399          | 23,046                        |
+| Rook   | 596          | 34,425                        |
+| Queen  | 1197         | 69,144                        |
+| King   | 0            | 0 (PSQ still applied)         |
+
+This gives TDLeaf a principled, deterministic starting point: bucket 0 begins with
+opening king-safety and centre-control bonuses; buckets 6–7 with endgame king
+centralization and pawn-promotion gradients.
+
 Key hyperparameters (in `src/tdleaf.h`):
 
 | Constant | Value | Notes |

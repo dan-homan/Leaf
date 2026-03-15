@@ -288,34 +288,41 @@ perl comp.pl init_nnue NNUE=1 TDLEAF=1
 
 This calls `nnue_alloc_arrays()` + `nnue_init_fp32_weights()` + `nnue_init_zero_weights()`:
 
-| Component | Initialisation |
-|-----------|---------------|
-| FC0 weights | N(0.24, 8.43), truncated ±127 (rejection sampling) |
-| FC1 weights | N(−1.10, 18.30), truncated ±127 (rejection sampling) |
-| FC2 weights | N(1.10, 30.0), truncated ±127 — σ reduced from measured 76.38; see below |
-| FC0/1/2 biases | **0** (zero) |
-| FT weights (int16) | N(−0.71, 44.41), clipped to int16 range |
-| FT biases (int16) | **0** (zero) |
-| PSQT | Classical piece values (score.h): Pawn=5776, Knight=21776, Bishop=23046, Rook=34425, Queen=69144, King=0 (units: cp × 5776/100); signed ± by pside==persp |
+| Component | Distribution | Notes |
+|-----------|-------------|-------|
+| FT weights (int16) | N(0, 44.41) | Zero mean; std calibrated to ~30-feature accumulator sum |
+| FC0 weights (int8) | N(0, 3.0) | Zero mean; std He-adjusted for 1024-input fan-in |
+| FC1 weights (int8) | N(0, 18.30) | Zero mean; std unchanged (30 inputs, low sat risk) |
+| FC2 weights (int8) | N(0, 30.0) | Zero mean; std unchanged (output layer) |
+| All biases | **0** (zero) | FT and FC biases zero-initialised |
+| PSQT | Classical material + PSQ, by game stage | See below |
+
+All int8 weight sampling uses **rejection sampling** (not clipping): values outside ±127 are
+discarded and redrawn to avoid density spikes at the int8 boundary.
+
+**Why zero means?**  The Stockfish 15.1 non-zero means (+0.24 FC0, −1.10 FC1, +1.10 FC2,
+−0.71 FT) are a trained endpoint, not a useful prior.  They create a systematic directional
+bias in every neuron from game 1; TDLeaf must first cancel the bias before learning signal.
+Zero mean (the He/Kaiming principle) eliminates this wasted capacity.
+
+**Why FC0 std = 3.0?**  With 1024 SqrCReLU inputs in [0,127] and zero-mean FT weights,
+the effective input scale gives `std(raw>>6) ≈ 23.5 × σ_w`.  The old σ=8.4 produced
+~24% neuron saturation; σ=3.0 reduces this to ~3%, matching the He design target.  The
+He formula itself (σ=√(2/n) ≈ 0.044 FP32) collapses to < 0.1 int8 units at this
+quantization scale and cannot be applied directly.
+
+**PSQT initialisation:** each of the 8 buckets is seeded with classical `material + piece_sq`
+values from `score.h`, interpolated to the bucket's corresponding game stage.  Bucket 0
+receives opening-stage PSQ values (king safety, central knight bonuses, rook placement);
+buckets 6–7 receive endgame values (king centralization, pawn advancement).  The 8 buckets
+map to the 4 classical stages via effective gstage = 2b for bucket b (2 buckets per stage,
+with linear interpolation at stage boundaries).  White pieces use `whitef[sq]`
+(rank-flip from score.h); black pieces index directly.  Scale: cp × 5776/100.
 
 Biases are zero-initialised because random N(μ,σ) from an unrelated SF15.1 distribution
-provides no useful prior — it only adds noise that TDLeaf must overcome via its
-near-cancelling per-game gradient structure.  FT weights break symmetry sufficiently for
-SqrCReLU activations to be non-zero from game 1.
-
-PSQT is initialised to classical evaluator piece values (score.h `value[]`) converted to
-NNUE int32 units.  This gives TDLeaf a neutral but principled starting point rather than
-random values with no positional content.
-
-**FC2 σ note:** The measured SF15.1 FC2 distribution (σ=76.38) is the *result* of training —
-many weights are pushed near ±127 after learning.  Using σ=76.38 for random init clips
-roughly 20% of samples to the int8 boundary, creating artificial spikes.  σ=30 avoids all
-clipping (P(|X|>127) < 0.002% with rejection sampling) while providing enough weight
-diversity to prevent pathological symmetry.  The trained FC2 distribution will naturally
-widen as TDLeaf pushes high-importance weights toward their saturation limits.
-
-All int8 weight sampling uses rejection sampling (not clipping): values outside ±127 are
-discarded and redrawn.
+adds noise TDLeaf must overcome via its near-cancelling per-game gradient structure.
+FT weights already break symmetry across dimensions, so zero FT biases yield varied
+SqrCReLU activations from game 1.
 
 Then build training binaries pointing at the new file:
 

@@ -1,5 +1,28 @@
 Changes since 2017_12_24
 
+2026_03_15 -- nnue_init_zero_weights: He-inspired weight initialisation (nnue.cpp).
+               Two changes to the fresh-network init used by --init-nnue:
+               (1) All FC weight means zeroed (were inherited from Stockfish 15.1
+                   endpoint: FC0 +0.24, FC1 -1.10, FC2 +1.10, FT -0.71).  Non-zero
+                   means create a systematic directional bias TDLeaf must undo before
+                   learning signal; zero mean (the He/Kaiming principle) is the correct
+                   starting point.
+               (2) FC0 std reduced 8.4252 → 3.0.  FC0 has 1024 inputs; with the actual
+                   SqrCReLU input statistics (E[x²] ≈ 2200, inputs in [0,127]) the
+                   old σ=8.4 gave std(raw>>6) ≈ 197 and ~24% neuron saturation.
+                   σ=3.0 gives std(raw>>6) ≈ 70 and ~3% saturation, matching the He
+                   design target.  FC1 (30 inputs) and FC2 (output layer) stds unchanged.
+               FT std 44.4 and all bias zero-init unchanged.
+
+2026_03_15 -- nnue_init_zero_weights: PSQT initialised from classical piece-square
+               tables (nnue.cpp).  Each of the 8 PSQT buckets is now seeded with
+               material + piece-square positional bonus from score.h piece_sq[4][7][64],
+               interpolated to the appropriate classical game stage:
+               Bucket 0 → pure opening (stage 0); buckets 1-5 → interpolated transitions;
+               buckets 6-7 → endgame (stage 3).  White pieces use whitef[] rank-flip;
+               black pieces index directly.  Scale: cp × 5776/100 (NNUE int32 units).
+               Previously all 8 buckets were identical (uniform material, no PSQ).
+
 2026_03_14 -- TDLeaf: non-blocking file lock in nnue_save_fc_weights() (nnue.cpp).
                Previously used LOCK_EX (blocking), which serialised all 10 concurrent
                training processes at game end — causing the next game to start while the
