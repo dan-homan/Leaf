@@ -1,5 +1,23 @@
 Changes since 2017_12_24
 
+2026_03_15 -- TDLeaf: separate PSQT Adam LR + FC int8 float-shadow clamping (nnue.cpp, tdleaf.h).
+               Two fixes diagnosed from 5,000-game training analysis:
+               (1) FC0/FC1 float-shadow clamping: after each weight update, the float shadow
+               is clamped to [-127, +127] (the int8 quantisation boundary).  Without this,
+               the float shadow can drift arbitrarily beyond ±127 while the requantised
+               inference weight is stuck at the boundary — a "zombie" weight that accumulates
+               gradient with no effect on the network.  This caused the observed FC1 pileup
+               at the int8 extremes (std 49.8, range ±155 vs int8 limit ±127).  Not applied
+               to FC2 (output layer, no activation clamping).
+               (2) Separate PSQT Adam LR0 (TDLEAF_ADAM_PSQT_LR0 = 20.0): Adam normalises
+               gradient magnitude, so only LR0 controls the per-step size in weight-space.
+               PSQT weights are at int32 scale (std ~36,000) while FC weights are at int8
+               scale (std ~3-50) — a ratio of ~1,000×.  Using the same LR0=0.5 for both
+               caused PSQT to learn ~1,000× slower than FC per update.  NNUE_PSQT_LR_SCALE
+               is ineffective with Adam (normalised away) and only the LR0 matters.
+               PSQT_LR0=20 gives ~5% baseline change per feature over 5,000 games vs ~0.3%
+               previously.
+
 2026_03_15 -- TDLeaf Adam + per-weight LR decay (nnue.cpp, tdleaf.h).
                nnue_apply_gradients() now supports Adam with per-weight learning-rate
                decay as an alternative to plain gradient descent.  Controlled by

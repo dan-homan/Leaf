@@ -1857,7 +1857,7 @@ void nnue_apply_gradients()
     const float bc1 = use_adam ? (1.0f - powf(TDLEAF_ADAM_BETA1, (float)t_adam)) : 1.0f;
     const float bc2 = use_adam ? (1.0f - powf(TDLEAF_ADAM_BETA2, (float)t_adam)) : 1.0f;
 
-    // Full Adam step for FC layers, FT biases, and PSQT.
+    // Full Adam step for FC layers and FT biases.
     // When use_adam=false this degenerates to plain gradient descent (returns g).
     // LR decays as lr(cnt) = LR0 / (1 + cnt/C), so converged weights move less each game.
     auto do_step = [&](float g, float &m, float &v, uint32_t cnt) -> float {
@@ -1869,12 +1869,29 @@ void nnue_apply_gradients()
         float lr    = TDLEAF_ADAM_LR0 / (1.0f + (float)cnt / TDLEAF_ADAM_C);
         return lr * m_hat / (sqrtf(v_hat) + TDLEAF_ADAM_EPS);
     };
+    // PSQT Adam step — same algorithm but uses TDLEAF_ADAM_PSQT_LR0.
+    // PSQT weights are at int32 scale (std ~36,000) while FC weights are int8 scale (std ~3-50).
+    // Adam normalises gradient magnitude, so only LR0 sets the per-step size in weight-space.
+    // PSQT_LR0 must be ~1000× larger than FC LR0 to achieve comparable fractional updates.
+    auto do_step_psqt = [&](float g, float &m, float &v, uint32_t cnt) -> float {
+        if (!use_adam) return g;
+        m = TDLEAF_ADAM_BETA1 * m + (1.0f - TDLEAF_ADAM_BETA1) * g;
+        v = TDLEAF_ADAM_BETA2 * v + (1.0f - TDLEAF_ADAM_BETA2) * g * g;
+        float m_hat = m / bc1;
+        float v_hat = v / bc2;
+        float lr    = TDLEAF_ADAM_PSQT_LR0 / (1.0f + (float)cnt / TDLEAF_ADAM_C);
+        return lr * m_hat / (sqrtf(v_hat) + TDLEAF_ADAM_EPS);
+    };
 
     for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
         for (int i = 0; i < NNUE_L0_SIZE * NNUE_L0_INPUT; i++) {
             if (grad_l0_w[s][i] != 0.0f) {
                 float dw = do_step(grad_l0_w[s][i], m_l0_w[s][i], v_l0_w[s][i], l0_weights_cnt[s][i]);
                 l0_weights_f32[s][i] -= dw;  delta_l0_w[s][i] -= dw;
+                // Clamp float shadow to int8 range: prevents zombie weights where the float
+                // shadow drifts beyond ±127 while the requantised inference value is stuck.
+                if (l0_weights_f32[s][i] >  127.0f) l0_weights_f32[s][i] =  127.0f;
+                if (l0_weights_f32[s][i] < -127.0f) l0_weights_f32[s][i] = -127.0f;
                 l0_weights_cnt[s][i]++;
             }
         }
@@ -1889,6 +1906,9 @@ void nnue_apply_gradients()
             if (grad_l1_w[s][i] != 0.0f) {
                 float dw = do_step(grad_l1_w[s][i], m_l1_w[s][i], v_l1_w[s][i], l1_weights_cnt[s][i]);
                 l1_weights_f32[s][i] -= dw;  delta_l1_w[s][i] -= dw;
+                // Clamp float shadow to int8 range (same reason as FC0).
+                if (l1_weights_f32[s][i] >  127.0f) l1_weights_f32[s][i] =  127.0f;
+                if (l1_weights_f32[s][i] < -127.0f) l1_weights_f32[s][i] = -127.0f;
                 l1_weights_cnt[s][i]++;
             }
         }
@@ -1969,7 +1989,7 @@ void nnue_apply_gradients()
                     float dw;
                     if (use_adam && m_psqt_w && v_psqt_w) {
                         size_t vi = (size_t)fi * NNUE_PSQT_BKTS + b;
-                        dw = do_step(gpw[b], m_psqt_w[vi], v_psqt_w[vi], pcnt[b]);
+                        dw = do_step_psqt(gpw[b], m_psqt_w[vi], v_psqt_w[vi], pcnt[b]);
                     } else {
                         dw = gpw[b];
                     }

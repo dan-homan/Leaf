@@ -78,11 +78,12 @@ static const float TDLEAF_ID_VAR_SIGMA2  = 10000.0f;
 // v arrays are session-local (process memory only, not persisted to .tdleaf.bin).
 // t_adam is also session-local; resets alongside v so bias correction is always valid.
 // ---------------------------------------------------------------------------
-static const float TDLEAF_ADAM_LR0   = 0.5f;    // initial step size (float weight units)
-static const float TDLEAF_ADAM_C     = 500.0f;  // LR half-life in per-weight updates
-static const float TDLEAF_ADAM_BETA1 = 0.9f;    // first-moment decay  (FC + FT bias + PSQT)
-static const float TDLEAF_ADAM_BETA2 = 0.999f;  // second-moment decay (all layers)
-static const float TDLEAF_ADAM_EPS   = 1e-8f;   // numerical floor
+static const float TDLEAF_ADAM_LR0      = 0.5f;    // initial step size for FC/FT layers (float weight units)
+static const float TDLEAF_ADAM_PSQT_LR0 = 20.0f;   // initial step size for PSQT (int32 scale ~36k std; needs larger LR)
+static const float TDLEAF_ADAM_C        = 500.0f;  // LR half-life in per-weight updates (shared)
+static const float TDLEAF_ADAM_BETA1    = 0.9f;    // first-moment decay  (FC + FT bias + PSQT)
+static const float TDLEAF_ADAM_BETA2    = 0.999f;  // second-moment decay (all layers)
+static const float TDLEAF_ADAM_EPS      = 1e-8f;   // numerical floor
 
 // ---------------------------------------------------------------------------
 // Per-ply record: accumulator snapshot + search score
