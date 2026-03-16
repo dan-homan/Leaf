@@ -52,7 +52,7 @@ static const float TDLEAF_ID_VAR_SIGMA2  = 10000.0f;
 // t_adam is also session-local; resets alongside v so bias correction is always valid.
 // ---------------------------------------------------------------------------
 static const float TDLEAF_ADAM_LR0      = 0.2f;    // initial step size for FC/FT layers (float weight units)
-static const float TDLEAF_ADAM_PSQT_LR0 = 1.0f;   // initial step size for PSQT (int32 scale ~36k std; needs larger LR)
+static const float TDLEAF_ADAM_PSQT_LR0 = 2.0f;   // initial step size for PSQT (int32 scale ~36k std; needs larger LR)
 static const float TDLEAF_ADAM_C        = 5000.0f;  // LR half-life in per-weight updates (shared)
 // Long-term LR floor: the learning rate settles to LR0 × LR_FLOOR as cnt → ∞
 // rather than approaching zero.  Full decay schedule:
