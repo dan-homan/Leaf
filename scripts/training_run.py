@@ -74,14 +74,14 @@ def _prompt_init_cnt(is_fresh_random):
 
     Returns an int (0 = no priming, i.e. full LR0 from game 1).
 
-    The Adam LR decay formula is:  lr(cnt) = LR0 / (1 + cnt / C)  where C=500.
+    The Adam LR decay formula is:  lr(cnt) = LR0 / (1 + cnt / C)  where C=5000.
     Suggested values:
       0    — untrained / fresh random network  → full LR0 from game 1
-      500  — lightly pre-trained               → start at 50% of LR0  (lr × 0.50)
-      1000 — moderately pre-trained            → start at 33% of LR0  (lr × 0.33)
-      2000 — well-trained (e.g. SF15.1 fine-tuning) → start at 20% of LR0  (lr × 0.20)
+      5000  — lightly pre-trained               → start at 50% of LR0  (lr × 0.50)
+      10000 — moderately pre-trained            → start at 33% of LR0  (lr × 0.33)
+      20000 — well-trained (e.g. SF15.1 fine-tuning) → start at 20% of LR0  (lr × 0.20)
     """
-    default = 0 if is_fresh_random else 1000
+    default = 0 if is_fresh_random else 10000
     print()
     print("Initial update count (cnt) for Adam LR decay:")
     print("  lr(cnt) = LR0 × (0.01 + 0.99 / (1 + cnt / 500))")
