@@ -17,9 +17,16 @@ rook = 500 cp, queen = 900 cp.  Kings are set to zero.  The network therefore be
 crude but sensible material prior for positional scoring, while the FC layers start from
 random noise.
 
-*(Note: this Run 1 PSQT init used uniform material values only.  The current `--init-nnue`
-initialises PSQT from the full classical piece-square tables, staged across the 8 game-phase
-buckets — a richer starting point.  See `docs/NNUE.md` for the current scheme.)*
+*(Note: this Run 1 init differed from the current `--init-nnue` in two ways:*
+*— **FC/FT weights:** means were copied from Stockfish 15.1 measurements (FT: −0.71, FC0: +0.24,
+FC1: −1.10, FC2: +1.10) rather than set to zero.  The current init uses zero means (He/Kaiming
+principle) to eliminate directional neuron bias from game 1, and reduces FC0 std from 8.43
+(SF15.1 measured) to 3.0 (He-adjusted for 1024-input fan-in), cutting initial FC0 saturation
+from ~24% to ~3%.*
+*— **PSQT:** used uniform material values (100/300/300/500/900 cp, game-stage-independent).
+The current init maps each of the 8 PSQT buckets to an interpolated classical game stage via
+Leaf's own piece-square tables — a richer starting point that gives the network opening/endgame
+awareness from game 1.  See `docs/NNUE.md` for full details.)*
 
 The network is a statistically plausible but chess-naïve starting point — it has the right weight magnitudes but no learned positional chess knowledge.
 
@@ -134,5 +141,6 @@ The 8000g network is above the material-only classical eval (60.5%) and dominate
   previously.  See `docs/TDLEAF.md`.
 - Consider a training run starting from the SF15.1 network (`nn-ad9b42354671.nnue`) rather than
   a fresh initialisation, as a comparison point.
-- Run a second full training run with the improved init (classical PSQ PSQT buckets) and Adam
-  optimizer to establish a new Elo baseline curve.
+- ~~Run a second full training run with the improved init (classical PSQ PSQT buckets) and Adam
+  optimizer to establish a new Elo baseline curve.~~ — In progress (2026-03-16): preliminary
+  result at 5,000 games shows ~+300 Elo vs. fresh init; formal test tournament pending.
