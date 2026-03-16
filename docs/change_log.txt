@@ -1,5 +1,19 @@
 Changes since 2017_12_24
 
+2026_03_15 -- TDLeaf: --set-cnt N flag to prime Adam LR decay for pre-trained networks
+               (main.cpp, nnue.cpp, nnue.h, scripts/training_run.py).
+               New engine flag --set-cnt N sets all per-weight update counts to N,
+               saves the resulting .tdleaf.bin, and exits.  This primes the Adam
+               lr(cnt) = LR0/(1 + cnt/C) schedule before training begins:
+                 cnt=0    → full LR0 (untrained / fresh random network)
+                 cnt=500  → 50% of LR0 (lightly pre-trained)
+                 cnt=1000 → 33% of LR0 (moderately pre-trained)
+                 cnt=2000 → 20% of LR0 (well-trained network)
+               training_run.py now prompts for an initial cnt value whenever a fresh
+               .tdleaf.bin is being created (new training session or explicit start-fresh),
+               suggests defaults based on whether the network is randomly initialised or
+               pre-trained, and calls --set-cnt automatically before the match begins.
+
 2026_03_15 -- TDLeaf: separate PSQT Adam LR + FC int8 float-shadow clamping (nnue.cpp, tdleaf.h).
                Two fixes diagnosed from 5,000-game training analysis:
                (1) FC0/FC1 float-shadow clamping: after each weight update, the float shadow

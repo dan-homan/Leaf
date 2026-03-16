@@ -2084,6 +2084,46 @@ void nnue_requantize_fc()
 }
 
 // ---------------------------------------------------------------------------
+// nnue_set_cnt — set all per-weight update counts to a fixed value
+//
+// Used by --set-cnt N to prime the Adam LR decay schedule before training
+// on a pre-trained network.  A count of 0 gives full LR0 from game 1.
+// A count of C (=500) halves the initial learning rate (~50% LR0).
+// A count of ~2000 gives ~20% LR0 (appropriate for a well-trained network).
+// After calling this, nnue_save_fc_weights() writes the primed .tdleaf.bin.
+// ---------------------------------------------------------------------------
+void nnue_set_cnt(uint32_t val)
+{
+    for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
+        for (int i = 0; i < NNUE_L0_SIZE * NNUE_L0_INPUT; i++) l0_weights_cnt[s][i] = val;
+        for (int i = 0; i < NNUE_L0_SIZE; i++)                 l0_biases_cnt[s][i]  = val;
+        for (int i = 0; i < NNUE_L1_SIZE * NNUE_L1_PADDED; i++) l1_weights_cnt[s][i] = val;
+        for (int i = 0; i < NNUE_L1_SIZE; i++)                  l1_biases_cnt[s][i]  = val;
+        for (int i = 0; i < NNUE_L2_PADDED; i++)                l2_weights_cnt[s][i] = val;
+        l2_bias_cnt[s] = val;
+    }
+    for (int d = 0; d < NNUE_HALF_DIMS; d++) ft_bias_cnt[d] = val;
+    if (ft_weights_cnt) {
+        size_t ft_sz = (size_t)NNUE_FT_INPUTS * NNUE_HALF_DIMS;
+        for (size_t i = 0; i < ft_sz; i++) ft_weights_cnt[i] = val;
+    }
+    if (psqt_weights_cnt) {
+        size_t psqt_sz = (size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS;
+        for (size_t i = 0; i < psqt_sz; i++) psqt_weights_cnt[i] = val;
+    }
+    printf("TDLeaf: all %u parameter update counts set to %u  "
+           "(Adam LR0 × %.3f)\n",
+           (unsigned)(NNUE_LAYER_STACKS * (NNUE_L0_SIZE * NNUE_L0_INPUT + NNUE_L0_SIZE +
+                                            NNUE_L1_SIZE * NNUE_L1_PADDED + NNUE_L1_SIZE +
+                                            NNUE_L2_PADDED + 1) +
+                      NNUE_HALF_DIMS +
+                      (ft_weights_cnt  ? (size_t)NNUE_FT_INPUTS * NNUE_HALF_DIMS : 0) +
+                      (psqt_weights_cnt ? (size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS : 0)),
+           val,
+           1.0f / (1.0f + (float)val / TDLEAF_ADAM_C));
+}
+
+// ---------------------------------------------------------------------------
 // nnue_save_fc_weights / nnue_load_fc_weights — companion .tdleaf.bin file
 //
 // Version 4 layout (current):
