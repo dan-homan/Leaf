@@ -81,6 +81,14 @@ static const float TDLEAF_ID_VAR_SIGMA2  = 10000.0f;
 static const float TDLEAF_ADAM_LR0      = 0.2f;    // initial step size for FC/FT layers (float weight units)
 static const float TDLEAF_ADAM_PSQT_LR0 = 1.0f;   // initial step size for PSQT (int32 scale ~36k std; needs larger LR)
 static const float TDLEAF_ADAM_C        = 5000.0f;  // LR half-life in per-weight updates (shared)
+// Long-term LR floor: the learning rate settles to LR0 × LR_FLOOR as cnt → ∞
+// rather than approaching zero.  Full decay schedule:
+//   lr(cnt) = LR0 × (LR_FLOOR + (1 − LR_FLOOR) / (1 + cnt/C))
+//   cnt=0  → LR0 × 1.0    (full initial rate)
+//   cnt=C  → LR0 × (0.5 + 0.5×LR_FLOOR)  (half-life point)
+//   cnt→∞  → LR0 × LR_FLOOR  (long-term floor)
+// Set to 0.0 to restore the original decay-to-zero behaviour.
+static const float TDLEAF_ADAM_LR_FLOOR = 0.01f;   // long-term fraction of LR0 (1%)
 static const float TDLEAF_ADAM_BETA1    = 0.9f;    // first-moment decay  (FC + FT bias + PSQT)
 static const float TDLEAF_ADAM_BETA2    = 0.999f;  // second-moment decay (all layers)
 static const float TDLEAF_ADAM_EPS      = 1e-8f;   // numerical floor

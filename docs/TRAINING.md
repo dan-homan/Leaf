@@ -10,7 +10,23 @@ This documents the first complete TDLeaf(λ) training run on Leaf, carried out o
 
 The starting network, **`nn-fresh-260309.nnue`**, was created by Leaf's `--init-nnue` facility.  It is not derived from any pre-trained chess data; all weights are drawn from Gaussian distributions whose parameters (mean, σ) were measured empirically from the Stockfish 15.1 release network (`nn-ad9b42354671.nnue`).  See `docs/NNUE.md` for the per-layer distributions.
 
-PSQT weights are initialised to piece-value priors rather than random values.  The prior assigns each piece type a uniform signed value chosen so that one extra own piece of that type scores the standard centipawn equivalent: pawn = 100 cp, knight = 300 cp, bishop = 300 cp, rook = 500 cp, queen = 900 cp.  In internal NNUE units (where the score formula is `psqt_diff/2 × 100/5776`) this corresponds to values of 5,776 / 17,328 / 17,328 / 28,880 / 51,984 respectively.  Kings are set to zero.  The network therefore begins with a crude but sensible material prior for positional scoring, while the FC layers start from random noise.
+PSQT weights are initialised to piece-value priors rather than random values.  The prior
+assigns each piece type a uniform signed value chosen so that one extra own piece of that type
+scores the standard centipawn equivalent: pawn = 100 cp, knight = 300 cp, bishop = 300 cp,
+rook = 500 cp, queen = 900 cp.  Kings are set to zero.  The network therefore begins with a
+crude but sensible material prior for positional scoring, while the FC layers start from
+random noise.
+
+*(Note: this Run 1 init differed from the current `--init-nnue` in two ways:*
+*— **FC/FT weights:** means were copied from Stockfish 15.1 measurements (FT: −0.71, FC0: +0.24,
+FC1: −1.10, FC2: +1.10) rather than set to zero.  The current init uses zero means (He/Kaiming
+principle) to eliminate directional neuron bias from game 1, and reduces FC0 std from 8.43
+(SF15.1 measured) to 3.0 (He-adjusted for 1024-input fan-in), cutting initial FC0 saturation
+from ~24% to ~3%.*
+*— **PSQT:** used uniform material values (100/300/300/500/900 cp, game-stage-independent).
+The current init maps each of the 8 PSQT buckets to an interpolated classical game stage via
+Leaf's own piece-square tables — a richer starting point that gives the network opening/endgame
+awareness from game 1.  See `docs/NNUE.md` for full details.)*
 
 The network is a statistically plausible but chess-naïve starting point — it has the right weight magnitudes but no learned positional chess knowledge.
 
@@ -120,5 +136,11 @@ The 8000g network is above the material-only classical eval (60.5%) and dominate
 
 - Continue training beyond 8000 games to assess whether improvement continues or plateaus.
 - Run a test match against standard-chess opponents (not Fischer Random) to check transferability.
-- Investigate learning-rate tuning, particularly for PSQT, which appears to learn slowly (see `docs/TODO.md`).
-- Consider a training run starting from the SF15.1 network (`nn-ad9b42354671.nnue`) rather than a fresh initialisation, as a comparison.
+- ~~Investigate learning-rate tuning for PSQT~~ — Addressed (2026-03-15): Adam optimizer with
+  separate `TDLEAF_ADAM_PSQT_LR0=20.0` gives ~5% PSQT baseline change per 5,000 games vs ~0.3%
+  previously.  See `docs/TDLEAF.md`.
+- Consider a training run starting from the SF15.1 network (`nn-ad9b42354671.nnue`) rather than
+  a fresh initialisation, as a comparison point.
+- ~~Run a second full training run with the improved init (classical PSQ PSQT buckets) and Adam
+  optimizer to establish a new Elo baseline curve.~~ — In progress (2026-03-16): preliminary
+  result at 5,000 games shows ~+300 Elo vs. fresh init; formal test tournament pending.

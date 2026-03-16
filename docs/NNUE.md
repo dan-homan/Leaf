@@ -18,10 +18,12 @@ or via the build script:
 perl comp.pl 2026_03_07a NNUE=1 
 ```
 
-The network file currently defaults to `nn-ad9b42354671.nnue` (Stockfish 15.1 release, 47 MB) which must be in
-the same directory as the binary, or in the directory from which the engine is launched. 
-It can be downloaded from: https://github.com/official-stockfish/networks. Other compatitible networks can be 
-specified with the compile variable NNUE_NET=filename.
+The network file defaults to `to-be-trained.nnue` and must be in the same directory as the binary,
+or in the directory from which the engine is launched.  A fresh network can be generated with
+`--init-nnue --write-nnue <file>` before training.  The Stockfish 15.1 release network
+`nn-ad9b42354671.nnue` (47 MB) is the historical reference against which Leaf's forward pass
+was validated; any Stockfish 15.1–era HalfKAv2_hm network is compatible and can be specified
+at compile time with `NNUE_NET=filename`.
 
 When NNUE is not compiled in (`-D NNUE=0` or omitted), the classical eval is used
 unchanged.  When NNUE is compiled in but the network file is not found, the engine falls
@@ -327,13 +329,22 @@ Key hyperparameters (in `src/tdleaf.h`):
 
 | Constant | Value | Notes |
 |----------|-------|-------|
-| `TDLEAF_ALPHA` | 200 | Learning rate for FC and FT layers |
-| `NNUE_FT_LR_SCALE` | 1.0 | FT accumulator LR multiplier (no extra scale needed) |
-| `NNUE_PSQT_LR_SCALE` | 10000 | PSQT LR multiplier (large: PSQT bypasses FC chain) |
-| `NNUE_FC_BIAS_LR_SCALE` | 1000 | FC bias LR multiplier (wtm_sign cancellation fix) |
-| `NNUE_FT_BIAS_LR_SCALE` | 10 | FT bias LR multiplier (shared-bias cancellation fix) |
 | `TDLEAF_LAMBDA` | 0.7 | Eligibility trace decay |
 | `TDLEAF_K` | 400 | Sigmoid temperature (cp) |
+| `TDLEAF_ALPHA` | 200 | Global gradient scale multiplier |
+| `TDLEAF_ADAM_LR0` | 0.5 | Adam initial step size for FC/FT layers (float weight units) |
+| `TDLEAF_ADAM_PSQT_LR0` | 20.0 | Adam initial step size for PSQT (int32 scale; ~1000× FC) |
+| `TDLEAF_ADAM_C` | 500 | Adam LR half-life in per-weight update counts |
+| `TDLEAF_ADAM_LR_FLOOR` | 0.01 | Long-term LR floor (fraction of LR0); lr → LR0×floor as cnt→∞ |
+| `NNUE_FT_LR_SCALE` | 1.0 | FT gradient pre-scale (secondary with Adam active) |
+| `NNUE_PSQT_LR_SCALE` | 1000 | PSQT gradient pre-scale (secondary with Adam active) |
+| `NNUE_FC_BIAS_LR_SCALE` | 1000 | FC bias gradient pre-scale (secondary with Adam active) |
+| `NNUE_FT_BIAS_LR_SCALE` | 10 | FT bias gradient pre-scale (secondary with Adam active) |
+
+With Adam active (`TDLEAF_ADAM_LR0 > 0`), the `*_LR_SCALE` multipliers pre-scale gradients
+before Adam sees them but Adam normalises gradient magnitude — the actual per-step size in
+weight-space is governed by `TDLEAF_ADAM_LR0` / `TDLEAF_ADAM_PSQT_LR0`, not the LR_SCALE
+values.  See `docs/TDLEAF.md` for the full optimizer reference.
 
 ---
 

@@ -6,106 +6,42 @@ Planned investigations, improvements, and open questions.
 
 ## TDLeaf(λ) Training
 
-### LR decay via update counts or other schedule
+### Adam hyperparameter tuning
 
-Explore mechanisms to reduce the effective learning rate as training progresses,
-so that early games make large corrections and later games make smaller refinements:
+The Adam + per-weight LR decay optimizer (`TDLEAF_ADAM_LR0=0.5`, `TDLEAF_ADAM_PSQT_LR0=20`,
+`TDLEAF_ADAM_C=500`) uses initial guesses that have not been systematically tuned.  A grid
+search varying each independently across 500–1000-game runs would establish better defaults.
 
-- **Count-based Kalman (already implemented as Phase 1 in BAYESIAN_UPDATE.md):**
-  `K = P0 / (P0 + cnt × R)` decays the per-weight Kalman gain from 1 → 0 as the
-  per-weight update count `cnt` grows.  Currently bypassed because `TDLEAF_BAYES_R = 1.0`
-  and `TDLEAF_MAX_UPDATE_FRAC = 1.0` together act as a flat cap rather than a schedule.
-  Worth enabling properly and ablating against the flat-LR baseline.
+Key questions:
 
-- **Global step schedule:** a single session-level counter (games played) driving a
-  shared LR multiplier — simpler than per-weight counts, easier to reason about.
+- **FC LR0 (0.5):** After 5,000 games the FC0/FC1 float shadows spread to std≈30/50, filling
+  the int8 range.  Float-shadow clamping prevents zombie weights but further training will be
+  limited at the ±127 boundary.  Monitor whether the network continues to improve or plateaus
+  as the distribution saturates.
+- **PSQT LR0 (20):** Set to give ~5% baseline change per feature over 5,000 games (vs ~0.3%
+  with the old unified LR0=0.5).  Tune empirically; 10–50 is a reasonable search range.
+- **C (500):** LR half-life in per-weight updates.  `lr(cnt) = LR0 / (1 + cnt/C)`.  Larger C
+  extends the fast-learning phase; smaller C converges more aggressively.  500–2000 is the
+  practical range for ~5,000-game sessions.
+- **LR_SCALE multipliers:** `NNUE_PSQT_LR_SCALE`, `NNUE_FC_BIAS_LR_SCALE`, and
+  `NNUE_FT_BIAS_LR_SCALE` are no longer the primary controls for per-step size when Adam is
+  active — Adam normalises gradient magnitude, making these pre-scalings irrelevant to actual
+  step size.  They can be removed in a future cleanup (or left as plain-GD fallback controls
+  for `TDLEAF_ADAM_LR0 = 0.0`).
 
-- **Cosine / polynomial decay:** standard ML schedules applied to `TDLEAF_ALPHA` or
-  the Kalman P0/R ratio.
+### TDLEAF_MAX_UPDATE_FRAC
 
-- **Adam with appropriate LR:** Adam was attempted (see ADAM_UPDATE.md) but proved
-  unstable for pre-trained weights because it amplifies small near-zero gradients to a
-  full ±LR step.  Revisit with a much smaller LR (e.g. 0.01–0.05) or gradient
-  clipping before Adam normalisation.
-
-### Learning rate tuning
-The current LR scales are initial guesses and have not been systematically tuned.
-PSQT in particular appears to learn very slowly — `NNUE_PSQT_LR_SCALE` raised to 10000
-(from 1000) to accelerate PSQT learning; further tuning may be needed.  FT bias
-(`NNUE_FT_BIAS_LR_SCALE = 10`) and FC bias (`NNUE_FC_BIAS_LR_SCALE = 1000`) scales
-similarly benefit from empirical testing.  A short grid search varying each scale
-independently across 500–1000-game runs would establish good defaults.
-
-### Learning rate scales and delta clamping
-`NNUE_PSQT_LR_SCALE` and `NNUE_FC_BIAS_LR_SCALE` have been dialled back from
-5000 → 1000 (2026-03-12) in preparation for symmetric self-play, where the
-effective gradient signal per unit time doubles.  `TDLEAF_REPLAY_K` was also
-reduced from 2 → 1 for the same reason.
-
-Still open:
-- `TDLEAF_MAX_UPDATE_FRAC` is currently 1.0 (disabled).  A tighter per-update
-  clamp (e.g. 0.10–0.20) could prevent large individual games from dominating
-  the accumulated gradient under concurrent two-engine training.
-- Run a symmetric training run and inspect delta magnitudes via
-  `compare_nnue_learning.py` (the new FC bias page is useful here) to confirm
-  the dialled-back scales are not still too aggressive.
-- If instability persists, consider halving `TDLEAF_ALPHA` next.
-
-### Epoch-based replay for TDLeaf training
-
-The current TDLeaf implementation is fully online: weights are updated after
-each game and the game record is discarded.  A cheap alternative is to store
-each game's leaf positions after self-play and make K additional passes through
-them, recomputing the NNUE evaluation at each stored leaf with the updated
-weights and applying the TD error on each pass.  The search is not re-run —
-only the forward and backward NNUE passes at the fixed stored positions.
-
-**Cost estimate (Flavor B — fixed leaves, recompute NNUE only):**
-- Per-position: ~1–5 μs forward pass + ~10–15 μs backward pass
-- Per-game (~80 leaf positions): ~1 ms per epoch
-- 4,000 games × 10 epochs ≈ 40 seconds of additional compute — negligible
-
-**Memory:**
-- Storing board states only (accumulator recomputed each pass): ~160 MB for 4,000 games
-- Storing accumulators (2 × 1024 int16 per position): ~1.3 GB for 4,000 games
-
-**Caveats:**
-- TDLeaf is on-policy: the stored leaf positions were found by an earlier
-  version of the network.  Re-using them with updated weights is an off-policy
-  approximation.  Empirically (cf. experience replay in DQN) this works well
-  for small K, but degrades as the stored positions become stale relative to
-  the current network.  K = 2–5 is a reasonable starting range; beyond ~5
-  epochs over the same data instability is likely.
-- The leaf *positions* themselves would change if the search were re-run with
-  updated weights.  Flavor B accepts this as an approximation in exchange for
-  the large reduction in compute cost vs. re-running the full search (Flavor A),
-  which would cost the same as replaying all games × number of epochs.
-
-**✓ Implemented (2026-03-11).** Flavor B is live with `TDLEAF_REPLAY_K` and
-`TDLEAF_REPLAY_BUF_N=8` configurable at build or run time.
-
-**Ablation results:**
-
-| K | Result |
-|---|--------|
-| 0 | Baseline (no replay) — much weaker |
-| 2 | **Best — adopted as default** |
-| 3 | Slightly worse than K=2 |
-| 6 | Large regression |
-
-K=2 was marginally better than K=1 and substantially better than K=0.  K=6
-caused a large regression, consistent with the expected instability when stored
-positions become stale relative to the current network.  The default has been
-reduced to K=1 in `src/define.h` as a more conservative choice for symmetric
-self-play, where the doubled gradient signal makes additional replay passes
-more likely to compound instability.
+`TDLEAF_MAX_UPDATE_FRAC` is currently 1.0 (disabled).  Under Adam the effective per-update
+magnitude is bounded by `TDLEAF_ADAM_LR0`, so the fraction-of-weight clamping is less urgent
+than under plain GD.  Still, a tighter cap (e.g. 0.20) could prevent any single pathological
+game from dominating the accumulated gradient during concurrent two-engine training.  Consider
+enabling after confirming stable Adam behaviour over a longer run.
 
 ### Horizon noise mitigation — ablation testing plan
 
-Two mechanisms were added to reduce the influence of tactics-beyond-horizon on TD
-errors: score-change clipping (`TDLEAF_SCORE_CLIP_CP`) and ID-stability weighting
-(`TDLEAF_ID_VAR_SIGMA2`).  Their contributions should be isolated before committing
-to the combined defaults.
+Two mechanisms reduce the influence of tactics-beyond-horizon on TD errors:
+score-change clipping (`TDLEAF_SCORE_CLIP_CP`) and ID-stability weighting
+(`TDLEAF_ID_VAR_SIGMA2`).  Their individual contributions should be isolated.
 
 **Recommended ablation (500 games per arm, same starting network):**
 
@@ -119,7 +55,7 @@ to the combined defaults.
 **Metric:** Elo gain per game vs. the starting network (use `bayeselo_ratings.py` on
 a 100-game test match against the starting network after each 500-game training run).
 
-**Override hyperparameters at build time:**
+**Override at build time:**
 
 ```sh
 # Arm A — no mitigation
@@ -133,14 +69,7 @@ perl comp.pl train_arm_b NNUE=1 NNUE_NET=nn-start.nnue TDLEAF=1 \
 
 (Similarly for arms C and D.)
 
-**After the ablation:** if one approach dominates, drop the other to reduce
-complexity.  If both help, the combined default is confirmed.
-
-### ~~Bias initialisation~~ ✓ Implemented (2026-03-11)
-FC biases (FC0/FC1/FC2) and FT biases are now initialised to zero in `--init-nnue` mode.
-Random N(μ,σ) from the SF15.1 distribution provided no useful prior and added noise
-that TDLeaf must overcome via its near-cancelling per-game gradient structure.  FT
-weights still use random init so SqrCReLU activations are non-zero from game 1.
+**After the ablation:** if one approach dominates, drop the other to reduce complexity.
 
 ### Search parameter tuning
 The search's pruning parameters (null-move margins, futility thresholds, aspiration
@@ -163,13 +92,30 @@ Review whether `search.par` is still the right mechanism for runtime configurati
 consider what parameters are still relevant, whether the file format should be updated,
 and how it interacts with xboard/cutechess invocation.
 
-### ~~Linux compilation~~ ✓ RESOLVED (2026-03-11)
-AVX2 x86-64 SIMD paths added to `nnue.cpp` for SqrCReLU, FC0, and FC1.
-Fallback chain is now: NEON (ARM) → AVX2 (x86-64 with `-mavx2`) → scalar.
-Default build uses `-march=x86-64-v3`; use `NATIVE=1` for CPU-native tuning.
-
 ### Multi-thread accumulator correctness
 The SMP search allocates one `ts_thread_data` per thread, each with its own
 `search_node n[MAXD+1]` stack including per-node accumulators.  Each thread's root
 accumulator is independently initialised.  Thread interactions have not been tested
 under NNUE; correctness is expected but unverified with `THREADS > 1`.
+
+---
+
+## Resolved / Implemented
+
+### ~~Adam + per-weight LR decay~~ ✓ Implemented (2026-03-15)
+Adam optimizer with per-weight LR decay `lr(cnt) = LR0 / (1 + cnt/C)` is live.
+FC/FT: `TDLEAF_ADAM_LR0=0.5`; PSQT: `TDLEAF_ADAM_PSQT_LR0=20.0`; C=500.
+FC0/FC1 float shadows clamped to ±127 to prevent zombie weights.  See `docs/TDLEAF.md`.
+
+### ~~Epoch-based replay~~ ✓ Implemented (2026-03-11)
+Flavor B is live with `TDLEAF_REPLAY_K=1` (default) and `TDLEAF_REPLAY_BUF_N=8`.
+Ablation: K=1 is the current conservative default (K=2 marginal gain; K=6 large regression).
+
+### ~~Bias initialisation~~ ✓ Implemented (2026-03-11)
+FC biases (FC0/FC1/FC2) and FT biases are zero-initialised in `--init-nnue` mode.
+Random N(μ,σ) from SF15.1 was removed — it added noise TDLeaf must first cancel.
+
+### ~~Linux compilation~~ ✓ Resolved (2026-03-11)
+AVX2 x86-64 SIMD paths added to `nnue.cpp` for SqrCReLU, FC0, and FC1.
+Fallback chain: NEON (ARM) → AVX2 (x86-64 with `-mavx2`) → scalar.
+Default build uses `-march=x86-64-v3`; use `NATIVE=1` for CPU-native tuning.

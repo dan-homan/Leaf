@@ -218,6 +218,30 @@ int main(int argc, char *argv[])
   }
 #endif
 
+#if TDLEAF
+  // Handle --set-cnt N: set all per-weight update counts to N, save .tdleaf.bin, exit.
+  // Used by training_run.py to prime the Adam LR decay schedule before a new training
+  // session on a pre-trained network.  cnt=0 → full LR0; cnt=C (500) → half LR0.
+  for (int ai = 1; ai < argc; ai++) {
+    if (strcmp(argv[ai], "--set-cnt") == 0 && ai + 1 < argc) {
+      uint32_t cnt_val = (uint32_t)atoi(argv[ai + 1]);
+      if (!nnue_available) {
+        fprintf(stderr, "--set-cnt: no NNUE loaded\n");
+        return 1;
+      }
+      nnue_set_cnt(cnt_val);
+      char tdleaf_path[512];
+      snprintf(tdleaf_path, sizeof(tdleaf_path), "%s%s", exec_path, NNUE_TDLEAF_BIN);
+      if (!nnue_save_fc_weights(tdleaf_path)) {
+        fprintf(stderr, "--set-cnt: failed to write %s\n", tdleaf_path);
+        return 1;
+      }
+      printf("TDLeaf: saved %s\n", tdleaf_path);
+      return 0;
+    }
+  }
+#endif
+
   // initialize all thread data
   game.ts.create_thread_data(&game, MAX_THREADS);
   game.ts.initialize_extra_threads();

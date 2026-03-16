@@ -1857,30 +1857,35 @@ void nnue_apply_gradients()
     const float bc1 = use_adam ? (1.0f - powf(TDLEAF_ADAM_BETA1, (float)t_adam)) : 1.0f;
     const float bc2 = use_adam ? (1.0f - powf(TDLEAF_ADAM_BETA2, (float)t_adam)) : 1.0f;
 
+    // Per-weight LR with long-term floor:
+    //   lr(cnt) = LR0 × (floor + (1 − floor) / (1 + cnt/C))
+    // At cnt=0 → LR0; as cnt→∞ → LR0 × floor (never drops to zero).
+    auto lr_decay = [](float lr0, uint32_t cnt) -> float {
+        return lr0 * (TDLEAF_ADAM_LR_FLOOR
+                      + (1.0f - TDLEAF_ADAM_LR_FLOOR)
+                        / (1.0f + (float)cnt / TDLEAF_ADAM_C));
+    };
+
     // Full Adam step for FC layers and FT biases.
     // When use_adam=false this degenerates to plain gradient descent (returns g).
-    // LR decays as lr(cnt) = LR0 / (1 + cnt/C), so converged weights move less each game.
     auto do_step = [&](float g, float &m, float &v, uint32_t cnt) -> float {
         if (!use_adam) return g;
         m = TDLEAF_ADAM_BETA1 * m + (1.0f - TDLEAF_ADAM_BETA1) * g;
         v = TDLEAF_ADAM_BETA2 * v + (1.0f - TDLEAF_ADAM_BETA2) * g * g;
         float m_hat = m / bc1;
         float v_hat = v / bc2;
-        float lr    = TDLEAF_ADAM_LR0 / (1.0f + (float)cnt / TDLEAF_ADAM_C);
-        return lr * m_hat / (sqrtf(v_hat) + TDLEAF_ADAM_EPS);
+        return lr_decay(TDLEAF_ADAM_LR0, cnt) * m_hat / (sqrtf(v_hat) + TDLEAF_ADAM_EPS);
     };
     // PSQT Adam step — same algorithm but uses TDLEAF_ADAM_PSQT_LR0.
     // PSQT weights are at int32 scale (std ~36,000) while FC weights are int8 scale (std ~3-50).
     // Adam normalises gradient magnitude, so only LR0 sets the per-step size in weight-space.
-    // PSQT_LR0 must be ~1000× larger than FC LR0 to achieve comparable fractional updates.
     auto do_step_psqt = [&](float g, float &m, float &v, uint32_t cnt) -> float {
         if (!use_adam) return g;
         m = TDLEAF_ADAM_BETA1 * m + (1.0f - TDLEAF_ADAM_BETA1) * g;
         v = TDLEAF_ADAM_BETA2 * v + (1.0f - TDLEAF_ADAM_BETA2) * g * g;
         float m_hat = m / bc1;
         float v_hat = v / bc2;
-        float lr    = TDLEAF_ADAM_PSQT_LR0 / (1.0f + (float)cnt / TDLEAF_ADAM_C);
-        return lr * m_hat / (sqrtf(v_hat) + TDLEAF_ADAM_EPS);
+        return lr_decay(TDLEAF_ADAM_PSQT_LR0, cnt) * m_hat / (sqrtf(v_hat) + TDLEAF_ADAM_EPS);
     };
 
     for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
@@ -1962,7 +1967,7 @@ void nnue_apply_gradients()
                     float sv = sqrtf(v_ft_row[fi] / bc2) + TDLEAF_ADAM_EPS;
                     for (int d = 0; d < NNUE_HALF_DIMS; d++) {
                         if (gw[d] != 0.0f) {
-                            float lr = TDLEAF_ADAM_LR0 / (1.0f + (float)cnt[d] / TDLEAF_ADAM_C);
+                            float lr = lr_decay(TDLEAF_ADAM_LR0, cnt[d]);
                             float dw = lr * gw[d] / sv;
                             fw[d] -= dw;  if (fd) fd[d] -= dw;
                             cnt[d]++;
@@ -2081,6 +2086,47 @@ void nnue_requantize_fc()
     // Clear score hash — cached evaluations are now stale.
     if (score_table && SCORE_SIZE > 0)
         memset(score_table, 0, SCORE_SIZE * sizeof(score_rec));
+}
+
+// ---------------------------------------------------------------------------
+// nnue_set_cnt — set all per-weight update counts to a fixed value
+//
+// Used by --set-cnt N to prime the Adam LR decay schedule before training
+// on a pre-trained network.  A count of 0 gives full LR0 from game 1.
+// A count of C (=500) halves the initial learning rate (~50% LR0).
+// A count of ~2000 gives ~20% LR0 (appropriate for a well-trained network).
+// After calling this, nnue_save_fc_weights() writes the primed .tdleaf.bin.
+// ---------------------------------------------------------------------------
+void nnue_set_cnt(uint32_t val)
+{
+    for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
+        for (int i = 0; i < NNUE_L0_SIZE * NNUE_L0_INPUT; i++) l0_weights_cnt[s][i] = val;
+        for (int i = 0; i < NNUE_L0_SIZE; i++)                 l0_biases_cnt[s][i]  = val;
+        for (int i = 0; i < NNUE_L1_SIZE * NNUE_L1_PADDED; i++) l1_weights_cnt[s][i] = val;
+        for (int i = 0; i < NNUE_L1_SIZE; i++)                  l1_biases_cnt[s][i]  = val;
+        for (int i = 0; i < NNUE_L2_PADDED; i++)                l2_weights_cnt[s][i] = val;
+        l2_bias_cnt[s] = val;
+    }
+    for (int d = 0; d < NNUE_HALF_DIMS; d++) ft_bias_cnt[d] = val;
+    if (ft_weights_cnt) {
+        size_t ft_sz = (size_t)NNUE_FT_INPUTS * NNUE_HALF_DIMS;
+        for (size_t i = 0; i < ft_sz; i++) ft_weights_cnt[i] = val;
+    }
+    if (psqt_weights_cnt) {
+        size_t psqt_sz = (size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS;
+        for (size_t i = 0; i < psqt_sz; i++) psqt_weights_cnt[i] = val;
+    }
+    printf("TDLeaf: all %u parameter update counts set to %u  "
+           "(Adam LR0 × %.3f)\n",
+           (unsigned)(NNUE_LAYER_STACKS * (NNUE_L0_SIZE * NNUE_L0_INPUT + NNUE_L0_SIZE +
+                                            NNUE_L1_SIZE * NNUE_L1_PADDED + NNUE_L1_SIZE +
+                                            NNUE_L2_PADDED + 1) +
+                      NNUE_HALF_DIMS +
+                      (ft_weights_cnt  ? (size_t)NNUE_FT_INPUTS * NNUE_HALF_DIMS : 0) +
+                      (psqt_weights_cnt ? (size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS : 0)),
+           val,
+           TDLEAF_ADAM_LR_FLOOR + (1.0f - TDLEAF_ADAM_LR_FLOOR)
+               / (1.0f + (float)val / TDLEAF_ADAM_C));
 }
 
 // ---------------------------------------------------------------------------
