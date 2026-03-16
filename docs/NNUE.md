@@ -18,10 +18,12 @@ or via the build script:
 perl comp.pl 2026_03_07a NNUE=1 
 ```
 
-The network file currently defaults to `nn-ad9b42354671.nnue` (Stockfish 15.1 release, 47 MB) which must be in
-the same directory as the binary, or in the directory from which the engine is launched. 
-It can be downloaded from: https://github.com/official-stockfish/networks. Other compatitible networks can be 
-specified with the compile variable NNUE_NET=filename.
+The network file defaults to `to-be-trained.nnue` and must be in the same directory as the binary,
+or in the directory from which the engine is launched.  A fresh network can be generated with
+`--init-nnue --write-nnue <file>` before training.  The Stockfish 15.1 release network
+`nn-ad9b42354671.nnue` (47 MB) is the historical reference against which Leaf's forward pass
+was validated; any Stockfish 15.1–era HalfKAv2_hm network is compatible and can be specified
+at compile time with `NNUE_NET=filename`.
 
 When NNUE is not compiled in (`-D NNUE=0` or omitted), the classical eval is used
 unchanged.  When NNUE is compiled in but the network file is not found, the engine falls

@@ -60,10 +60,10 @@
 //   perl comp.pl MYVER NNUE=1 NNUE_NET=nn-newnet.nnue
 // The companion .tdleaf.bin name is derived from NNUE_NET automatically.
 #ifndef NNUE_NET
- #define NNUE_NET "nn-ad9b42354671.nnue"
+ #define NNUE_NET "to-be-trained.nnue"
 #endif
 #ifndef NNUE_TDLEAF_BIN
- #define NNUE_TDLEAF_BIN "nn-ad9b42354671.tdleaf.bin"
+ #define NNUE_TDLEAF_BIN "to-be-trained.tdleaf.bin"
 #endif
 
 // Return material-only score from score_pos(), bypassing all positional eval.

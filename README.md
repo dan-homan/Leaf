@@ -34,7 +34,7 @@ This work was developed interactively with [Claude Code](https://claude.ai/claud
 
 Leaf supports **HalfKAv2_hm** NNUE evaluation compatible with Stockfish 15.1 era networks.  Build with `NNUE=1`.
 
-The current default network file, **`nn-ad9b42354671.nnue`** is the original Stockfish 15.1 release network and serves three distinct purposes in the project:
+The default network file is **`to-be-trained.nnue`** — a placeholder name for a Leaf-trained network generated via `--init-nnue` (see Training below).  The Stockfish 15.1 release network **`nn-ad9b42354671.nnue`** serves as a reference for the project in three ways:
 
 **1. Implementation correctness anchor.**
 Because this is the exact network shipped with Stockfish 15.1, Leaf's forward pass can be validated against the Stockfish 15.1 source line by line.  Any discrepancy in evaluation of a given position is a bug in Leaf, not an approximation.  This property was used extensively during development: several significant bugs were isolated and fixed by comparing Leaf evaluation against Stockfish on the same position, including an incorrect feature index for the own king, a wrong SqrCReLU formulation that zeroed all negative pre-activations, and an incorrect PSQT scale factor.  After all fixes, Leaf matches Stockfish 15.1 evaluation exactly (within 1 cp rounding) on every tested position.
@@ -108,7 +108,7 @@ perl src/comp.pl <version> NNUE=1 TDLEAF=1
 
 The `perl comp.pl` build script handles include paths, optimization flags, and optional `OVERWRITE` to skip the interactive prompt.  Built binaries land in `run/` with the name `Leaf_v<version>`.
 
-The network file `nn-ad9b42354671.nnue` must be present in the same directory as the binary (or the directory from which the engine is launched).  It can be obtained from the [official Stockfish networks repository](https://github.com/official-stockfish/networks).
+The network file (default: `to-be-trained.nnue`) must be present in the same directory as the binary, or in the directory from which the engine is launched.  A fresh network can be generated with `--init-nnue --write-nnue <file>` before training.  Any Stockfish 15.1–era HalfKAv2_hm network is compatible and can be substituted at compile time with `NNUE_NET=<filename>`.
 
 ---
 
