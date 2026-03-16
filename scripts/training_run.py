@@ -84,11 +84,11 @@ def _prompt_init_cnt(is_fresh_random):
     default = 0 if is_fresh_random else 1000
     print()
     print("Initial update count (cnt) for Adam LR decay:")
-    print("  lr(cnt) = LR0 / (1 + cnt / 500)")
-    print("    0    — untrained / fresh random network (full LR0 from game 1)")
-    print("    500  — lightly pre-trained              (start at 50% of LR0)")
-    print("    1000 — moderately pre-trained           (start at 33% of LR0)")
-    print("    2000 — well-trained network             (start at 20% of LR0)")
+    print("  lr(cnt) = LR0 × (0.01 + 0.99 / (1 + cnt / 500))")
+    print("    0    — untrained / fresh random network (start at 100% of LR0, floor  1%)")
+    print("    500  — lightly pre-trained              (start at  51% of LR0, floor  1%)")
+    print("    1000 — moderately pre-trained           (start at  34% of LR0, floor  1%)")
+    print("    2000 — well-trained network             (start at  21% of LR0, floor  1%)")
     val = int(ask("  Initial cnt", default))
     return val
 
@@ -291,7 +291,7 @@ def main():
     if fischer:
         print( "  Fischer Random:   yes")
     if init_cnt is not None and init_cnt > 0:
-        lr_frac = 1.0 / (1.0 + init_cnt / 500.0)
+        lr_frac = 0.01 + 0.99 / (1.0 + init_cnt / 500.0)
         print(f"  Initial cnt:      {init_cnt}  (Adam LR0 × {lr_frac:.2f})")
     print(f"  PGN directory:    {pgn_dir}/")
     print(f"  Output net:       {output_net_name}  (learn/)")
@@ -306,7 +306,7 @@ def main():
     # -----------------------------------------------------------------------
     if init_cnt is not None and init_cnt > 0:
         print()
-        lr_frac = 1.0 / (1.0 + init_cnt / 500.0)
+        lr_frac = 0.01 + 0.99 / (1.0 + init_cnt / 500.0)
         print(f"Priming .tdleaf.bin with cnt={init_cnt}  "
               f"(Adam LR0 × {lr_frac:.2f} from game 1) ...")
         result = subprocess.run(

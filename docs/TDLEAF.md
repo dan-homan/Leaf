@@ -209,10 +209,13 @@ cnt ← cnt + 1
 correction denominators `(1−β₁ᵗ)` and `(1−β₂ᵗ)` are hoisted outside all per-weight
 loops for efficiency.
 
-**Per-weight LR decay:** `lr(cnt) = LR0 / (1 + cnt/C)`.  At `cnt=0` the step size is
-`LR0`; at `cnt=C` it is `LR0/2`; at `cnt≫C` it approaches zero.  Weights that receive
-gradient every game (FC biases, dense feature rows) converge fastest; rarely-seen PSQT
-buckets retain a higher effective LR for longer.
+**Per-weight LR decay with floor:** `lr(cnt) = LR0 × (floor + (1 − floor) / (1 + cnt/C))`.
+At `cnt=0` the step size is `LR0`; at `cnt=C` it is halfway between `LR0` and the floor;
+as `cnt→∞` it settles to `LR0 × floor` rather than zero.  The floor (`TDLEAF_ADAM_LR_FLOOR`,
+default 0.01) ensures weights remain trainable indefinitely — even heavily-updated parameters
+still receive 1% of the initial step size per game.  Weights that receive gradient every game
+(FC biases, dense feature rows) converge fastest; rarely-seen PSQT buckets retain a higher
+effective LR for longer.
 
 ### Per-Layer Configuration
 
@@ -266,12 +269,14 @@ Moments are **not** persisted to `.tdleaf.bin` because:
 | `TDLEAF_ADAM_LR0` | 0.5 | Initial step size for FC/FT layers (float weight units) |
 | `TDLEAF_ADAM_PSQT_LR0` | 20.0 | Initial step size for PSQT (int32 scale; ~1000× FC) |
 | `TDLEAF_ADAM_C` | 500 | LR half-life in per-weight update counts |
+| `TDLEAF_ADAM_LR_FLOOR` | 0.01 | Long-term LR floor as a fraction of LR0; lr settles to `LR0 × floor` as cnt→∞ |
 | `TDLEAF_ADAM_BETA1` | 0.9 | First-moment decay (FC weights/biases, FT biases, PSQT) |
 | `TDLEAF_ADAM_BETA2` | 0.999 | Second-moment decay (all layers) |
 | `TDLEAF_ADAM_EPS` | 1e-8 | Numerical floor in denominator |
 
-Set `TDLEAF_ADAM_LR0 = 0.0` to disable Adam and fall back to plain gradient descent
-(the original single-step `w -= g` path; all Adam arrays remain zeroed and unused).
+Set `TDLEAF_ADAM_LR_FLOOR = 0.0` to restore the original decay-to-zero behaviour.
+Set `TDLEAF_ADAM_LR0 = 0.0` to disable Adam entirely and fall back to plain gradient
+descent (the original single-step `w -= g` path; all Adam arrays remain zeroed and unused).
 
 ---
 

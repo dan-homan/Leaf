@@ -333,6 +333,7 @@ Key hyperparameters (in `src/tdleaf.h`):
 | `TDLEAF_ADAM_LR0` | 0.5 | Adam initial step size for FC/FT layers (float weight units) |
 | `TDLEAF_ADAM_PSQT_LR0` | 20.0 | Adam initial step size for PSQT (int32 scale; ~1000× FC) |
 | `TDLEAF_ADAM_C` | 500 | Adam LR half-life in per-weight update counts |
+| `TDLEAF_ADAM_LR_FLOOR` | 0.01 | Long-term LR floor (fraction of LR0); lr → LR0×floor as cnt→∞ |
 | `NNUE_FT_LR_SCALE` | 1.0 | FT gradient pre-scale (secondary with Adam active) |
 | `NNUE_PSQT_LR_SCALE` | 1000 | PSQT gradient pre-scale (secondary with Adam active) |
 | `NNUE_FC_BIAS_LR_SCALE` | 1000 | FC bias gradient pre-scale (secondary with Adam active) |
