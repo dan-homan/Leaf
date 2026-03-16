@@ -45,7 +45,7 @@ change between consecutive moves exceeds `TDLEAF_SCORE_CLIP_CP` centipawns — s
 
 where `∇_w d_t = d_t * (1 - d_t) / K * ∇_w score_t`.
 
-Defaults: `λ = 0.7`, `K = 400`, `TDLEAF_ALPHA = 200` (global gradient scale multiplier).
+Defaults: `λ = 0.7`, `K = 400`.
 Gradient updates use Adam with per-weight LR decay; see [Adam Optimizer](#adam-optimizer-with-per-weight-lr-decay) below.
 
 **Key design choice:** `d_t` is computed from `nnue_evaluate()` (direct static eval of the
@@ -71,7 +71,7 @@ leaf position are touched.  `ft_dirty[FT_INPUTS]` tracks which rows received gra
 during the game; only dirty rows are scanned in `nnue_apply_gradients`.
 
 FT biases are updated densely every game (all 1,024 values): the gradient is the sum of
-`g_acc[persp][d]` across both perspectives, amplified by `NNUE_FT_BIAS_LR_SCALE`.
+`g_acc[persp][d]` across both perspectives.
 
 ---
 
@@ -157,37 +157,16 @@ FC2 output (positional)
   → PSQT weight rows for each active feature index (sparse)
 ```
 
-**Gradient pre-scale multipliers** (defined in `src/tdleaf.h`):
-
-- `NNUE_FT_LR_SCALE` multiplies `g_acc[p][d]` before accumulating into `grad_ft_w`.
-  Value 1.0 means the same effective LR as FC (TDLEAF_ALPHA already in grad_scale).
-
-- `NNUE_PSQT_LR_SCALE` multiplies `grad_scale × 0.5` for the PSQT update.
-  PSQT bypasses the FC backward chain, so raw gradients are tiny
-  (`grad_scale ≈ 2×10⁻⁴`) relative to the int32 PSQT weight scale (~5,776/pawn).
-  **With Adam active, this multiplier is secondary:** Adam normalises gradient magnitude
-  so the actual per-step size in weight-space is governed by `TDLEAF_ADAM_PSQT_LR0`,
-  not by `NNUE_PSQT_LR_SCALE`.
-
-- `NNUE_FC_BIAS_LR_SCALE` multiplies all FC bias gradients.
-  Because TDLeaf alternates `wtm_sign × e[t]`, bias gradients from white-to-move and
-  black-to-move plies nearly cancel across a game, leaving a near-zero per-game net.
-  **With Adam active, this multiplier is secondary** for the same reason as PSQT.
-
-- `NNUE_FT_BIAS_LR_SCALE` multiplies `g_acc[0][d] + g_acc[1][d]` for FT bias gradients.
-  Same cancellation mechanism as FC biases.  **Secondary with Adam active.**
-
-When Adam is enabled (`TDLEAF_ADAM_LR0 > 0`), the LR_SCALE multipliers pre-scale gradients
-before Adam sees them, but Adam immediately normalises gradient magnitude to ±1.  The actual
-step size is therefore determined entirely by `TDLEAF_ADAM_LR0` / `TDLEAF_ADAM_PSQT_LR0`
-and the per-weight LR decay schedule.  See [Adam Optimizer](#adam-optimizer-with-per-weight-lr-decay).
+The step size for each layer is governed by the Adam LR schedule.  FC, FT, and FT-bias layers
+use `TDLEAF_ADAM_LR0`; PSQT uses `TDLEAF_ADAM_PSQT_LR0` (separate because Adam normalises
+gradient magnitude, so only LR0 sets the per-step size in weight-space — PSQT at int32 scale
+needs a different LR0 than FC at int8 scale).  See [Adam Optimizer](#adam-optimizer-with-per-weight-lr-decay).
 
 ---
 
 ## Adam Optimizer with Per-Weight LR Decay
 
-`nnue_apply_gradients()` uses Adam with per-weight learning-rate decay as the default
-update rule.  Set `TDLEAF_ADAM_LR0 = 0.0` to fall back to plain gradient descent.
+`nnue_apply_gradients()` uses Adam with per-weight learning-rate decay.
 
 ### Algorithm
 
@@ -199,7 +178,7 @@ m   ← β₁ m + (1−β₁) g                    (first moment)
 v   ← β₂ v + (1−β₂) g²                   (second moment)
 m̂   = m / (1 − β₁ᵗ)                      (bias-corrected)
 v̂   = v / (1 − β₂ᵗ)                      (bias-corrected)
-lr  = LR0 / (1 + cnt / C)                 (per-weight LR decay)
+lr  = LR0 × (floor + (1−floor) / (1 + cnt/C))   (per-weight LR decay with floor)
 Δw  = −lr × m̂ / (√v̂ + ε)
 w   ← w + Δw
 cnt ← cnt + 1
@@ -221,24 +200,19 @@ effective LR for longer.
 
 | Layer | Update Rule | LR0 | Notes |
 |-------|-------------|-----|-------|
-| FC0/FC1/FC2 weights | Full Adam | `TDLEAF_ADAM_LR0 = 0.5` | Float shadow clamped to ±127 after each update |
-| FC0/FC1/FC2 biases  | Full Adam | `TDLEAF_ADAM_LR0 = 0.5` | |
-| FT weights | RMSProp (per-row v, no m) | `TDLEAF_ADAM_LR0 = 0.5` | 92 MB per-weight v ruled out; per-row v ≈ 88 KB |
-| FT biases  | Full Adam | `TDLEAF_ADAM_LR0 = 0.5` | |
-| PSQT       | Full Adam | `TDLEAF_ADAM_PSQT_LR0 = 20.0` | Separate LR0 required — see below |
+| FC0/FC1/FC2 weights | Full Adam | `TDLEAF_ADAM_LR0 = 0.2` | Float shadow clamped to ±127 after each update |
+| FC0/FC1/FC2 biases  | Full Adam | `TDLEAF_ADAM_LR0 = 0.2` | |
+| FT weights | RMSProp (per-row v, no m) | `TDLEAF_ADAM_LR0 = 0.2` | 92 MB per-weight v ruled out; per-row v ≈ 88 KB |
+| FT biases  | Full Adam | `TDLEAF_ADAM_LR0 = 0.2` | |
+| PSQT       | Full Adam | `TDLEAF_ADAM_PSQT_LR0 = 1.0` | Separate LR0 required — see below |
 
 ### Why a Separate PSQT LR0?
 
 Adam normalises gradient magnitude: the effective per-step size in weight-space is
 approximately ±LR0 per update, independent of the raw gradient magnitude.  PSQT
 weights are at int32 scale (std ≈ 36,000) while FC weights are at int8 scale (std ≈ 30)
-— a ratio of ~1,000×.  Using the same LR0=0.5 for both caused PSQT to change by only
-~0.3% of its baseline scale per 5,000 games.  `TDLEAF_ADAM_PSQT_LR0 = 20.0` targets
-~5% change over 5,000 games.
-
-As a corollary, `NNUE_PSQT_LR_SCALE` is no longer the relevant tuning lever for PSQT
-learning speed when Adam is active.  The scale multiplier affects the raw gradient before
-Adam sees it, but Adam normalises it away.
+— a ratio of ~1,000×.  Using the same LR0=0.2 for both caused PSQT to change negligibly
+relative to its baseline scale.  `TDLEAF_ADAM_PSQT_LR0` is tuned separately for this reason.
 
 ### Why Float-Shadow Clamping for FC0/FC1?
 

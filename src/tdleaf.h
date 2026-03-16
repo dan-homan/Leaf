@@ -6,7 +6,7 @@
 //     e_{T-1} = result - d_{T-1}
 //     e_t     = (d_{t+1} - d_t) + lambda * e_{t+1}
 //   Weight update:
-//     Δw = alpha * Σ_t  e_t * ∇_w d_t
+//     Δw = Σ_t  e_t * ∇_w d_t   (step size governed by Adam LR schedule)
 //
 // FC layers (FC0/FC1/FC2) and FT biases (1024 int16) are trained.  FT weights
 // and PSQT are also trained (FT weights 46 MB, PSQT 720 KB).
@@ -25,33 +25,8 @@
 // Hyperparameters (can be overridden by setvalue/environment at runtime)
 // ---------------------------------------------------------------------------
 static const float TDLEAF_LAMBDA          = 0.7f;   // eligibility trace decay
-static const float TDLEAF_ALPHA           = 200.0f;  // learning rate for FC layers
-// FT learning rate scale applied inside nnue_accumulate_gradients to g_acc[p][d].
-static const float NNUE_FT_LR_SCALE = 1.000f;
-// PSQT learning rate scale applied inside nnue_accumulate_gradients to g_psqt_diff.
-// Separate from NNUE_FT_LR_SCALE so PSQT can be tuned independently.
-// NOTE: grad_scale = TDLEAF_ALPHA × e[t] × d(1-d)/K × cp_factor.
-//   With K=400 and cp_factor=100/5776, |grad_scale| ≈ 2e-4 for typical errors.
-//   PSQT weights are at int32 scale (a pawn ≈ 5776 units), so a large multiplier
-//   is needed to get meaningful per-game updates.
-static const float NNUE_PSQT_LR_SCALE = 1000.0f;
-// FT bias learning rate scale: applied to the FT bias gradient (g_acc[0][d] + g_acc[1][d]).
-// FT biases are shared across all positions so per-game cancellation is significant,
-// similar to FC biases. Start at 10× FT weight scale; tune empirically.
-static const float NNUE_FT_BIAS_LR_SCALE = 10.0f;
-// FC bias learning rate scale: applied to all FC bias gradients.
-// FC biases are in int32 units (FC0: ~332, FC1: ~-400, FC2: ~1242).
-// Unlike weights, bias gradients have no l0_in[i] multiplier, so TDLeaf's
-// alternating wtm_sign × e[t] structure causes near-complete per-game cancellation.
-// A large multiplier is needed to produce visible int32 updates.  Tune empirically.
-static const float NNUE_FC_BIAS_LR_SCALE = 1000.0f;
-//
 static const float TDLEAF_K               = 400.0f; // sigmoid temperature (centipawns)
 static const int   TDLEAF_MIN_PLIES       = 8;      // skip games shorter than this
-// Per-update clamp: a single game's gradient update is limited to at most this
-// fraction of the weight's current magnitude (min ref = 1.0 so near-zero weights
-// can still move).  Set to 1.0 to disable.  Applied to both FC and FT layers.
-static const float TDLEAF_MAX_UPDATE_FRAC = 1.0f; //0.10f;  // max 10% change per update
 // Approach 1 — TD error clipping.
 // When the white-POV score change between consecutive moves exceeds this
 // threshold (centipawns), the (d[t+1]−d[t]) contribution to the eligibility
@@ -66,13 +41,11 @@ static const float TDLEAF_ID_VAR_SIGMA2  = 10000.0f;
 // ---------------------------------------------------------------------------
 // Adam + per-weight LR decay hyperparameters
 //
-// Set TDLEAF_ADAM_LR0 = 0.0 to fall back to plain gradient descent (the
-// original Kalman-equivalent path).
-//
-// LR schedule:  lr(cnt) = LR0 / (1 + cnt / C)
-//   cnt = 0  → lr = LR0          (fresh weight, fast initial learning)
-//   cnt = C  → lr = LR0 / 2      (half-life)
-//   cnt >> C → lr → 0             (converged weight moves very little)
+// LR schedule with long-term floor:
+//   lr(cnt) = LR0 × (floor + (1 − floor) / (1 + cnt / C))
+//   cnt = 0  → LR0 × 1.0         (full initial rate)
+//   cnt = C  → LR0 × (0.5 + 0.5×floor)  (half-life point)
+//   cnt → ∞  → LR0 × floor       (long-term floor; never reaches zero)
 //
 // FT weights use RMSProp (per-row v, no m); all other layers use full Adam.
 // v arrays are session-local (process memory only, not persisted to .tdleaf.bin).

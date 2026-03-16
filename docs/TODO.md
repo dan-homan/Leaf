@@ -8,34 +8,20 @@ Planned investigations, improvements, and open questions.
 
 ### Adam hyperparameter tuning
 
-The Adam + per-weight LR decay optimizer (`TDLEAF_ADAM_LR0=0.5`, `TDLEAF_ADAM_PSQT_LR0=20`,
-`TDLEAF_ADAM_C=500`) uses initial guesses that have not been systematically tuned.  A grid
+The Adam + per-weight LR decay optimizer (`TDLEAF_ADAM_LR0=0.2`, `TDLEAF_ADAM_PSQT_LR0=1.0`,
+`TDLEAF_ADAM_C=5000`) uses initial guesses that have not been systematically tuned.  A grid
 search varying each independently across 500–1000-game runs would establish better defaults.
 
 Key questions:
 
-- **FC LR0 (0.5):** After 5,000 games the FC0/FC1 float shadows spread to std≈30/50, filling
+- **FC LR0 (0.2):** After 5,000 games the FC0/FC1 float shadows spread to std≈30/50, filling
   the int8 range.  Float-shadow clamping prevents zombie weights but further training will be
   limited at the ±127 boundary.  Monitor whether the network continues to improve or plateaus
   as the distribution saturates.
-- **PSQT LR0 (20):** Set to give ~5% baseline change per feature over 5,000 games (vs ~0.3%
-  with the old unified LR0=0.5).  Tune empirically; 10–50 is a reasonable search range.
-- **C (500):** LR half-life in per-weight updates.  `lr(cnt) = LR0 / (1 + cnt/C)`.  Larger C
-  extends the fast-learning phase; smaller C converges more aggressively.  500–2000 is the
-  practical range for ~5,000-game sessions.
-- **LR_SCALE multipliers:** `NNUE_PSQT_LR_SCALE`, `NNUE_FC_BIAS_LR_SCALE`, and
-  `NNUE_FT_BIAS_LR_SCALE` are no longer the primary controls for per-step size when Adam is
-  active — Adam normalises gradient magnitude, making these pre-scalings irrelevant to actual
-  step size.  They can be removed in a future cleanup (or left as plain-GD fallback controls
-  for `TDLEAF_ADAM_LR0 = 0.0`).
-
-### TDLEAF_MAX_UPDATE_FRAC
-
-`TDLEAF_MAX_UPDATE_FRAC` is currently 1.0 (disabled).  Under Adam the effective per-update
-magnitude is bounded by `TDLEAF_ADAM_LR0`, so the fraction-of-weight clamping is less urgent
-than under plain GD.  Still, a tighter cap (e.g. 0.20) could prevent any single pathological
-game from dominating the accumulated gradient during concurrent two-engine training.  Consider
-enabling after confirming stable Adam behaviour over a longer run.
+- **PSQT LR0 (1.0):** Tuned separately from FC LR0 since Adam normalises gradient magnitude
+  and PSQT operates at int32 scale.  Tune empirically.
+- **C (5000):** LR half-life in per-weight updates.  Larger C extends the fast-learning phase;
+  smaller C converges more aggressively.
 
 ### Horizon noise mitigation — ablation testing plan
 
@@ -103,8 +89,8 @@ under NNUE; correctness is expected but unverified with `THREADS > 1`.
 ## Resolved / Implemented
 
 ### ~~Adam + per-weight LR decay~~ ✓ Implemented (2026-03-15)
-Adam optimizer with per-weight LR decay `lr(cnt) = LR0 / (1 + cnt/C)` is live.
-FC/FT: `TDLEAF_ADAM_LR0=0.5`; PSQT: `TDLEAF_ADAM_PSQT_LR0=20.0`; C=500.
+Adam optimizer with per-weight LR decay `lr(cnt) = LR0×(floor+(1−floor)/(1+cnt/C))` is live.
+FC/FT: `TDLEAF_ADAM_LR0=0.2`; PSQT: `TDLEAF_ADAM_PSQT_LR0=1.0`; C=5000; floor=0.01.
 FC0/FC1 float shadows clamped to ±127 to prevent zombie weights.  See `docs/TDLEAF.md`.
 
 ### ~~Epoch-based replay~~ ✓ Implemented (2026-03-11)

@@ -1,5 +1,17 @@
 Changes since 2017_12_24
 
+2026_03_16 -- TDLeaf: remove plain-GD fallback and defunct LR-scale constants
+               (tdleaf.h, tdleaf.cpp, nnue.cpp, scripts/training_run.py, docs/).
+               Removed constants: TDLEAF_ALPHA, NNUE_FT_LR_SCALE, NNUE_PSQT_LR_SCALE,
+               NNUE_FT_BIAS_LR_SCALE, NNUE_FC_BIAS_LR_SCALE, TDLEAF_MAX_UPDATE_FRAC.
+               Under Adam all LR-scale multipliers cancel in m̂/(√v̂+ε); step size is
+               governed entirely by TDLEAF_ADAM_LR0 / TDLEAF_ADAM_PSQT_LR0.
+               TDLEAF_MAX_UPDATE_FRAC had no implementing code (dead constant).
+               Also removed the use_adam conditional and plain-GD else branches from
+               nnue_apply_gradients(); Adam is now the only update path.
+               Updated stale doc values: LR0=0.2, PSQT_LR0=1.0, C=5000 (current code).
+               training_run.py --set-cnt display updated to use C=5000.
+
 2026_03_16 -- TDLeaf: Adam LR decay floor — lr settles to LR0×floor rather than zero
                (nnue.cpp, tdleaf.h, scripts/training_run.py, docs/).
                New constant TDLEAF_ADAM_LR_FLOOR = 0.1 changes the per-weight LR

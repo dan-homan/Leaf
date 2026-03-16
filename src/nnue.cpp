@@ -1720,7 +1720,7 @@ void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale)
     // grad w.r.t. FC2 weights and bias
     for (int i = 0; i < NNUE_L2_PADDED; i++)
         grad_l2_w[s][i] += g_fc2_raw * act.fc2_in[i];
-    grad_l2_b[s] += NNUE_FC_BIAS_LR_SCALE * g_fc2_raw;
+    grad_l2_b[s] += g_fc2_raw;
     // grad w.r.t. fc2_in[i]
     float g_fc2_in[NNUE_L2_PADDED];
     for (int i = 0; i < NNUE_L2_PADDED; i++)
@@ -1738,7 +1738,7 @@ void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale)
         if (g_fc1_raw[o] == 0.0f) continue;
         for (int i = 0; i < NNUE_L1_PADDED; i++)
             grad_l1_w[s][o * NNUE_L1_PADDED + i] += g_fc1_raw[o] * act.fc1_in[i];
-        grad_l1_b[s][o] += NNUE_FC_BIAS_LR_SCALE * g_fc1_raw[o];
+        grad_l1_b[s][o] += g_fc1_raw[o];
     }
     // grad w.r.t. fc1_in[i]
     float g_fc1_in[NNUE_L1_PADDED] = {};
@@ -1770,7 +1770,7 @@ void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale)
         if (g_fc0_raw[o] == 0.0f) continue;
         for (int i = 0; i < NNUE_L0_INPUT; i++)
             grad_l0_w[s][o * NNUE_L0_INPUT + i] += g_fc0_raw[o] * act.l0_in[i];
-        grad_l0_b[s][o] += NNUE_FC_BIAS_LR_SCALE * g_fc0_raw[o];
+        grad_l0_b[s][o] += g_fc0_raw[o];
     }
 
     // 1. Continue backward: FC0 inputs → accumulator → FT/PSQT weights
@@ -1807,14 +1807,13 @@ void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale)
     }
 
     // FT weight gradient: for each active feature fi in perspective p:
-    //   grad_ft_w[fi × HALF_DIMS + d] += NNUE_FT_LR_SCALE × g_acc[p][d]
+    //   grad_ft_w[fi × HALF_DIMS + d] += g_acc[p][d]
     // PSQT gradient (only bucket `stack` is used by this position):
     //   psqt_diff = psqt[stm][stack] - psqt[opp][stack]
     //   ∂score_cp/∂psqt_diff = cp_factor/2 (half of the cp_factor used for positional)
     //   g_psqt_diff = grad_scale × 0.5  (grad_scale already includes cp_factor for positional)
-    //   grad_psqt_w[fi × PSQT_BKTS + stack] += NNUE_PSQT_LR_SCALE × g_psqt_diff × (+1 for stm, -1 for opp)
-    //   NNUE_PSQT_LR_SCALE is large (~10000) because grad_scale is tiny (|grad_scale| ≈ 2e-4)
-    //   due to the 1/K and cp_factor terms in sig_grad, while psqt_f32 is at int32 scale (~5776/pawn).
+    //   grad_psqt_w[fi × PSQT_BKTS + stack] += g_psqt_diff × (+1 for stm, -1 for opp)
+    //   Adam normalises gradient magnitude; TDLEAF_ADAM_PSQT_LR0 governs the per-step size.
     float g_psqt_diff = grad_scale * 0.5f;
     for (int p = 0; p < 2; p++) {
         int persp       = (p == 0) ? stm_p : (stm_p ^ 1);
@@ -1826,36 +1825,30 @@ void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale)
             ft_dirty[fi] = true;
             float *gfw = grad_ft_w + (size_t)fi * NNUE_HALF_DIMS;
             for (int d = 0; d < NNUE_HALF_DIMS; d++)
-                gfw[d] += NNUE_FT_LR_SCALE * g_a[d];
+                gfw[d] += g_a[d];
             grad_psqt_w[fi * NNUE_PSQT_BKTS + s] +=
-                NNUE_PSQT_LR_SCALE * g_psqt_diff * psqt_sign;
+                g_psqt_diff * psqt_sign;
         }
     }
 
     // FT bias gradient: ∂loss/∂ft_biases[d] = Σ_persp g_acc[persp][d]
     // Both perspectives share the same bias vector, so gradients sum across them.
     for (int d = 0; d < NNUE_HALF_DIMS; d++)
-        grad_ft_bias[d] += NNUE_FT_BIAS_LR_SCALE * (g_acc[0][d] + g_acc[1][d]);
+        grad_ft_bias[d] += (g_acc[0][d] + g_acc[1][d]);
 }
 
 // ---------------------------------------------------------------------------
 // nnue_apply_gradients — update FP32 weights from accumulators, increment counts,
 //                        then zero the accumulators.
 // Only weights that received a non-zero gradient this game are updated / counted.
-// Each update is clamped to ±TDLEAF_MAX_UPDATE_FRAC × max(|w|, 1.0) so no single
-// game can move any weight by more than that fraction of its current magnitude.
 // ---------------------------------------------------------------------------
 void nnue_apply_gradients()
 {
-    // Adam with per-weight LR decay.
-    // Set TDLEAF_ADAM_LR0 = 0.0 to fall back to plain gradient descent.
-    const bool use_adam = (TDLEAF_ADAM_LR0 > 0.0f);
-
-    if (use_adam) t_adam++;
+    t_adam++;
 
     // Bias-correction denominators — hoisted outside all per-weight loops.
-    const float bc1 = use_adam ? (1.0f - powf(TDLEAF_ADAM_BETA1, (float)t_adam)) : 1.0f;
-    const float bc2 = use_adam ? (1.0f - powf(TDLEAF_ADAM_BETA2, (float)t_adam)) : 1.0f;
+    const float bc1 = 1.0f - powf(TDLEAF_ADAM_BETA1, (float)t_adam);
+    const float bc2 = 1.0f - powf(TDLEAF_ADAM_BETA2, (float)t_adam);
 
     // Per-weight LR with long-term floor:
     //   lr(cnt) = LR0 × (floor + (1 − floor) / (1 + cnt/C))
@@ -1867,9 +1860,7 @@ void nnue_apply_gradients()
     };
 
     // Full Adam step for FC layers and FT biases.
-    // When use_adam=false this degenerates to plain gradient descent (returns g).
     auto do_step = [&](float g, float &m, float &v, uint32_t cnt) -> float {
-        if (!use_adam) return g;
         m = TDLEAF_ADAM_BETA1 * m + (1.0f - TDLEAF_ADAM_BETA1) * g;
         v = TDLEAF_ADAM_BETA2 * v + (1.0f - TDLEAF_ADAM_BETA2) * g * g;
         float m_hat = m / bc1;
@@ -1880,7 +1871,6 @@ void nnue_apply_gradients()
     // PSQT weights are at int32 scale (std ~36,000) while FC weights are int8 scale (std ~3-50).
     // Adam normalises gradient magnitude, so only LR0 sets the per-step size in weight-space.
     auto do_step_psqt = [&](float g, float &m, float &v, uint32_t cnt) -> float {
-        if (!use_adam) return g;
         m = TDLEAF_ADAM_BETA1 * m + (1.0f - TDLEAF_ADAM_BETA1) * g;
         v = TDLEAF_ADAM_BETA2 * v + (1.0f - TDLEAF_ADAM_BETA2) * g * g;
         float m_hat = m / bc1;
@@ -1954,7 +1944,7 @@ void nnue_apply_gradients()
             float    *gw  = grad_ft_w      + (size_t)fi * NNUE_HALF_DIMS;
             uint32_t *cnt = ft_weights_cnt + (size_t)fi * NNUE_HALF_DIMS;
             float    *fd  = ft_delta_f32 ? ft_delta_f32 + (size_t)fi * NNUE_HALF_DIMS : nullptr;
-            if (use_adam && v_ft_row) {
+            if (v_ft_row) {
                 // Accumulate row mean g² over non-zero dims; update per-row v.
                 float g2sum = 0.0f;
                 int   n_nz  = 0;
@@ -1975,14 +1965,6 @@ void nnue_apply_gradients()
                         }
                     }
                 }
-            } else {
-                for (int d = 0; d < NNUE_HALF_DIMS; d++) {
-                    if (gw[d] != 0.0f) {
-                        fw[d] -= gw[d];  if (fd) fd[d] -= gw[d];
-                        cnt[d]++;
-                        gw[d] = 0.0f;
-                    }
-                }
             }
             // PSQT weights — full Adam per-weight (only 8 buckets per row).
             float    *pw   = psqt_weights_f32 + (size_t)fi * NNUE_PSQT_BKTS;
@@ -1990,14 +1972,9 @@ void nnue_apply_gradients()
             uint32_t *pcnt = psqt_weights_cnt + (size_t)fi * NNUE_PSQT_BKTS;
             float    *pd   = psqt_delta_f32 ? psqt_delta_f32 + (size_t)fi * NNUE_PSQT_BKTS : nullptr;
             for (int b = 0; b < NNUE_PSQT_BKTS; b++) {
-                if (gpw[b] != 0.0f) {
-                    float dw;
-                    if (use_adam && m_psqt_w && v_psqt_w) {
-                        size_t vi = (size_t)fi * NNUE_PSQT_BKTS + b;
-                        dw = do_step_psqt(gpw[b], m_psqt_w[vi], v_psqt_w[vi], pcnt[b]);
-                    } else {
-                        dw = gpw[b];
-                    }
+                if (gpw[b] != 0.0f && m_psqt_w && v_psqt_w) {
+                    size_t vi = (size_t)fi * NNUE_PSQT_BKTS + b;
+                    float dw = do_step_psqt(gpw[b], m_psqt_w[vi], v_psqt_w[vi], pcnt[b]);
                     pw[b] -= dw;  if (pd) pd[b] -= dw;
                     pcnt[b]++;
                     gpw[b] = 0.0f;
