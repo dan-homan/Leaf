@@ -204,7 +204,7 @@ effective LR for longer.
 | FC0/FC1/FC2 biases  | Full Adam | `TDLEAF_ADAM_LR0 = 0.2` | |
 | FT weights | RMSProp (per-row v, no m) | `TDLEAF_ADAM_LR0 = 0.2` | 92 MB per-weight v ruled out; per-row v ≈ 88 KB |
 | FT biases  | Full Adam | `TDLEAF_ADAM_LR0 = 0.2` | |
-| PSQT       | Full Adam | `TDLEAF_ADAM_PSQT_LR0 = 1.0` | Separate LR0 required — see below |
+| PSQT       | Full Adam | `TDLEAF_ADAM_PSQT_LR0 = 2.0` | Separate LR0 required — see below |
 
 ### Why a Separate PSQT LR0?
 
@@ -240,9 +240,9 @@ Moments are **not** persisted to `.tdleaf.bin` because:
 
 | Constant | Value | Notes |
 |----------|-------|-------|
-| `TDLEAF_ADAM_LR0` | 0.5 | Initial step size for FC/FT layers (float weight units) |
-| `TDLEAF_ADAM_PSQT_LR0` | 20.0 | Initial step size for PSQT (int32 scale; ~1000× FC) |
-| `TDLEAF_ADAM_C` | 500 | LR half-life in per-weight update counts |
+| `TDLEAF_ADAM_LR0` | 0.2 | Initial step size for FC/FT layers (float weight units) |
+| `TDLEAF_ADAM_PSQT_LR0` | 2.0 | Initial step size for PSQT (int32 scale; ~1000× FC) |
+| `TDLEAF_ADAM_C` | 5000 | LR half-life in per-weight update counts |
 | `TDLEAF_ADAM_LR_FLOOR` | 0.01 | Long-term LR floor as a fraction of LR0; lr settles to `LR0 × floor` as cnt→∞ |
 | `TDLEAF_ADAM_BETA1` | 0.9 | First-moment decay (FC weights/biases, FT biases, PSQT) |
 | `TDLEAF_ADAM_BETA2` | 0.999 | Second-moment decay (all layers) |

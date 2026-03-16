@@ -92,7 +92,7 @@ Leaf uses a unity build — `src/Leaf.cc` includes all other `.cpp` files.
 
 **Classical eval (no NNUE):**
 ```sh
-g++ -o Leaf src/Leaf.cc -O3 -D VERS="dev" -D TABLEBASES=1 -pthread
+g++ -o Leaf src/Leaf.cc -O3 -D VERS="dev" -pthread
 ```
 
 **With NNUE evaluation:**

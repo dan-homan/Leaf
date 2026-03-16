@@ -143,4 +143,4 @@ The 8000g network is above the material-only classical eval (60.5%) and dominate
   a fresh initialisation, as a comparison point.
 - ~~Run a second full training run with the improved init (classical PSQ PSQT buckets) and Adam
   optimizer to establish a new Elo baseline curve.~~ — In progress (2026-03-16): preliminary
-  result at 5,000 games shows ~+300 Elo vs. fresh init; formal test tournament pending.
+  result at 5,000 games shows ~+400 Elo vs. fresh init; formal test tournament pending.

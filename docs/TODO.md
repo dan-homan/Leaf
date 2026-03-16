@@ -8,7 +8,7 @@ Planned investigations, improvements, and open questions.
 
 ### Adam hyperparameter tuning
 
-The Adam + per-weight LR decay optimizer (`TDLEAF_ADAM_LR0=0.2`, `TDLEAF_ADAM_PSQT_LR0=1.0`,
+The Adam + per-weight LR decay optimizer (`TDLEAF_ADAM_LR0=0.2`, `TDLEAF_ADAM_PSQT_LR0=2.0`,
 `TDLEAF_ADAM_C=5000`) uses initial guesses that have not been systematically tuned.  A grid
 search varying each independently across 500–1000-game runs would establish better defaults.
 
@@ -18,7 +18,7 @@ Key questions:
   the int8 range.  Float-shadow clamping prevents zombie weights but further training will be
   limited at the ±127 boundary.  Monitor whether the network continues to improve or plateaus
   as the distribution saturates.
-- **PSQT LR0 (1.0):** Tuned separately from FC LR0 since Adam normalises gradient magnitude
+- **PSQT LR0 (2.0):** Tuned separately from FC LR0 since Adam normalises gradient magnitude
   and PSQT operates at int32 scale.  Tune empirically.
 - **C (5000):** LR half-life in per-weight updates.  Larger C extends the fast-learning phase;
   smaller C converges more aggressively.
