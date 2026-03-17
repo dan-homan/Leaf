@@ -1,5 +1,15 @@
 Changes since 2017_12_24
 
+2026_03_17 -- TDLeaf: fix asymmetric off-PV filter — zero delta_d for ALL opponent
+               deviations, not only when deviation helped us (tdleaf.cpp, docs/TDLEAF.md).
+               The original "helped_us" guard was asymmetric: it suppressed positive
+               delta_d from opponent blunders while passing through negative delta_d from
+               opponent's unexpected good moves.  Over training this created a systematic
+               downward bias that collapsed evaluations and made the network much weaker
+               than the initialized state.  Symmetric zeroing (filter all off-PV
+               transitions regardless of sign) removes the bias; learning comes from
+               on-PV transitions and the terminal game-result signal.
+
 2026_03_17 -- TDLeaf: blunder filter — zero delta_d when opponent deviates and score improves
                (tdleaf.h, tdleaf.cpp, main.cpp, docs/TDLEAF.md).
                TDRecord gains root_wtm, predicted_opp_move (pv[1]), and actual_opp_move

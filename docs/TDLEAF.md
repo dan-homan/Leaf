@@ -539,7 +539,7 @@ score fluctuated across search depths are down-weighted.  `TDLEAF_ID_VAR_SIGMA2`
 `TDLEAF_ID_VAR_SIGMA2` receives half weight.  Set `TDLEAF_ID_VAR_SIGMA2` to a very
 large value to disable this approach.
 
-### Approach 3 — Blunder filter (opponent deviation)
+### Approach 3 — Off-PV filter (opponent deviation)
 
 Each engine's `TDRecord` stores two moves for every ply:
 
@@ -555,15 +555,19 @@ if predicted_opp_move != NOMOVE and actual_opp_move != NOMOVE:
     opp_deviated = (predicted_opp_move.from != actual_opp_move.from  OR
                     predicted_opp_move.to   != actual_opp_move.to    OR
                     predicted_opp_move.promote != actual_opp_move.promote)
-    helped_us    = (engine is White) ? delta_d > 0 : delta_d < 0
-    if opp_deviated AND helped_us:
+    if opp_deviated:
         delta_d = 0
 ```
 
-When the opponent deviates from our predicted response **and** the score moves in our
-favour, the swing reflects the opponent's error — not the quality of our evaluation of
-the position.  Zeroing `delta_d` prevents that blunder from flowing into the eligibility
-trace and gradient accumulation.
+When the opponent plays a move we did not predict, the score change for that transition
+is attributable to their unpredicted move, not to the quality of our leaf evaluation.
+The filter is applied **symmetrically** — in both the positive and negative direction.
+Filtering only when the opponent's deviation *helped* us (removing positive signals
+while keeping negative ones) creates a systematic downward bias that pushes all
+evaluations toward pessimism; symmetric zeroing avoids that.
+
+After filtering, learning comes only from on-PV transitions (where the opponent followed
+our predicted response) and from the terminal game-result signal.
 
 Moves are compared by from-square, to-square, and promotion piece; the `type` flag is
 excluded to be robust to minor encoding differences between PV moves and `pos.last`.

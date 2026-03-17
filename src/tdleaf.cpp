@@ -142,11 +142,14 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
     for (int t = T - 2; t >= 0; t--) {
         float delta_d  = d[t + 1] - d[t];
 
-        // Approach 3 — Blunder filter.
-        // If the opponent deviated from our predicted response (pv[1]) AND the
-        // score moved in our favour, the swing reflects their error rather than
-        // the quality of our evaluation.  Zero delta_d so it does not contribute
-        // to the eligibility trace or gradients for this transition.
+        // Off-PV filter.
+        // If the opponent deviated from our predicted response (pv[1]), the score
+        // change for this transition is attributable to their unpredicted move, not
+        // to the quality of our leaf evaluation.  Zero delta_d in either direction:
+        // keeping only the negative side (when opponent deviates and hurts us) while
+        // removing the positive side (when opponent blunders) would create a
+        // systematic downward bias on all evaluations.  Symmetric zeroing avoids
+        // that bias; we learn only from on-PV transitions and the terminal signal.
         // Compare by from+to+promote; type flags may differ between PV and pos.last.
         {
             const move &pred   = rec.plies[t].predicted_opp_move;
@@ -155,11 +158,7 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
                 bool opp_deviated = (pred.b.from    != actual.b.from    ||
                                      pred.b.to      != actual.b.to      ||
                                      pred.b.promote != actual.b.promote);
-                // "Helped us" = score shifted in the engine's favour.
-                // root_wtm==true means engine is White: improvement is delta_d > 0.
-                bool helped_us = rec.plies[t].root_wtm ? (delta_d > 0.0f)
-                                                       : (delta_d < 0.0f);
-                if (opp_deviated && helped_us) delta_d = 0.0f;
+                if (opp_deviated) delta_d = 0.0f;
             }
         }
 
