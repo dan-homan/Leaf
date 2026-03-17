@@ -112,8 +112,12 @@ def main():
     parser.add_argument("-c", "--concurrency", type=int, default=default_concurrency,
                         help=f"Simultaneous games (default: {default_concurrency})")
     parser.add_argument("-tc", "--time-control", default="10+0.1",
-                        help="Time control: 'moves/time+inc' or 'time+inc' in seconds "
-                             "(default: 10+0.1)")
+                        help="Time control for both engines: 'moves/time+inc' or 'time+inc' "
+                             "in seconds (default: 10+0.1)")
+    parser.add_argument("--tc1", default=None, metavar="TC",
+                        help="Override time control for engine1 only (default: same as -tc)")
+    parser.add_argument("--tc2", default=None, metavar="TC",
+                        help="Override time control for engine2 only (default: same as -tc)")
     parser.add_argument("--pgn", default=None, metavar="FILE",
                         help="Persistent PGN: all games from all opponents/iterations are "
                              "appended to this file (cutechess -pgnout FILE append)")
@@ -183,8 +187,10 @@ def main():
         d1 = str(args.depth1) if args.depth1 is not None else "unlimited"
         d2 = str(args.depth2) if args.depth2 is not None else "unlimited"
         depth_str = f"   Depth: {name1}={d1} / opponent={d2}"
+    tc_display = (args.time_control if not args.tc1 and not args.tc2
+                  else f"{args.tc1 or args.time_control} / {args.tc2 or args.time_control}")
     print(f"Games: {args.games}   Iterations: {args.iterations}   "
-          f"Concurrency: {args.concurrency}   TC: {args.time_control}   "
+          f"Concurrency: {args.concurrency}   TC: {tc_display}   "
           f"Fischer Random: {'on' if args.fischer_random else 'off'}{depth_str}")
     if args.pgn:
         print(f"Persistent PGN: {args.pgn}")
@@ -207,6 +213,9 @@ def main():
             rounds_arg = str(args.games)
             games_arg  = []
 
+        tc1 = args.tc1 or args.time_control
+        tc2 = args.tc2 or args.time_control
+
         eng1_spec = [f"cmd={exe1}",    f"name={name1}", "proto=xboard", f"dir={run_dir}"]
         eng2_spec = [f"cmd={opp_exe}", f"name={name2}", "proto=xboard", f"dir={run_dir}"]
         if args.depth1 is not None:
@@ -214,11 +223,19 @@ def main():
         if args.depth2 is not None:
             eng2_spec.append(f"depth={args.depth2}")
 
+        # Per-engine TC: use -each when identical, per-engine spec when different.
+        if tc1 == tc2:
+            each_tc = [f"tc={tc1}"]
+        else:
+            eng1_spec.append(f"tc={tc1}")
+            eng2_spec.append(f"tc={tc2}")
+            each_tc = []
+
         base_cmd = [
             cutechess_cli,
             "-engine", *eng1_spec,
             "-engine", *eng2_spec,
-            "-each",   f"tc={args.time_control}", *(["ponder"] if args.ponder else []),
+            "-each",   *each_tc, *(["ponder"] if args.ponder else []),
             *([ "-variant", "fischerandom"] if args.fischer_random else []),
             "-concurrency", str(args.concurrency),
             "-rounds", rounds_arg,

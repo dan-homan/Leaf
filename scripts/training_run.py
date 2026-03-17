@@ -170,29 +170,71 @@ def main():
     sidecar_path = os.path.join(learn_dir, net_base + ".games")
 
     # -----------------------------------------------------------------------
+    # Step 1b — Training partner selection
+    # -----------------------------------------------------------------------
+    print()
+    print("Training partner:")
+    print("  [1] Self-play           — both instances learn (symmetric)")
+    print("  [2] Read-only opponent  — learner vs. fixed-weight copy of same net")
+    print("  [3] External opponent   — learner vs. user-supplied executable")
+    partner_choice = ask("Choice", "1").strip()
+
+    opponent_exe = None   # set for choices 2 and 3
+    if partner_choice == "3":
+        while True:
+            opp_path = ask("  Path to opponent executable").strip()
+            if os.path.isfile(opp_path):
+                opponent_exe = os.path.abspath(opp_path)
+                break
+            print(f"  File not found: {opp_path}")
+
+    # -----------------------------------------------------------------------
     # Step 2 — Build executables  (comp.pl runs in run/, binaries moved to learn/)
     # -----------------------------------------------------------------------
     print()
     print("Building executables:")
-    train_ver  = f"train_{net_base}_a"
-    train_ver2 = f"train_{net_base}_b"
-    train_exe  = os.path.join(learn_dir, f"Leaf_v{train_ver}")
-    train_exe2 = os.path.join(learn_dir, f"Leaf_v{train_ver2}")
-    nnue_flag  = f"NNUE_NET={net_filename}"
+    train_ver   = f"train_{net_base}_a"
+    train_exe   = os.path.join(learn_dir, f"Leaf_v{train_ver}")
+    nnue_flag   = f"NNUE_NET={net_filename}"
+    tdleaf_flags = ["NNUE=1", "TDLEAF=1", nnue_flag]
 
+    if partner_choice == "1":
+        # Symmetric self-play: two learning instances.
+        train_ver2 = f"train_{net_base}_b"
+        train_exe2 = os.path.join(learn_dir, f"Leaf_v{train_ver2}")
+        need_exe2  = True
+        ro_build   = False
+    elif partner_choice == "2":
+        # Read-only opponent: build a second binary with TDLEAF_READONLY=1.
+        train_ver2 = f"train_{net_base}_ro"
+        train_exe2 = os.path.join(learn_dir, f"Leaf_v{train_ver2}")
+        need_exe2  = True
+        ro_build   = True
+    else:
+        # External opponent: no second binary to build.
+        train_ver2 = None
+        train_exe2 = opponent_exe
+        need_exe2  = False
+        ro_build   = False
+
+    exes_exist = os.path.isfile(train_exe) and (not need_exe2 or os.path.isfile(train_exe2))
     rebuild = True
-    if os.path.isfile(train_exe) and os.path.isfile(train_exe2):
-        rebuild = ask_yes_no("  Both executables already exist.  Rebuild?", default="n")
+    if exes_exist:
+        rebuild = ask_yes_no(
+            "  Executable(s) already exist.  Rebuild?", default="n")
 
     if rebuild:
-        print(f"  Building training binary A (Leaf_v{train_ver}) ...")
-        if not build_binary(train_ver, ["NNUE=1", "TDLEAF=1", nnue_flag]):
+        print(f"  Building learning binary (Leaf_v{train_ver}) ...")
+        if not build_binary(train_ver, tdleaf_flags):
             print("  Build failed.", file=sys.stderr)
             sys.exit(1)
-        print(f"  Building training binary B (Leaf_v{train_ver2}) ...")
-        if not build_binary(train_ver2, ["NNUE=1", "TDLEAF=1", nnue_flag]):
-            print("  Build failed.", file=sys.stderr)
-            sys.exit(1)
+        if need_exe2:
+            label = "read-only" if ro_build else "B"
+            print(f"  Building {label} binary (Leaf_v{train_ver2}) ...")
+            ro_flags = tdleaf_flags + ["TDLEAF_READONLY=1"] if ro_build else tdleaf_flags
+            if not build_binary(train_ver2, ro_flags):
+                print("  Build failed.", file=sys.stderr)
+                sys.exit(1)
         print("  Build complete.")
     else:
         print("  Using existing binaries.")
@@ -252,12 +294,16 @@ def main():
     print("Match parameters:")
     n_games     = int(ask("  Games per iteration [-n]        ", 500))
     n_iters     = int(ask("  Iterations          [-i]        ", 10))
-    tc          = ask(    "  Time control        [-tc]       ", "0:03+0.05")
+    tc1         = ask(    "  Learner time control   [--tc1]  ", "0:03+0.05")
+    tc2_raw     = ask(    "  Opponent time control  [--tc2]  ", tc1)
+    tc2         = tc2_raw if tc2_raw.strip() else tc1
     concurrency = int(ask( "  Concurrency         [-c]        ", default_concurrency))
     wait_ms     = int(ask("  Wait between games  [--wait ms] ", 500))
     fischer     = ask_yes_no("  Fischer Random? [--fischer-random]", default="y")
-    depth_str   = ask("  Depth limit (both engines, 0=none) [--depth1/2]", "0")
-    depth       = int(depth_str) if depth_str.strip() else 0
+    depth1_str  = ask("  Learner depth limit (0=none) [--depth1]", "0")
+    depth1      = int(depth1_str) if depth1_str.strip() else 0
+    depth2_str  = ask(f"  Opponent depth limit (0=none) [--depth2]", str(depth1))
+    depth2      = int(depth2_str) if depth2_str.strip() else 0
 
     total_new   = n_games * n_iters
     total_after = prior_games + total_new
@@ -280,14 +326,27 @@ def main():
     print()
     print("=" * 62)
     print(f"  Net in:           {net_filename}")
-    print(f"  Training binary A: Leaf_v{train_ver}")
-    print(f"  Training binary B: Leaf_v{train_ver2}")
+    print(f"  Learner:          Leaf_v{train_ver}")
+    if partner_choice == "1":
+        print(f"  Opponent:         Leaf_v{train_ver2}  (symmetric self-play)")
+    elif partner_choice == "2":
+        print(f"  Opponent:         Leaf_v{train_ver2}  (read-only, same net)")
+    else:
+        print(f"  Opponent:         {os.path.basename(train_exe2)}  (external)")
     print(f"  Games this run:   {total_new:,}  ({n_iters} iter × {n_games} games)")
     print(f"  Prior games:      {prior_games:,}")
     print(f"  Total after run:  {total_after:,}")
-    print(f"  TC: {tc}   Concurrency: {concurrency}   Wait: {wait_ms} ms")
-    if depth:
-        print(f"  Depth limit:      {depth} (both engines)")
+    if tc1 == tc2:
+        print(f"  TC: {tc1}   Concurrency: {concurrency}   Wait: {wait_ms} ms")
+    else:
+        print(f"  TC learner: {tc1}   TC opponent: {tc2}   Concurrency: {concurrency}   Wait: {wait_ms} ms")
+    if depth1 or depth2:
+        d1_str = str(depth1) if depth1 else "none"
+        d2_str = str(depth2) if depth2 else "none"
+        if depth1 == depth2:
+            print(f"  Depth limit:      {d1_str} (both engines)")
+        else:
+            print(f"  Depth learner:    {d1_str}   Depth opponent: {d2_str}")
     if fischer:
         print( "  Fischer Random:   yes")
     if init_cnt is not None and init_cnt > 0:
@@ -328,15 +387,19 @@ def main():
         train_exe2,
         "-n", str(n_games),
         "-i", str(n_iters),
-        "-tc", tc,
+        "-tc", tc1,
         "-c", str(concurrency),
         "--wait", str(wait_ms),
         "--pgn-out", pgn_base_path,
     ]
+    if tc2 != tc1:
+        match_cmd += ["--tc2", tc2]
     if fischer:
         match_cmd.append("--fischer-random")
-    if depth:
-        match_cmd += ["--depth1", str(depth), "--depth2", str(depth)]
+    if depth1:
+        match_cmd += ["--depth1", str(depth1)]
+    if depth2:
+        match_cmd += ["--depth2", str(depth2)]
 
     result = subprocess.run(match_cmd, cwd=run_dir)
     if result.returncode != 0:
@@ -369,6 +432,12 @@ def main():
     print("  Training run complete.")
     print(f"  Net in:      {net_filename}")
     print(f"  Net out:     {output_net_name}  (learn/)")
+    if partner_choice == "1":
+        print( "  Mode:        symmetric self-play")
+    elif partner_choice == "2":
+        print( "  Mode:        learner vs. read-only opponent")
+    else:
+        print(f"  Mode:        learner vs. {os.path.basename(train_exe2)}")
     print(f"  Games added: {total_new:,}  ({n_iters} iter × {n_games} games)")
     print(f"  Total games: {total_after:,}")
     print(f"  PGN files:   {pgn_dir}/")
