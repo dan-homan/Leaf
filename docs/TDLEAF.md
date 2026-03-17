@@ -539,41 +539,6 @@ score fluctuated across search depths are down-weighted.  `TDLEAF_ID_VAR_SIGMA2`
 `TDLEAF_ID_VAR_SIGMA2` receives half weight.  Set `TDLEAF_ID_VAR_SIGMA2` to a very
 large value to disable this approach.
 
-### Approach 3 — Off-PV filter (opponent deviation)
-
-Each engine's `TDRecord` stores two moves for every ply:
-
-- **`predicted_opp_move`** — `pv[1]` from this search: the opponent's response our PV
-  expected.  `NOMOVE` if the PV has depth < 2.
-- **`actual_opp_move`** — `game.pos.last` at search time: the last move the opponent
-  actually played to reach the current root position.  `NOMOVE` at the first game ply.
-
-In `tdleaf_accumulate_game`, before score-change clipping, for each transition t → t+1:
-
-```
-if predicted_opp_move != NOMOVE and actual_opp_move != NOMOVE:
-    opp_deviated = (predicted_opp_move.from != actual_opp_move.from  OR
-                    predicted_opp_move.to   != actual_opp_move.to    OR
-                    predicted_opp_move.promote != actual_opp_move.promote)
-    if opp_deviated:
-        delta_d = 0
-```
-
-When the opponent plays a move we did not predict, the score change for that transition
-is attributable to their unpredicted move, not to the quality of our leaf evaluation.
-The filter is applied **symmetrically** — in both the positive and negative direction.
-Filtering only when the opponent's deviation *helped* us (removing positive signals
-while keeping negative ones) creates a systematic downward bias that pushes all
-evaluations toward pessimism; symmetric zeroing avoids that.
-
-After filtering, learning comes only from on-PV transitions (where the opponent followed
-our predicted response) and from the terminal game-result signal.
-
-Moves are compared by from-square, to-square, and promotion piece; the `type` flag is
-excluded to be robust to minor encoding differences between PV moves and `pos.last`.
-
-No hyperparameter controls this filter; it is always active when `TDLEAF=1`.
-
 ### Tuning guidance
 
 | Hyperparameter | Default | Effect of increasing | Effect of decreasing |
@@ -581,6 +546,6 @@ No hyperparameter controls this filter; it is always active when `TDLEAF=1`.
 | `TDLEAF_SCORE_CLIP_CP` | 200 cp | Less clipping; more sensitive to large swings | More aggressive attenuation of large score changes |
 | `TDLEAF_ID_VAR_SIGMA2` | 10 000 cp² | More tolerant of unstable ID scores | Stronger down-weighting of ID-unstable positions |
 
-All three approaches are active simultaneously by default.  Use the ablation plan in
+Both approaches are active simultaneously by default.  Use the ablation plan in
 `docs/TODO.md` to isolate their individual contributions.  A good starting ablation:
 run 500 games with each configuration and compare Elo gain per game vs. the baseline.

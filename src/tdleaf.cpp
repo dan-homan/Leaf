@@ -20,10 +20,8 @@ void tdleaf_record_ply(TDGameRecord &rec,
                        const NNUEAccumulator &root_acc,
                        const move *pv,
                        int score_root_stm,
-                       bool root_wtm,
                        const int *id_scores,
-                       int id_score_count,
-                       move opp_move_to_here)
+                       int id_score_count)
 {
     if (rec.n_plies >= MAX_GAME_PLY) return;  // safety guard
 
@@ -45,7 +43,7 @@ void tdleaf_record_ply(TDGameRecord &rec,
     }
     // acc_a now holds the fully computed leaf accumulator; cur is the leaf position.
 
-    bool leaf_wtm = root_wtm ^ (bool)(pv_len & 1);
+    bool leaf_wtm = (bool)root_pos.wtm ^ (bool)(pv_len & 1);
 
     // Leaf piece count for stack selection.
     int pc = 2;  // kings
@@ -91,16 +89,8 @@ void tdleaf_record_ply(TDGameRecord &rec,
     memcpy(r.psqt[1], acc_a.psqt[1], NNUE_PSQT_BKTS * sizeof(int32_t));
     r.score_stm         = leaf_score_stm;
     r.wtm               = leaf_wtm;
-    r.root_wtm          = root_wtm;
     r.stack             = (pc - 1) / 4;
     r.id_score_variance = id_var;
-
-    // Blunder-filter fields.
-    // predicted_opp_move: the opponent's predicted response from our PV (pv[1]).
-    // pv[0] is our move; pv[1] is the opponent's predicted reply.
-    move nomove; nomove.t = NOMOVE;
-    r.predicted_opp_move = (pv[0].t != NOMOVE && pv[1].t != NOMOVE) ? pv[1] : nomove;
-    r.actual_opp_move    = opp_move_to_here;
 
     // Enumerate active features at the leaf position for FT/PSQT backprop.
     // Indices are by actual perspective (0=BLACK, 1=WHITE) matching halfkav2_feature().
@@ -141,26 +131,6 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
     e[T - 1] = result - d[T - 1];
     for (int t = T - 2; t >= 0; t--) {
         float delta_d  = d[t + 1] - d[t];
-
-        // Off-PV filter.
-        // If the opponent deviated from our predicted response (pv[1]), the score
-        // change for this transition is attributable to their unpredicted move, not
-        // to the quality of our leaf evaluation.  Zero delta_d in either direction:
-        // keeping only the negative side (when opponent deviates and hurts us) while
-        // removing the positive side (when opponent blunders) would create a
-        // systematic downward bias on all evaluations.  Symmetric zeroing avoids
-        // that bias; we learn only from on-PV transitions and the terminal signal.
-        // Compare by from+to+promote; type flags may differ between PV and pos.last.
-        {
-            const move &pred   = rec.plies[t].predicted_opp_move;
-            const move &actual = rec.plies[t + 1].actual_opp_move;
-            if (pred.t != NOMOVE && actual.t != NOMOVE) {
-                bool opp_deviated = (pred.b.from    != actual.b.from    ||
-                                     pred.b.to      != actual.b.to      ||
-                                     pred.b.promote != actual.b.promote);
-                if (opp_deviated) delta_d = 0.0f;
-            }
-        }
 
         float delta_cp = fabsf(score_w_cp[t + 1] - score_w_cp[t]);
         if (delta_cp > TDLEAF_SCORE_CLIP_CP && delta_cp > 0.0f)
