@@ -19,6 +19,7 @@
 #define TDLEAF_H
 
 #include "define.h"
+#include "chess.h"
 #include "nnue.h"
 
 // ---------------------------------------------------------------------------
@@ -74,12 +75,20 @@ struct TDRecord {
     int32_t psqt[2][NNUE_PSQT_BKTS];  // PSQT sums [perspective][bucket]
     int     score_stm;                 // search score (centipawns, side-to-move POV)
     int     stack;                     // layer stack index used (piece_count-1)/4
-    bool    wtm;                       // White to move at this position
+    bool    wtm;                       // White to move at the leaf position
+    bool    root_wtm;                  // White to move at the root (engine's colour this turn)
     float   id_score_variance;         // variance of last N ID depth scores (cp²); 0 if < 2 depths
     // Active feature indices at the leaf position (indexed by actual perspective 0=BLACK,1=WHITE).
     // Used for FT and PSQT gradient backprop.
     int     ft_idx[2][NNUE_MAX_FT_PER_PERSP];
     int8_t  n_ft[2];
+    // Blunder-filter fields (Approach 3 of horizon noise mitigation).
+    // predicted_opp_move: pv[1] at this ply — the move we expected the opponent to
+    //   play in response to our pv[0].  NOMOVE (t==0) if PV depth < 2.
+    // actual_opp_move: the last move actually played by the opponent to reach this
+    //   root position (game.pos.last at search time).  NOMOVE at the first game ply.
+    move    predicted_opp_move;
+    move    actual_opp_move;
 };
 
 // ---------------------------------------------------------------------------
@@ -111,7 +120,8 @@ void tdleaf_record_ply(TDGameRecord &rec,
                        int score_root_stm,
                        bool root_wtm,
                        const int *id_scores,
-                       int id_score_count);
+                       int id_score_count,
+                       move opp_move_to_here);
 
 // Run the full TDLeaf(λ) update after a game ends.
 // result: game outcome from White's perspective (1.0=White wins, 0.5=draw, 0.0=Black wins).

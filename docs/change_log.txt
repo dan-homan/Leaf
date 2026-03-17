@@ -1,5 +1,13 @@
 Changes since 2017_12_24
 
+2026_03_17 -- TDLeaf: blunder filter — zero delta_d when opponent deviates and score improves
+               (tdleaf.h, tdleaf.cpp, main.cpp, docs/TDLEAF.md).
+               TDRecord gains root_wtm, predicted_opp_move (pv[1]), and actual_opp_move
+               (game.pos.last).  In tdleaf_accumulate_game, before score-change clipping,
+               if the opponent played a different move than our PV predicted AND the score
+               moved in our favour, delta_d is set to 0 — the swing reflects the opponent's
+               error, not signal about our evaluation.
+
 2026_03_16 -- TDLeaf: remove plain-GD fallback and defunct LR-scale constants
                (tdleaf.h, tdleaf.cpp, nnue.cpp, scripts/training_run.py, docs/).
                Removed constants: TDLEAF_ALPHA, NNUE_FT_LR_SCALE, NNUE_PSQT_LR_SCALE,

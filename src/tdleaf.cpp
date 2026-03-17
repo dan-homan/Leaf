@@ -22,7 +22,8 @@ void tdleaf_record_ply(TDGameRecord &rec,
                        int score_root_stm,
                        bool root_wtm,
                        const int *id_scores,
-                       int id_score_count)
+                       int id_score_count,
+                       move opp_move_to_here)
 {
     if (rec.n_plies >= MAX_GAME_PLY) return;  // safety guard
 
@@ -88,10 +89,18 @@ void tdleaf_record_ply(TDGameRecord &rec,
     memcpy(r.acc[1],  acc_a.acc[1],  NNUE_HALF_DIMS  * sizeof(int16_t));
     memcpy(r.psqt[0], acc_a.psqt[0], NNUE_PSQT_BKTS * sizeof(int32_t));
     memcpy(r.psqt[1], acc_a.psqt[1], NNUE_PSQT_BKTS * sizeof(int32_t));
-    r.score_stm        = leaf_score_stm;
-    r.wtm              = leaf_wtm;
-    r.stack            = (pc - 1) / 4;
+    r.score_stm         = leaf_score_stm;
+    r.wtm               = leaf_wtm;
+    r.root_wtm          = root_wtm;
+    r.stack             = (pc - 1) / 4;
     r.id_score_variance = id_var;
+
+    // Blunder-filter fields.
+    // predicted_opp_move: the opponent's predicted response from our PV (pv[1]).
+    // pv[0] is our move; pv[1] is the opponent's predicted reply.
+    move nomove; nomove.t = NOMOVE;
+    r.predicted_opp_move = (pv[0].t != NOMOVE && pv[1].t != NOMOVE) ? pv[1] : nomove;
+    r.actual_opp_move    = opp_move_to_here;
 
     // Enumerate active features at the leaf position for FT/PSQT backprop.
     // Indices are by actual perspective (0=BLACK, 1=WHITE) matching halfkav2_feature().
@@ -132,6 +141,28 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
     e[T - 1] = result - d[T - 1];
     for (int t = T - 2; t >= 0; t--) {
         float delta_d  = d[t + 1] - d[t];
+
+        // Approach 3 — Blunder filter.
+        // If the opponent deviated from our predicted response (pv[1]) AND the
+        // score moved in our favour, the swing reflects their error rather than
+        // the quality of our evaluation.  Zero delta_d so it does not contribute
+        // to the eligibility trace or gradients for this transition.
+        // Compare by from+to+promote; type flags may differ between PV and pos.last.
+        {
+            const move &pred   = rec.plies[t].predicted_opp_move;
+            const move &actual = rec.plies[t + 1].actual_opp_move;
+            if (pred.t != NOMOVE && actual.t != NOMOVE) {
+                bool opp_deviated = (pred.b.from    != actual.b.from    ||
+                                     pred.b.to      != actual.b.to      ||
+                                     pred.b.promote != actual.b.promote);
+                // "Helped us" = score shifted in the engine's favour.
+                // root_wtm==true means engine is White: improvement is delta_d > 0.
+                bool helped_us = rec.plies[t].root_wtm ? (delta_d > 0.0f)
+                                                       : (delta_d < 0.0f);
+                if (opp_deviated && helped_us) delta_d = 0.0f;
+            }
+        }
+
         float delta_cp = fabsf(score_w_cp[t + 1] - score_w_cp[t]);
         if (delta_cp > TDLEAF_SCORE_CLIP_CP && delta_cp > 0.0f)
             delta_d *= TDLEAF_SCORE_CLIP_CP / delta_cp;

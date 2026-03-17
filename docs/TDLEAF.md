@@ -539,6 +539,37 @@ score fluctuated across search depths are down-weighted.  `TDLEAF_ID_VAR_SIGMA2`
 `TDLEAF_ID_VAR_SIGMA2` receives half weight.  Set `TDLEAF_ID_VAR_SIGMA2` to a very
 large value to disable this approach.
 
+### Approach 3 — Blunder filter (opponent deviation)
+
+Each engine's `TDRecord` stores two moves for every ply:
+
+- **`predicted_opp_move`** — `pv[1]` from this search: the opponent's response our PV
+  expected.  `NOMOVE` if the PV has depth < 2.
+- **`actual_opp_move`** — `game.pos.last` at search time: the last move the opponent
+  actually played to reach the current root position.  `NOMOVE` at the first game ply.
+
+In `tdleaf_accumulate_game`, before score-change clipping, for each transition t → t+1:
+
+```
+if predicted_opp_move != NOMOVE and actual_opp_move != NOMOVE:
+    opp_deviated = (predicted_opp_move.from != actual_opp_move.from  OR
+                    predicted_opp_move.to   != actual_opp_move.to    OR
+                    predicted_opp_move.promote != actual_opp_move.promote)
+    helped_us    = (engine is White) ? delta_d > 0 : delta_d < 0
+    if opp_deviated AND helped_us:
+        delta_d = 0
+```
+
+When the opponent deviates from our predicted response **and** the score moves in our
+favour, the swing reflects the opponent's error — not the quality of our evaluation of
+the position.  Zeroing `delta_d` prevents that blunder from flowing into the eligibility
+trace and gradient accumulation.
+
+Moves are compared by from-square, to-square, and promotion piece; the `type` flag is
+excluded to be robust to minor encoding differences between PV moves and `pos.last`.
+
+No hyperparameter controls this filter; it is always active when `TDLEAF=1`.
+
 ### Tuning guidance
 
 | Hyperparameter | Default | Effect of increasing | Effect of decreasing |
@@ -546,6 +577,6 @@ large value to disable this approach.
 | `TDLEAF_SCORE_CLIP_CP` | 200 cp | Less clipping; more sensitive to large swings | More aggressive attenuation of large score changes |
 | `TDLEAF_ID_VAR_SIGMA2` | 10 000 cp² | More tolerant of unstable ID scores | Stronger down-weighting of ID-unstable positions |
 
-Both approaches are active simultaneously by default.  Use the ablation plan in
+All three approaches are active simultaneously by default.  Use the ablation plan in
 `docs/TODO.md` to isolate their individual contributions.  A good starting ablation:
 run 500 games with each configuration and compare Elo gain per game vs. the baseline.
