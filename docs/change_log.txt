@@ -1,5 +1,14 @@
 Changes since 2017_12_24
 
+2026_03_18 -- main.cpp: fix stdin EOF spin-loop (src/main.cpp).
+               When the GUI closed the stdin pipe without sending "quit",
+               cin >> response failed silently and the main protocol loop
+               spun at 100% CPU forever.  Orphan engine processes from a
+               training match consumed all CPU, starving newly launched
+               engines in the next cycle and causing spurious
+               "doesn't support variant fischerandom" failures.
+               Fix: break from the main loop if cin >> response fails.
+
 2026_03_18 -- training_run.py: train-validate loop and related improvements
                (scripts/training_run.py, scripts/match.py, docs/SCRIPT_USE.md).
                New features:

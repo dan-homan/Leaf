@@ -458,8 +458,8 @@ int main(int argc, char *argv[])
     if(game.process_move) { make_move(); game.T++; game.process_move = 0; continue; }
 
     if(game.p_side == game.pos.wtm || game.over || game.force_mode) {
-      cin >> response;      // get the command
-      if((game.ts.last_ponder || game.ts.analysis_mode) && UNIX) cout << "\n";       
+      if (!(cin >> response)) break;  // EOF (pipe closed by GUI) — exit cleanly
+      if((game.ts.last_ponder || game.ts.analysis_mode) && UNIX) cout << "\n";
       parse_command();      // parse it
     } else {
       if(!xboard) cout << "Thinking ...\n";
