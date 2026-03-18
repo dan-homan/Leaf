@@ -1352,12 +1352,17 @@ int inter()
   }
 
   if(interrupt && xboard) {
-    cin >> response;
-    parse_command();
-    if(!game.terminate_search) {
-      interrupt = 0;
+    if (!(cin >> response)) {
+      // EOF: pipe closed by GUI — stop search so main loop can exit cleanly
+      game.terminate_search = 1;
+      logfile << "Search Interrupted: stdin EOF\n";
     } else {
-      logfile << "Search Interrupted by GUI command\n";
+      parse_command();
+      if(!game.terminate_search) {
+        interrupt = 0;
+      } else {
+        logfile << "Search Interrupted by GUI command\n";
+      }
     }
   }
 
