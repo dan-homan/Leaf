@@ -39,6 +39,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 
 learn_dir = os.path.dirname(os.path.abspath(__file__))
 run_dir   = os.path.normpath(os.path.join(learn_dir, "../run"))
@@ -565,6 +566,9 @@ def main():
                       f"   [{current_games:,} games banked]")
                 print("─" * 62)
 
+                # Brief pause to ensure all file I/O from the previous cycle has settled.
+                time.sleep(1)
+
                 # Save checkpoint of current .tdleaf.bin
                 checkpoint_bin = tdleaf_bin + ".checkpoint"
                 best_nnue_path = os.path.join(learn_dir, best_nnue_name)
@@ -603,9 +607,15 @@ def main():
                 current_games += games_per_cycle
                 break
 
+            # Allow engines time to finish flushing .tdleaf.bin before we read it.
+            time.sleep(2)
+
             # --- Export candidate ---
             print()
             export_nnue(train_exe, cand_nnue_path, "candidate")
+
+            # Allow the exported .nnue files to settle before validation reads them.
+            time.sleep(1)
 
             # --- Validation match ---
             val_pgn = os.path.join(
