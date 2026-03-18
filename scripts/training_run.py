@@ -610,6 +610,30 @@ def main():
             print(f"  --write-nnue ({label}) failed.", file=sys.stderr)
             sys.exit(r.returncode)
 
+    # -----------------------------------------------------------------------
+    # Step 5b-pre — Set up initial best.nnue baseline (loop mode only).
+    #
+    # best.nnue must reflect the weights at the *start* of training so the
+    # validation match has a stable baseline.  We set it up ONCE here (before
+    # any cycle) rather than at the top of each cycle so that no train_exe
+    # subprocess runs immediately before the training match — that was causing
+    # intermittent engine-startup failures in cycle 2+.
+    #
+    # After each *accepted* cycle we re-export best.nnue from the accepted
+    # .tdleaf.bin so it advances with the training.
+    # -----------------------------------------------------------------------
+    if use_loop:
+        best_nnue_path = os.path.join(learn_dir, best_nnue_name)
+        cand_nnue_path = os.path.join(learn_dir, cand_nnue_name)
+        print()
+        if os.path.isfile(tdleaf_bin):
+            print("Setting up initial best baseline from existing .tdleaf.bin ...")
+            wait_until_stable(tdleaf_bin)
+            export_nnue(train_exe, best_nnue_path, "initial best")
+        else:
+            shutil.copy2(net_file, best_nnue_path)
+            print(f"  Best baseline → {best_nnue_name}  (base net, no prior .tdleaf.bin)")
+
     cycle_num = 0
     try:
         while True:
@@ -628,20 +652,11 @@ def main():
                 # Ensure all file I/O from the previous cycle has settled.
                 wait_until_stable(tdleaf_bin)
 
-                # Save checkpoint of current .tdleaf.bin
+                # Save a checkpoint so we can revert on rejection.
                 checkpoint_bin = tdleaf_bin + ".checkpoint"
-                best_nnue_path = os.path.join(learn_dir, best_nnue_name)
-                cand_nnue_path = os.path.join(learn_dir, cand_nnue_name)
-
                 has_checkpoint = os.path.isfile(tdleaf_bin)
                 if has_checkpoint:
                     shutil.copy2(tdleaf_bin, checkpoint_bin)
-                    export_nnue(train_exe, best_nnue_path, "best")
-                else:
-                    # No weights yet — use the base .nnue as the baseline.
-                    # On rejection we will delete the newly created .tdleaf.bin.
-                    shutil.copy2(net_file, best_nnue_path)
-                    print(f"  Best checkpoint  → {best_nnue_name}  (base net)")
 
                 pgn_path = os.path.join(
                     pgn_dir, f"match_{net_base}_cycle{cycle_num:02d}.pgn")
@@ -715,6 +730,9 @@ def main():
             if accepted:
                 current_games += games_per_cycle
                 write_game_count(sidecar_path, current_games)
+                # Advance the best baseline so the next cycle compares against
+                # the newly accepted weights (not the original session start).
+                export_nnue(train_exe, best_nnue_path, "new best (accepted)")
                 print(f"  Banked games: {current_games:,}")
             else:
                 if has_checkpoint:

@@ -20,6 +20,10 @@ Changes since 2017_12_24
                  .tdleaf.bin companion lock file (POSIX flock) to clear before
                  reading weights, preventing stale exports and engine-init failures
                  in subsequent cycles.
+               · best.nnue baseline is now established once before the first cycle
+                 (and updated only after each accepted cycle), eliminating a train_exe
+                 invocation immediately before the training match that caused
+                 intermittent Fischer Random engine-startup failures in cycle 2+.
 
 2026_03_17 -- TDLeaf: remove off-PV / blunder filter — did not produce stronger play
                (tdleaf.h, tdleaf.cpp, main.cpp, docs/TDLEAF.md).

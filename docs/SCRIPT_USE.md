@@ -82,12 +82,16 @@ When enabled, the script runs repeated train → validate cycles instead of a si
 match block:
 
 ```
+setup (once before first cycle):
+  export current .tdleaf.bin → <net>-best.nnue
+  (or copy base .nnue if no .tdleaf.bin exists yet)
+
 repeat N cycles (0 = forever until Ctrl-C):
-  1. Checkpoint current .tdleaf.bin; export current weights → <net>-best.nnue
+  1. Checkpoint current .tdleaf.bin
   2. Train for X games (single iteration — Adam state preserved throughout)
   3. Export new weights → <net>-cand.nnue
   4. Run Y-game validation match: eval_cand vs eval_best
-  5. Accept if LOS ≥ threshold → bank games, update best
+  5. Accept if LOS ≥ threshold → bank games, export accepted weights → best.nnue
      Reject → revert .tdleaf.bin to pre-cycle checkpoint
 ```
 
