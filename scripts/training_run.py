@@ -139,9 +139,13 @@ def compute_los(w, d, l):
     return 0.5 * math.erfc(-z / math.sqrt(2.0))
 
 
-def run_match_streaming(cmd):
+def run_match_streaming(cmd, los_stop_hi=None, los_stop_lo=None):
     """Run a subprocess, stream its stdout to the console, and capture the
     final Score line (cutechess-cli format).
+
+    If los_stop_hi or los_stop_lo are given (fractions, e.g. 0.90 / 0.10),
+    the match is terminated early once the running LOS crosses either bound
+    after at least 20 games.  Early termination is treated as success.
 
     Returns (w, d, l, returncode) from engine1's perspective.
     """
@@ -149,6 +153,7 @@ def run_match_streaming(cmd):
         r"Score of .+? vs .+?:\s+(\d+)\s+-\s+(\d+)\s+-\s+(\d+)"
     )
     w = d = l = 0
+    early_stop = False
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
     )
@@ -158,8 +163,26 @@ def run_match_streaming(cmd):
         if m:
             # cutechess: "W - L - D" from engine1 perspective
             w, l, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            n = w + d + l
+            if n >= 20 and (los_stop_hi is not None or los_stop_lo is not None):
+                los = compute_los(w, d, l)
+                if los_stop_hi is not None and los >= los_stop_hi:
+                    print(f"\n  [Early stop: LOS={los*100:.1f}% ≥ {los_stop_hi*100:.0f}%"
+                          f" after {n} games]", flush=True)
+                    proc.terminate()
+                    early_stop = True
+                    break
+                if los_stop_lo is not None and los <= los_stop_lo:
+                    print(f"\n  [Early stop: LOS={los*100:.1f}% ≤ {los_stop_lo*100:.0f}%"
+                          f" after {n} games]", flush=True)
+                    proc.terminate()
+                    early_stop = True
+                    break
+    if early_stop:
+        for line in proc.stdout:   # drain to unblock the child
+            print(line, end="", flush=True)
     proc.wait()
-    return w, d, l, proc.returncode
+    return w, d, l, 0 if early_stop else proc.returncode
 
 
 # ---------------------------------------------------------------------------
@@ -250,6 +273,8 @@ def main():
     n_cycles       = 0
     val_games      = 200
     los_thresh_pct = 70.0
+    los_stop_hi    = 0.90   # early-stop if LOS rises above this
+    los_stop_lo    = 0.10   # early-stop if LOS falls below this
     val_tc         = None   # set in Step 4 after tc1 is known
     # Eval binary names (set in Step 2 if use_loop)
     best_nnue_name = None
@@ -261,6 +286,8 @@ def main():
         n_cycles       = int(ask("  Cycles (0 = run forever until Ctrl-C)", "0"))
         val_games      = int(ask("  Validation games per cycle           ", "200"))
         los_thresh_pct = float(ask("  LOS acceptance threshold (%)        ", "70"))
+        los_stop_hi    = float(ask("  Early-stop if LOS ≥ (%)            ", "90")) / 100.0
+        los_stop_lo    = float(ask("  Early-stop if LOS ≤ (%)            ", "10")) / 100.0
         # val_tc is asked in Step 4 once tc1 is known
         best_nnue_name = f"{net_base}-best.nnue"
         cand_nnue_name = f"{net_base}-cand.nnue"
@@ -441,7 +468,8 @@ def main():
         cycle_label = str(n_cycles) if n_cycles > 0 else "∞"
         print(f"  Loop:             {cycle_label} cycles × {games_per_cycle:,} games/cycle")
         print(f"  Validation:       {val_games} games @ {val_tc}  "
-              f" LOS threshold: {los_thresh_pct:.0f}%")
+              f" accept≥{los_thresh_pct:.0f}%  "
+              f"early-stop ≥{los_stop_hi*100:.0f}% / ≤{los_stop_lo*100:.0f}%")
     else:
         print(f"  Games this run:   {games_per_cycle:,}  ({n_iters} iter × {n_games} games)")
     print(f"  Prior games:      {prior_games:,}")
@@ -595,7 +623,8 @@ def main():
             if fischer:
                 val_cmd.append("--fischer-random")
 
-            vw, vd, vl, vrc = run_match_streaming(val_cmd)
+            vw, vd, vl, vrc = run_match_streaming(
+                val_cmd, los_stop_hi=los_stop_hi, los_stop_lo=los_stop_lo)
             if vrc != 0:
                 print(f"  Validation match failed (exit {vrc}).",
                       file=sys.stderr)
