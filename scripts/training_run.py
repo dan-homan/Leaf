@@ -661,10 +661,13 @@ def main():
                     shutil.copy2(checkpoint_bin, tdleaf_bin)
                     print("  Reverted .tdleaf.bin to pre-cycle checkpoint.")
                 else:
-                    # No prior weights existed — remove the file created this cycle.
-                    if os.path.isfile(tdleaf_bin):
-                        os.remove(tdleaf_bin)
-                    print("  No prior checkpoint — removed new .tdleaf.bin.")
+                    # No prior checkpoint existed.  Leave the .tdleaf.bin in
+                    # place so the next cycle can build on this cycle's
+                    # training rather than restarting from the base net.
+                    # The next cycle will still compare against the base net
+                    # (best.nnue) until some candidate is finally accepted.
+                    print("  No prior checkpoint — retaining .tdleaf.bin for"
+                          " next cycle.")
 
     except KeyboardInterrupt:
         print("\n\n[Ctrl-C — exporting current weights before exit ...]")
