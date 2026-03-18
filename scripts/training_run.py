@@ -38,6 +38,7 @@ import math
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -209,7 +210,8 @@ def run_match_streaming(cmd, los_stop_hi=None, los_stop_lo=None):
     w = d = l = 0
     early_stop = False
     proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+        start_new_session=True   # isolate in its own process group for clean teardown
     )
     for line in proc.stdout:
         print(line, end="", flush=True)
@@ -223,16 +225,21 @@ def run_match_streaming(cmd, los_stop_hi=None, los_stop_lo=None):
                 if los_stop_hi is not None and los >= los_stop_hi:
                     print(f"\n  [Early stop: LOS={los*100:.1f}% ≥ {los_stop_hi*100:.0f}%"
                           f" after {n} games]", flush=True)
-                    proc.terminate()
                     early_stop = True
                     break
                 if los_stop_lo is not None and los <= los_stop_lo:
                     print(f"\n  [Early stop: LOS={los*100:.1f}% ≤ {los_stop_lo*100:.0f}%"
                           f" after {n} games]", flush=True)
-                    proc.terminate()
                     early_stop = True
                     break
     if early_stop:
+        # Kill the entire process group (match.py + cutechess-cli + all engine processes).
+        # Without this, orphaned engine processes keep consuming CPU and starve
+        # cycle-2+ training engine startups.
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except (ProcessLookupError, OSError):
+            pass
         for line in proc.stdout:   # drain to unblock the child
             print(line, end="", flush=True)
     proc.wait()
