@@ -33,6 +33,7 @@
 #
 
 import datetime
+import fcntl
 import math
 import os
 import re
@@ -103,16 +104,25 @@ def _prompt_init_cnt(is_fresh_random):
 
 
 def wait_until_stable(path, stable_secs=3, timeout=120):
-    """Wait until path's mtime and size have not changed for stable_secs seconds.
+    """Wait until all training engines have finished with the .tdleaf.bin file.
 
-    This is used after a training match to confirm that all engine processes
-    have finished writing to .tdleaf.bin before we read it.  Returns True if
-    the file stabilised, False if it never appeared or timed out.
+    Two-phase check:
+      1. Poll mtime/size until the file has not changed for stable_secs seconds
+         (confirms no active writes to the data file).
+      2. Acquire and immediately release a blocking exclusive flock on the
+         companion <path>.lock file (the same lock the engines use).  This
+         returns only when every engine process has released its lock, which
+         guarantees no engine is still in a write or read-init critical section.
+
+    Returns True if both phases completed, False on timeout or missing file.
     """
     if not os.path.isfile(path):
         return False
-    print(f"  Waiting for {os.path.basename(path)} to stabilise ...",
-          end="", flush=True)
+
+    label = os.path.basename(path)
+    print(f"  Waiting for {label} to stabilise ...", end="", flush=True)
+
+    # Phase 1 — file content stability
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -120,12 +130,29 @@ def wait_until_stable(path, stable_secs=3, timeout=120):
             time.sleep(stable_secs)
             st1 = os.stat(path)
             if st0.st_mtime_ns == st1.st_mtime_ns and st0.st_size == st1.st_size:
-                print(" done.", flush=True)
-                return True
+                break
         except OSError:
-            break
-    print(" timed out — proceeding anyway.", flush=True)
-    return False
+            print(" timed out — proceeding anyway.", flush=True)
+            return False
+    else:
+        print(" timed out — proceeding anyway.", flush=True)
+        return False
+
+    # Phase 2 — lock clearance
+    # The engines use a companion "<path>.lock" file with POSIX flock.
+    # Acquiring LOCK_EX blocks until every engine releases its lock,
+    # confirming no engine is still in a write or startup-read critical section.
+    lock_path = path + ".lock"
+    if os.path.isfile(lock_path):
+        try:
+            with open(lock_path, "r+b") as lf:
+                fcntl.flock(lf, fcntl.LOCK_EX)   # blocks until all locks released
+                fcntl.flock(lf, fcntl.LOCK_UN)
+        except OSError:
+            pass   # lock file disappeared or not lockable — proceed
+
+    print(" done.", flush=True)
+    return True
 
 
 def build_binary(version, flags):
