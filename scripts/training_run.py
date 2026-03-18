@@ -567,7 +567,7 @@ def main():
                 print("─" * 62)
 
                 # Brief pause to ensure all file I/O from the previous cycle has settled.
-                time.sleep(1)
+                time.sleep(2)
 
                 # Save checkpoint of current .tdleaf.bin
                 checkpoint_bin = tdleaf_bin + ".checkpoint"
@@ -608,14 +608,14 @@ def main():
                 break
 
             # Allow engines time to finish flushing .tdleaf.bin before we read it.
-            time.sleep(2)
+            time.sleep(4)
 
             # --- Export candidate ---
             print()
             export_nnue(train_exe, cand_nnue_path, "candidate")
 
             # Allow the exported .nnue files to settle before validation reads them.
-            time.sleep(1)
+            time.sleep(2)
 
             # --- Validation match ---
             val_pgn = os.path.join(
