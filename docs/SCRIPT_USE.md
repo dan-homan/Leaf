@@ -59,21 +59,59 @@ cd learn/
 python3 training_run.py
 ```
 
-The script prompts for:
+### Prompt sequence
 
 1. **Starting network** — existing `.nnue` file or a freshly random-initialised one
-2. **Build** — compiles two training binaries (`_a` and `_b`, both `NNUE=1 TDLEAF=1`)
-   via `src/comp.pl`; both write to the shared `.tdleaf.bin` (symmetric self-play)
-3. **Continuity** — whether to continue from an existing `.tdleaf.bin` or start fresh
-4. **Match parameters** — games/iteration, iteration count, TC, concurrency, wait, Fischer Random
+2. **Training partner** — choose one of three modes:
+   - `[1]` Symmetric self-play — both `_a` and `_b` instances learn (default)
+   - `[2]` Read-only opponent — `_a` learns; `_ro` holds weights fixed (`TDLEAF_READONLY=1`)
+   - `[3]` External opponent — `_a` learns; user supplies path to any executable
+3. **Train-validate loop** — optional; see below
+4. **Build** — compiles the required binaries via `src/comp.pl` and moves them to `learn/`
+5. **Continuity** — continue from existing `.tdleaf.bin` or start fresh (with optional
+   Adam `cnt` priming for pre-trained nets)
+6. **Match parameters** — TC, concurrency, wait, Fischer Random, per-engine depth limits;
+   per-engine TCs (`--tc1` / `--tc2`) when the opponent runs at a different speed
 
-Both binaries are full learners: every game produces gradient updates from both sides
-of the board, doubling the signal per game.  Concurrent writes are safe via the
-`flock`+delta-merge mechanism in `nnue_save_fc_weights`.  On completion the trained
-weights are exported to `<net_base>-<total_games>g.nnue`.
+On completion, trained weights are exported to `<net_base>-<total_games>g.nnue`.
+Game counts accumulate in a `<net_base>.games` sidecar file across runs.
 
-Game counts accumulate in a `<net_base>.games` sidecar file across multiple runs on
-the same network.
+### Train-validate loop
+
+When enabled, the script runs repeated train → validate cycles instead of a single
+match block:
+
+```
+repeat N cycles (0 = forever until Ctrl-C):
+  1. Checkpoint current .tdleaf.bin; export current weights → <net>-best.nnue
+  2. Train for X games (single iteration — Adam state preserved throughout)
+  3. Export new weights → <net>-cand.nnue
+  4. Run Y-game validation match: eval_cand vs eval_best
+  5. Accept if LOS ≥ threshold → bank games, update best
+     Reject → revert .tdleaf.bin to pre-cycle checkpoint
+```
+
+Loop-mode prompts (Step 3):
+
+| Prompt | Default | Notes |
+|--------|---------|-------|
+| Cycles | 0 (∞) | Number of train-validate cycles; 0 = run until Ctrl-C |
+| Validation games | 200 | Games per validation match |
+| LOS acceptance threshold | 70% | Candidate accepted if LOS ≥ this |
+| Early-stop high | 90% | Terminate validation early if LOS ≥ this (clear win) |
+| Early-stop low  | 10% | Terminate validation early if LOS ≤ this (clear loss) |
+| Validation TC | (same as training TC) | Separate TC for the validation match |
+| Games per cycle | 5000 | Training games per cycle (single iteration; no engine restart) |
+
+Two eval-only binaries (`NNUE=1`, no `TDLEAF`) are compiled once at setup:
+`eval_best` loads `<net>-best.nnue` and `eval_cand` loads `<net>-cand.nnue`.
+
+**Why single iteration in loop mode**: multiple iterations restart the engine
+processes between blocks, discarding Adam momentum and variance state.  A single
+long iteration preserves the full optimiser state across the training block.
+
+Ctrl-C exits cleanly: current weights are exported and a per-cycle result table
+is printed.
 
 ---
 

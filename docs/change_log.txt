@@ -1,5 +1,26 @@
 Changes since 2017_12_24
 
+2026_03_18 -- training_run.py: train-validate loop and related improvements
+               (scripts/training_run.py, scripts/match.py, docs/SCRIPT_USE.md).
+               New features:
+               · Training partner selection: symmetric self-play (default),
+                 read-only opponent (TDLEAF_READONLY=1), or external executable.
+               · Train-validate loop: each cycle trains for N games, exports a
+                 candidate .nnue, runs a validation match (eval_cand vs eval_best),
+                 and accepts or reverts based on LOS (likelihood of superiority).
+                 Configurable: cycles, validation games, LOS threshold (default 70%),
+                 early-stop bounds (90% / 10%), separate validation TC.
+               · Loop mode always uses a single iteration (n_iters=1, default 5000
+                 games/cycle) to preserve Adam momentum and variance state across
+                 the full training block.  Multiple iterations restart engines and
+                 discard optimiser state unnecessarily.
+               · Per-engine TC (--tc1/--tc2) and depth limits (--depth1/--depth2)
+                 in both training_run.py and match.py.
+               · Process synchronisation: after each training match, waits for the
+                 .tdleaf.bin companion lock file (POSIX flock) to clear before
+                 reading weights, preventing stale exports and engine-init failures
+                 in subsequent cycles.
+
 2026_03_17 -- TDLeaf: remove off-PV / blunder filter — did not produce stronger play
                (tdleaf.h, tdleaf.cpp, main.cpp, docs/TDLEAF.md).
                Removed TDRecord fields root_wtm, predicted_opp_move, actual_opp_move;

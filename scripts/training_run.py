@@ -474,8 +474,14 @@ def main():
     # -----------------------------------------------------------------------
     print()
     print("Match parameters:")
-    n_games     = int(ask("  Games per iteration [-n]        ", 500))
-    n_iters     = int(ask("  Iterations          [-i]        ", 10))
+    if use_loop:
+        # In loop mode always use a single iteration so Adam momentum and
+        # variance are preserved across the full training block.
+        n_games = int(ask("  Games per cycle     [-n]        ", 5000))
+        n_iters = 1
+    else:
+        n_games = int(ask("  Games per iteration [-n]        ", 500))
+        n_iters = int(ask("  Iterations          [-i]        ", 10))
     tc1         = ask(    "  Learner time control   [--tc1]  ", "0:03+0.05")
     tc2_raw     = ask(    "  Opponent time control  [--tc2]  ", tc1)
     tc2         = tc2_raw if tc2_raw.strip() else tc1
@@ -525,7 +531,7 @@ def main():
               f" accept≥{los_thresh_pct:.0f}%  "
               f"early-stop ≥{los_stop_hi*100:.0f}% / ≤{los_stop_lo*100:.0f}%")
     else:
-        print(f"  Games this run:   {games_per_cycle:,}  ({n_iters} iter × {n_games} games)")
+        print(f"  Games this run:   {games_per_cycle:,}  ({n_iters} iter × {n_games} games/iter)")
     print(f"  Prior games:      {prior_games:,}")
     print(f"  Total after run:  {total_after_str}")
     if tc1 == tc2:
