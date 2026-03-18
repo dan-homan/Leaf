@@ -220,7 +220,7 @@ def run_match_streaming(cmd, los_stop_hi=None, los_stop_lo=None):
             # cutechess: "W - L - D" from engine1 perspective
             w, l, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
             n = w + d + l
-            if n >= 20 and (los_stop_hi is not None or los_stop_lo is not None):
+            if n >= 20 and n % 10 == 0 and (los_stop_hi is not None or los_stop_lo is not None):
                 los = compute_los(w, d, l)
                 if los_stop_hi is not None and los >= los_stop_hi:
                     print(f"\n  [Early stop: LOS={los*100:.1f}% ≥ {los_stop_hi*100:.0f}%"
