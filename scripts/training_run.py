@@ -102,6 +102,32 @@ def _prompt_init_cnt(is_fresh_random):
     return val
 
 
+def wait_until_stable(path, stable_secs=3, timeout=120):
+    """Wait until path's mtime and size have not changed for stable_secs seconds.
+
+    This is used after a training match to confirm that all engine processes
+    have finished writing to .tdleaf.bin before we read it.  Returns True if
+    the file stabilised, False if it never appeared or timed out.
+    """
+    if not os.path.isfile(path):
+        return False
+    print(f"  Waiting for {os.path.basename(path)} to stabilise ...",
+          end="", flush=True)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            st0 = os.stat(path)
+            time.sleep(stable_secs)
+            st1 = os.stat(path)
+            if st0.st_mtime_ns == st1.st_mtime_ns and st0.st_size == st1.st_size:
+                print(" done.", flush=True)
+                return True
+        except OSError:
+            break
+    print(" timed out — proceeding anyway.", flush=True)
+    return False
+
+
 def build_binary(version, flags):
     """Invoke src/comp.pl (cwd=run_dir), then move the resulting binary to learn_dir."""
     comp_pl = os.path.join(src_dir, "comp.pl")
@@ -566,8 +592,8 @@ def main():
                       f"   [{current_games:,} games banked]")
                 print("─" * 62)
 
-                # Brief pause to ensure all file I/O from the previous cycle has settled.
-                time.sleep(2)
+                # Ensure all file I/O from the previous cycle has settled.
+                wait_until_stable(tdleaf_bin)
 
                 # Save checkpoint of current .tdleaf.bin
                 checkpoint_bin = tdleaf_bin + ".checkpoint"
@@ -607,14 +633,15 @@ def main():
                 current_games += games_per_cycle
                 break
 
-            # Allow engines time to finish flushing .tdleaf.bin before we read it.
-            time.sleep(4)
+            # Wait for all engine processes to finish writing .tdleaf.bin.
+            # A fixed delay is unreliable — poll until the file stops changing.
+            wait_until_stable(tdleaf_bin)
 
             # --- Export candidate ---
             print()
             export_nnue(train_exe, cand_nnue_path, "candidate")
 
-            # Allow the exported .nnue files to settle before validation reads them.
+            # Brief pause for filesystem to flush the exported .nnue files.
             time.sleep(2)
 
             # --- Validation match ---
