@@ -21,13 +21,21 @@
 #      Game counts are tracked in a sidecar file (learn/<net_base>.games) that
 #      persists across multiple runs on the same network.
 #
+# Train-validate loop (optional):
+#   Each cycle trains for X games, then runs a validation match between the
+#   candidate (new weights) and the current best.  The candidate is accepted
+#   if its LOS (likelihood of superiority) meets the threshold; otherwise the
+#   .tdleaf.bin is reverted to the pre-cycle checkpoint.
+#
 # All working files (.nnue, .tdleaf.bin, .games, binaries, output .nnue) are
 # kept in learn/ for easy access.  run/ is used for match.py; src/comp.pl is
 # invoked directly for builds.
 #
 
 import datetime
+import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -106,6 +114,52 @@ def build_binary(version, flags):
     if os.path.isfile(built):
         shutil.move(built, dest)
     return os.path.isfile(dest)
+
+
+def compute_los(w, d, l):
+    """Likelihood of superiority for engine1 (candidate) from W/D/L counts.
+
+    Uses a normal approximation on the per-game score distribution.
+    Returns a value in [0, 1]; 0.5 means indistinguishable from chance.
+    """
+    n = w + d + l
+    if n == 0:
+        return 0.5
+    score = (w + 0.5 * d) / n
+    if score <= 0.0:
+        return 0.0
+    if score >= 1.0:
+        return 1.0
+    var = (w * (1.0 - score) ** 2 +
+           d * (0.5 - score) ** 2 +
+           l * (0.0 - score) ** 2) / n
+    if var == 0.0:
+        return 1.0 if score > 0.5 else 0.0
+    z = (score - 0.5) / math.sqrt(var / n)
+    return 0.5 * math.erfc(-z / math.sqrt(2.0))
+
+
+def run_match_streaming(cmd):
+    """Run a subprocess, stream its stdout to the console, and capture the
+    final Score line (cutechess-cli format).
+
+    Returns (w, d, l, returncode) from engine1's perspective.
+    """
+    score_re = re.compile(
+        r"Score of .+? vs .+?:\s+(\d+)\s+-\s+(\d+)\s+-\s+(\d+)"
+    )
+    w = d = l = 0
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
+    )
+    for line in proc.stdout:
+        print(line, end="", flush=True)
+        m = score_re.search(line)
+        if m:
+            # cutechess: "W - L - D" from engine1 perspective
+            w, l, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    proc.wait()
+    return w, d, l, proc.returncode
 
 
 # ---------------------------------------------------------------------------
@@ -189,6 +243,29 @@ def main():
             print(f"  File not found: {opp_path}")
 
     # -----------------------------------------------------------------------
+    # Step 1c — Train-validate loop (optional)
+    # -----------------------------------------------------------------------
+    print()
+    use_loop       = ask_yes_no("Enable train-validate loop?", default="n")
+    n_cycles       = 0
+    val_games      = 200
+    los_thresh_pct = 70.0
+    val_tc         = "10+0.1"
+    # Eval binary names (set in Step 2 if use_loop)
+    best_nnue_name = None
+    cand_nnue_name = None
+    eval_best_exe  = None
+    eval_cand_exe  = None
+
+    if use_loop:
+        n_cycles       = int(ask("  Cycles (0 = run forever until Ctrl-C)", "0"))
+        val_games      = int(ask("  Validation games per cycle           ", "200"))
+        los_thresh_pct = float(ask("  LOS acceptance threshold (%)        ", "70"))
+        val_tc         = ask(     "  Validation time control             ", "10+0.1")
+        best_nnue_name = f"{net_base}-best.nnue"
+        cand_nnue_name = f"{net_base}-cand.nnue"
+
+    # -----------------------------------------------------------------------
     # Step 2 — Build executables  (comp.pl runs in run/, binaries moved to learn/)
     # -----------------------------------------------------------------------
     print()
@@ -238,6 +315,30 @@ def main():
         print("  Build complete.")
     else:
         print("  Using existing binaries.")
+
+    # Eval-only binaries for train-validate loop
+    if use_loop:
+        eval_best_ver = f"train_{net_base}_eval_best"
+        eval_cand_ver = f"train_{net_base}_eval_cand"
+        eval_best_exe = os.path.join(learn_dir, f"Leaf_v{eval_best_ver}")
+        eval_cand_exe = os.path.join(learn_dir, f"Leaf_v{eval_cand_ver}")
+
+        eval_exist = os.path.isfile(eval_best_exe) and os.path.isfile(eval_cand_exe)
+        rebuild_eval = True
+        if eval_exist:
+            rebuild_eval = ask_yes_no(
+                "  Eval binaries already exist.  Rebuild?", default="n")
+        if rebuild_eval:
+            print(f"  Building eval-best binary (loads {best_nnue_name}) ...")
+            if not build_binary(eval_best_ver, ["NNUE=1", f"NNUE_NET={best_nnue_name}"]):
+                print("  Eval-best build failed.", file=sys.stderr)
+                sys.exit(1)
+            print(f"  Building eval-cand binary (loads {cand_nnue_name}) ...")
+            if not build_binary(eval_cand_ver, ["NNUE=1", f"NNUE_NET={cand_nnue_name}"]):
+                print("  Eval-cand build failed.", file=sys.stderr)
+                sys.exit(1)
+        else:
+            print("  Using existing eval binaries.")
 
     # -----------------------------------------------------------------------
     # Step 2b — Random init (after training binary exists in learn/)
@@ -305,8 +406,14 @@ def main():
     depth2_str  = ask(f"  Opponent depth limit (0=none) [--depth2]", str(depth1))
     depth2      = int(depth2_str) if depth2_str.strip() else 0
 
-    total_new   = n_games * n_iters
-    total_after = prior_games + total_new
+    games_per_cycle = n_games * n_iters
+
+    if use_loop:
+        max_new = games_per_cycle * n_cycles if n_cycles > 0 else None
+        total_after_str = (f"{prior_games + max_new:,} (if all accepted)"
+                           if max_new is not None else "open-ended")
+    else:
+        total_after_str = f"{prior_games + games_per_cycle:,}"
 
     # -----------------------------------------------------------------------
     # PGN directory  —  learn/pgn/<net_base>/
@@ -318,11 +425,6 @@ def main():
     # -----------------------------------------------------------------------
     # Confirm
     # -----------------------------------------------------------------------
-    # net_base already contains the "nn-" prefix (e.g. "nn-ad9b42354671"),
-    # so the output name is simply  <net_base>-<games>g.nnue.
-    output_net_name = f"{net_base}-{total_after}g.nnue"
-    output_net_path = os.path.join(learn_dir, output_net_name)
-
     print()
     print("=" * 62)
     print(f"  Net in:           {net_filename}")
@@ -333,9 +435,15 @@ def main():
         print(f"  Opponent:         Leaf_v{train_ver2}  (read-only, same net)")
     else:
         print(f"  Opponent:         {os.path.basename(train_exe2)}  (external)")
-    print(f"  Games this run:   {total_new:,}  ({n_iters} iter × {n_games} games)")
+    if use_loop:
+        cycle_label = str(n_cycles) if n_cycles > 0 else "∞"
+        print(f"  Loop:             {cycle_label} cycles × {games_per_cycle:,} games/cycle")
+        print(f"  Validation:       {val_games} games @ {val_tc}  "
+              f" LOS threshold: {los_thresh_pct:.0f}%")
+    else:
+        print(f"  Games this run:   {games_per_cycle:,}  ({n_iters} iter × {n_games} games)")
     print(f"  Prior games:      {prior_games:,}")
-    print(f"  Total after run:  {total_after:,}")
+    print(f"  Total after run:  {total_after_str}")
     if tc1 == tc2:
         print(f"  TC: {tc1}   Concurrency: {concurrency}   Wait: {wait_ms} ms")
     else:
@@ -353,7 +461,6 @@ def main():
         lr_frac = 0.01 + 0.99 / (1.0 + init_cnt / 5000.0)
         print(f"  Initial cnt:      {init_cnt}  (Adam LR0 × {lr_frac:.2f})")
     print(f"  PGN directory:    {pgn_dir}/")
-    print(f"  Output net:       {output_net_name}  (learn/)")
     print("=" * 62)
 
     if not ask_yes_no("Proceed?", default="y"):
@@ -377,45 +484,150 @@ def main():
             sys.exit(result.returncode)
 
     # -----------------------------------------------------------------------
-    # Step 5b — Run matches
+    # Step 5b — Training loop (single pass or multi-cycle train-validate)
+    # -----------------------------------------------------------------------
+    match_py      = os.path.join(run_dir, "match.py")
+    current_games = prior_games
+    cycle_log     = []   # list of (cycle, accepted, vw, vd, vl, los)
+
+    def build_match_cmd(pgn_path):
+        cmd = [
+            sys.executable, match_py,
+            train_exe,
+            train_exe2,
+            "-n", str(n_games),
+            "-i", str(n_iters),
+            "-tc", tc1,
+            "-c", str(concurrency),
+            "--wait", str(wait_ms),
+            "--pgn-out", pgn_path,
+        ]
+        if tc2 != tc1:
+            cmd += ["--tc2", tc2]
+        if fischer:
+            cmd.append("--fischer-random")
+        if depth1:
+            cmd += ["--depth1", str(depth1)]
+        if depth2:
+            cmd += ["--depth2", str(depth2)]
+        return cmd
+
+    def export_nnue(exe, dest_path, label):
+        """Export trained weights via --write-nnue; exit on failure."""
+        print(f"  Exporting {label} → {os.path.basename(dest_path)} ...")
+        r = subprocess.run([exe, "--write-nnue", dest_path], cwd=learn_dir)
+        if r.returncode != 0:
+            print(f"  --write-nnue ({label}) failed.", file=sys.stderr)
+            sys.exit(r.returncode)
+
+    cycle_num = 0
+    try:
+        while True:
+            cycle_num += 1
+
+            if use_loop:
+                if n_cycles > 0 and cycle_num > n_cycles:
+                    break
+                print()
+                print("─" * 62)
+                cycle_label = f"/{n_cycles}" if n_cycles > 0 else "  (Ctrl-C to stop)"
+                print(f"  Cycle {cycle_num}{cycle_label}"
+                      f"   [{current_games:,} games banked]")
+                print("─" * 62)
+
+                # Save checkpoint of current .tdleaf.bin
+                checkpoint_bin = tdleaf_bin + ".checkpoint"
+                best_nnue_path = os.path.join(learn_dir, best_nnue_name)
+                cand_nnue_path = os.path.join(learn_dir, cand_nnue_name)
+
+                if os.path.isfile(tdleaf_bin):
+                    shutil.copy2(tdleaf_bin, checkpoint_bin)
+                    export_nnue(train_exe, best_nnue_path, "best")
+                else:
+                    # No weights yet — use the base .nnue as the baseline
+                    shutil.copy2(net_file, best_nnue_path)
+                    print(f"  Best checkpoint  → {best_nnue_name}  (base net)")
+
+                pgn_path = os.path.join(
+                    pgn_dir, f"match_{net_base}_cycle{cycle_num:02d}.pgn")
+            else:
+                pgn_path = pgn_base_path
+
+            # --- Training match ---
+            print()
+            result = subprocess.run(build_match_cmd(pgn_path), cwd=run_dir)
+            if result.returncode != 0:
+                print(f"\nMatch run failed (exit code {result.returncode}).",
+                      file=sys.stderr)
+                if use_loop:
+                    print("Weights from completed iterations preserved. Exiting.")
+                else:
+                    print("Game count sidecar NOT updated.")
+                sys.exit(result.returncode)
+
+            if not use_loop:
+                # Single-run mode: update count and break
+                write_game_count(sidecar_path, current_games + games_per_cycle)
+                current_games += games_per_cycle
+                break
+
+            # --- Export candidate ---
+            print()
+            export_nnue(train_exe, cand_nnue_path, "candidate")
+
+            # --- Validation match ---
+            val_pgn = os.path.join(
+                pgn_dir, f"val_{net_base}_cycle{cycle_num:02d}.pgn")
+            print(f"  Validation: {val_games} games @ {val_tc}"
+                  f"   (candidate vs best)")
+            val_cmd = [
+                sys.executable, match_py,
+                eval_cand_exe, eval_best_exe,
+                "-n", str(val_games),
+                "-tc", val_tc,
+                "-c", str(concurrency),
+                "--pgn-out", val_pgn,
+            ]
+            if fischer:
+                val_cmd.append("--fischer-random")
+
+            vw, vd, vl, vrc = run_match_streaming(val_cmd)
+            if vrc != 0:
+                print(f"  Validation match failed (exit {vrc}).",
+                      file=sys.stderr)
+                sys.exit(vrc)
+
+            # --- Accept / revert ---
+            vn  = vw + vd + vl
+            pct = (vw + 0.5 * vd) / vn * 100.0 if vn else 50.0
+            los = compute_los(vw, vd, vl)
+            accepted = los >= (los_thresh_pct / 100.0)
+            verdict  = "ACCEPTED ✓" if accepted else "REJECTED ✗"
+
+            print(f"\n  Validation: W={vw} D={vd} L={vl}  "
+                  f"score={pct:.1f}%  LOS={los * 100:.1f}%  → {verdict}")
+
+            cycle_log.append((cycle_num, accepted, vw, vd, vl, los))
+
+            if accepted:
+                current_games += games_per_cycle
+                write_game_count(sidecar_path, current_games)
+                print(f"  Banked games: {current_games:,}")
+            else:
+                if os.path.isfile(checkpoint_bin):
+                    shutil.copy2(checkpoint_bin, tdleaf_bin)
+                    print("  Reverted .tdleaf.bin to pre-cycle checkpoint.")
+
+    except KeyboardInterrupt:
+        print("\n\n[Ctrl-C — exporting current weights before exit ...]")
+
+    # -----------------------------------------------------------------------
+    # Step 6 — Export final .nnue
     # -----------------------------------------------------------------------
     print()
-    match_py  = os.path.join(run_dir, "match.py")
-    match_cmd = [
-        sys.executable, match_py,
-        train_exe,          # absolute path — match.py passes these straight to cutechess
-        train_exe2,
-        "-n", str(n_games),
-        "-i", str(n_iters),
-        "-tc", tc1,
-        "-c", str(concurrency),
-        "--wait", str(wait_ms),
-        "--pgn-out", pgn_base_path,
-    ]
-    if tc2 != tc1:
-        match_cmd += ["--tc2", tc2]
-    if fischer:
-        match_cmd.append("--fischer-random")
-    if depth1:
-        match_cmd += ["--depth1", str(depth1)]
-    if depth2:
-        match_cmd += ["--depth2", str(depth2)]
-
-    result = subprocess.run(match_cmd, cwd=run_dir)
-    if result.returncode != 0:
-        print(f"\nMatch run failed (exit code {result.returncode}).", file=sys.stderr)
-        print("Weights from completed iterations are preserved in the .tdleaf.bin.")
-        print("Game count sidecar NOT updated (re-run to continue from last checkpoint).")
-        sys.exit(result.returncode)
-
-    # Update sidecar only after all iterations complete successfully
-    write_game_count(sidecar_path, total_after)
-
-    # -----------------------------------------------------------------------
-    # Step 6 — Export trained .nnue
-    # -----------------------------------------------------------------------
-    print()
-    print(f"Exporting trained weights → {output_net_name}")
+    output_net_name = f"{net_base}-{current_games}g.nnue"
+    output_net_path = os.path.join(learn_dir, output_net_name)
+    print(f"Exporting final weights → {output_net_name}")
     result = subprocess.run(
         [train_exe, "--write-nnue", output_net_path],
         cwd=learn_dir
@@ -438,10 +650,24 @@ def main():
         print( "  Mode:        learner vs. read-only opponent")
     else:
         print(f"  Mode:        learner vs. {os.path.basename(train_exe2)}")
-    print(f"  Games added: {total_new:,}  ({n_iters} iter × {n_games} games)")
-    print(f"  Total games: {total_after:,}")
+    print(f"  Total games: {current_games:,}")
     print(f"  PGN files:   {pgn_dir}/")
     print(f"  .tdleaf.bin: {tdleaf_bin}")
+
+    if use_loop and cycle_log:
+        accepted_count = sum(1 for _, acc, *_ in cycle_log if acc)
+        print()
+        print(f"  Cycle results  ({accepted_count}/{len(cycle_log)} accepted):")
+        print(f"  {'Cycle':>5}  {'W':>4} {'D':>4} {'L':>4}  {'Score%':>7}  "
+              f"{'LOS%':>6}  {'Result'}")
+        print("  " + "-" * 50)
+        for cyc, acc, vw, vd, vl, los in cycle_log:
+            vn  = vw + vd + vl
+            pct = (vw + 0.5 * vd) / vn * 100.0 if vn else 50.0
+            tag = "accepted" if acc else "rejected"
+            print(f"  {cyc:>5}  {vw:>4} {vd:>4} {vl:>4}  "
+                  f"{pct:>6.1f}%  {los*100:>5.1f}%  {tag}")
+
     print("=" * 62)
     print()
 
