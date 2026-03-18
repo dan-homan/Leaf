@@ -250,7 +250,7 @@ def main():
     n_cycles       = 0
     val_games      = 200
     los_thresh_pct = 70.0
-    val_tc         = "10+0.1"
+    val_tc         = None   # set in Step 4 after tc1 is known
     # Eval binary names (set in Step 2 if use_loop)
     best_nnue_name = None
     cand_nnue_name = None
@@ -261,7 +261,7 @@ def main():
         n_cycles       = int(ask("  Cycles (0 = run forever until Ctrl-C)", "0"))
         val_games      = int(ask("  Validation games per cycle           ", "200"))
         los_thresh_pct = float(ask("  LOS acceptance threshold (%)        ", "70"))
-        val_tc         = ask(     "  Validation time control             ", "10+0.1")
+        # val_tc is asked in Step 4 once tc1 is known
         best_nnue_name = f"{net_base}-best.nnue"
         cand_nnue_name = f"{net_base}-cand.nnue"
 
@@ -405,6 +405,8 @@ def main():
     depth1      = int(depth1_str) if depth1_str.strip() else 0
     depth2_str  = ask(f"  Opponent depth limit (0=none) [--depth2]", str(depth1))
     depth2      = int(depth2_str) if depth2_str.strip() else 0
+    if use_loop:
+        val_tc = ask("  Validation time control  [--val-tc]  ", tc1)
 
     games_per_cycle = n_games * n_iters
 
@@ -540,11 +542,13 @@ def main():
                 best_nnue_path = os.path.join(learn_dir, best_nnue_name)
                 cand_nnue_path = os.path.join(learn_dir, cand_nnue_name)
 
-                if os.path.isfile(tdleaf_bin):
+                has_checkpoint = os.path.isfile(tdleaf_bin)
+                if has_checkpoint:
                     shutil.copy2(tdleaf_bin, checkpoint_bin)
                     export_nnue(train_exe, best_nnue_path, "best")
                 else:
-                    # No weights yet — use the base .nnue as the baseline
+                    # No weights yet — use the base .nnue as the baseline.
+                    # On rejection we will delete the newly created .tdleaf.bin.
                     shutil.copy2(net_file, best_nnue_path)
                     print(f"  Best checkpoint  → {best_nnue_name}  (base net)")
 
@@ -614,9 +618,14 @@ def main():
                 write_game_count(sidecar_path, current_games)
                 print(f"  Banked games: {current_games:,}")
             else:
-                if os.path.isfile(checkpoint_bin):
+                if has_checkpoint:
                     shutil.copy2(checkpoint_bin, tdleaf_bin)
                     print("  Reverted .tdleaf.bin to pre-cycle checkpoint.")
+                else:
+                    # No prior weights existed — remove the file created this cycle.
+                    if os.path.isfile(tdleaf_bin):
+                        os.remove(tdleaf_bin)
+                    print("  No prior checkpoint — removed new .tdleaf.bin.")
 
     except KeyboardInterrupt:
         print("\n\n[Ctrl-C — exporting current weights before exit ...]")
