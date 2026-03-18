@@ -630,16 +630,18 @@ def main():
     # .tdleaf.bin so it advances with the training.
     # -----------------------------------------------------------------------
     if use_loop:
+        had_prior_tdleaf = os.path.isfile(tdleaf_bin)
         best_nnue_path = os.path.join(learn_dir, best_nnue_name)
         cand_nnue_path = os.path.join(learn_dir, cand_nnue_name)
         print()
-        if os.path.isfile(tdleaf_bin):
+        if had_prior_tdleaf:
             print("Setting up initial best baseline from existing .tdleaf.bin ...")
             wait_until_stable(tdleaf_bin)
             export_nnue(train_exe, best_nnue_path, "initial best")
         else:
             shutil.copy2(net_file, best_nnue_path)
             print(f"  Best baseline → {best_nnue_name}  (base net, no prior .tdleaf.bin)")
+            print("  Note: cycle 1 will be auto-accepted (no trained baseline to compare against).")
 
     cycle_num = 0
     try:
@@ -700,37 +702,49 @@ def main():
             time.sleep(2)
 
             # --- Validation match ---
-            val_pgn = os.path.join(
-                pgn_dir, f"val_{net_base}_cycle{cycle_num:02d}.pgn")
-            print(f"  Validation: {val_games} games @ {val_tc}"
-                  f"   (candidate vs best)")
-            val_cmd = [
-                sys.executable, match_py,
-                eval_cand_exe, eval_best_exe,
-                "-n", str(val_games),
-                "-tc", val_tc,
-                "-c", str(concurrency),
-                "--pgn-out", val_pgn,
-            ]
-            if fischer:
-                val_cmd.append("--fischer-random")
+            # Cycle 1 with no prior .tdleaf.bin: the "best" baseline is the
+            # raw base network (random weights), which is not a meaningful
+            # comparison target — TDLeaf training from a random init can
+            # legitimately produce weights that evaluate worse than random for
+            # the first several hundred games.  Auto-accept so this cycle
+            # establishes a trained baseline for all subsequent comparisons.
+            if not had_prior_tdleaf and cycle_num == 1:
+                vw = vd = vl = 0
+                los = 1.0
+                accepted = True
+                verdict  = "AUTO-ACCEPTED ✓"
+                print(f"\n  Validation: skipped (no prior trained baseline)  → {verdict}")
+            else:
+                val_pgn = os.path.join(
+                    pgn_dir, f"val_{net_base}_cycle{cycle_num:02d}.pgn")
+                print(f"  Validation: {val_games} games @ {val_tc}"
+                      f"   (candidate vs best)")
+                val_cmd = [
+                    sys.executable, match_py,
+                    eval_cand_exe, eval_best_exe,
+                    "-n", str(val_games),
+                    "-tc", val_tc,
+                    "-c", str(concurrency),
+                    "--pgn-out", val_pgn,
+                ]
+                if fischer:
+                    val_cmd.append("--fischer-random")
 
-            vw, vd, vl, vrc = run_match_streaming(
-                val_cmd, los_stop_hi=los_stop_hi, los_stop_lo=los_stop_lo)
-            if vrc != 0:
-                print(f"  Validation match failed (exit {vrc}).",
-                      file=sys.stderr)
-                sys.exit(vrc)
+                vw, vd, vl, vrc = run_match_streaming(
+                    val_cmd, los_stop_hi=los_stop_hi, los_stop_lo=los_stop_lo)
+                if vrc != 0:
+                    print(f"  Validation match failed (exit {vrc}).",
+                          file=sys.stderr)
+                    sys.exit(vrc)
 
-            # --- Accept / revert ---
-            vn  = vw + vd + vl
-            pct = (vw + 0.5 * vd) / vn * 100.0 if vn else 50.0
-            los = compute_los(vw, vd, vl)
-            accepted = los >= (los_thresh_pct / 100.0)
-            verdict  = "ACCEPTED ✓" if accepted else "REJECTED ✗"
+                vn  = vw + vd + vl
+                pct = (vw + 0.5 * vd) / vn * 100.0 if vn else 50.0
+                los = compute_los(vw, vd, vl)
+                accepted = los >= (los_thresh_pct / 100.0)
+                verdict  = "ACCEPTED ✓" if accepted else "REJECTED ✗"
 
-            print(f"\n  Validation: W={vw} D={vd} L={vl}  "
-                  f"score={pct:.1f}%  LOS={los * 100:.1f}%  → {verdict}")
+                print(f"\n  Validation: W={vw} D={vd} L={vl}  "
+                      f"score={pct:.1f}%  LOS={los * 100:.1f}%  → {verdict}")
 
             cycle_log.append((cycle_num, accepted, vw, vd, vl, los))
 
