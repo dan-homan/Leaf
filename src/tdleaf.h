@@ -48,9 +48,11 @@ static const float TDLEAF_ID_VAR_SIGMA2  = 10000.0f;
 //   cnt = C  → LR0 × (0.5 + 0.5×floor)  (half-life point)
 //   cnt → ∞  → LR0 × floor       (long-term floor; never reaches zero)
 //
-// FT weights use RMSProp (per-row v, no m); all other layers use full Adam.
+// FT weights use RMSProp (per-weight v, no m); all other layers use full Adam.
 // v arrays are session-local (process memory only, not persisted to .tdleaf.bin).
 // t_adam is also session-local; resets alongside v so bias correction is always valid.
+// LR warmup: ramps from 0 to full LR over first WARMUP Adam steps.
+// Mini-batch: gradients accumulated across BATCH_SIZE games before each Adam step.
 // ---------------------------------------------------------------------------
 static const float TDLEAF_ADAM_LR0      = 0.2f;    // initial step size for FC/FT layers (float weight units)
 static const float TDLEAF_ADAM_PSQT_LR0 = 2.0f;   // initial step size for PSQT (int32 scale ~36k std; needs larger LR)
@@ -66,6 +68,8 @@ static const float TDLEAF_ADAM_LR_FLOOR = 0.01f;   // long-term fraction of LR0 
 static const float TDLEAF_ADAM_BETA1    = 0.9f;    // first-moment decay  (FC + FT bias + PSQT)
 static const float TDLEAF_ADAM_BETA2    = 0.999f;  // second-moment decay (all layers)
 static const float TDLEAF_ADAM_EPS      = 1e-8f;   // numerical floor
+static const int   TDLEAF_ADAM_WARMUP   = 50;      // linear LR warmup over first N games (0 = disabled)
+static const int   TDLEAF_BATCH_SIZE    = 4;       // accumulate gradients across N games before Adam step
 
 // ---------------------------------------------------------------------------
 // Per-ply record: accumulator snapshot + search score
@@ -126,5 +130,8 @@ extern int tdleaf_replay_k;
 // current weights before each pass.  Must be called after tdleaf_update_after_game().
 // No-op if tdleaf_replay_k == 0.
 void tdleaf_replay(TDGameRecord &rec, float result, const char *save_path);
+
+// Flush any pending mini-batch gradients (e.g., at session end or weight export).
+void tdleaf_flush_batch(const char *save_path);
 
 #endif // TDLEAF_H

@@ -57,6 +57,71 @@ perl comp.pl train_arm_b NNUE=1 NNUE_NET=nn-start.nnue TDLEAF=1 \
 
 **After the ablation:** if one approach dominates, drop the other to reduce complexity.
 
+### Flavor A replay (re-evaluate from current weights)
+
+The current replay system (Flavor B) uses frozen accumulators — it refreshes `score_stm`
+via the FC forward pass but the FT activations are stale.  This means FT weight gradients
+during replay are computed from accumulators that reflected old FT weights, creating a
+gradient inconsistency that grows as FT weights change.
+
+**Flavor A** would re-evaluate positions from scratch using the current weights.  This
+requires storing the actual positions (or at least piece lists + king squares) in
+`TDRecord` rather than just the accumulators, so the accumulator can be recomputed.
+The memory cost is higher per `TDRecord` and compute per replay pass increases, but
+the gradient quality improvement for the ~23M FT parameters would be substantial.
+
+If implemented, the replay buffer could be made much larger (32–64 games) with K=1–2
+passes, randomly sub-sampling a subset per pass for better generalization.
+
+### Weight decay / L2 regularization (AdamW)
+
+The optimizer has no explicit regularization.  The per-weight LR decay with floor serves
+as an implicit regularizer but doesn't penalize large weight magnitudes.  For an online
+learning system with noisy gradients, light decoupled weight decay (AdamW-style) could
+improve generalization:
+
+```cpp
+// After computing dw from Adam:
+w -= weight_decay * lr * w;
+```
+
+A very small decay coefficient (1e-5 to 1e-4) would gently pull unused or overfit weights
+toward zero.  Consider applying only to FC and FT weights, not PSQT (which has meaningful
+non-zero baselines from classical init).
+
+### Gradient clipping by global norm
+
+The per-ply score-change clipping and ID-stability weighting are good local noise
+mitigation, but there is no protection against the *aggregate* gradient being very large
+(e.g., from a game with many tactical plies that all barely pass the clip threshold).
+
+After accumulating all per-ply gradients for a game, compute the global gradient norm
+and clip if it exceeds a threshold.  This prevents any single outlier game from making a
+disproportionately large weight update.
+
+### Prioritized experience replay
+
+The replay buffer currently iterates over all buffered games with equal weight.  Games
+with larger total TD error (`Σ|e[t]|`) contain more learning signal and should be
+replayed with higher priority.  Simplest variant: weight each game by its cumulative
+absolute TD error, or skip games where total error is near zero.
+
+### Asymmetric lambda for wins vs losses
+
+Using a single λ=0.7 for all games treats wins, losses, and draws equivalently.  Using
+different λ values (higher for decisive games, lower for draws) could improve credit
+assignment: decisive games benefit from longer trace propagation, while draws are better
+served by shorter traces that don't amplify balanced-position noise.
+
+### Per-weight bias correction for sparse features
+
+`t_adam` is a global counter incremented once per `nnue_apply_gradients()` call, but
+weights that receive zero gradient skip the m/v update.  For sparse FT features this
+means bias correction uses a `t_adam` larger than the weight's actual update count,
+causing `v̂` to be under-corrected (step too small for that weight).  Using per-weight
+`t` counters for bias correction, or skipping correction entirely for weights with >20
+updates (where `1−β^t ≈ 1`), would reduce this effect for rarely-visited features.
+
 ### Search parameter tuning
 The search's pruning parameters (null-move margins, futility thresholds, aspiration
 windows, LMR reduction tables) were tuned for the classical eval.  The NNUE eval has a
@@ -97,6 +162,22 @@ See memory for full implementation plan.
 ---
 
 ## Resolved / Implemented
+
+### ~~Mini-batch gradient accumulation~~ ✓ Implemented (2026-03-19)
+Gradients accumulated across `TDLEAF_BATCH_SIZE=4` games before each Adam step.
+Reduces single-game gradient noise and file I/O by ~4×.  `tdleaf_flush_batch()`
+applies any pending partial batch at session end.  Set `TDLEAF_BATCH_SIZE=1` to restore
+per-game updates.
+
+### ~~Per-weight FT second moment~~ ✓ Implemented (2026-03-19)
+FT weights upgraded from per-row RMSProp v (~88 KB) to per-weight v (~92 MB, OS lazy-paged).
+Each of the 1024 dimensions within a feature row now has its own variance estimate,
+allowing the optimizer to adapt step sizes per-dimension rather than using a coarse
+per-row average.
+
+### ~~LR warmup~~ ✓ Implemented (2026-03-19)
+Linear warmup over first `TDLEAF_ADAM_WARMUP=50` Adam steps.  Prevents early-training
+instability from cold-start v estimates.  Set `TDLEAF_ADAM_WARMUP=0` to disable.
 
 ### ~~Adam + per-weight LR decay~~ ✓ Implemented (2026-03-15)
 Adam optimizer with per-weight LR decay `lr(cnt) = LR0×(floor+(1−floor)/(1+cnt/C))` is live.

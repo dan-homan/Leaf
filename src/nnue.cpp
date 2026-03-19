@@ -1248,9 +1248,9 @@ static float    ft_bias_delta [NNUE_HALF_DIMS] = {};
 // All zeroed at session start in nnue_init_fp32_weights / nnue_init_zero_weights.
 //
 // FC layers + FT biases: true per-weight m and v (static, ~1.1 MB total).
-// FT weights:            per-row v only (RMSProp; m omitted — per-dim m would
+// FT weights:            per-weight v (RMSProp; m omitted — per-dim m would
 //                        require 92 MB heap and the per-row mean is too coarse
-//                        to be directionally useful).  Heap, ~88 KB.
+//                        to be directionally useful).  Heap, ~92 MB (OS lazy-paged).
 // PSQT:                  per-weight m and v (heap, ~1.4 MB; only 8 buckets/row
 //                        so per-weight is affordable and per-row is too coarse).
 // ---------------------------------------------------------------------------
@@ -1270,7 +1270,7 @@ static float m_l2_w[NNUE_LAYER_STACKS][NNUE_L2_PADDED]                = {};
 static float m_l2_b[NNUE_LAYER_STACKS]                                 = {};
 static float m_ft_bias[NNUE_HALF_DIMS]                                  = {};
 
-static float    *v_ft_row  = nullptr;  // [NNUE_FT_INPUTS] — FT per-row second moment (~88 KB)
+static float    *v_ft_w    = nullptr;  // [NNUE_FT_INPUTS × NNUE_HALF_DIMS] — FT per-weight second moment (~92 MB, OS lazy-paged)
 static float    *v_psqt_w  = nullptr;  // [NNUE_FT_INPUTS × PSQT_BKTS] — PSQT per-weight v (~720 KB)
 static float    *m_psqt_w  = nullptr;  // [NNUE_FT_INPUTS × PSQT_BKTS] — PSQT per-weight m (~720 KB)
 
@@ -1450,10 +1450,10 @@ void nnue_init_zero_weights()
         memset(ft_dirty,         0, NNUE_FT_INPUTS * sizeof(bool));
 
         // Adam heap arrays — allocate on first use; zero for fresh network.
-        if (!v_ft_row)  v_ft_row  = new float[NNUE_FT_INPUTS]();
+        if (!v_ft_w)    v_ft_w    = new float[ft_sz]();
         if (!v_psqt_w)  v_psqt_w  = new float[psqt_sz]();
         if (!m_psqt_w)  m_psqt_w  = new float[psqt_sz]();
-        memset(v_ft_row,  0, NNUE_FT_INPUTS * sizeof(float));
+        memset(v_ft_w,    0, ft_sz   * sizeof(float));
         memset(v_psqt_w,  0, psqt_sz * sizeof(float));
         memset(m_psqt_w,  0, psqt_sz * sizeof(float));
 
@@ -1568,7 +1568,7 @@ void nnue_init_fp32_weights()
         ft_delta_f32     = new float   [ft_sz]();    // zero-initialised
         psqt_delta_f32   = new float   [psqt_sz]();  // zero-initialised
         // Adam heap arrays — session-local moment arrays for FT and PSQT.
-        v_ft_row  = new float[NNUE_FT_INPUTS]();
+        v_ft_w    = new float[ft_sz]();    // per-weight FT second moment (~92 MB, OS lazy-paged)
         v_psqt_w  = new float[psqt_sz]();
         m_psqt_w  = new float[psqt_sz]();
     }
@@ -1611,7 +1611,7 @@ void nnue_init_fp32_weights()
     memset(m_l2_w,    0, sizeof(m_l2_w));
     memset(m_l2_b,    0, sizeof(m_l2_b));
     memset(m_ft_bias, 0, sizeof(m_ft_bias));
-    if (v_ft_row)  memset(v_ft_row,  0, NNUE_FT_INPUTS * sizeof(float));
+    if (v_ft_w)    memset(v_ft_w,    0, ft_sz * sizeof(float));
     if (v_psqt_w)  memset(v_psqt_w,  0, psqt_sz * sizeof(float));
     if (m_psqt_w)  memset(m_psqt_w,  0, psqt_sz * sizeof(float));
     t_adam = 0;
@@ -1850,11 +1850,16 @@ void nnue_apply_gradients()
     const float bc1 = 1.0f - powf(TDLEAF_ADAM_BETA1, (float)t_adam);
     const float bc2 = 1.0f - powf(TDLEAF_ADAM_BETA2, (float)t_adam);
 
-    // Per-weight LR with long-term floor:
-    //   lr(cnt) = LR0 × (floor + (1 − floor) / (1 + cnt/C))
+    // Linear LR warmup: ramp from 0 to full over the first WARMUP Adam steps.
+    const float warmup_factor = (TDLEAF_ADAM_WARMUP > 0 && t_adam <= (uint32_t)TDLEAF_ADAM_WARMUP)
+        ? (float)t_adam / (float)TDLEAF_ADAM_WARMUP
+        : 1.0f;
+
+    // Per-weight LR with long-term floor and warmup:
+    //   lr(cnt) = warmup × LR0 × (floor + (1 − floor) / (1 + cnt/C))
     // At cnt=0 → LR0; as cnt→∞ → LR0 × floor (never drops to zero).
-    auto lr_decay = [](float lr0, uint32_t cnt) -> float {
-        return lr0 * (TDLEAF_ADAM_LR_FLOOR
+    auto lr_decay = [warmup_factor](float lr0, uint32_t cnt) -> float {
+        return warmup_factor * lr0 * (TDLEAF_ADAM_LR_FLOOR
                       + (1.0f - TDLEAF_ADAM_LR_FLOOR)
                         / (1.0f + (float)cnt / TDLEAF_ADAM_C));
     };
@@ -1938,31 +1943,24 @@ void nnue_apply_gradients()
     if (ft_dirty) {
         for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
             if (!ft_dirty[fi]) continue;
-            // FT weights — RMSProp with per-row v (no m; per-row mean is too coarse
-            // to carry directional first-moment signal).  Per-weight LR decay via cnt.
+            // FT weights — per-weight RMSProp (no m; FT rows are too sparse for
+            // first-moment to carry useful directional signal).  Per-weight LR decay via cnt.
             float    *fw  = ft_weights_f32 + (size_t)fi * NNUE_HALF_DIMS;
             float    *gw  = grad_ft_w      + (size_t)fi * NNUE_HALF_DIMS;
             uint32_t *cnt = ft_weights_cnt + (size_t)fi * NNUE_HALF_DIMS;
             float    *fd  = ft_delta_f32 ? ft_delta_f32 + (size_t)fi * NNUE_HALF_DIMS : nullptr;
-            if (v_ft_row) {
-                // Accumulate row mean g² over non-zero dims; update per-row v.
-                float g2sum = 0.0f;
-                int   n_nz  = 0;
+            if (v_ft_w) {
+                float *vw = v_ft_w + (size_t)fi * NNUE_HALF_DIMS;
                 for (int d = 0; d < NNUE_HALF_DIMS; d++) {
-                    if (gw[d] != 0.0f) { g2sum += gw[d] * gw[d]; n_nz++; }
-                }
-                if (n_nz > 0) {
-                    v_ft_row[fi] = TDLEAF_ADAM_BETA2 * v_ft_row[fi]
-                                 + (1.0f - TDLEAF_ADAM_BETA2) * (g2sum / (float)n_nz);
-                    float sv = sqrtf(v_ft_row[fi] / bc2) + TDLEAF_ADAM_EPS;
-                    for (int d = 0; d < NNUE_HALF_DIMS; d++) {
-                        if (gw[d] != 0.0f) {
-                            float lr = lr_decay(TDLEAF_ADAM_LR0, cnt[d]);
-                            float dw = lr * gw[d] / sv;
-                            fw[d] -= dw;  if (fd) fd[d] -= dw;
-                            cnt[d]++;
-                            gw[d] = 0.0f;
-                        }
+                    if (gw[d] != 0.0f) {
+                        vw[d] = TDLEAF_ADAM_BETA2 * vw[d]
+                               + (1.0f - TDLEAF_ADAM_BETA2) * gw[d] * gw[d];
+                        float sv = sqrtf(vw[d] / bc2) + TDLEAF_ADAM_EPS;
+                        float lr = lr_decay(TDLEAF_ADAM_LR0, cnt[d]);
+                        float dw = lr * gw[d] / sv;
+                        fw[d] -= dw;  if (fd) fd[d] -= dw;
+                        cnt[d]++;
+                        gw[d] = 0.0f;
                     }
                 }
             }

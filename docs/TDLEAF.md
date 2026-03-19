@@ -192,7 +192,7 @@ w   ← w + Δw
 cnt ← cnt + 1
 ```
 
-`t` is incremented once per `nnue_apply_gradients()` call (once per game).  The bias
+`t` is incremented once per `nnue_apply_gradients()` call (once per batch).  The bias
 correction denominators `(1−β₁ᵗ)` and `(1−β₂ᵗ)` are hoisted outside all per-weight
 loops for efficiency.
 
@@ -210,7 +210,7 @@ effective LR for longer.
 |-------|-------------|-----|-------|
 | FC0/FC1/FC2 weights | Full Adam | `TDLEAF_ADAM_LR0 = 0.2` | Float shadow clamped to ±127 after each update |
 | FC0/FC1/FC2 biases  | Full Adam | `TDLEAF_ADAM_LR0 = 0.2` | |
-| FT weights | RMSProp (per-row v, no m) | `TDLEAF_ADAM_LR0 = 0.2` | 92 MB per-weight v ruled out; per-row v ≈ 88 KB |
+| FT weights | RMSProp (per-weight v, no m) | `TDLEAF_ADAM_LR0 = 0.2` | Per-weight v (~92 MB, OS lazy-paged; physical use ∝ active features) |
 | FT biases  | Full Adam | `TDLEAF_ADAM_LR0 = 0.2` | |
 | PSQT       | Full Adam | `TDLEAF_ADAM_PSQT_LR0 = 2.0` | Separate LR0 required — see below |
 
@@ -238,7 +238,7 @@ and `nnue_init_zero_weights()`.  Resetting both together keeps bias correction
 `v̂ = v/(1−β₂ᵗ)` mathematically valid from game 1 of each session.
 
 Moments are **not** persisted to `.tdleaf.bin` because:
-- The volume is small (~2.7 MB) but persisting them would break the delta-merge mechanism
+- Persisting them would break the delta-merge mechanism
   used for concurrent multi-instance training.
 - Session-local moments restart cleanly with full bias correction each session.
 - The per-weight `cnt` arrays (which are persisted) carry the durable learning history
@@ -255,10 +255,63 @@ Moments are **not** persisted to `.tdleaf.bin` because:
 | `TDLEAF_ADAM_BETA1` | 0.9 | First-moment decay (FC weights/biases, FT biases, PSQT) |
 | `TDLEAF_ADAM_BETA2` | 0.999 | Second-moment decay (all layers) |
 | `TDLEAF_ADAM_EPS` | 1e-8 | Numerical floor in denominator |
+| `TDLEAF_ADAM_WARMUP` | 50 | Linear LR warmup: ramp from 0 to full LR over first N Adam steps (0 = disabled) |
+| `TDLEAF_BATCH_SIZE` | 4 | Mini-batch: accumulate gradients across N games before each Adam step |
 
 Set `TDLEAF_ADAM_LR_FLOOR = 0.0` to restore the original decay-to-zero behaviour.
 Set `TDLEAF_ADAM_LR0 = 0.0` to disable Adam entirely and fall back to plain gradient
 descent (the original single-step `w -= g` path; all Adam arrays remain zeroed and unused).
+Set `TDLEAF_BATCH_SIZE = 1` to restore per-game Adam steps.
+Set `TDLEAF_ADAM_WARMUP = 0` to disable warmup.
+
+---
+
+## Mini-Batch Gradient Accumulation
+
+By default (`TDLEAF_BATCH_SIZE=4`), gradients are accumulated across 4 games before
+a single Adam step is applied.  This gives the optimizer a more reliable gradient signal
+per step, reducing single-game noise that otherwise causes Adam's first moment to chase
+stochastic fluctuations.
+
+### How it works
+
+1. `tdleaf_update_after_game()` calls `tdleaf_accumulate_game()` on every game but only
+   calls `nnue_apply_gradients()` + `nnue_requantize_fc()` + save when the batch counter
+   reaches `TDLEAF_BATCH_SIZE`.
+2. `tdleaf_replay()` always pushes the completed game into the ring buffer, but replay
+   passes only run on batch boundaries (when the live batch was just applied).
+3. `tdleaf_flush_batch()` applies any pending partial batch at session end (program exit
+   or weight export), preventing gradient loss.
+
+### Trade-offs
+
+- **Pro:** each Adam step uses ~4× more gradient data, improving signal-to-noise ratio.
+- **Pro:** file I/O reduced by ~4× (one write per batch instead of per game).
+- **Con:** weight updates are delayed by up to `BATCH_SIZE-1` games (negligible in practice;
+  the delay is <1 second at typical game durations).
+
+Set `TDLEAF_BATCH_SIZE = 1` to restore the original per-game update behaviour.
+
+---
+
+## LR Warmup
+
+A linear warmup ramps the learning rate from 0 to its full value over the first
+`TDLEAF_ADAM_WARMUP` Adam steps (default 50).  The effective LR at step `t` is:
+
+```
+lr_effective = min(1.0, t / WARMUP) × lr_decay(LR0, cnt)
+```
+
+### Motivation
+
+Adam's bias correction handles cold-start `m` and `v` mathematically, but in practice
+the first few steps can produce disproportionately large effective step sizes because
+`v` hasn't accumulated a reliable variance estimate.  For rarely-visited feature rows
+that may not receive gradient for hundreds of games, the first update can overshoot.
+Warmup smooths this transition at essentially zero implementation cost.
+
+Set `TDLEAF_ADAM_WARMUP = 0` to disable warmup.
 
 ---
 

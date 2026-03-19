@@ -164,7 +164,14 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
 }
 
 // ---------------------------------------------------------------------------
-// tdleaf_update_after_game — live pass: accumulate + apply + save
+// Mini-batch: accumulate gradients across TDLEAF_BATCH_SIZE games before
+// applying the Adam step.  This gives Adam a more reliable gradient signal
+// per step, reducing single-game noise.
+// ---------------------------------------------------------------------------
+static int td_batch_pending = 0;  // games accumulated since last apply
+
+// ---------------------------------------------------------------------------
+// tdleaf_update_after_game — live pass: accumulate; apply every BATCH_SIZE games
 // ---------------------------------------------------------------------------
 void tdleaf_update_after_game(TDGameRecord &rec, float result, const char *save_path)
 {
@@ -175,16 +182,24 @@ void tdleaf_update_after_game(TDGameRecord &rec, float result, const char *save_
     }
 
     tdleaf_accumulate_game(rec, result);
-    nnue_apply_gradients();
-    nnue_requantize_fc();
+    td_batch_pending++;
 
-    if (save_path && save_path[0]) {
-        if (!nnue_save_fc_weights(save_path))
-            fprintf(stderr, "TDLeaf: failed to save weights to %s\n", save_path);
+    if (td_batch_pending >= TDLEAF_BATCH_SIZE) {
+        nnue_apply_gradients();
+        nnue_requantize_fc();
+
+        if (save_path && save_path[0]) {
+            if (!nnue_save_fc_weights(save_path))
+                fprintf(stderr, "TDLeaf: failed to save weights to %s\n", save_path);
+        }
+
+        fprintf(stderr, "TDLeaf: applied batch of %d game(s), latest %d plies (result=%.1f)\n",
+                td_batch_pending, T, (double)result);
+        td_batch_pending = 0;
+    } else {
+        fprintf(stderr, "TDLeaf: accumulated %d-ply game (result=%.1f), batch %d/%d\n",
+                T, (double)result, td_batch_pending, TDLEAF_BATCH_SIZE);
     }
-
-    fprintf(stderr, "TDLeaf: updated weights for %d-ply game (result=%.1f)\n",
-            T, (double)result);
 }
 
 // ---------------------------------------------------------------------------
@@ -226,10 +241,9 @@ static void tdleaf_refresh_scores(TDGameRecord &rec)
 // ---------------------------------------------------------------------------
 void tdleaf_replay(TDGameRecord &rec, float result, const char *save_path)
 {
-    if (tdleaf_replay_k <= 0) return;
     if (rec.n_plies < TDLEAF_MIN_PLIES) return;
 
-    // Push current game into the ring buffer.
+    // Always push the completed game into the ring buffer.
     int slot = td_replay_head;
     td_replay_buf[slot].rec    = rec;
     td_replay_buf[slot].result = result;
@@ -237,7 +251,12 @@ void tdleaf_replay(TDGameRecord &rec, float result, const char *save_path)
     td_replay_head = (td_replay_head + 1) % TDLEAF_REPLAY_BUF_N;
     if (td_replay_count < TDLEAF_REPLAY_BUF_N) td_replay_count++;
 
-    int n_valid = td_replay_count;  // number of valid entries (≤ BUF_N)
+    // Only run replay passes on batch boundaries (when td_batch_pending was
+    // just reset to 0 by tdleaf_update_after_game).  This ensures the live
+    // batch and replay batch are applied at the same cadence.
+    if (tdleaf_replay_k <= 0 || td_batch_pending != 0) return;
+
+    int n_valid = td_replay_count;
 
     for (int pass = 0; pass < tdleaf_replay_k; pass++) {
         // Iterate entries in chronological order (oldest first).
@@ -264,6 +283,26 @@ void tdleaf_replay(TDGameRecord &rec, float result, const char *save_path)
 
     fprintf(stderr, "TDLeaf replay: %d pass(es) x %d game(s) in buffer\n",
             tdleaf_replay_k, n_valid);
+}
+
+// ---------------------------------------------------------------------------
+// tdleaf_flush_batch — apply any pending accumulated gradients (e.g., at
+// session end or weight export).  No-op if no gradients are pending.
+// ---------------------------------------------------------------------------
+void tdleaf_flush_batch(const char *save_path)
+{
+    if (td_batch_pending <= 0) return;
+
+    nnue_apply_gradients();
+    nnue_requantize_fc();
+
+    if (save_path && save_path[0]) {
+        if (!nnue_save_fc_weights(save_path))
+            fprintf(stderr, "TDLeaf flush: failed to save weights to %s\n", save_path);
+    }
+
+    fprintf(stderr, "TDLeaf flush: applied partial batch of %d game(s)\n", td_batch_pending);
+    td_batch_pending = 0;
 }
 
 #endif // TDLEAF

@@ -517,6 +517,15 @@ int main(int argc, char *argv[])
    }
 
   if(logging) logfile.close();
+
+#if TDLEAF && NNUE && !TDLEAF_READONLY
+  if (nnue_available) {
+    char tdleaf_save[FILENAME_MAX];
+    snprintf(tdleaf_save, sizeof(tdleaf_save), "%s%s", exec_path, NNUE_TDLEAF_BIN);
+    tdleaf_flush_batch(tdleaf_save);
+  }
+#endif
+
   close_hash();
 
   return 0;

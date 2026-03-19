@@ -1,5 +1,21 @@
 Changes since 2017_12_24
 
+2026_03_19 -- TDLeaf optimizer improvements (src/tdleaf.cpp, src/tdleaf.h,
+               src/nnue.cpp, src/main.cpp).
+               Three changes to speed up learning:
+               1. Mini-batch gradient accumulation (TDLEAF_BATCH_SIZE=4): gradients
+                  are accumulated across 4 games before each Adam step, giving the
+                  optimizer a more reliable gradient signal per step and reducing
+                  file I/O by ~4×.  tdleaf_flush_batch() applies any pending partial
+                  batch at session end.
+               2. Per-weight FT second moment: FT weights upgraded from per-row
+                  RMSProp v (~88 KB) to per-weight v (~92 MB, OS lazy-paged).  Each
+                  of the 1024 dimensions within a feature row now has its own variance
+                  estimate, allowing dimension-specific step-size adaptation.
+               3. LR warmup (TDLEAF_ADAM_WARMUP=50): linear warmup ramps LR from 0 to
+                  full over the first 50 Adam steps.  Prevents early-training
+                  instability from cold-start variance estimates.
+
 2026_03_19 -- UCI protocol support (src/uci.cpp, src/main.cpp, src/search.cpp,
                src/search.h, src/support.cpp, src/extern.h, src/funct.h,
                src/Leaf.cc).
