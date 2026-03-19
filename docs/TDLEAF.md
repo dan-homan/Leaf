@@ -186,9 +186,9 @@ m   ← β₁ m + (1−β₁) g                    (first moment)
 v   ← β₂ v + (1−β₂) g²                   (second moment)
 m̂   = m / (1 − β₁ᵗ)                      (bias-corrected)
 v̂   = v / (1 − β₂ᵗ)                      (bias-corrected)
-lr  = LR0 × (floor + (1−floor) / (1 + cnt/C))   (per-weight LR decay with floor)
-Δw  = −lr × m̂ / (√v̂ + ε)
-w   ← w + Δw
+lr  = LR0 × (floor + (1−floor) / (1 + √(cnt/C)))  (sqrt-softened per-weight LR decay)
+Δw  = −lr × m̂ / (√v̂ + ε)                 (Adam step)
+w   ← w − λ × lr × w                      (AdamW weight decay; weights only, not biases/PSQT)
 cnt ← cnt + 1
 ```
 
@@ -196,23 +196,25 @@ cnt ← cnt + 1
 correction denominators `(1−β₁ᵗ)` and `(1−β₂ᵗ)` are hoisted outside all per-weight
 loops for efficiency.
 
-**Per-weight LR decay with floor:** `lr(cnt) = LR0 × (floor + (1 − floor) / (1 + cnt/C))`.
+**Per-weight LR decay with floor (sqrt-softened):** `lr(cnt) = LR0 × (floor + (1 − floor) / (1 + sqrt(cnt/C)))`.
 At `cnt=0` the step size is `LR0`; at `cnt=C` it is halfway between `LR0` and the floor;
-as `cnt→∞` it settles to `LR0 × floor` rather than zero.  The floor (`TDLEAF_ADAM_LR_FLOOR`,
-default 0.01) ensures weights remain trainable indefinitely — even heavily-updated parameters
-still receive 1% of the initial step size per game.  Weights that receive gradient every game
-(FC biases, dense feature rows) converge fastest; rarely-seen PSQT buckets retain a higher
-effective LR for longer.
+as `cnt→∞` it settles to `LR0 × floor` rather than zero.  The sqrt softens the decay at
+large `cnt` compared to the original `1/(1+cnt/C)`: the schedule spends more time near the
+floor, giving well-trained weights more opportunity to continue adapting.  The floor
+(`TDLEAF_ADAM_LR_FLOOR`, default 0.05) ensures weights remain trainable indefinitely — even
+heavily-updated parameters still receive 5% of the initial step size per game.  Weights that
+receive gradient every game (FC biases, dense feature rows) converge fastest; rarely-seen
+PSQT buckets retain a higher effective LR for longer.
 
 ### Per-Layer Configuration
 
-| Layer | Update Rule | LR0 | Notes |
-|-------|-------------|-----|-------|
-| FC0/FC1/FC2 weights | Full Adam | `TDLEAF_ADAM_LR0 = 0.2` | Float shadow clamped to ±127 after each update |
-| FC0/FC1/FC2 biases  | Full Adam | `TDLEAF_ADAM_LR0 = 0.2` | |
-| FT weights | RMSProp (per-weight v, no m) | `TDLEAF_ADAM_LR0 = 0.2` | Per-weight v (~92 MB, OS lazy-paged; physical use ∝ active features) |
-| FT biases  | Full Adam | `TDLEAF_ADAM_LR0 = 0.2` | |
-| PSQT       | Full Adam | `TDLEAF_ADAM_PSQT_LR0 = 2.0` | Separate LR0 required — see below |
+| Layer | Update Rule | LR0 | Weight Decay | Notes |
+|-------|-------------|-----|--------------|-------|
+| FC0/FC1/FC2 weights | Full Adam | `TDLEAF_ADAM_LR0 = 0.2` | Yes | Float shadow clamped to ±127 after each update |
+| FC0/FC1/FC2 biases  | Full Adam | `TDLEAF_ADAM_LR0 = 0.2` | No | |
+| FT weights | RMSProp (per-weight v, no m) | `TDLEAF_ADAM_LR0 = 0.2` | Yes | Per-weight v (~92 MB, OS lazy-paged) |
+| FT biases  | Full Adam | `TDLEAF_ADAM_LR0 = 0.2` | No | |
+| PSQT       | Full Adam | `TDLEAF_ADAM_PSQT_LR0 = 2.0` | No | Classical prior; separate LR0 — see below |
 
 ### Why a Separate PSQT LR0?
 
@@ -230,6 +232,24 @@ Without a matching clamp on the float shadow, Adam can push `w_f32` arbitrarily 
 accumulate gradient updates with zero effect on the network.  After each weight update,
 `w_f32 = clamp(w_f32, −127, 127)` keeps the float shadow aligned with the int8 inference
 space.  Not applied to FC2 (output layer, no activation clamping required).
+
+### AdamW Decoupled Weight Decay
+
+After each Adam step, FC weights (FC0/FC1/FC2) and FT weights receive a decoupled weight
+decay update: `w -= λ × lr × w`, where `λ = TDLEAF_WEIGHT_DECAY` (default 1e-4) and `lr`
+is the same per-weight learning rate used by the Adam step (including warmup and decay).
+
+Weight decay is **not** applied to:
+- **Biases** (FC biases, FT biases) — standard practice; biases do not benefit from
+  regularization toward zero and decay would fight the learned offset.
+- **PSQT weights** — initialized from meaningful classical material + piece-square values.
+  Decay would pull them toward zero, fighting the classical prior that provides the
+  starting point for learning.
+
+The decay is *decoupled* (AdamW-style, Loshchilov & Hutter 2019): the `λ × lr × w` term
+is applied directly to the weight, not injected into the gradient before the Adam m/v
+updates.  This prevents the optimizer's adaptive learning rate from counteracting the
+regularization effect.
 
 ### Session-Local Moments
 
@@ -251,11 +271,12 @@ Moments are **not** persisted to `.tdleaf.bin` because:
 | `TDLEAF_ADAM_LR0` | 0.2 | Initial step size for FC/FT layers (float weight units) |
 | `TDLEAF_ADAM_PSQT_LR0` | 2.0 | Initial step size for PSQT (int32 scale; ~1000× FC) |
 | `TDLEAF_ADAM_C` | 5000 | LR half-life in per-weight update counts |
-| `TDLEAF_ADAM_LR_FLOOR` | 0.01 | Long-term LR floor as a fraction of LR0; lr settles to `LR0 × floor` as cnt→∞ |
+| `TDLEAF_ADAM_LR_FLOOR` | 0.05 | Long-term LR floor as a fraction of LR0 (5%); lr settles to `LR0 × floor` as cnt→∞ |
 | `TDLEAF_ADAM_BETA1` | 0.9 | First-moment decay (FC weights/biases, FT biases, PSQT) |
 | `TDLEAF_ADAM_BETA2` | 0.999 | Second-moment decay (all layers) |
 | `TDLEAF_ADAM_EPS` | 1e-8 | Numerical floor in denominator |
 | `TDLEAF_ADAM_WARMUP` | 50 | Linear LR warmup: ramp from 0 to full LR over first N Adam steps (0 = disabled) |
+| `TDLEAF_WEIGHT_DECAY` | 1e-4 | AdamW decoupled weight decay coefficient (FC weights + FT weights only; 0 = disabled) |
 | `TDLEAF_BATCH_SIZE` | 4 | Mini-batch: accumulate gradients across N games before each Adam step |
 
 Set `TDLEAF_ADAM_LR_FLOOR = 0.0` to restore the original decay-to-zero behaviour.
@@ -263,6 +284,7 @@ Set `TDLEAF_ADAM_LR0 = 0.0` to disable Adam entirely and fall back to plain grad
 descent (the original single-step `w -= g` path; all Adam arrays remain zeroed and unused).
 Set `TDLEAF_BATCH_SIZE = 1` to restore per-game Adam steps.
 Set `TDLEAF_ADAM_WARMUP = 0` to disable warmup.
+Set `TDLEAF_WEIGHT_DECAY = 0.0` to disable weight decay.
 
 ---
 

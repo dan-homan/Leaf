@@ -1855,13 +1855,14 @@ void nnue_apply_gradients()
         ? (float)t_adam / (float)TDLEAF_ADAM_WARMUP
         : 1.0f;
 
-    // Per-weight LR with long-term floor and warmup:
-    //   lr(cnt) = warmup × LR0 × (floor + (1 − floor) / (1 + cnt/C))
+    // Per-weight LR with long-term floor and warmup (sqrt-softened decay):
+    //   lr(cnt) = warmup × LR0 × (floor + (1 − floor) / (1 + sqrt(cnt/C)))
     // At cnt=0 → LR0; as cnt→∞ → LR0 × floor (never drops to zero).
+    // The sqrt softens the decay at large cnt vs the original 1/(1+cnt/C).
     auto lr_decay = [warmup_factor](float lr0, uint32_t cnt) -> float {
         return warmup_factor * lr0 * (TDLEAF_ADAM_LR_FLOOR
                       + (1.0f - TDLEAF_ADAM_LR_FLOOR)
-                        / (1.0f + (float)cnt / TDLEAF_ADAM_C));
+                        / (1.0f + sqrtf((float)cnt / TDLEAF_ADAM_C)));
     };
 
     // Full Adam step for FC layers and FT biases.
@@ -1886,8 +1887,11 @@ void nnue_apply_gradients()
     for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
         for (int i = 0; i < NNUE_L0_SIZE * NNUE_L0_INPUT; i++) {
             if (grad_l0_w[s][i] != 0.0f) {
+                float lr = lr_decay(TDLEAF_ADAM_LR0, l0_weights_cnt[s][i]);
                 float dw = do_step(grad_l0_w[s][i], m_l0_w[s][i], v_l0_w[s][i], l0_weights_cnt[s][i]);
-                l0_weights_f32[s][i] -= dw;  delta_l0_w[s][i] -= dw;
+                // AdamW: decoupled weight decay (weights only, not biases)
+                float wd = TDLEAF_WEIGHT_DECAY * lr * l0_weights_f32[s][i];
+                l0_weights_f32[s][i] -= dw + wd;  delta_l0_w[s][i] -= dw + wd;
                 // Clamp float shadow to int8 range: prevents zombie weights where the float
                 // shadow drifts beyond ±127 while the requantised inference value is stuck.
                 if (l0_weights_f32[s][i] >  127.0f) l0_weights_f32[s][i] =  127.0f;
@@ -1904,8 +1908,10 @@ void nnue_apply_gradients()
         }
         for (int i = 0; i < NNUE_L1_SIZE * NNUE_L1_PADDED; i++) {
             if (grad_l1_w[s][i] != 0.0f) {
+                float lr = lr_decay(TDLEAF_ADAM_LR0, l1_weights_cnt[s][i]);
                 float dw = do_step(grad_l1_w[s][i], m_l1_w[s][i], v_l1_w[s][i], l1_weights_cnt[s][i]);
-                l1_weights_f32[s][i] -= dw;  delta_l1_w[s][i] -= dw;
+                float wd = TDLEAF_WEIGHT_DECAY * lr * l1_weights_f32[s][i];
+                l1_weights_f32[s][i] -= dw + wd;  delta_l1_w[s][i] -= dw + wd;
                 // Clamp float shadow to int8 range (same reason as FC0).
                 if (l1_weights_f32[s][i] >  127.0f) l1_weights_f32[s][i] =  127.0f;
                 if (l1_weights_f32[s][i] < -127.0f) l1_weights_f32[s][i] = -127.0f;
@@ -1921,8 +1927,10 @@ void nnue_apply_gradients()
         }
         for (int i = 0; i < NNUE_L2_PADDED; i++) {
             if (grad_l2_w[s][i] != 0.0f) {
+                float lr = lr_decay(TDLEAF_ADAM_LR0, l2_weights_cnt[s][i]);
                 float dw = do_step(grad_l2_w[s][i], m_l2_w[s][i], v_l2_w[s][i], l2_weights_cnt[s][i]);
-                l2_weights_f32[s][i] -= dw;  delta_l2_w[s][i] -= dw;
+                float wd = TDLEAF_WEIGHT_DECAY * lr * l2_weights_f32[s][i];
+                l2_weights_f32[s][i] -= dw + wd;  delta_l2_w[s][i] -= dw + wd;
                 l2_weights_cnt[s][i]++;
             }
         }
@@ -1958,7 +1966,9 @@ void nnue_apply_gradients()
                         float sv = sqrtf(vw[d] / bc2) + TDLEAF_ADAM_EPS;
                         float lr = lr_decay(TDLEAF_ADAM_LR0, cnt[d]);
                         float dw = lr * gw[d] / sv;
-                        fw[d] -= dw;  if (fd) fd[d] -= dw;
+                        // AdamW: decoupled weight decay (FT weights, not biases/PSQT)
+                        float wd = TDLEAF_WEIGHT_DECAY * lr * fw[d];
+                        fw[d] -= dw + wd;  if (fd) fd[d] -= dw + wd;
                         cnt[d]++;
                         gw[d] = 0.0f;
                     }

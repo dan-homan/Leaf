@@ -73,22 +73,6 @@ the gradient quality improvement for the ~23M FT parameters would be substantial
 If implemented, the replay buffer could be made much larger (32–64 games) with K=1–2
 passes, randomly sub-sampling a subset per pass for better generalization.
 
-### Weight decay / L2 regularization (AdamW)
-
-The optimizer has no explicit regularization.  The per-weight LR decay with floor serves
-as an implicit regularizer but doesn't penalize large weight magnitudes.  For an online
-learning system with noisy gradients, light decoupled weight decay (AdamW-style) could
-improve generalization:
-
-```cpp
-// After computing dw from Adam:
-w -= weight_decay * lr * w;
-```
-
-A very small decay coefficient (1e-5 to 1e-4) would gently pull unused or overfit weights
-toward zero.  Consider applying only to FC and FT weights, not PSQT (which has meaningful
-non-zero baselines from classical init).
-
 ### Gradient clipping by global norm
 
 The per-ply score-change clipping and ID-stability weighting are good local noise
@@ -163,6 +147,14 @@ See memory for full implementation plan.
 
 ## Resolved / Implemented
 
+### ~~Sqrt-softened LR decay~~ ✓ Implemented (2026-03-19)
+Changed schedule from `1/(1+cnt/C)` to `1/(1+sqrt(cnt/C))`.  Same half-life point at
+`cnt=C`, but the decay is softer at large `cnt`, spending more time near the floor.
+
+### ~~AdamW decoupled weight decay~~ ✓ Implemented (2026-03-19)
+`TDLEAF_WEIGHT_DECAY=1e-4` applied to FC weights and FT weights after each Adam step.
+Skipped for biases (no benefit) and PSQT (would fight classical prior).
+
 ### ~~Mini-batch gradient accumulation~~ ✓ Implemented (2026-03-19)
 Gradients accumulated across `TDLEAF_BATCH_SIZE=4` games before each Adam step.
 Reduces single-game gradient noise and file I/O by ~4×.  `tdleaf_flush_batch()`
@@ -181,7 +173,7 @@ instability from cold-start v estimates.  Set `TDLEAF_ADAM_WARMUP=0` to disable.
 
 ### ~~Adam + per-weight LR decay~~ ✓ Implemented (2026-03-15)
 Adam optimizer with per-weight LR decay `lr(cnt) = LR0×(floor+(1−floor)/(1+cnt/C))` is live.
-FC/FT: `TDLEAF_ADAM_LR0=0.2`; PSQT: `TDLEAF_ADAM_PSQT_LR0=1.0`; C=5000; floor=0.01.
+FC/FT: `TDLEAF_ADAM_LR0=0.2`; PSQT: `TDLEAF_ADAM_PSQT_LR0=1.0`; C=5000; floor=0.05.
 FC0/FC1 float shadows clamped to ±127 to prevent zombie weights.  See `docs/TDLEAF.md`.
 
 ### ~~Epoch-based replay~~ ✓ Implemented (2026-03-11)
