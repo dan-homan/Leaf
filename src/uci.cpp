@@ -330,16 +330,19 @@ static void uci_dispatch_go(const std::string &line)
     game.terminate_search = 0;
 
     if (ponder_flag_go) {
-        // UCI ponder: use analysis_mode + uci_in_ponder so search doesn't time out
+        // UCI ponder: use analysis_mode + uci_in_ponder so search doesn't time out.
+        // Loop the search because the ID loop only runs to MAX_MAIN_TREE (depth 79)
+        // and would return naturally on simple positions before stop/ponderhit arrives.
         uci_in_ponder = 1;
         game.ts.analysis_mode = 1;
         game.ts.max_search_depth = MAXD;
         game.ts.max_search_time  = MAXT;
-        // Use a very large time so the search runs until ponderhit/stop
         game.timeleft[stm] = float(MAXT * 100);
         game.inc  = 0.0f;
         game.mttc = 0;
-        game.best = game.ts.search(game.pos, MAXT, game.T, &game);
+        while (uci_in_ponder && !uci_stop_flag && game.program_run) {
+            game.best = game.ts.search(game.pos, MAXT, game.T, &game);
+        }
         uci_in_ponder = 0;
         game.ts.analysis_mode = 0;
     } else {
@@ -379,7 +382,15 @@ static void uci_dispatch_go(const std::string &line)
         }
 
         int search_start = GetTime();
-        game.best = game.ts.search(game.pos, time_limit, game.T, &game);
+        if (uci_go_infinite) {
+            // Loop until stop received — same reason as ponder: ID exits naturally at depth 79
+            while (game.ts.analysis_mode && !uci_stop_flag && game.program_run) {
+                game.best = game.ts.search(game.pos, time_limit, game.T, &game);
+            }
+            game.ts.analysis_mode = 0;
+        } else {
+            game.best = game.ts.search(game.pos, time_limit, game.T, &game);
+        }
         int elapsed_cs = GetTime() - search_start;
 
         // Update time tracking
