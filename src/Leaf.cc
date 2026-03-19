@@ -1,4 +1,5 @@
 #include "../src/main.cpp"
+#include "../src/uci.cpp"
 #ifdef MAKE_GUI
 #include "../src/fltk_gui.cpp"
 #endif

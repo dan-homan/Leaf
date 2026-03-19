@@ -46,6 +46,28 @@ python3 match.py Leaf_vnew Leaf_v1 Leaf_v2 Leaf_v3 \
 When more than one opponent is supplied the script enters **gauntlet mode** and
 prints a summary table (Opponent, Games, W, D, L, Score%, Elo diff) at the end.
 
+### UCI vs xboard cross-protocol match
+
+`match.py` always uses `proto=xboard`.  To run a cross-protocol parity test (UCI
+engine vs xboard engine, same binary) call `cutechess-cli` directly:
+
+```sh
+cd run/
+../tools/cutechess-1.4.0/build/cutechess-cli \
+  -engine cmd=./Leaf_vX name=LeafUCI  proto=uci    dir=$(pwd) \
+  -engine cmd=./Leaf_vX name=LeafXB   proto=xboard dir=$(pwd) \
+  -each tc=10+0.1 \
+  -games 2 -rounds 100 -repeat \
+  -concurrency 4 \
+  -openings file=../testing/testsuites/wac.epd format=epd order=random \
+  -pgnout /tmp/uci_vs_xboard.pgn \
+  -resign movecount=5 score=800 \
+  -draw movenumber=40 movecount=8 score=20
+```
+
+Expected result: ~50% score, Elo difference within ±50 (same engine, different wire
+protocol).
+
 ---
 
 ## training_run.py
@@ -53,6 +75,12 @@ prints a summary table (Opponent, Games, W, D, L, Score%, Elo diff) at the end.
 Interactive TDLeaf(λ) training run manager.  **Invoke from `learn/`** so that
 all working files (`.nnue`, `.tdleaf.bin`, `.games`, built binaries, PGN output)
 land in `learn/`.
+
+> **TDLeaf requires xboard protocol.**  Learning hooks are called from inside
+> `make_move()`, which is only reached in the xboard game loop.  Matches driven
+> through a UCI GUI will not update any weights even if the binary was compiled
+> with `TDLEAF=1`.  `training_run.py` and `match.py` both use `proto=xboard` and
+> are the correct tools for all training workflows.
 
 ```sh
 cd learn/

@@ -66,7 +66,7 @@ int CHECK_INTER=4095;  // node interval to check time
   if(tdata->ID == 0 && !(tdata->node_count&CHECK_INTER)) { \
    if (ts->max_ply > 3 || ts->ponder) {		   \
      int elapsed = GetTime() - ts->start_time;	   \
-     if ((elapsed >= MIN(2*ts->limit,ts->max_limit) && !ts->ponder)	\
+     if ((elapsed >= MIN(2*ts->limit,ts->max_limit) && !ts->ponder && !uci_in_ponder)	\
          || (ts->tsuite && elapsed >= ts->limit) \
 	 || (inter())) {			 \
        return -TIME_FLAG;			 \

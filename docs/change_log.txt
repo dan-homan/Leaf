@@ -1,5 +1,37 @@
 Changes since 2017_12_24
 
+2026_03_19 -- UCI protocol support (src/uci.cpp, src/main.cpp, src/search.cpp,
+               src/search.h, src/support.cpp, src/extern.h, src/funct.h,
+               src/Leaf.cc).
+               Full UCI implementation alongside the existing xboard/CECP protocol
+               and interactive CLI.  Protocol is selected at runtime by auto-detecting
+               the first command received from stdin ("uci", "xboard", or anything
+               else for CLI).  Force flags --uci / --xboard bypass auto-detection.
+               Key design points:
+               · Dedicated I/O reader thread pushes commands into a mutex-protected
+                 queue so "stop" and "ponderhit" are received immediately during search.
+               · inter() routes to uci_check_interrupt() which drains the queue
+                 non-blocking; "stop" sets terminate_search; "ponderhit" transitions
+                 from ponder to time-limited mode without interrupting the search.
+               · UCI pondering uses uci_in_ponder=1 + analysis_mode=1 instead of
+                 game.ts.ponder=1 to avoid the internal ponder-move application in
+                 search() (the GUI already sends the full position including the
+                 expected opponent reply in the "position" command).
+               · "position fen" correctly sets pos.fifty = halfmove_clock * 2 after
+                 setboard() (which zeros it).
+               · Time management in uci_dispatch_go() mirrors make_move()'s GUI branch:
+                 wtime/btime (ms÷10→cs), winc/binc (ms÷1000→s), movestogo→mttc.
+               · New global interface_mode replaces the old xboard flag at sites whose
+                 semantics are "under any GUI protocol" (time management, interrupt
+                 checking, display suppression).  xboard flag now means strictly
+                 xboard/CECP.
+               · log_search() emits "info depth score cp/mate time nodes nps pv"
+                 lines in UCI mode; bestmove [ponder] sent after search returns.
+               · uci_in_ponder guards added to book lookup, singular response, and
+                 history-table aging so ponder-search behaviour matches xboard ponder.
+               Verified: 200-game self-match UCI vs xboard (same binary, same eval)
+               scores 84–89–27 = 48.7%, Elo −8.7 ± 45.0 — statistically identical.
+
 2026_03_18 -- main.cpp: fix stdin EOF spin-loop (src/main.cpp).
                When the GUI closed the stdin pipe without sending "quit",
                cin >> response failed silently and the main protocol loop

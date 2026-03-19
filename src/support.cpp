@@ -332,10 +332,18 @@ void tree_search::log_search(int score)
 {
   char outstring[400], mstring[10];
   position p = tdata[0].n[0].pos;
-  
+
   int total_time = GetTime()-start_time;
   unsigned __int64 node_count = 0ULL;
   for(int ti=0; ti<THREADS; ti++) { node_count += tdata[ti].node_count; }
+
+  // UCI mode: emit UCI info line and return early
+  if (uci_mode) {
+    if (tdata[0].fail == 0) {
+      uci_send_info(score, max_ply, total_time, (unsigned long long)node_count, this);
+    }
+    return;
+  }
 
   //---------------------------------------------------
   // Put max_ply and score information into outstring

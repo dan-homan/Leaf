@@ -8,7 +8,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Leaf is a C++ chess engine (GPL v3) by Daniel C. Homan, originally developed as EXchess (1997–2017).
 The 2026 restart adds NNUE evaluation (Stockfish 15.1–compatible HalfKAv2_hm architecture) and
-TDLeaf(λ) online learning from self-play.  xboard/CECP protocol; no UCI.
+TDLeaf(λ) online learning from self-play.  Supports UCI, xboard/CECP, and an interactive CLI;
+protocol is auto-detected from the first command received on stdin.
 
 ---
 
@@ -56,7 +57,7 @@ The `.nnue` network file and `.tdleaf.bin` weights file must reside in the same 
 
 ### Unity build (`src/Leaf.cc` include order)
 
-`main.cpp` → `attacks.cpp` → `exmove.cpp` → `swap.cpp` → `moves.cpp` → `captures.cpp` →
+`main.cpp` → `uci.cpp` → `attacks.cpp` → `exmove.cpp` → `swap.cpp` → `moves.cpp` → `captures.cpp` →
 `captchecks.cpp` → `hash.cpp` → `smp.cpp` → `search.cpp` → `score.cpp` →
 `#if NNUE nnue.cpp` → `#if TDLEAF tdleaf.cpp` → `check.cpp` → `book.cpp` → `sort.cpp` →
 `util.cpp` → `support.cpp` → `probe.cpp` → `setup.cpp` → `game_rec.cpp` →
@@ -69,7 +70,8 @@ errors (unknown types, undeclared identifiers).  These are expected and can be i
 
 | File | Role |
 |------|------|
-| `src/main.cpp` | xboard protocol, game loop, TDLeaf hooks (`tdleaf_record_ply`, `tdleaf_update_after_game`, `tdleaf_replay`) |
+| `src/main.cpp` | Protocol detection, xboard/CECP loop, CLI loop, game loop, TDLeaf hooks (`tdleaf_record_ply`, `tdleaf_update_after_game`, `tdleaf_replay`) |
+| `src/uci.cpp` | Full UCI implementation: I/O reader thread, command queue, `uci_loop()`, `uci_dispatch_go()`, `uci_set_position()`, `uci_check_interrupt()`, `uci_send_info()` |
 | `src/search.cpp` | PVS alpha-beta, null-move pruning, LMR, lazy SMP, iterative deepening; tracks `id_scores[]` for TDLeaf |
 | `src/score.cpp` | Classical hand-crafted eval + NNUE dispatch; NNUE/pawn/score hash probe/store |
 | `src/nnue.cpp` | NNUE forward pass (int8 inference + NEON), FP32 shadow weights, gradient accumulation, `.tdleaf.bin` I/O |
@@ -93,6 +95,24 @@ errors (unknown types, undeclared identifiers).  These are expected and can be i
 - `tdleaf_replay()` then runs `TDLEAF_REPLAY_K` (default 1) additional passes over the last `TDLEAF_REPLAY_BUF_N` (default 8) completed games stored in a ring buffer, refreshing scores from current weights before each pass.
 - Weights persist to `<net>.tdleaf.bin` (v4 format); POSIX file locking + delta merging allows concurrent multi-instance training.
 - `material` in `score.cpp` is **already STM (side-to-move) POV** — do not flip it.
+
+### Protocol support
+
+Leaf supports three interface modes, selected at runtime by the first command received:
+
+| Mode | Trigger | Force flag |
+|------|---------|------------|
+| UCI | `"uci"` | `--uci` |
+| xboard/CECP | `"xboard"` | `--xboard` |
+| Interactive CLI | anything else | *(default)* |
+
+- `uci_mode` (int) — set when running under UCI.
+- `xboard` (int) — set when running under xboard/CECP.
+- `interface_mode` (int) — set under **either** GUI protocol; used wherever the behaviour is "suppress console output / use GUI time management" rather than being xboard-specific.
+
+UCI pondering: `go ponder` sets `uci_in_ponder=1` + `analysis_mode=1` rather than `game.ts.ponder=1`, because the GUI has already applied the expected opponent move in the `position` command. `ponderhit` clears `uci_in_ponder` and switches to a time-limited search on the same position. `stop` terminates the ponder search and emits `bestmove`.
+
+TDLeaf learning is inactive in UCI mode (the engine never calls `make_move()`, so the TDLeaf hooks in `make_move()` are never reached).
 
 ### Important conventions
 

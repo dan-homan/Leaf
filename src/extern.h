@@ -59,6 +59,9 @@ extern int ALLEG;                  // flags from main.cpp to control the book
                                    // and playing modes
 extern ofstream logfile;           // logfile
 extern int average_lag;
+extern int uci_mode;               // 1 when running UCI protocol
+extern int interface_mode;         // 1 when any GUI protocol is active (xboard or UCI)
+extern int uci_in_ponder;          // 1 when UCI ponder search is running
 
 /* book.cpp */
 extern int learn_count;

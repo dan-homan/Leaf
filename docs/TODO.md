@@ -86,6 +86,16 @@ under NNUE; correctness is expected but unverified with `THREADS > 1`.
 
 ---
 
+### Win-only .tdleaf.bin writes (`TDLEAF_WIN_ONLY_WRITE`)
+
+Compile-time flag that suppresses writing `.tdleaf.bin` after draws and losses.
+Gradients still applied to in-memory weights and other-process deltas still merged from disk on
+all games; only the disk write is gated on `td_result >= 1.0`.  Requires refactoring
+`nnue_save_fc_weights` to split its read+merge phase from its write phase.
+See memory for full implementation plan.
+
+---
+
 ## Resolved / Implemented
 
 ### ~~Adam + per-weight LR decay~~ ✓ Implemented (2026-03-15)

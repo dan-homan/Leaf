@@ -194,7 +194,7 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
   //-----------------------------  
   // checking book
   //-----------------------------  
-  if(gr->book && !ponder) {
+  if(gr->book && !ponder && !uci_in_ponder) {
     bookm = opening_book(p.hcode, p, gr);
     if(bookm.t) {
      tdata[0].pc[0][0] = bookm; tdata[0].pc[0][1].t = 0;
@@ -230,7 +230,7 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
 
   // if last search expected a singular move after opponents response,
   //  move instantly
-  if(!ponder && p.last.t && singular_response.t 
+  if(!ponder && !uci_in_ponder && p.last.t && singular_response.t
      && ((p.last.t == ponder_move.t && last_ponder && singular_response.t==tdata[0].pc[0][0].t)
 		  || (p.last.t == tdata[0].pc[0][1].t && singular_response.t==tdata[0].pc[0][2].t && !last_ponder))) {
     // output move to log or search screen
@@ -287,7 +287,7 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
   for(int ti=0;ti<THREADS;ti++) {
     tdata[ti].n[0].pos = p;               // set the root node of the search
     tdata[ti].n[0].pos.hmove.t = NOMOVE;  // clear the expected best move from the position
-    tdata[ti].init_thread_data(ponder);
+    tdata[ti].init_thread_data(ponder || uci_in_ponder);
 #if NNUE
     if(nnue_available) {
       tdata[ti].n[0].acc.dirty[0] = tdata[ti].n[0].acc.dirty[1] = true;
@@ -306,10 +306,10 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
   last_ponder = 0;
   ponder_time = 0;
   max_limit = int(MIN(8.0*time_limit, MAX(time_limit, gr->timeleft[p.wtm]/4.0)));
-  if(!gr->mttc && !xboard && !tsuite && !analysis_mode) {max_limit = int(gr->timeleft[p.wtm]);}
+  if(!gr->mttc && !interface_mode && !tsuite && !analysis_mode) {max_limit = int(gr->timeleft[p.wtm]);}
   max_limit = MIN(max_limit, max_search_time*100);
   if(!tsuite && !analysis_mode) {
-    if(!gr->mttc && !xboard) {
+    if(!gr->mttc && !interface_mode) {
       limit = MIN(max_limit, limit);
     } else {
       limit = MIN(max_limit/2, limit);
@@ -327,7 +327,7 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
   int min_cushion = MAX(MIN((int)gr->base, 600), MOVE_OVERHEAD_CS);  // at least MOVE_OVERHEAD_CS for increment-only games
   int time_cushion = MAX((gr->mttc+3)*average_lag, min_cushion);
   int max_margin = MAX(MIN((int)gr->base*10, 6000), 3*min_cushion);  // non-zero for increment-only games
-  if(xboard && gr->timeleft[p.wtm] <= MIN(3*time_cushion, max_margin)) {
+  if(interface_mode && gr->timeleft[p.wtm] <= MIN(3*time_cushion, max_margin)) {
     limit = MIN(limit, MAX(1,gr->timeleft[p.wtm]-2*time_cushion));
     max_limit = limit;  // no time extensions in this mode
     write_out("Short time control restrictions active.\n");
@@ -443,7 +443,7 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
 
     // display results of this search iteration
     if(g != -TIME_FLAG) {
-      if(post && !xboard) search_display(g);
+      if(post && !interface_mode) search_display(g);
       log_search(g);
       best_depth = max_ply;
     }
@@ -454,7 +454,7 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
     // if time is up OR we are interrupted... break
     //  -- require at least 3 ply before breaking due to time being up
     //     This is important to avoid draw by reps!
-    if(g == -TIME_FLAG || inter() || (elapsed >= limit && !ponder && max_ply > 3)) { 
+    if(g == -TIME_FLAG || inter() || (elapsed >= limit && !ponder && !uci_in_ponder && max_ply > 3)) {
       break;
     }
 
@@ -537,7 +537,7 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
   if(failed_high < 1) failed_high = 1;
   if(elapsed < 1) elapsed = 1;
 
-  if(!xboard && !ALLEG && post) {
+  if(!interface_mode && !ALLEG && post) {
    cout << "\nnodes = " << node_count
         << " hash moves = " << hmove_count
         << " qnodes = " << q_count
@@ -607,10 +607,10 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
   //-----------------------------------------
   // Assign a singular move, if appropriate
   //-----------------------------------------
-  if((tdata[0].pc[0][2].b.type&SINGULAR) && !ponder) {
+  if((tdata[0].pc[0][2].b.type&SINGULAR) && !ponder && !uci_in_ponder) {
     tdata[0].pc[0][2].b.type &= NOT_SINGULAR;
     singular_response=tdata[0].pc[0][2];
-  } else if(!ponder) singular_response.t = NOMOVE;
+  } else if(!ponder && !uci_in_ponder) singular_response.t = NOMOVE;
   else tdata[0].pc[0][2].b.type &= NOT_SINGULAR;
 
   //------------------------------------------------------------------
@@ -994,7 +994,7 @@ void search_node::root_pvs()
      //  -- only in the main thread (ID == 0)
      if(!tdata->ID) {
        tdata->fail = -1;
-       if(post && !xboard) ts->search_display(score);
+       if(post && !interface_mode) ts->search_display(score);
        ts->log_search(score);
        tdata->fail = 0;
      }
@@ -1052,7 +1052,7 @@ void search_node::root_pvs()
      //ts->wbest = score; ts->wply = ts->max_ply;  // whisper variables
      // only display search in the default thread
      if(tdata->ID==0) {
-       if(post && !xboard && (!tdata->fail || !first)) ts->search_display(score);
+       if(post && !interface_mode && (!tdata->fail || !first)) ts->search_display(score);
        ts->log_search(score);
      }
      tdata->fail = 0;

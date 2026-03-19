@@ -22,6 +22,8 @@
 
 #include <iostream>
 #include <iomanip>
+#include <sstream>
+#include <string>
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
@@ -85,6 +87,9 @@ int average_lag = 0;
 // Basic control flags for whole game
 int xboard = 0, post = 0, ics = 0, ALLEG = 0, hintflag = 0;
 int ponder_flag = 1, shout_book = 0;
+int uci_mode = 0;
+int interface_mode = 0;
+int uci_in_ponder = 0;
 
 // Executable directory
 char exec_path[FILENAME_MAX];
@@ -307,9 +312,23 @@ int main(int argc, char *argv[])
   //  -- virtually no error checking!
   //-----------------------------------
   for(int argi = 1; argi < argc; argi++) {
-    // turn on xboard mode
-    if(!strcmp(argv[argi], "xb")) { 
+    // turn on UCI mode via command-line flag
+    if(!strcmp(argv[argi], "--uci")) {
+      uci_mode = 1;
+      interface_mode = 1;
+      continue;
+    }
+    // turn on xboard mode via command-line flag
+    if(!strcmp(argv[argi], "--xboard")) {
       xboard = 1;
+      interface_mode = 1;
+      signal(SIGINT, SIG_IGN);
+      continue;
+    }
+    // turn on xboard mode
+    if(!strcmp(argv[argi], "xb")) {
+      xboard = 1;
+      interface_mode = 1;
       continue;
     }
     // set the number of cores to use
@@ -367,37 +386,60 @@ int main(int argc, char *argv[])
   return FLTKmain(argc,argv);
 #endif
 
-  if(!xboard) {
-    cout << "\nLeaf Chess Engine version " << VERS << VERS2 << " (beta),"
-         << "\nCopyright (C) 1997-2026 Daniel C. Homan, Granville OH, USA"
-         << "\nLeaf comes with ABSOLUTELY NO WARRANTY. This is free"
-         << "\nsoftware, and you are welcome to redistribute it under"
-         << "\ncertain conditions. This program is distributed under the"
-         << "\nGNU public license.  See the file license.txt"
-         << "\nfor more information.\n\n";
-
-    //    cout << sizeof(cmove_rec) << "\n";
-
-    cout << "Hash size = " << TAB_SIZE << " buckets of 4 entries, "
-         << TAB_SIZE*sizeof(hash_bucket)/1048576 << " Mbytes\n";
-    cout << "Pawn size = " << PAWN_SIZE << " individual entries, "
-         << PAWN_SIZE*sizeof(pawn_rec)/1048576 << " Mbytes\n";
-    cout << "Score size = " << SCORE_SIZE << " individual entries, "
-         << SCORE_SIZE*sizeof(score_rec)/1048576 << " Mbytes\n";
-    cout << "Cmove size = " << CMOVE_SIZE << " individual entries, "
-         << CMOVE_SIZE*sizeof(cmove_rec)/1048576 << " Mbytes\n\n";
-    cout << "Type 'help' for a list of commands.\n";
-    if(MATERIAL_ONLY) {
-        cout << "\nWARNING -- Material-only eval mode active.\n";
-    }
-  } else { 
-
-    // catch signals for xboard interface
+  // Suppress xboard startup signal setup here if already set via flag
+  if (xboard && !uci_mode) {
     signal(SIGINT, SIG_IGN);
-
   }
 
+  // Protocol auto-detection (only if protocol not already set via flags)
+  if (!uci_mode && !xboard) {
+    std::string first_line;
+    if (std::getline(std::cin, first_line)) {
+      std::istringstream iss(first_line);
+      std::string first_token;
+      iss >> first_token;
+      if (first_token == "uci") {
+        uci_mode = 1;
+        interface_mode = 1;
+      } else if (first_token == "xboard") {
+        xboard = 1;
+        interface_mode = 1;
+        signal(SIGINT, SIG_IGN);
+      } else {
+        // CLI mode: print banner then process this line as the first command
+        cout << "\nLeaf Chess Engine version " << VERS << VERS2 << " (beta),"
+             << "\nCopyright (C) 1997-2026 Daniel C. Homan, Granville OH, USA"
+             << "\nLeaf comes with ABSOLUTELY NO WARRANTY. This is free"
+             << "\nsoftware, and you are welcome to redistribute it under"
+             << "\ncertain conditions. This program is distributed under the"
+             << "\nGNU public license.  See the file license.txt"
+             << "\nfor more information.\n\n";
+        cout << "Hash size = " << TAB_SIZE << " buckets of 4 entries, "
+             << TAB_SIZE*sizeof(hash_bucket)/1048576 << " Mbytes\n";
+        cout << "Pawn size = " << PAWN_SIZE << " individual entries, "
+             << PAWN_SIZE*sizeof(pawn_rec)/1048576 << " Mbytes\n";
+        cout << "Score size = " << SCORE_SIZE << " individual entries, "
+             << SCORE_SIZE*sizeof(score_rec)/1048576 << " Mbytes\n";
+        cout << "Cmove size = " << CMOVE_SIZE << " individual entries, "
+             << CMOVE_SIZE*sizeof(cmove_rec)/1048576 << " Mbytes\n\n";
+        cout << "Type 'help' for a list of commands.\n";
+        if(MATERIAL_ONLY) {
+            cout << "\nWARNING -- Material-only eval mode active.\n";
+        }
+        strncpy(response, first_token.c_str(), sizeof(response)-1);
+        response[sizeof(response)-1] = '\0';
+        parse_command();
+      }
+    }
+  }
 
+  // If UCI mode, run the UCI loop and exit cleanly
+  if (uci_mode) {
+    uci_loop(&game);
+    if(logging) logfile.close();
+    close_hash();
+    return 0;
+  }
 
   /* main loop for text interface */
 
@@ -522,7 +564,7 @@ void make_move()
      //------------------------------
      // Estimate search time to use
      //------------------------------
-     if(xboard || game.mttc) {
+     if(interface_mode || game.mttc) {
        // Estimate the amount of time remaining to time control
        int projected_time = game.timeleft[game.pos.wtm];
        int moves_remaining = game.mttc+1;
@@ -588,8 +630,8 @@ void make_move()
 	game.mttc = game.omttc; 
       } 
     }
-    if(game.mttc <= 0 && !xboard) { 
-      game.timeleft[0] = game.base*100; 
+    if(game.mttc <= 0 && !interface_mode) {
+      game.timeleft[0] = game.base*100;
       game.timeleft[1] = game.base*100;
       game.mttc = game.omttc; 
     }
@@ -1011,14 +1053,15 @@ void parse_command()
     cin >> fsq >> tsq;  
     cout << swap(tsq,game.pos,game.pos.wtm,fsq) << "\n"; 
   }
-  else if(!strcmp(response, "xboard")) { 
+  else if(!strcmp(response, "xboard")) {
     /* only do something if xboard mode is not already set */
-    if(!xboard) { 
+    if(!xboard) {
       xboard = 1;
+      interface_mode = 1;
       // catch signals for xboard interface
       signal(SIGINT, SIG_IGN);
     }
-  }    
+  }
   else if(!strcmp(response, "variant")) { cin.getline(line,256); }
   else if(!strcmp(response, "protover")) {
     cin >> protN;
@@ -1307,9 +1350,13 @@ int inter()
   if(abortflag) { abortflag = 0; return 1; } else { return 0; }
 #endif
 
+  if (uci_mode) {
+    return uci_check_interrupt();
+  }
+
   int interrupt = 0;
  
-  if(!game.ts.ponder && !game.ts.analysis_mode && !xboard) return 0;
+  if(!game.ts.ponder && !game.ts.analysis_mode && !interface_mode) return 0;
 
   if(!xboard && cin.rdbuf() -> in_avail() > 1) interrupt = 1;
 
@@ -1346,7 +1393,7 @@ int inter()
     FD_SET(0,&read_fds);
     timeout.tv_sec = timeout.tv_usec = 0;
     select(1,&read_fds,NULL,NULL,&timeout);
-    if((game.ts.ponder || game.ts.analysis_mode || xboard) && FD_ISSET(0,&read_fds)) interrupt = 1;
+    if((game.ts.ponder || game.ts.analysis_mode || interface_mode) && FD_ISSET(0,&read_fds)) interrupt = 1;
 
 #endif
   }

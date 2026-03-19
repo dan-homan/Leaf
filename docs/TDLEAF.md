@@ -15,6 +15,14 @@ perl comp.pl 2026_03_09a NNUE=1 TDLEAF=1
 
 All learning code is gated by `#if TDLEAF`; when `TDLEAF=0` (default) no overhead is added.
 
+> **Protocol requirement — TDLeaf only works under xboard/CECP.**
+> The learning hooks (`tdleaf_record_ply`, `tdleaf_update_after_game`) are called
+> from inside `make_move()`, which is part of the xboard game loop.  When Leaf runs
+> under the UCI protocol the GUI drives the game externally — `make_move()` is never
+> called — so **no weights are updated and no `.tdleaf.bin` is written**, even if the
+> binary was compiled with `TDLEAF=1`.  Always use xboard-protocol matches (via
+> `match.py` or direct xboard GUI invocation) for training.
+
 ---
 
 ## Algorithm
