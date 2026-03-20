@@ -1950,6 +1950,13 @@ void nnue_apply_gradients()
 {
     t_adam++;
 
+    // Global bias-correction denominator for FT RMSProp.  FT weights are extremely
+    // sparse (mean ~8 updates per weight over 5000 games), so per-weight bc2 gives
+    // almost no correction (eff_t=1 → bc2=0.001).  The global bc2 grows with t_adam,
+    // providing larger effective steps for sparse weights — crucial for FT learning.
+    // FC layers use per-weight bc inside do_step (correct for dense weights).
+    const float ft_bc2 = 1.0f - powf(TDLEAF_ADAM_BETA2, (float)t_adam);
+
     // Linear LR warmup: ramp from 0 to full over the first WARMUP Adam steps.
     const float warmup_factor = (TDLEAF_ADAM_WARMUP > 0 && t_adam <= (uint32_t)TDLEAF_ADAM_WARMUP)
         ? (float)t_adam / (float)TDLEAF_ADAM_WARMUP
@@ -2074,9 +2081,13 @@ void nnue_apply_gradients()
                     if (gw[d] != 0.0f) {
                         vw[d] = TDLEAF_ADAM_BETA2 * vw[d]
                                + (1.0f - TDLEAF_ADAM_BETA2) * gw[d] * gw[d];
-                        uint32_t eff_t = cnt[d] + 1;
-                        float pw_bc2 = (eff_t >= 20) ? 1.0f : (1.0f - powf(TDLEAF_ADAM_BETA2, (float)eff_t));
-                        float sv = sqrtf(vw[d] / pw_bc2) + TDLEAF_ADAM_EPS;
+                        // Use global ft_bc2 (not per-weight): sparse FT weights need
+                        // the growing global correction to produce effective steps.
+                        // Per-weight bc2 at eff_t=1 gives bc2=0.001, yielding step=±lr.
+                        // Global bc2 at t_adam=200 gives bc2≈0.18, yielding step≈2.7×lr.
+                        // This amplification is critical for FT learning under extreme
+                        // sparsity (mean ~8 updates per weight over 5000 games).
+                        float sv = sqrtf(vw[d] / ft_bc2) + TDLEAF_ADAM_EPS;
                         float lr = lr_decay(TDLEAF_ADAM_LR0, cnt[d]);
                         float dw = lr * gw[d] / sv;
                         // AdamW: decoupled weight decay (FT weights, not biases/PSQT)

@@ -1,5 +1,15 @@
 Changes since 2017_12_24
 
+2026_03_20 -- Fix FT under-training: restore global bc2 for FT RMSProp
+               (src/nnue.cpp).
+               Per-weight bias correction (cnt+1) for FT weights gave bc2=0.001 on
+               first update → step=±LR0=±0.2 regardless of training progress.  FT
+               weights are extremely sparse (mean ~8 updates over 5000 games), so this
+               effectively froze the feature transformer while FC layers overfitted to
+               near-random features, producing ±1500 cp opening evals after 5000 games.
+               FT now uses global bc2 (= 1−β₂^t_adam), which amplifies sparse updates
+               by ~2–21×.  FC and PSQT retain per-weight bias correction.
+
 2026_03_20 -- Document symmetric self-play requirement for TDLeaf training
                (docs/TDLEAF.md, docs/TRAINING.md).
                Learner-vs-readonly training is structurally broken: any weight update

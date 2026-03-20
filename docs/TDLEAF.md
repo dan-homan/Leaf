@@ -196,9 +196,18 @@ w   ← w − λ × lr × w                      (AdamW weight decay; weights on
 cnt ← cnt + 1
 ```
 
-`t` is incremented once per `nnue_apply_gradients()` call (once per batch).  The bias
-correction denominators `(1−β₁ᵗ)` and `(1−β₂ᵗ)` are hoisted outside all per-weight
-loops for efficiency.
+`t` is incremented once per `nnue_apply_gradients()` call (once per batch).
+
+**Bias correction — per-weight vs global:**  FC layers and PSQT use per-weight bias
+correction: `eff_t = cnt + 1`, so the correction matches the number of times that
+specific weight has been updated.  FT weights instead use the **global** `t` (the batch
+counter) for the β₂ bias correction denominator.  This is intentional: FT weights are
+extremely sparse (mean ~8 updates per weight over 5000 games), so per-weight bc2 at
+`eff_t=1` gives `bc2 = 0.001`, yielding step ≈ ±LR0.  The global bc2 grows with `t`
+(e.g. `bc2 ≈ 0.18` at `t=200`), providing an effective step ≈ 2.7×LR0 for a weight
+seeing its first gradient.  This amplification is critical for FT learning under extreme
+sparsity — without it, FT weights barely move and FC layers overfit to near-random
+features, producing catastrophic eval divergence.
 
 **Per-weight LR decay with floor:** `lr(cnt) = LR0 × (floor + (1 − floor) / (1 + cnt/C))`.
 At `cnt=0` the step size is `LR0`; at `cnt=C` it is halfway between `LR0` and the floor;
@@ -214,7 +223,7 @@ PSQT buckets retain a higher effective LR for longer.
 |-------|-------------|-----|--------------|-------|
 | FC0/FC1/FC2 weights | Full Adam | `TDLEAF_ADAM_LR0 = 0.2` | Yes | Float shadow clamped to ±127 after each update |
 | FC0/FC1/FC2 biases  | Full Adam | `TDLEAF_ADAM_LR0 = 0.2` | No | |
-| FT weights | RMSProp (per-weight v, no m) | `TDLEAF_ADAM_LR0 = 0.2` | Yes | Per-weight v (~92 MB, OS lazy-paged) |
+| FT weights | RMSProp (per-weight v, no m) | `TDLEAF_ADAM_LR0 = 0.2` | Yes | Per-weight v (~92 MB); global bc2 — see below |
 | FT biases  | **Not trained** | — | — | Stays at baseline; see note above |
 | PSQT       | Full Adam | `TDLEAF_ADAM_PSQT_LR0 = 2.0` | No | Classical prior; separate LR0 — see below |
 

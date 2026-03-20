@@ -100,9 +100,12 @@ Decisive games get longer eligibility traces; draws use shorter traces to reduce
 balanced-position noise.  Set both to the same value for symmetric behaviour.
 
 ### ~~Per-weight bias correction~~ ✓ Implemented (2026-03-20)
-Adam bias correction now uses per-weight update count (`cnt+1`) instead of global
-`t_adam`.  For weights with ≥20 updates, bias correction is skipped (≈1.0).
-Fixes under-correction for sparse FT/PSQT features.
+FC and PSQT bias correction now uses per-weight update count (`cnt+1`) instead of
+global `t_adam`.  For weights with ≥20 updates, bias correction is skipped (≈1.0).
+FT weights retain **global** `t_adam` for bc2 — sparse FT features (mean ~8 updates
+per weight) need the growing global bc2 to produce effective step sizes.  Per-weight
+bc2 at `eff_t=1` gives bc2=0.001 → step=±LR0, far too small; global bc2 amplifies
+sparse first-updates by ~2–21× depending on when they occur.
 
 ### ~~Gradient clipping by global norm~~ ✓ Implemented (2026-03-20)
 `TDLEAF_GRAD_CLIP_NORM=1.0` clips the global L2 gradient norm before each Adam step.
