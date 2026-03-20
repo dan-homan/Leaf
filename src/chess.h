@@ -73,9 +73,6 @@ typedef uint64_t h_code;
 
 #if NNUE
 #include "nnue.h"
-#if TDLEAF
-#include "tdleaf.h"
-#endif
 // Convenience macros for passing the NNUE accumulator through score_pos call sites.
 //   NNUE_ACC_PARAM : add the optional parameter to the score_pos declaration
 //   NNUE_ACC_ARG   : pass the current search_node's accumulator (use inside search_node methods)
@@ -222,6 +219,10 @@ struct position {
   move parse_move(char mstring[10], ts_thread_data *temps);
 
 };
+
+#if NNUE && TDLEAF
+#include "tdleaf.h"
+#endif
 
 // structure for nodes in the search
 

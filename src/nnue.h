@@ -185,6 +185,10 @@ bool nnue_load_fc_weights(const char *path);
 // the Adam LR decay schedule before starting training on a pre-trained network.
 void nnue_set_cnt(uint32_t val);
 
+// Compute global L2 norm of all gradient arrays and clip if it exceeds max_norm.
+// Returns the pre-clip norm.  If max_norm <= 0, does nothing (returns 0).
+float nnue_clip_gradients(float max_norm);
+
 // Evaluate from raw accumulator arrays (used by TDLeaf replay to refresh
 // score_stm from stored acc[][] against current weights, without constructing
 // a full NNUEAccumulator object).

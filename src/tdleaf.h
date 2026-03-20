@@ -19,13 +19,15 @@
 #define TDLEAF_H
 
 #include "define.h"
-#include "chess.h"
 #include "nnue.h"
+// Note: tdleaf.h is included from chess.h after the position struct is defined.
+// Do not include chess.h here to avoid circular inclusion.
 
 // ---------------------------------------------------------------------------
 // Hyperparameters (can be overridden by setvalue/environment at runtime)
 // ---------------------------------------------------------------------------
-static const float TDLEAF_LAMBDA          = 0.7f;   // eligibility trace decay
+static const float TDLEAF_LAMBDA_DECISIVE  = 0.8f;   // eligibility trace decay for wins/losses
+static const float TDLEAF_LAMBDA_DRAW      = 0.5f;   // eligibility trace decay for draws
 static const float TDLEAF_K               = 400.0f; // sigmoid temperature (centipawns)
 static const int   TDLEAF_MIN_PLIES       = 8;      // skip games shorter than this
 // Approach 1 — TD error clipping.
@@ -38,6 +40,9 @@ static const float TDLEAF_SCORE_CLIP_CP  = 200.0f;
 // Expressed in cp²: 10000 corresponds to a 100 cp std-dev reference.
 // Larger values are more tolerant of ID score instability.
 static const float TDLEAF_ID_VAR_SIGMA2  = 10000.0f;
+// Gradient clipping: if global L2 norm of all gradients exceeds this threshold,
+// scale all gradients by max_norm/norm.  Set to 0 to disable.
+static const float TDLEAF_GRAD_CLIP_NORM = 1.0f;
 
 // ---------------------------------------------------------------------------
 // Adam + per-weight LR decay hyperparameters
@@ -75,6 +80,10 @@ static const float TDLEAF_ADAM_EPS      = 1e-8f;   // numerical floor
 static const int   TDLEAF_ADAM_WARMUP   = 50;      // linear LR warmup over first N games (0 = disabled)
 static const int   TDLEAF_BATCH_SIZE    = 4;       // accumulate gradients across N games before Adam step
 
+// Prioritized experience replay: skip replay games whose cumulative |e[t]|
+// falls below this threshold.  Set to 0.0 to disable (replay all games).
+static const float TDLEAF_REPLAY_MIN_ERROR = 0.0f;
+
 // ---------------------------------------------------------------------------
 // Per-ply record: accumulator snapshot + search score
 // ---------------------------------------------------------------------------
@@ -89,6 +98,7 @@ struct TDRecord {
     // Used for FT and PSQT gradient backprop.
     int     ft_idx[2][NNUE_MAX_FT_PER_PERSP];
     int8_t  n_ft[2];
+    position pos;  // leaf position for Flavor A accumulator rebuild during replay
 };
 
 // ---------------------------------------------------------------------------

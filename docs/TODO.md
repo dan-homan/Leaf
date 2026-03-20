@@ -57,55 +57,6 @@ perl comp.pl train_arm_b NNUE=1 NNUE_NET=nn-start.nnue TDLEAF=1 \
 
 **After the ablation:** if one approach dominates, drop the other to reduce complexity.
 
-### Flavor A replay (re-evaluate from current weights)
-
-The current replay system (Flavor B) uses frozen accumulators — it refreshes `score_stm`
-via the FC forward pass but the FT activations are stale.  This means FT weight gradients
-during replay are computed from accumulators that reflected old FT weights, creating a
-gradient inconsistency that grows as FT weights change.
-
-**Flavor A** would re-evaluate positions from scratch using the current weights.  This
-requires storing the actual positions (or at least piece lists + king squares) in
-`TDRecord` rather than just the accumulators, so the accumulator can be recomputed.
-The memory cost is higher per `TDRecord` and compute per replay pass increases, but
-the gradient quality improvement for the ~23M FT parameters would be substantial.
-
-If implemented, the replay buffer could be made much larger (32–64 games) with K=1–2
-passes, randomly sub-sampling a subset per pass for better generalization.
-
-### Gradient clipping by global norm
-
-The per-ply score-change clipping and ID-stability weighting are good local noise
-mitigation, but there is no protection against the *aggregate* gradient being very large
-(e.g., from a game with many tactical plies that all barely pass the clip threshold).
-
-After accumulating all per-ply gradients for a game, compute the global gradient norm
-and clip if it exceeds a threshold.  This prevents any single outlier game from making a
-disproportionately large weight update.
-
-### Prioritized experience replay
-
-The replay buffer currently iterates over all buffered games with equal weight.  Games
-with larger total TD error (`Σ|e[t]|`) contain more learning signal and should be
-replayed with higher priority.  Simplest variant: weight each game by its cumulative
-absolute TD error, or skip games where total error is near zero.
-
-### Asymmetric lambda for wins vs losses
-
-Using a single λ=0.7 for all games treats wins, losses, and draws equivalently.  Using
-different λ values (higher for decisive games, lower for draws) could improve credit
-assignment: decisive games benefit from longer trace propagation, while draws are better
-served by shorter traces that don't amplify balanced-position noise.
-
-### Per-weight bias correction for sparse features
-
-`t_adam` is a global counter incremented once per `nnue_apply_gradients()` call, but
-weights that receive zero gradient skip the m/v update.  For sparse FT features this
-means bias correction uses a `t_adam` larger than the weight's actual update count,
-causing `v̂` to be under-corrected (step too small for that weight).  Using per-weight
-`t` counters for bias correction, or skipping correction entirely for weights with >20
-updates (where `1−β^t ≈ 1`), would reduce this effect for rarely-visited features.
-
 ### Search parameter tuning
 The search's pruning parameters (null-move margins, futility thresholds, aspiration
 windows, LMR reduction tables) were tuned for the classical eval.  The NNUE eval has a
@@ -135,17 +86,33 @@ under NNUE; correctness is expected but unverified with `THREADS > 1`.
 
 ---
 
-### Win-only .tdleaf.bin writes (`TDLEAF_WIN_ONLY_WRITE`)
-
-Compile-time flag that suppresses writing `.tdleaf.bin` after draws and losses.
-Gradients still applied to in-memory weights and other-process deltas still merged from disk on
-all games; only the disk write is gated on `td_result >= 1.0`.  Requires refactoring
-`nnue_save_fc_weights` to split its read+merge phase from its write phase.
-See memory for full implementation plan.
-
----
-
 ## Resolved / Implemented
+
+### ~~Asymmetric lambda~~ ✓ Implemented (2026-03-20)
+`TDLEAF_LAMBDA_DECISIVE=0.8` for wins/losses, `TDLEAF_LAMBDA_DRAW=0.5` for draws.
+Decisive games get longer eligibility traces; draws use shorter traces to reduce
+balanced-position noise.  Set both to the same value for symmetric behaviour.
+
+### ~~Per-weight bias correction~~ ✓ Implemented (2026-03-20)
+Adam bias correction now uses per-weight update count (`cnt+1`) instead of global
+`t_adam`.  For weights with ≥20 updates, bias correction is skipped (≈1.0).
+Fixes under-correction for sparse FT/PSQT features.
+
+### ~~Gradient clipping by global norm~~ ✓ Implemented (2026-03-20)
+`TDLEAF_GRAD_CLIP_NORM=1.0` clips the global L2 gradient norm before each Adam step.
+Applied in `tdleaf_update_after_game`, `tdleaf_replay`, and `tdleaf_flush_batch`.
+Set to 0 to disable.  Logs pre-clip norm to stderr when clipping occurs.
+
+### ~~Prioritized experience replay~~ ✓ Implemented (2026-03-20)
+`TDLEAF_REPLAY_MIN_ERROR=0.0` (disabled by default).  Replay games with cumulative
+|e[t]| below the threshold are skipped.  TD error sums are updated after each replay
+pass for accurate future prioritization.
+
+### ~~Flavor A replay~~ ✓ Implemented (2026-03-20)
+Replay now rebuilds accumulators from stored leaf positions using current FT weights
+via `nnue_init_accumulator()`, then re-enumerates features and re-evaluates scores.
+This eliminates the gradient inconsistency of Flavor B where FT gradients were computed
+from stale accumulators.  `TDRecord` stores the leaf `position` (~256 bytes/ply).
 
 ### ~~AdamW decoupled weight decay~~ ✓ Implemented (2026-03-19)
 `TDLEAF_WEIGHT_DECAY=1e-4` applied to FC weights and FT weights after each Adam step.
@@ -172,8 +139,8 @@ Adam optimizer with per-weight LR decay `lr(cnt) = LR0×(floor+(1−floor)/(1+cn
 FC/FT: `TDLEAF_ADAM_LR0=0.2`; PSQT: `TDLEAF_ADAM_PSQT_LR0=1.0`; C=5000; floor=0.05.
 FC0/FC1 float shadows clamped to ±127 to prevent zombie weights.  See `docs/TDLEAF.md`.
 
-### ~~Epoch-based replay~~ ✓ Implemented (2026-03-11)
-Flavor B is live with `TDLEAF_REPLAY_K=1` (default) and `TDLEAF_REPLAY_BUF_N=8`.
+### ~~Epoch-based replay~~ ✓ Implemented (2026-03-11, upgraded to Flavor A 2026-03-20)
+Flavor A is live with `TDLEAF_REPLAY_K=1` (default) and `TDLEAF_REPLAY_BUF_N=8`.
 Ablation: K=1 is the current conservative default (K=2 marginal gain; K=6 large regression).
 
 ### ~~Bias initialisation~~ ✓ Implemented (2026-03-11)
