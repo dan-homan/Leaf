@@ -166,7 +166,11 @@ void nnue_forward_fp32(const int16_t acc[2][NNUE_HALF_DIMS],
 
 // Accumulate per-weight gradients for one position into the static grad arrays.
 // grad_scale = alpha * e_t * sigmoid_gradient — applied inside.
-void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale);
+// fc_only: if true, skip FT weight, FT bias, and PSQT gradient accumulation.
+// Used during replay to prevent FT overfitting through the positive feedback
+// loop where rebuilt accumulators reinforce live-pass FT updates.
+void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
+                               bool fc_only = false);
 
 // Apply accumulated gradients (zero them afterwards).
 void nnue_apply_gradients();

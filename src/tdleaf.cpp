@@ -113,7 +113,8 @@ void tdleaf_record_ply(TDGameRecord &rec,
 // tdleaf_accumulate_game — steps 1-3: compute d[], e[], accumulate gradients.
 // Does NOT apply or save.  Called by both tdleaf_update_after_game and replay.
 // ---------------------------------------------------------------------------
-static float tdleaf_accumulate_game(TDGameRecord &rec, float result)
+static float tdleaf_accumulate_game(TDGameRecord &rec, float result,
+                                    bool fc_only = false)
 {
     int T = rec.n_plies;
 
@@ -166,7 +167,7 @@ static float tdleaf_accumulate_game(TDGameRecord &rec, float result)
         act.n_ft[1] = rec.plies[t].n_ft[1];
         memcpy(act.ft_idx[0], rec.plies[t].ft_idx[0], rec.plies[t].n_ft[0] * sizeof(int));
         memcpy(act.ft_idx[1], rec.plies[t].ft_idx[1], rec.plies[t].n_ft[1] * sizeof(int));
-        nnue_accumulate_gradients(act, grad_scale);
+        nnue_accumulate_gradients(act, grad_scale, fc_only);
     }
     return td_error_sum;
 }
@@ -241,7 +242,11 @@ static void tdleaf_refresh_scores(TDGameRecord &rec)
     for (int t = 0; t < rec.n_plies; t++) {
         TDRecord &r = rec.plies[t];
 
-        // Rebuild accumulator from stored position using current FT weights.
+        // Flavor A: rebuild accumulator from stored position using current FT
+        // weights.  This ensures TD errors during replay reflect the current
+        // network state.  FT/PSQT gradient backprop is suppressed (fc_only=true
+        // in tdleaf_accumulate_game) to prevent the positive feedback loop where
+        // rebuilt accumulators reinforce live-pass FT updates.
         NNUEAccumulator fresh_acc;
         nnue_init_accumulator(fresh_acc, r.pos);
         memcpy(r.acc[0],  fresh_acc.acc[0],  NNUE_HALF_DIMS * sizeof(int16_t));
@@ -249,7 +254,7 @@ static void tdleaf_refresh_scores(TDGameRecord &rec)
         memcpy(r.psqt[0], fresh_acc.psqt[0], NNUE_PSQT_BKTS * sizeof(int32_t));
         memcpy(r.psqt[1], fresh_acc.psqt[1], NNUE_PSQT_BKTS * sizeof(int32_t));
 
-        // Re-enumerate active features (ensures consistency with rebuilt acc).
+        // Re-enumerate active features (for FC gradient backprop consistency).
         for (int p = 0; p < 2; p++) {
             int ksq = r.pos.plist[p][KING][1];
             r.n_ft[p] = 0;
@@ -309,8 +314,11 @@ void tdleaf_replay(TDGameRecord &rec, float result, const char *save_path)
                 continue;
 
             // Flavor A: rebuild accumulators + re-evaluate from current weights.
+            // fc_only=true: skip FT/PSQT gradient backprop to prevent the
+            // positive feedback loop where rebuilt accumulators amplify FT updates.
             tdleaf_refresh_scores(entry.rec);
-            entry.td_error_sum = tdleaf_accumulate_game(entry.rec, entry.result);
+            entry.td_error_sum = tdleaf_accumulate_game(entry.rec, entry.result,
+                                                         /*fc_only=*/true);
         }
         // Apply the summed gradients from all buffered games, then requantize
         // so the next pass's tdleaf_refresh_scores() sees the updated weights.

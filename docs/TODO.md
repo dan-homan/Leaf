@@ -108,11 +108,14 @@ Set to 0 to disable.  Logs pre-clip norm to stderr when clipping occurs.
 |e[t]| below the threshold are skipped.  TD error sums are updated after each replay
 pass for accurate future prioritization.
 
-### ~~Flavor A replay~~ ✓ Implemented (2026-03-20)
-Replay now rebuilds accumulators from stored leaf positions using current FT weights
+### ~~Flavor A replay~~ ✓ Implemented (2026-03-20, FC-only fix 2026-03-20)
+Replay rebuilds accumulators from stored leaf positions using current FT weights
 via `nnue_init_accumulator()`, then re-enumerates features and re-evaluates scores.
-This eliminates the gradient inconsistency of Flavor B where FT gradients were computed
-from stale accumulators.  `TDRecord` stores the leaf `position` (~256 bytes/ply).
+**FC-only replay gradients:** FT/PSQT gradient backprop is suppressed during replay
+(`fc_only=true`) to prevent a positive feedback loop where rebuilt accumulators
+amplify live-pass FT updates, causing eval divergence within ~130 games.  FC layers
+still receive correct gradients from refreshed accumulators during replay.
+`TDRecord` stores the leaf `position` (~256 bytes/ply).
 
 ### ~~AdamW decoupled weight decay~~ ✓ Implemented (2026-03-19)
 `TDLEAF_WEIGHT_DECAY=1e-4` applied to FC weights and FT weights after each Adam step.

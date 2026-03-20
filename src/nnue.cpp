@@ -1708,7 +1708,8 @@ void nnue_forward_fp32(const int16_t acc[2][NNUE_HALF_DIMS],
 // nnue_accumulate_gradients — backprop one position, add to grad arrays
 // grad_scale = alpha * e_t * d_t * (1-d_t) / K * (100 / 5776)
 // ---------------------------------------------------------------------------
-void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale)
+void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
+                               bool fc_only)
 {
     int s = act.stack;
 
@@ -1814,27 +1815,31 @@ void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale)
     //   g_psqt_diff = grad_scale × 0.5  (grad_scale already includes cp_factor for positional)
     //   grad_psqt_w[fi × PSQT_BKTS + stack] += g_psqt_diff × (+1 for stm, -1 for opp)
     //   Adam normalises gradient magnitude; TDLEAF_ADAM_PSQT_LR0 governs the per-step size.
-    float g_psqt_diff = grad_scale * 0.5f;
-    for (int p = 0; p < 2; p++) {
-        int persp       = (p == 0) ? stm_p : (stm_p ^ 1);
-        float psqt_sign = (persp == stm_p) ? 1.0f : -1.0f;
-        float *g_a      = g_acc[persp];
-        for (int k = 0; k < (int)act.n_ft[persp]; k++) {
-            int fi = act.ft_idx[persp][k];
-            if (fi < 0 || fi >= NNUE_FT_INPUTS) continue;
-            ft_dirty[fi] = true;
-            float *gfw = grad_ft_w + (size_t)fi * NNUE_HALF_DIMS;
-            for (int d = 0; d < NNUE_HALF_DIMS; d++)
-                gfw[d] += g_a[d];
-            grad_psqt_w[fi * NNUE_PSQT_BKTS + s] +=
-                g_psqt_diff * psqt_sign;
+    // FT/PSQT gradients: skipped during replay (fc_only) to prevent FT
+    // overfitting through the positive feedback loop where rebuilt accumulators
+    // reinforce live-pass FT updates.
+    if (!fc_only) {
+        float g_psqt_diff = grad_scale * 0.5f;
+        for (int p = 0; p < 2; p++) {
+            int persp       = (p == 0) ? stm_p : (stm_p ^ 1);
+            float psqt_sign = (persp == stm_p) ? 1.0f : -1.0f;
+            float *g_a      = g_acc[persp];
+            for (int k = 0; k < (int)act.n_ft[persp]; k++) {
+                int fi = act.ft_idx[persp][k];
+                if (fi < 0 || fi >= NNUE_FT_INPUTS) continue;
+                ft_dirty[fi] = true;
+                float *gfw = grad_ft_w + (size_t)fi * NNUE_HALF_DIMS;
+                for (int d = 0; d < NNUE_HALF_DIMS; d++)
+                    gfw[d] += g_a[d];
+                grad_psqt_w[fi * NNUE_PSQT_BKTS + s] +=
+                    g_psqt_diff * psqt_sign;
+            }
         }
-    }
 
-    // FT bias gradient: ∂loss/∂ft_biases[d] = Σ_persp g_acc[persp][d]
-    // Both perspectives share the same bias vector, so gradients sum across them.
-    for (int d = 0; d < NNUE_HALF_DIMS; d++)
-        grad_ft_bias[d] += (g_acc[0][d] + g_acc[1][d]);
+        // FT bias gradient: ∂loss/∂ft_biases[d] = Σ_persp g_acc[persp][d]
+        for (int d = 0; d < NNUE_HALF_DIMS; d++)
+            grad_ft_bias[d] += (g_acc[0][d] + g_acc[1][d]);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2109,6 +2114,7 @@ void nnue_apply_gradients()
         ft_biases[d] = (int16_t)std::max(-32767.0f,
                                 std::min( 32767.0f, roundf(ft_biases_f32[d])));
     }
+
 }
 
 // ---------------------------------------------------------------------------

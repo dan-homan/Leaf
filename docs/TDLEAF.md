@@ -519,7 +519,7 @@ After `tdleaf_update_after_game()` applies the live gradient pass, `tdleaf_repla
 runs `TDLEAF_REPLAY_K` (default 1) additional passes over the last `TDLEAF_REPLAY_BUF_N`
 (default 8) completed games stored in a static ring buffer.
 
-### How it works (Flavor A — full accumulator rebuild)
+### How it works (Flavor A — full accumulator rebuild, FC-only gradients)
 
 1. The completed `TDGameRecord` (accumulator snapshots + feature indices + leaf positions)
    is pushed into the ring buffer, replacing the oldest entry when full.  Each `TDRecord`
@@ -531,8 +531,10 @@ runs `TDLEAF_REPLAY_K` (default 1) additional passes over the last `TDLEAF_REPLA
       `nnue_init_accumulator()` on the stored leaf position, then re-enumerates active
       features and re-evaluates `score_stm`.  This ensures both the accumulator and score
       reflect the current FT and FC weights.
-   b. `tdleaf_accumulate_game()` computes TD errors and accumulates gradients exactly
-      as in the live pass.  The stored `td_error_sum` is updated for future prioritization.
+   b. `tdleaf_accumulate_game()` computes TD errors and accumulates **FC-layer gradients
+      only** (`fc_only=true`).  FT weight, FT bias, and PSQT gradients are suppressed
+      during replay to prevent a positive feedback loop (see below).  The stored
+      `td_error_sum` is updated for future prioritization.
 4. Gradient clipping (`nnue_clip_gradients`) is applied before the Adam step.
 5. After all games in the pass are processed, `nnue_apply_gradients()` and
    `nnue_requantize_fc()` are called once, so the next pass's accumulator rebuild sees
@@ -541,6 +543,19 @@ runs `TDLEAF_REPLAY_K` (default 1) additional passes over the last `TDLEAF_REPLA
 
 Score-change clipping, ID-stability weighting, and asymmetric lambda apply identically
 in replay passes (the stored `id_score_variance` values are reused unchanged).
+
+### Why FC-only replay gradients
+
+Full Flavor A replay (FT+FC gradients from rebuilt accumulators) creates a positive
+feedback loop: the live pass updates FT weights → rebuilt accumulators reflect those
+changes → replay FT gradients reinforce the same direction → FT weights overshoot.
+With Adam normalizing even tiny gradients into ~LR-sized steps, this amplification
+causes eval divergence within ~130 FRC games (opening evals reaching ±18 cp).
+
+Suppressing FT/PSQT gradients during replay breaks the feedback loop while preserving
+the benefit of correct TD errors and FC gradients from refreshed accumulators.  FT
+weights learn exclusively from the live pass, which provides fresh gradient signal
+from newly played positions.
 
 ### Ablation results (K vs. Elo gain)
 

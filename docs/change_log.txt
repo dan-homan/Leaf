@@ -18,6 +18,13 @@ Changes since 2017_12_24
                   using current FT weights via nnue_init_accumulator(), eliminating
                   the gradient inconsistency of Flavor B.  TDRecord now stores the
                   leaf position (~256 bytes/ply).
+                  **FC-only replay fix:** FT/PSQT gradients are suppressed during
+                  replay (fc_only=true) to prevent a positive feedback loop where
+                  rebuilt accumulators reinforce live-pass FT weight updates.  Full
+                  Flavor A FT backprop caused eval divergence within ~130 FRC games
+                  (opening evals reaching ±18 cp); the FC-only variant is stable
+                  through 200+ games.  FC layers still benefit from correct gradients
+                  via refreshed accumulators.
 
 2026_03_20 -- merge_tdleaf.py: -o is now a filename base (produces <base>.tdleaf.bin
                and optionally <base>.nnue).  New --baseline flag specifies a source
