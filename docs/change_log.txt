@@ -1,5 +1,15 @@
 Changes since 2017_12_24
 
+2026_03_20 -- Disable FT bias training in TDLeaf (src/nnue.cpp).
+               FT bias gradient accumulation and Adam updates are disabled during
+               online TDLeaf learning.  The shared 1024-dim bias vector's gradient
+               is structurally tiny (shifts both perspectives equally, largely
+               cancelling in the score), but Adam normalises these into full LR-sized
+               steps, causing universal negative drift (mean -371 after 5000 games,
+               gating off ~93% of SqrCReLU dimensions).  Per-feature FT weights can
+               absorb any needed offset.  Biases remain at their baseline .nnue values
+               and are still saved/loaded in the v4 .tdleaf.bin format for compatibility.
+
 2026_03_20 -- TDLeaf learning improvements (src/tdleaf.h, src/tdleaf.cpp, src/nnue.h,
                src/nnue.cpp, src/chess.h).
                Five changes to improve gradient quality and replay effectiveness:

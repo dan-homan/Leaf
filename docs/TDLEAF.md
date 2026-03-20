@@ -70,7 +70,7 @@ position, making the gradient self-consistent.
 | FC0 weights/biases | 1,024×16 int8 + 16 int32, ×8 stacks | Quantized int8, float shadow |
 | FC1 weights/biases | 32×32 int8 + 32 int32, ×8 stacks | Same |
 | FC2 weights/bias   | 32 int8 + 1 int32, ×8 stacks | Same |
-| FT biases          | 1,024 int16 | Dense update; static float shadow (4 KB) |
+| FT biases          | 1,024 int16 | **Not trained** — stay at baseline .nnue values |
 | FT weights         | 22,528×1,024 int16 | Sparse update; float shadow on heap (~92 MB) |
 | PSQT weights       | 22,528×8 int32 | Sparse update; float shadow (~720 KB) |
 
@@ -78,8 +78,12 @@ FT weights and PSQT are updated sparsely: only the ~30–60 feature rows active 
 leaf position are touched.  `ft_dirty[FT_INPUTS]` tracks which rows received gradient
 during the game; only dirty rows are scanned in `nnue_apply_gradients`.
 
-FT biases are updated densely every game (all 1,024 values): the gradient is the sum of
-`g_acc[persp][d]` across both perspectives.
+FT biases are **not trained** during online TDLeaf learning.  The shared 1,024-dim bias
+gradient is structurally tiny (shifting both perspectives equally largely cancels in the
+score), but Adam normalises it into full LR-sized steps, causing universal negative drift
+(mean −371 after 5,000 games, gating off ~93% of SqrCReLU dimensions).  Per-feature FT
+weights absorb any needed offset.  Biases stay at their baseline `.nnue` values and are
+still saved in the v4 `.tdleaf.bin` format for compatibility.
 
 ---
 
@@ -211,7 +215,7 @@ PSQT buckets retain a higher effective LR for longer.
 | FC0/FC1/FC2 weights | Full Adam | `TDLEAF_ADAM_LR0 = 0.2` | Yes | Float shadow clamped to ±127 after each update |
 | FC0/FC1/FC2 biases  | Full Adam | `TDLEAF_ADAM_LR0 = 0.2` | No | |
 | FT weights | RMSProp (per-weight v, no m) | `TDLEAF_ADAM_LR0 = 0.2` | Yes | Per-weight v (~92 MB, OS lazy-paged) |
-| FT biases  | Full Adam | `TDLEAF_ADAM_LR0 = 0.2` | No | |
+| FT biases  | **Not trained** | — | — | Stays at baseline; see note above |
 | PSQT       | Full Adam | `TDLEAF_ADAM_PSQT_LR0 = 2.0` | No | Classical prior; separate LR0 — see below |
 
 ### Why a Separate PSQT LR0?
@@ -238,8 +242,9 @@ decay update: `w -= λ × lr × w`, where `λ = TDLEAF_WEIGHT_DECAY` (default 1e
 is the same per-weight learning rate used by the Adam step (including warmup and decay).
 
 Weight decay is **not** applied to:
-- **Biases** (FC biases, FT biases) — standard practice; biases do not benefit from
-  regularization toward zero and decay would fight the learned offset.
+- **FC biases** — standard practice; biases do not benefit from regularization toward
+  zero and decay would fight the learned offset.
+- **FT biases** — not trained at all (see "Trainable Parameters" above).
 - **PSQT weights** — initialized from meaningful classical material + piece-square values.
   Decay would pull them toward zero, fighting the classical prior that provides the
   starting point for learning.

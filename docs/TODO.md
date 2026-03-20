@@ -88,6 +88,13 @@ under NNUE; correctness is expected but unverified with `THREADS > 1`.
 
 ## Resolved / Implemented
 
+### ~~FT bias training disabled~~ ✓ Fixed (2026-03-20)
+FT bias gradient accumulation and Adam updates disabled during online TDLeaf learning.
+The shared bias gradient is structurally tiny (shifts both perspectives equally) but
+Adam normalizes it into full LR-sized steps, causing universal negative drift (mean -371
+after 5000 games, gating off ~93% of SqrCReLU dimensions).  Per-feature FT weights
+absorb any needed offset.  Biases stay at baseline .nnue values.
+
 ### ~~Asymmetric lambda~~ ✓ Implemented (2026-03-20)
 `TDLEAF_LAMBDA_DECISIVE=0.8` for wins/losses, `TDLEAF_LAMBDA_DRAW=0.5` for draws.
 Decisive games get longer eligibility traces; draws use shorter traces to reduce
