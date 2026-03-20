@@ -320,6 +320,56 @@ two games must also have matching `White` and `Black` tags to be considered dupl
 
 ---
 
+## merge_tdleaf.py
+
+Merge multiple `.tdleaf.bin` files with count-weighted averaging.  Each weight
+in the output is the weighted average of the corresponding weights across all
+input files, where the per-element weight is its update count (`cnt`).
+
+```sh
+# Merge two training runs
+python3 scripts/merge_tdleaf.py run1.tdleaf.bin run2.tdleaf.bin -o merged.tdleaf.bin
+
+# Merge with summary statistics
+python3 scripts/merge_tdleaf.py a.tdleaf.bin b.tdleaf.bin c.tdleaf.bin \
+    -o merged.tdleaf.bin --report
+```
+
+### Key options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `files` (positional) | *(required)* | Two or more `.tdleaf.bin` input files |
+| `-o`, `--output` | *(required)* | Output `.tdleaf.bin` path |
+| `--report` | off | Print per-file and merged update-count statistics |
+
+### Merge algorithm
+
+For each weight element `i` across N input files:
+
+```
+if sum(cnt[i]) > 0:
+    merged[i] = sum(value[i] * cnt[i]) / sum(cnt[i])
+else:
+    merged[i] = value[i] from first file
+merged_cnt[i] = sum(cnt[i])
+```
+
+FC layers, FT weights, PSQT weights, and FT biases are all merged with this
+scheme.  Sparse FT/PSQT rows are unioned: a feature row present in any input
+file appears in the output.  The output is always v4 format regardless of input
+versions (v2/v3/v4 are all accepted).
+
+### Use cases
+
+- **Combining independent training runs** that started from the same baseline
+  `.nnue` file but diverged.  The count-weighting ensures each run's
+  contribution is proportional to how much training it performed.
+- **Averaging checkpoints** from different stages of a single training run
+  (e.g., merging the 1000-game and 2000-game snapshots).
+
+---
+
 ## tdleaf_selfplay.py
 
 *(Not in active use.)*  Earlier self-play driver for TDLeaf training, predating
