@@ -8,18 +8,17 @@ Planned investigations, improvements, and open questions.
 
 ### Adam hyperparameter tuning
 
-The Adam + per-weight LR decay optimizer (`TDLEAF_ADAM_LR0=0.02`, `TDLEAF_ADAM_PSQT_LR0=0.2`,
+The Adam + per-weight LR decay optimizer (`TDLEAF_ADAM_LR0=0.2`, `TDLEAF_ADAM_PSQT_LR0=2.0`,
 `TDLEAF_ADAM_C=5000`) uses initial guesses that have not been systematically tuned.  A grid
 search varying each independently across 500–1000-game runs would establish better defaults.
 
 Key questions:
 
-- **FC LR0 (0.02):** Reduced 10× from 0.2 to prevent eval divergence in learner-vs-readonly
-  training.  At the original rate, FC weight updates were large enough to create a positive
-  feedback loop (wrong evals → losses → large TD errors → worse evals).  Monitor whether the
-  lower rate learns fast enough or needs adjustment.
-- **PSQT LR0 (0.2):** Reduced 10× from 2.0 alongside FC LR0.  Tuned separately from FC LR0
-  since Adam normalises gradient magnitude and PSQT operates at int32 scale.  Tune empirically.
+- **FC LR0 (0.2):** Initial guess.  Adam normalises gradient magnitude, so LR0 controls the
+  per-step size in float weight units (~±0.2 per update).  Too high risks overshoot; too low
+  slows convergence.
+- **PSQT LR0 (2.0):** Tuned separately from FC LR0 since Adam normalises gradient magnitude
+  and PSQT operates at int32 scale (~36k std vs ~30 for FC).  Needs ~10× FC LR0.
 - **C (5000):** LR half-life in per-weight updates.  Larger C extends the fast-learning phase;
   smaller C converges more aggressively.
 
@@ -146,7 +145,7 @@ instability from cold-start v estimates.  Set `TDLEAF_ADAM_WARMUP=0` to disable.
 
 ### ~~Adam + per-weight LR decay~~ ✓ Implemented (2026-03-15)
 Adam optimizer with per-weight LR decay `lr(cnt) = LR0×(floor+(1−floor)/(1+cnt/C))` is live.
-FC/FT: `TDLEAF_ADAM_LR0=0.2`; PSQT: `TDLEAF_ADAM_PSQT_LR0=1.0`; C=5000; floor=0.05.
+FC/FT: `TDLEAF_ADAM_LR0=0.2`; PSQT: `TDLEAF_ADAM_PSQT_LR0=2.0`; C=5000; floor=0.05.
 FC0/FC1 float shadows clamped to ±127 to prevent zombie weights.  See `docs/TDLEAF.md`.
 
 ### ~~Epoch-based replay~~ ✓ Implemented (2026-03-11, upgraded to Flavor A 2026-03-20)
