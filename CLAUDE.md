@@ -143,6 +143,9 @@ python3 scripts/pgn_dedup.py input.pgn --output deduped.pgn --report
 
 # Visualise weight changes after training
 python3 scripts/compare_nnue_learning.py learn/nn-fresh.nnue learn/nn-fresh.tdleaf.bin
+
+# Merge multiple .tdleaf.bin files (count-weighted averaging)
+python3 scripts/merge_tdleaf.py run1.tdleaf.bin run2.tdleaf.bin -o merged.tdleaf.bin --report
 ```
 
 ### Training workflow summary
