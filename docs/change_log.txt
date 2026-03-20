@@ -1,5 +1,18 @@
 Changes since 2017_12_24
 
+2026_03_20 -- Reduce TDLeaf learning rates 10× and merge replay into single Adam step
+               (src/tdleaf.h, src/tdleaf.cpp).
+               LR0 reduced from 0.2 to 0.02 (FC/FT) and from 2.0 to 0.2 (PSQT) to prevent
+               eval divergence in learner-vs-readonly training.  At the original rates, FC
+               weight updates created a positive feedback loop where wrong evals led to
+               losses, large TD errors, and worse evals (~±18 cp drift by game 120).
+               Replay restructured: tdleaf_update_after_game() now only accumulates live-pass
+               gradients without applying them.  tdleaf_replay() adds FC-only replay
+               gradients into the same accumulators, then applies a single combined Adam
+               step per batch.  This halves the effective FC update rate (was 2 Adam steps
+               per batch: 1 live + 1 replay) and ensures live+replay gradients are jointly
+               clipped and normalized.
+
 2026_03_20 -- Disable FT bias training in TDLeaf (src/nnue.cpp).
                FT bias gradient accumulation and Adam updates are disabled during
                online TDLeaf learning.  The shared 1024-dim bias vector's gradient

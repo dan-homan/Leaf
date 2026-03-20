@@ -212,9 +212,9 @@ PSQT buckets retain a higher effective LR for longer.
 
 | Layer | Update Rule | LR0 | Weight Decay | Notes |
 |-------|-------------|-----|--------------|-------|
-| FC0/FC1/FC2 weights | Full Adam | `TDLEAF_ADAM_LR0 = 0.2` | Yes | Float shadow clamped to ±127 after each update |
-| FC0/FC1/FC2 biases  | Full Adam | `TDLEAF_ADAM_LR0 = 0.2` | No | |
-| FT weights | RMSProp (per-weight v, no m) | `TDLEAF_ADAM_LR0 = 0.2` | Yes | Per-weight v (~92 MB, OS lazy-paged) |
+| FC0/FC1/FC2 weights | Full Adam | `TDLEAF_ADAM_LR0 = 0.02` | Yes | Float shadow clamped to ±127 after each update |
+| FC0/FC1/FC2 biases  | Full Adam | `TDLEAF_ADAM_LR0 = 0.02` | No | |
+| FT weights | RMSProp (per-weight v, no m) | `TDLEAF_ADAM_LR0 = 0.02` | Yes | Per-weight v (~92 MB, OS lazy-paged) |
 | FT biases  | **Not trained** | — | — | Stays at baseline; see note above |
 | PSQT       | Full Adam | `TDLEAF_ADAM_PSQT_LR0 = 2.0` | No | Classical prior; separate LR0 — see below |
 
@@ -223,7 +223,7 @@ PSQT buckets retain a higher effective LR for longer.
 Adam normalises gradient magnitude: the effective per-step size in weight-space is
 approximately ±LR0 per update, independent of the raw gradient magnitude.  PSQT
 weights are at int32 scale (std ≈ 36,000) while FC weights are at int8 scale (std ≈ 30)
-— a ratio of ~1,000×.  Using the same LR0=0.2 for both caused PSQT to change negligibly
+— a ratio of ~1,000×.  Using the same LR0=0.02 for both caused PSQT to change negligibly
 relative to its baseline scale.  `TDLEAF_ADAM_PSQT_LR0` is tuned separately for this reason.
 
 ### Why Float-Shadow Clamping for FC0/FC1?
@@ -271,8 +271,8 @@ Moments are **not** persisted to `.tdleaf.bin` because:
 
 | Constant | Value | Notes |
 |----------|-------|-------|
-| `TDLEAF_ADAM_LR0` | 0.2 | Initial step size for FC/FT layers (float weight units) |
-| `TDLEAF_ADAM_PSQT_LR0` | 2.0 | Initial step size for PSQT (int32 scale; ~1000× FC) |
+| `TDLEAF_ADAM_LR0` | 0.02 | Initial step size for FC/FT layers (float weight units) |
+| `TDLEAF_ADAM_PSQT_LR0` | 0.2 | Initial step size for PSQT (int32 scale; ~10× FC) |
 | `TDLEAF_ADAM_C` | 5000 | LR half-life in per-weight update counts |
 | `TDLEAF_ADAM_LR_FLOOR` | 0.05 | Long-term LR floor as a fraction of LR0 (5%); lr settles to `LR0 × floor` as cnt→∞ |
 | `TDLEAF_ADAM_BETA1` | 0.9 | First-moment decay (FC weights/biases, FT biases, PSQT) |
@@ -520,9 +520,13 @@ weight snapshots but is no longer part of the default training workflow.
 
 ## Epoch-Based Replay
 
-After `tdleaf_update_after_game()` applies the live gradient pass, `tdleaf_replay()`
-runs `TDLEAF_REPLAY_K` (default 1) additional passes over the last `TDLEAF_REPLAY_BUF_N`
-(default 8) completed games stored in a static ring buffer.
+`tdleaf_update_after_game()` accumulates live-pass gradients.  On batch boundaries,
+`tdleaf_replay()` adds FC-only replay gradients into the **same** gradient accumulators,
+then applies a single combined Adam step.  This gives FC weights one Adam step per
+batch (not two), stabilising learning against fixed-weight opponents.
+
+Replay iterates over the last `TDLEAF_REPLAY_BUF_N` (default 8) completed games stored
+in a static ring buffer, running `TDLEAF_REPLAY_K` (default 1) passes.
 
 ### How it works (Flavor A — full accumulator rebuild, FC-only gradients)
 
@@ -540,10 +544,10 @@ runs `TDLEAF_REPLAY_K` (default 1) additional passes over the last `TDLEAF_REPLA
       only** (`fc_only=true`).  FT weight, FT bias, and PSQT gradients are suppressed
       during replay to prevent a positive feedback loop (see below).  The stored
       `td_error_sum` is updated for future prioritization.
-4. Gradient clipping (`nnue_clip_gradients`) is applied before the Adam step.
-5. After all games in the pass are processed, `nnue_apply_gradients()` and
-   `nnue_requantize_fc()` are called once, so the next pass's accumulator rebuild sees
-   the updated weights.
+4. Gradient clipping (`nnue_clip_gradients`) is applied to the combined live + replay
+   gradients before the single Adam step.
+5. `nnue_apply_gradients()` and `nnue_requantize_fc()` are called once for the
+   combined batch.
 6. Weights are saved to `.tdleaf.bin` after all K passes complete.
 
 Score-change clipping, ID-stability weighting, and asymmetric lambda apply identically

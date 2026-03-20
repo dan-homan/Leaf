@@ -8,8 +8,8 @@
 //   Weight update:
 //     Δw = Σ_t  e_t * ∇_w d_t   (step size governed by Adam LR schedule)
 //
-// FC layers (FC0/FC1/FC2) and FT biases (1024 int16) are trained.  FT weights
-// and PSQT are also trained (FT weights 46 MB, PSQT 720 KB).
+// FC layers (FC0/FC1/FC2), FT weights, and PSQT are trained.
+// FT biases are not trained (see nnue.cpp for rationale).
 // FP32 shadow copies of the FC weights are maintained in nnue.cpp; after each
 // game the int8 inference arrays are updated via nnue_requantize_fc().
 //
@@ -59,8 +59,8 @@ static const float TDLEAF_GRAD_CLIP_NORM = 1.0f;
 // LR warmup: ramps from 0 to full LR over first WARMUP Adam steps.
 // Mini-batch: gradients accumulated across BATCH_SIZE games before each Adam step.
 // ---------------------------------------------------------------------------
-static const float TDLEAF_ADAM_LR0      = 0.2f;    // initial step size for FC/FT layers (float weight units)
-static const float TDLEAF_ADAM_PSQT_LR0 = 2.0f;   // initial step size for PSQT (int32 scale ~36k std; needs larger LR)
+static const float TDLEAF_ADAM_LR0      = 0.02f;   // initial step size for FC/FT layers (float weight units)
+static const float TDLEAF_ADAM_PSQT_LR0 = 0.2f;   // initial step size for PSQT (int32 scale ~36k std; needs larger LR)
 static const float TDLEAF_ADAM_C        = 5000.0f;  // LR half-life in per-weight updates (shared)
 // Long-term LR floor: the learning rate settles to LR0 × LR_FLOOR as cnt → ∞
 // rather than approaching zero.  Full decay schedule:

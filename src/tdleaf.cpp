@@ -198,18 +198,13 @@ void tdleaf_update_after_game(TDGameRecord &rec, float result, const char *save_
     td_batch_pending++;
 
     if (td_batch_pending >= TDLEAF_BATCH_SIZE) {
-        nnue_clip_gradients(TDLEAF_GRAD_CLIP_NORM);
-        nnue_apply_gradients();
-        nnue_requantize_fc();
-
-        if (save_path && save_path[0]) {
-            if (!nnue_save_fc_weights(save_path))
-                fprintf(stderr, "TDLeaf: failed to save weights to %s\n", save_path);
-        }
-
-        fprintf(stderr, "TDLeaf: applied batch of %d game(s), latest %d plies (result=%.1f)\n",
+        // Gradients are accumulated but NOT applied here.  tdleaf_replay()
+        // will add FC-only replay gradients into the same accumulators and
+        // then apply the single combined Adam step.  This halves the FC
+        // update rate (1 step/batch instead of 2) and stabilises learning
+        // against fixed-weight opponents.
+        fprintf(stderr, "TDLeaf: batch of %d game(s) ready, latest %d plies (result=%.1f)\n",
                 td_batch_pending, T, (double)result);
-        td_batch_pending = 0;
     } else {
         fprintf(stderr, "TDLeaf: accumulated %d-ply game (result=%.1f), batch %d/%d\n",
                 T, (double)result, td_batch_pending, TDLEAF_BATCH_SIZE);
@@ -293,47 +288,51 @@ void tdleaf_replay(TDGameRecord &rec, float result, const char *save_path)
     td_replay_head = (td_replay_head + 1) % TDLEAF_REPLAY_BUF_N;
     if (td_replay_count < TDLEAF_REPLAY_BUF_N) td_replay_count++;
 
-    // Only run replay passes on batch boundaries (when td_batch_pending was
-    // just reset to 0 by tdleaf_update_after_game).  This ensures the live
-    // batch and replay batch are applied at the same cadence.
-    if (tdleaf_replay_k <= 0 || td_batch_pending != 0) return;
+    // Only run on batch boundaries (td_batch_pending == BATCH_SIZE, set by
+    // tdleaf_update_after_game).  The live-pass gradients are already in the
+    // accumulators; we add replay FC-only gradients, then do a single
+    // combined Adam step.
+    if (td_batch_pending < TDLEAF_BATCH_SIZE) return;
 
     int n_valid = td_replay_count;
+    int n_replayed = 0;
 
-    for (int pass = 0; pass < tdleaf_replay_k; pass++) {
-        // Iterate entries in chronological order (oldest first).
-        for (int i = 0; i < n_valid; i++) {
-            int idx = (td_replay_head - n_valid + i + TDLEAF_REPLAY_BUF_N)
-                      % TDLEAF_REPLAY_BUF_N;
-            TDReplayEntry &entry = td_replay_buf[idx];
-            if (!entry.valid) continue;
+    if (tdleaf_replay_k > 0) {
+        for (int pass = 0; pass < tdleaf_replay_k; pass++) {
+            for (int i = 0; i < n_valid; i++) {
+                int idx = (td_replay_head - n_valid + i + TDLEAF_REPLAY_BUF_N)
+                          % TDLEAF_REPLAY_BUF_N;
+                TDReplayEntry &entry = td_replay_buf[idx];
+                if (!entry.valid) continue;
 
-            // Prioritized replay: skip games with low TD error.
-            if (TDLEAF_REPLAY_MIN_ERROR > 0.0f &&
-                entry.td_error_sum < TDLEAF_REPLAY_MIN_ERROR)
-                continue;
+                if (TDLEAF_REPLAY_MIN_ERROR > 0.0f &&
+                    entry.td_error_sum < TDLEAF_REPLAY_MIN_ERROR)
+                    continue;
 
-            // Flavor A: rebuild accumulators + re-evaluate from current weights.
-            // fc_only=true: skip FT/PSQT gradient backprop to prevent the
-            // positive feedback loop where rebuilt accumulators amplify FT updates.
-            tdleaf_refresh_scores(entry.rec);
-            entry.td_error_sum = tdleaf_accumulate_game(entry.rec, entry.result,
-                                                         /*fc_only=*/true);
+                // Flavor A: rebuild accumulators from current FT weights.
+                // fc_only=true: FT/PSQT gradients suppressed during replay.
+                // Gradients accumulate into the same arrays as the live pass.
+                tdleaf_refresh_scores(entry.rec);
+                entry.td_error_sum = tdleaf_accumulate_game(entry.rec, entry.result,
+                                                             /*fc_only=*/true);
+                n_replayed++;
+            }
         }
-        // Apply the summed gradients from all buffered games, then requantize
-        // so the next pass's tdleaf_refresh_scores() sees the updated weights.
-        nnue_clip_gradients(TDLEAF_GRAD_CLIP_NORM);
-        nnue_apply_gradients();
-        nnue_requantize_fc();
     }
+
+    // Single combined Adam step: live-pass gradients + replay FC-only gradients.
+    nnue_clip_gradients(TDLEAF_GRAD_CLIP_NORM);
+    nnue_apply_gradients();
+    nnue_requantize_fc();
 
     if (save_path && save_path[0]) {
         if (!nnue_save_fc_weights(save_path))
-            fprintf(stderr, "TDLeaf replay: failed to save weights to %s\n", save_path);
+            fprintf(stderr, "TDLeaf: failed to save weights to %s\n", save_path);
     }
 
-    fprintf(stderr, "TDLeaf replay: %d pass(es) x %d game(s) in buffer\n",
-            tdleaf_replay_k, n_valid);
+    fprintf(stderr, "TDLeaf: applied batch of %d game(s) + %d replay, %d in buffer\n",
+            td_batch_pending, n_replayed, n_valid);
+    td_batch_pending = 0;
 }
 
 // ---------------------------------------------------------------------------
