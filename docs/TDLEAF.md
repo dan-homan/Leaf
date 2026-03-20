@@ -186,7 +186,7 @@ m   ← β₁ m + (1−β₁) g                    (first moment)
 v   ← β₂ v + (1−β₂) g²                   (second moment)
 m̂   = m / (1 − β₁ᵗ)                      (bias-corrected)
 v̂   = v / (1 − β₂ᵗ)                      (bias-corrected)
-lr  = LR0 × (floor + (1−floor) / (1 + √(cnt/C)))  (sqrt-softened per-weight LR decay)
+lr  = LR0 × (floor + (1−floor) / (1 + cnt/C))      (per-weight LR decay with floor)
 Δw  = −lr × m̂ / (√v̂ + ε)                 (Adam step)
 w   ← w − λ × lr × w                      (AdamW weight decay; weights only, not biases/PSQT)
 cnt ← cnt + 1
@@ -196,11 +196,9 @@ cnt ← cnt + 1
 correction denominators `(1−β₁ᵗ)` and `(1−β₂ᵗ)` are hoisted outside all per-weight
 loops for efficiency.
 
-**Per-weight LR decay with floor (sqrt-softened):** `lr(cnt) = LR0 × (floor + (1 − floor) / (1 + sqrt(cnt/C)))`.
+**Per-weight LR decay with floor:** `lr(cnt) = LR0 × (floor + (1 − floor) / (1 + cnt/C))`.
 At `cnt=0` the step size is `LR0`; at `cnt=C` it is halfway between `LR0` and the floor;
-as `cnt→∞` it settles to `LR0 × floor` rather than zero.  The sqrt softens the decay at
-large `cnt` compared to the original `1/(1+cnt/C)`: the schedule spends more time near the
-floor, giving well-trained weights more opportunity to continue adapting.  The floor
+as `cnt→∞` it settles to `LR0 × floor` rather than zero.  The floor
 (`TDLEAF_ADAM_LR_FLOOR`, default 0.05) ensures weights remain trainable indefinitely — even
 heavily-updated parameters still receive 5% of the initial step size per game.  Weights that
 receive gradient every game (FC biases, dense feature rows) converge fastest; rarely-seen

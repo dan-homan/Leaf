@@ -1855,14 +1855,13 @@ void nnue_apply_gradients()
         ? (float)t_adam / (float)TDLEAF_ADAM_WARMUP
         : 1.0f;
 
-    // Per-weight LR with long-term floor and warmup (sqrt-softened decay):
-    //   lr(cnt) = warmup × LR0 × (floor + (1 − floor) / (1 + sqrt(cnt/C)))
+    // Per-weight LR with long-term floor and warmup:
+    //   lr(cnt) = warmup × LR0 × (floor + (1 − floor) / (1 + cnt/C))
     // At cnt=0 → LR0; as cnt→∞ → LR0 × floor (never drops to zero).
-    // The sqrt softens the decay at large cnt vs the original 1/(1+cnt/C).
     auto lr_decay = [warmup_factor](float lr0, uint32_t cnt) -> float {
         return warmup_factor * lr0 * (TDLEAF_ADAM_LR_FLOOR
                       + (1.0f - TDLEAF_ADAM_LR_FLOOR)
-                        / (1.0f + sqrtf((float)cnt / TDLEAF_ADAM_C)));
+                        / (1.0f + (float)cnt / TDLEAF_ADAM_C));
     };
 
     // Full Adam step for FC layers and FT biases.

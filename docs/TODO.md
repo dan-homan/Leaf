@@ -147,10 +147,6 @@ See memory for full implementation plan.
 
 ## Resolved / Implemented
 
-### ~~Sqrt-softened LR decay~~ ✓ Implemented (2026-03-19)
-Changed schedule from `1/(1+cnt/C)` to `1/(1+sqrt(cnt/C))`.  Same half-life point at
-`cnt=C`, but the decay is softer at large `cnt`, spending more time near the floor.
-
 ### ~~AdamW decoupled weight decay~~ ✓ Implemented (2026-03-19)
 `TDLEAF_WEIGHT_DECAY=1e-4` applied to FC weights and FT weights after each Adam step.
 Skipped for biases (no benefit) and PSQT (would fight classical prior).

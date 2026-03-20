@@ -42,14 +42,11 @@ static const float TDLEAF_ID_VAR_SIGMA2  = 10000.0f;
 // ---------------------------------------------------------------------------
 // Adam + per-weight LR decay hyperparameters
 //
-// LR schedule with long-term floor (sqrt-softened):
-//   lr(cnt) = LR0 × (floor + (1 − floor) / (1 + sqrt(cnt / C)))
+// LR schedule with long-term floor:
+//   lr(cnt) = LR0 × (floor + (1 − floor) / (1 + cnt / C))
 //   cnt = 0  → LR0 × 1.0         (full initial rate)
 //   cnt = C  → LR0 × (0.5 + 0.5×floor)  (half-life point)
 //   cnt → ∞  → LR0 × floor       (long-term floor; never reaches zero)
-// The sqrt softens the decay at large cnt: the schedule spends more time near
-// the floor than the original 1/(1+cnt/C), giving well-trained weights more
-// opportunity to continue adapting.
 //
 // FT weights use RMSProp (per-weight v, no m); all other layers use full Adam.
 // v arrays are session-local (process memory only, not persisted to .tdleaf.bin).
@@ -62,7 +59,7 @@ static const float TDLEAF_ADAM_PSQT_LR0 = 2.0f;   // initial step size for PSQT 
 static const float TDLEAF_ADAM_C        = 5000.0f;  // LR half-life in per-weight updates (shared)
 // Long-term LR floor: the learning rate settles to LR0 × LR_FLOOR as cnt → ∞
 // rather than approaching zero.  Full decay schedule:
-//   lr(cnt) = LR0 × (LR_FLOOR + (1 − LR_FLOOR) / (1 + sqrt(cnt/C)))
+//   lr(cnt) = LR0 × (LR_FLOOR + (1 − LR_FLOOR) / (1 + cnt/C))
 //   cnt=0  → LR0 × 1.0    (full initial rate)
 //   cnt=C  → LR0 × (0.5 + 0.5×LR_FLOOR)  (half-life point)
 //   cnt→∞  → LR0 × LR_FLOOR  (long-term floor)
