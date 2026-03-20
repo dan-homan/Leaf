@@ -10,14 +10,6 @@ Changes since 2017_12_24
                FT now uses global bc2 (= 1−β₂^t_adam), which amplifies sparse updates
                by ~2–21×.  FC and PSQT retain per-weight bias correction.
 
-2026_03_20 -- Document symmetric self-play requirement for TDLeaf training
-               (docs/TDLEAF.md, docs/TRAINING.md).
-               Learner-vs-readonly training is structurally broken: any weight update
-               changes the learner's play, causing monotonic Elo decline regardless of
-               learning rate.  Symmetric self-play (both engines sharing weights) is the
-               correct training mode.  Progress is measured via periodic checkpoint
-               validation against frozen snapshots.
-
 2026_03_20 -- Merge live and replay gradients into single Adam step (src/tdleaf.cpp).
                Replay restructured: tdleaf_update_after_game() now only accumulates live-pass
                gradients without applying them.  tdleaf_replay() adds FC-only replay

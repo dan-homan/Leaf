@@ -37,7 +37,7 @@ The network is a statistically plausible but chess-naïve starting point — it 
 | Parameter | Value |
 |-----------|-------|
 | Algorithm | TDLeaf(λ), online, all layers updated |
-| Training format | Self-play: `Leaf_vtrain` (learning) vs `Leaf_vtrain_ro` (read-only) for early games; **superseded by symmetric self-play** (`_a` vs `_b`) as of 2026-03-12 — see `docs/TDLEAF.md` "Why Symmetric Self-Play" |
+| Training format | Symmetric self-play: both engines share weights and learn (`_a` vs `_b`) |
 | Positions | Fischer Random (Chess960), random starting position each game |
 | Opening book | None |
 | Tablebases | Disabled |
@@ -45,7 +45,7 @@ The network is a statistically plausible but chess-naïve starting point — it 
 | Concurrency | 5 simultaneous games |
 | Total training games | 8,000 |
 
-The read-only opponent (`_ro`) reloads the latest `.tdleaf.bin` weights at the start of each 500-game training iteration.  This means the learning engine's weights are periodically adopted as the new baseline opponent, providing a gradually strengthening training signal without the instability of per-game opponent updates.
+Both engines share the same `.tdleaf.bin` weights file (POSIX file-locked delta merging), so each game's learning updates are immediately visible to both sides.
 
 Network snapshots were saved at **500, 1000, 2000, 4000, and 8000 games**.
 
