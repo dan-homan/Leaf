@@ -500,6 +500,60 @@ weight snapshots but is no longer part of the default training workflow.
 
 ---
 
+## Why Symmetric Self-Play
+
+TDLeaf training **must** use symmetric self-play (both engines sharing the same learning
+weights) rather than learner-vs-readonly (one engine learns, the other holds fixed weights).
+
+### The learner-vs-readonly failure mode
+
+When one engine learns and the other holds fixed weights, any weight update — even a
+random one — changes the learner's evaluation function and therefore its move choices.
+Different moves lead to different game outcomes, but *different* does not mean *better*
+when the starting point is arbitrary.  This creates a positive feedback loop:
+
+1. The learner's eval drifts from the readonly baseline.
+2. The learner plays differently, often worse (its eval no longer matches the positions
+   it encounters against the readonly opponent's unchanged play style).
+3. Losses produce large TD errors in one direction.
+4. Large TD errors drive further eval drift in the same direction.
+5. The learner's Elo monotonically declines relative to the readonly opponent.
+
+This was observed empirically: at LR0=0.2, the learner diverged by −123 Elo within
+200 games; reducing LR 10× to 0.02 only delayed the onset, reaching −105 Elo by
+game 800.  The problem is structural, not parametric — no learning rate prevents it.
+
+### Why symmetric self-play works
+
+When both engines share the same weights (via the `.tdleaf.bin` delta-merge mechanism),
+weight updates affect both sides equally.  There is no fixed reference point to diverge
+from.  The TD signal comes from game outcomes (wins, draws, losses) relative to the
+network's own predictions, which is the correct learning signal: the network learns to
+make its evaluations more consistent with the results of games played under its own
+evaluation function.
+
+### Measuring training progress
+
+Since both engines share weights, win rates between them are uninformative (they should
+be ~50/50 by construction).  Instead, measure progress by periodic **checkpoint
+validation**: snapshot the weights every N games and play a test match of the snapshot
+against the starting network (or a fixed reference) using `TDLEAF_READONLY=1` binaries.
+
+```sh
+# Build a readonly binary from the snapshot
+perl comp.pl test_snapshot NNUE=1 NNUE_NET=nn-fresh.nnue TDLEAF=1 TDLEAF_READONLY=1 OVERWRITE
+cp learn/nn-fresh.tdleaf.bin run/nn-fresh.tdleaf.bin
+
+# Play against the starting network (no .tdleaf.bin = baseline weights)
+perl comp.pl test_baseline NNUE=1 NNUE_NET=nn-fresh.nnue TDLEAF=1 TDLEAF_READONLY=1 OVERWRITE
+# (do NOT copy a .tdleaf.bin for this binary)
+
+python3 scripts/match.py Leaf_vtest_snapshot Leaf_vtest_baseline -n 100 -tc 5+0.05
+python3 scripts/bayeselo_ratings.py run/pgn/*.pgn --min 20 --report
+```
+
+---
+
 ## Hooks in Existing Code
 
 | Location | Change |
