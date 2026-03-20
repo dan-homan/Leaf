@@ -12,7 +12,7 @@
 #      in nnue.cpp), then moves both binaries to learn/ so all training files
 #      live together.
 #   3. Checks for an existing .tdleaf.bin (continue or start fresh).
-#   4. Asks for match parameters, then runs match.py for N games × I iterations.
+#   4. Asks for match parameters, then runs match.py for N games.
 #      PGN files land in  learn/pgn/<net_base>/  so all PGNs for a given net
 #      accumulate in one place across multiple training runs.
 #   5. After matches complete, exports the trained weights to a .nnue file whose
@@ -482,13 +482,9 @@ def main():
     print()
     print("Match parameters:")
     if use_loop:
-        # In loop mode always use a single iteration so Adam momentum and
-        # variance are preserved across the full training block.
         n_games = int(ask("  Games per cycle     [-n]        ", 5000))
-        n_iters = 1
     else:
-        n_games = int(ask("  Games per iteration [-n]        ", 500))
-        n_iters = int(ask("  Iterations          [-i]        ", 10))
+        n_games = int(ask("  Games                [-n]        ", 5000))
     tc1         = ask(    "  Learner time control   [--tc1]  ", "0:03+0.05")
     tc2_raw     = ask(    "  Opponent time control  [--tc2]  ", tc1)
     tc2         = tc2_raw if tc2_raw.strip() else tc1
@@ -502,7 +498,7 @@ def main():
     if use_loop:
         val_tc = ask("  Validation time control  [--val-tc]  ", tc1)
 
-    games_per_cycle = n_games * n_iters
+    games_per_cycle = n_games
 
     if use_loop:
         max_new = games_per_cycle * n_cycles if n_cycles > 0 else None
@@ -538,7 +534,7 @@ def main():
               f" accept≥{los_thresh_pct:.0f}%  "
               f"early-stop ≥{los_stop_hi*100:.0f}% / ≤{los_stop_lo*100:.0f}%")
     else:
-        print(f"  Games this run:   {games_per_cycle:,}  ({n_iters} iter × {n_games} games/iter)")
+        print(f"  Games this run:   {n_games:,}")
     print(f"  Prior games:      {prior_games:,}")
     print(f"  Total after run:  {total_after_str}")
     if tc1 == tc2:
@@ -593,7 +589,6 @@ def main():
             train_exe,
             train_exe2,
             "-n", str(n_games),
-            "-i", str(n_iters),
             "-tc", tc1,
             "-c", str(concurrency),
             "--wait", str(wait_ms),
@@ -679,7 +674,7 @@ def main():
                 print(f"\nMatch run failed (exit code {result.returncode}).",
                       file=sys.stderr)
                 if use_loop:
-                    print("Weights from completed iterations preserved. Exiting.")
+                    print("Weights from completed cycles preserved. Exiting.")
                 else:
                     print("Game count sidecar NOT updated.")
                 sys.exit(result.returncode)
