@@ -326,13 +326,20 @@ Merge multiple `.tdleaf.bin` files with count-weighted averaging.  Each weight
 in the output is the weighted average of the corresponding weights across all
 input files, where the per-element weight is its update count (`cnt`).
 
+The `-o` argument is a filename base: produces `<base>.tdleaf.bin` always,
+and `<base>.nnue` when `--baseline` is given.
+
 ```sh
-# Merge two training runs
-python3 scripts/merge_tdleaf.py run1.tdleaf.bin run2.tdleaf.bin -o merged.tdleaf.bin
+# Merge two training runs (.tdleaf.bin only)
+python3 scripts/merge_tdleaf.py run1.tdleaf.bin run2.tdleaf.bin -o merged
+
+# Also produce a merged .nnue file from a baseline network
+python3 scripts/merge_tdleaf.py run1.tdleaf.bin run2.tdleaf.bin \
+    -o merged --baseline nn-start.nnue
 
 # Merge with summary statistics
 python3 scripts/merge_tdleaf.py a.tdleaf.bin b.tdleaf.bin c.tdleaf.bin \
-    -o merged.tdleaf.bin --report
+    -o merged --report
 ```
 
 ### Key options
@@ -340,7 +347,8 @@ python3 scripts/merge_tdleaf.py a.tdleaf.bin b.tdleaf.bin c.tdleaf.bin \
 | Flag | Default | Description |
 |------|---------|-------------|
 | `files` (positional) | *(required)* | Two or more `.tdleaf.bin` input files |
-| `-o`, `--output` | *(required)* | Output `.tdleaf.bin` path |
+| `-o`, `--output` | *(required)* | Output filename base (produces `<base>.tdleaf.bin` and optionally `<base>.nnue`) |
+| `--baseline` | *(none)* | Baseline `.nnue` file; when given, also writes `<output>.nnue` with merged weights applied |
 | `--report` | off | Print per-file and merged update-count statistics |
 
 ### Merge algorithm

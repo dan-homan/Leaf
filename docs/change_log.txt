@@ -1,5 +1,10 @@
 Changes since 2017_12_24
 
+2026_03_20 -- merge_tdleaf.py: -o is now a filename base (produces <base>.tdleaf.bin
+               and optionally <base>.nnue).  New --baseline flag specifies a source
+               .nnue file; merged float weights are requantized and written as a
+               complete .nnue file.  Added SLEB128 codec and .nnue reader/writer.
+
 2026_03_19 -- TDLeaf optimizer improvements (src/tdleaf.cpp, src/tdleaf.h,
                src/nnue.cpp, src/main.cpp).
                Five changes to speed up learning:

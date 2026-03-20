@@ -145,7 +145,10 @@ python3 scripts/pgn_dedup.py input.pgn --output deduped.pgn --report
 python3 scripts/compare_nnue_learning.py learn/nn-fresh.nnue learn/nn-fresh.tdleaf.bin
 
 # Merge multiple .tdleaf.bin files (count-weighted averaging)
-python3 scripts/merge_tdleaf.py run1.tdleaf.bin run2.tdleaf.bin -o merged.tdleaf.bin --report
+python3 scripts/merge_tdleaf.py run1.tdleaf.bin run2.tdleaf.bin -o merged --report
+
+# Merge and also produce a .nnue file from a baseline network
+python3 scripts/merge_tdleaf.py run1.tdleaf.bin run2.tdleaf.bin -o merged --baseline nn-start.nnue
 ```
 
 ### Training workflow summary
