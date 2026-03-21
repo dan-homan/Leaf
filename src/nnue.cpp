@@ -1831,10 +1831,14 @@ void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale)
         }
     }
 
-    // FT bias gradient: ∂loss/∂ft_biases[d] = Σ_persp g_acc[persp][d]
-    // Both perspectives share the same bias vector, so gradients sum across them.
-    for (int d = 0; d < NNUE_HALF_DIMS; d++)
-        grad_ft_bias[d] += (g_acc[0][d] + g_acc[1][d]);
+    // FT bias gradient: disabled during online TDLeaf learning.
+    // The bias is a single shared 1024-dim vector across all 22,528 features.
+    // Its gradient is structurally tiny (shifts both perspectives equally, largely
+    // cancelling in the score), but Adam normalizes these into full LR-sized steps,
+    // causing systematic negative drift (mean -371 after 5000 games, gating off
+    // ~93% of SqrCReLU dimensions).  Per-feature FT weights absorb any needed offset.
+    // for (int d = 0; d < NNUE_HALF_DIMS; d++)
+    //     grad_ft_bias[d] += (g_acc[0][d] + g_acc[1][d]);
 }
 
 // ---------------------------------------------------------------------------
@@ -1982,17 +1986,10 @@ void nnue_apply_gradients()
         }
     }
 
-    // FT bias update — full Adam per-dimension.
-    for (int d = 0; d < NNUE_HALF_DIMS; d++) {
-        if (grad_ft_bias[d] == 0.0f) continue;
-        float dw = do_step(grad_ft_bias[d], m_ft_bias[d], v_ft_bias[d], ft_bias_cnt[d]);
-        ft_biases_f32[d] -= dw;
-        ft_bias_delta[d] -= dw;
-        ft_bias_cnt[d]++;
-        grad_ft_bias[d] = 0.0f;
-        ft_biases[d] = (int16_t)std::max(-32767.0f,
-                                std::min( 32767.0f, roundf(ft_biases_f32[d])));
-    }
+    // FT bias update — disabled.  See comment in nnue_accumulate_gradients:
+    // Adam amplifies the structurally tiny bias gradient into systematic drift.
+    // FT biases stay at their baseline (.nnue) values; per-feature FT weights
+    // absorb any needed offset.
 }
 
 // ---------------------------------------------------------------------------
