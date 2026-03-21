@@ -1,5 +1,20 @@
 Changes since 2017_12_24
 
+2026_03_21 -- TDLeaf training improvements (src/tdleaf.h, src/tdleaf.cpp,
+               src/nnue.cpp, src/nnue.h).
+               Four additions to the optimizer:
+               1. Gradient clipping by global L2 norm (TDLEAF_GRAD_CLIP_NORM=10.0):
+                  safety net against anomalous gradient spikes.  Applied before each
+                  Adam step in live, replay, and flush paths.
+               2. AdamW decoupled weight decay (TDLEAF_WEIGHT_DECAY=1e-4): applied to
+                  FC weights (L0/L1/L2) and FT weights only.  Not applied to biases
+                  or PSQT.
+               3. Asymmetric lambda: TDLEAF_LAMBDA_DECISIVE=0.8 for wins/losses,
+                  TDLEAF_LAMBDA_DRAW=0.5 for draws.  Longer eligibility traces for
+                  decisive games (clearer signal), shorter for draws (less noise).
+               4. LR floor raised from 1% to 5%: long-term learning rate settles at
+                  LR0 × 0.05 instead of LR0 × 0.01.
+
 2026_03_19 -- TDLeaf optimizer improvements (src/tdleaf.cpp, src/tdleaf.h,
                src/nnue.cpp, src/main.cpp).
                Three changes to speed up learning:

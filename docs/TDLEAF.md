@@ -53,7 +53,7 @@ change between consecutive moves exceeds `TDLEAF_SCORE_CLIP_CP` centipawns — s
 
 where `∇_w d_t = d_t * (1 - d_t) / K * ∇_w score_t`.
 
-Defaults: `λ = 0.7`, `K = 400`.
+Defaults: `λ_decisive = 0.8` (wins/losses), `λ_draw = 0.5` (draws), `K = 400`.
 Gradient updates use Adam with per-weight LR decay; see [Adam Optimizer](#adam-optimizer-with-per-weight-lr-decay) below.
 
 **Key design choice:** `d_t` is computed from `nnue_evaluate()` (direct static eval of the
@@ -251,18 +251,23 @@ Moments are **not** persisted to `.tdleaf.bin` because:
 | `TDLEAF_ADAM_LR0` | 0.2 | Initial step size for FC/FT layers (float weight units) |
 | `TDLEAF_ADAM_PSQT_LR0` | 2.0 | Initial step size for PSQT (int32 scale; ~1000× FC) |
 | `TDLEAF_ADAM_C` | 5000 | LR half-life in per-weight update counts |
-| `TDLEAF_ADAM_LR_FLOOR` | 0.01 | Long-term LR floor as a fraction of LR0; lr settles to `LR0 × floor` as cnt→∞ |
+| `TDLEAF_ADAM_LR_FLOOR` | 0.05 | Long-term LR floor as a fraction of LR0; lr settles to `LR0 × floor` as cnt→∞ |
 | `TDLEAF_ADAM_BETA1` | 0.9 | First-moment decay (FC weights/biases, FT biases, PSQT) |
 | `TDLEAF_ADAM_BETA2` | 0.999 | Second-moment decay (all layers) |
 | `TDLEAF_ADAM_EPS` | 1e-8 | Numerical floor in denominator |
 | `TDLEAF_ADAM_WARMUP` | 50 | Linear LR warmup: ramp from 0 to full LR over first N Adam steps (0 = disabled) |
 | `TDLEAF_BATCH_SIZE` | 4 | Mini-batch: accumulate gradients across N games before each Adam step |
 
+| `TDLEAF_WEIGHT_DECAY` | 1e-4 | AdamW decoupled weight decay coefficient (FC + FT weights only) |
+| `TDLEAF_GRAD_CLIP_NORM` | 10.0 | Global gradient L2 norm clip threshold; 0 = disabled |
+
 Set `TDLEAF_ADAM_LR_FLOOR = 0.0` to restore the original decay-to-zero behaviour.
 Set `TDLEAF_ADAM_LR0 = 0.0` to disable Adam entirely and fall back to plain gradient
 descent (the original single-step `w -= g` path; all Adam arrays remain zeroed and unused).
 Set `TDLEAF_BATCH_SIZE = 1` to restore per-game Adam steps.
 Set `TDLEAF_ADAM_WARMUP = 0` to disable warmup.
+Set `TDLEAF_WEIGHT_DECAY = 0.0` to disable weight decay.
+Set `TDLEAF_GRAD_CLIP_NORM = 0.0` to disable gradient clipping.
 
 ---
 
