@@ -1,5 +1,9 @@
 Changes since 2017_12_24
 
+2026_03_21 -- training_run.py: save game-count-stamped .nnue snapshots on each
+               accepted validation cycle (e.g. nn-training1a-5000g.nnue) for
+               later tournament rating progression analysis.
+
 2026_03_21 -- TDLeaf training improvements (src/tdleaf.h, src/tdleaf.cpp,
                src/nnue.cpp, src/nnue.h, src/chess.h).
                5. Per-weight bias correction for FC/PSQT Adam steps: uses

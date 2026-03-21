@@ -119,9 +119,16 @@ repeat N cycles (0 = forever until Ctrl-C):
   2. Train for X games (single iteration — Adam state preserved throughout)
   3. Export new weights → <net>-cand.nnue
   4. Run Y-game validation match: eval_cand vs eval_best
-  5. Accept if LOS ≥ threshold → bank games, export accepted weights → best.nnue
+  5. Accept if LOS ≥ threshold →
+       bank games, export accepted weights → best.nnue
+       save snapshot → <net>-<total_games>g.nnue  (for tournament use)
      Reject → revert .tdleaf.bin to pre-cycle checkpoint
 ```
+
+**Snapshots:** Each accepted cycle saves a game-count-stamped `.nnue` file (e.g.
+`nn-training1a-5000g.nnue`, `nn-training1a-10000g.nnue`).  These can later be
+entered in a tournament via `bayeselo_ratings.py` to chart Elo progression over
+training.
 
 Loop-mode prompts (Step 3):
 
