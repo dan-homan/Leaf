@@ -1926,9 +1926,9 @@ void nnue_apply_gradients()
 {
     t_adam++;
 
-    // Bias-correction denominators — hoisted outside all per-weight loops.
-    const float bc1 = 1.0f - powf(TDLEAF_ADAM_BETA1, (float)t_adam);
-    const float bc2 = 1.0f - powf(TDLEAF_ADAM_BETA2, (float)t_adam);
+    // Global bias-correction for FT RMSProp (sparse features need growing
+    // global bc2; per-weight bc2 would be too small at ~8 updates/5000g).
+    const float ft_bc2 = 1.0f - powf(TDLEAF_ADAM_BETA2, (float)t_adam);
 
     // Linear LR warmup: ramp from 0 to full over the first WARMUP Adam steps.
     const float warmup_factor = (TDLEAF_ADAM_WARMUP > 0 && t_adam <= (uint32_t)TDLEAF_ADAM_WARMUP)
@@ -1944,22 +1944,26 @@ void nnue_apply_gradients()
                         / (1.0f + (float)cnt / TDLEAF_ADAM_C));
     };
 
-    // Full Adam step for FC layers and FT biases.
+    // Full Adam step for FC layers and FT biases — per-weight bias correction.
+    // bc1 (beta1=0.9): skipped at cnt>=20 (0.9^20≈0.12 → bc1≈0.88, close to 1).
+    // bc2 (beta2=0.999): ALWAYS applied (0.999^20≈0.98 → bc2=0.02; skipping gives ~7× oversized steps).
     auto do_step = [&](float g, float &m, float &v, uint32_t cnt) -> float {
         m = TDLEAF_ADAM_BETA1 * m + (1.0f - TDLEAF_ADAM_BETA1) * g;
         v = TDLEAF_ADAM_BETA2 * v + (1.0f - TDLEAF_ADAM_BETA2) * g * g;
-        float m_hat = m / bc1;
-        float v_hat = v / bc2;
+        uint32_t eff_t = cnt + 1;
+        float m_hat = (eff_t >= 20) ? m
+            : m / (1.0f - powf(TDLEAF_ADAM_BETA1, (float)eff_t));
+        float v_hat = v / (1.0f - powf(TDLEAF_ADAM_BETA2, (float)eff_t));
         return lr_decay(TDLEAF_ADAM_LR0, cnt) * m_hat / (sqrtf(v_hat) + TDLEAF_ADAM_EPS);
     };
-    // PSQT Adam step — same algorithm but uses TDLEAF_ADAM_PSQT_LR0.
-    // PSQT weights are at int32 scale (std ~36,000) while FC weights are int8 scale (std ~3-50).
-    // Adam normalises gradient magnitude, so only LR0 sets the per-step size in weight-space.
+    // PSQT Adam step — same per-weight BC but uses TDLEAF_ADAM_PSQT_LR0.
     auto do_step_psqt = [&](float g, float &m, float &v, uint32_t cnt) -> float {
         m = TDLEAF_ADAM_BETA1 * m + (1.0f - TDLEAF_ADAM_BETA1) * g;
         v = TDLEAF_ADAM_BETA2 * v + (1.0f - TDLEAF_ADAM_BETA2) * g * g;
-        float m_hat = m / bc1;
-        float v_hat = v / bc2;
+        uint32_t eff_t = cnt + 1;
+        float m_hat = (eff_t >= 20) ? m
+            : m / (1.0f - powf(TDLEAF_ADAM_BETA1, (float)eff_t));
+        float v_hat = v / (1.0f - powf(TDLEAF_ADAM_BETA2, (float)eff_t));
         return lr_decay(TDLEAF_ADAM_PSQT_LR0, cnt) * m_hat / (sqrtf(v_hat) + TDLEAF_ADAM_EPS);
     };
 
@@ -2042,7 +2046,7 @@ void nnue_apply_gradients()
                     if (gw[d] != 0.0f) {
                         vw[d] = TDLEAF_ADAM_BETA2 * vw[d]
                                + (1.0f - TDLEAF_ADAM_BETA2) * gw[d] * gw[d];
-                        float sv = sqrtf(vw[d] / bc2) + TDLEAF_ADAM_EPS;
+                        float sv = sqrtf(vw[d] / ft_bc2) + TDLEAF_ADAM_EPS;
                         float lr = lr_decay(TDLEAF_ADAM_LR0, cnt[d]);
                         float dw = lr * gw[d] / sv;
                         // AdamW: decoupled weight decay (FT weights, not biases/PSQT)

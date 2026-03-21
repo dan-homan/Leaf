@@ -19,7 +19,6 @@
 #define TDLEAF_H
 
 #include "define.h"
-#include "chess.h"
 #include "nnue.h"
 
 // ---------------------------------------------------------------------------
@@ -93,6 +92,9 @@ struct TDRecord {
     // Used for FT and PSQT gradient backprop.
     int     ft_idx[2][NNUE_MAX_FT_PER_PERSP];
     int8_t  n_ft[2];
+    // Leaf position for Flavor A replay: allows full accumulator rebuild from
+    // current FT weights during replay, rather than using stale accumulators.
+    position pos;
 };
 
 // ---------------------------------------------------------------------------

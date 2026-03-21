@@ -220,7 +220,7 @@ struct position {
 
 };
 
-#if NNUE && TDLEAF
+#if TDLEAF
 #include "tdleaf.h"
 #endif
 
