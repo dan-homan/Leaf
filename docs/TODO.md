@@ -57,37 +57,12 @@ perl comp.pl train_arm_b NNUE=1 NNUE_NET=nn-start.nnue TDLEAF=1 \
 
 **After the ablation:** if one approach dominates, drop the other to reduce complexity.
 
-### Flavor A replay (re-evaluate from current weights)
-
-The current replay system (Flavor B) uses frozen accumulators — it refreshes `score_stm`
-via the FC forward pass but the FT activations are stale.  This means FT weight gradients
-during replay are computed from accumulators that reflected old FT weights, creating a
-gradient inconsistency that grows as FT weights change.
-
-**Flavor A** would re-evaluate positions from scratch using the current weights.  This
-requires storing the actual positions (or at least piece lists + king squares) in
-`TDRecord` rather than just the accumulators, so the accumulator can be recomputed.
-The memory cost is higher per `TDRecord` and compute per replay pass increases, but
-the gradient quality improvement for the ~23M FT parameters would be substantial.
-
-If implemented, the replay buffer could be made much larger (32–64 games) with K=1–2
-passes, randomly sub-sampling a subset per pass for better generalization.
-
 ### Prioritized experience replay
 
 The replay buffer currently iterates over all buffered games with equal weight.  Games
 with larger total TD error (`Σ|e[t]|`) contain more learning signal and should be
 replayed with higher priority.  Simplest variant: weight each game by its cumulative
 absolute TD error, or skip games where total error is near zero.
-
-### Per-weight bias correction for sparse features
-
-`t_adam` is a global counter incremented once per `nnue_apply_gradients()` call, but
-weights that receive zero gradient skip the m/v update.  For sparse FT features this
-means bias correction uses a `t_adam` larger than the weight's actual update count,
-causing `v̂` to be under-corrected (step too small for that weight).  Using per-weight
-`t` counters for bias correction, or skipping correction entirely for weights with >20
-updates (where `1−β^t ≈ 1`), would reduce this effect for rarely-visited features.
 
 ### Search parameter tuning
 The search's pruning parameters (null-move margins, futility thresholds, aspiration
@@ -129,6 +104,16 @@ See memory for full implementation plan.
 ---
 
 ## Resolved / Implemented
+
+### ~~Flavor A replay~~ ✓ Implemented (2026-03-21)
+Replay now rebuilds accumulators from stored leaf positions using current FT weights,
+ensuring FT gradients during replay are self-consistent with the current network.
+`TDRecord` stores the leaf `position` (~300 bytes/ply, ~6% size increase).
+
+### ~~Per-weight bias correction~~ ✓ Implemented (2026-03-21)
+FC and PSQT Adam steps use per-weight bias correction (`eff_t = cnt + 1`) instead of
+global `t_adam`.  bc1 skipped at cnt≥20 (negligible); bc2 always applied.  FT RMSProp
+retains global bc2 (sparse features need growing global correction).
 
 ### ~~AdamW decoupled weight decay~~ ✓ Implemented (2026-03-21)
 `TDLEAF_WEIGHT_DECAY=1e-4` applied to FC weights and FT weights after each Adam step.

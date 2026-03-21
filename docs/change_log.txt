@@ -1,8 +1,16 @@
 Changes since 2017_12_24
 
 2026_03_21 -- TDLeaf training improvements (src/tdleaf.h, src/tdleaf.cpp,
-               src/nnue.cpp, src/nnue.h).
-               Four additions to the optimizer:
+               src/nnue.cpp, src/nnue.h, src/chess.h).
+               5. Per-weight bias correction for FC/PSQT Adam steps: uses
+                  per-weight eff_t = cnt+1 instead of global t_adam.  bc1
+                  skipped at cnt>=20 (negligible); bc2 always applied.  FT
+                  RMSProp keeps global bc2 for sparse features.
+               6. Flavor A replay: tdleaf_refresh_scores rebuilds accumulators
+                  from stored leaf positions using current FT weights, ensuring
+                  FT gradients during replay are self-consistent.  TDRecord
+                  now stores the leaf position (~300 bytes/ply).
+               Four earlier additions to the optimizer:
                1. Gradient clipping by global L2 norm (TDLEAF_GRAD_CLIP_NORM=10.0):
                   safety net against anomalous gradient spikes.  Applied before each
                   Adam step in live, replay, and flush paths.
