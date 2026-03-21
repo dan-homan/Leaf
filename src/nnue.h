@@ -166,11 +166,10 @@ void nnue_forward_fp32(const int16_t acc[2][NNUE_HALF_DIMS],
 
 // Accumulate per-weight gradients for one position into the static grad arrays.
 // grad_scale = alpha * e_t * sigmoid_gradient — applied inside.
-// fc_only: if true, skip FT weight, FT bias, and PSQT gradient accumulation.
-// Used during replay to prevent FT overfitting through the positive feedback
-// loop where rebuilt accumulators reinforce live-pass FT updates.
-void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
-                               bool fc_only = false);
+void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale);
+
+// Clip gradients by global L2 norm.  Returns pre-clip norm (0 if disabled).
+float nnue_clip_gradients(float max_norm);
 
 // Apply accumulated gradients (zero them afterwards).
 void nnue_apply_gradients();
@@ -188,10 +187,6 @@ bool nnue_load_fc_weights(const char *path);
 // Set all per-weight update counts to a fixed value.  Used by --set-cnt to prime
 // the Adam LR decay schedule before starting training on a pre-trained network.
 void nnue_set_cnt(uint32_t val);
-
-// Compute global L2 norm of all gradient arrays and clip if it exceeds max_norm.
-// Returns the pre-clip norm.  If max_norm <= 0, does nothing (returns 0).
-float nnue_clip_gradients(float max_norm);
 
 // Evaluate from raw accumulator arrays (used by TDLeaf replay to refresh
 // score_stm from stored acc[][] against current weights, without constructing

@@ -53,7 +53,7 @@ change between consecutive moves exceeds `TDLEAF_SCORE_CLIP_CP` centipawns — s
 
 where `∇_w d_t = d_t * (1 - d_t) / K * ∇_w score_t`.
 
-Defaults: `λ = 0.8` (wins/losses) / `0.5` (draws), `K = 400`.
+Defaults: `λ_decisive = 0.8` (wins/losses), `λ_draw = 0.5` (draws), `K = 400`.
 Gradient updates use Adam with per-weight LR decay; see [Adam Optimizer](#adam-optimizer-with-per-weight-lr-decay) below.
 
 **Key design choice:** `d_t` is computed from `nnue_evaluate()` (direct static eval of the
@@ -70,7 +70,7 @@ position, making the gradient self-consistent.
 | FC0 weights/biases | 1,024×16 int8 + 16 int32, ×8 stacks | Quantized int8, float shadow |
 | FC1 weights/biases | 32×32 int8 + 32 int32, ×8 stacks | Same |
 | FC2 weights/bias   | 32 int8 + 1 int32, ×8 stacks | Same |
-| FT biases          | 1,024 int16 | **Not trained** — stay at baseline .nnue values |
+| FT biases          | 1,024 int16 | Dense update; static float shadow (4 KB) |
 | FT weights         | 22,528×1,024 int16 | Sparse update; float shadow on heap (~92 MB) |
 | PSQT weights       | 22,528×8 int32 | Sparse update; float shadow (~720 KB) |
 
@@ -78,12 +78,8 @@ FT weights and PSQT are updated sparsely: only the ~30–60 feature rows active 
 leaf position are touched.  `ft_dirty[FT_INPUTS]` tracks which rows received gradient
 during the game; only dirty rows are scanned in `nnue_apply_gradients`.
 
-FT biases are **not trained** during online TDLeaf learning.  The shared 1,024-dim bias
-gradient is structurally tiny (shifting both perspectives equally largely cancels in the
-score), but Adam normalises it into full LR-sized steps, causing universal negative drift
-(mean −371 after 5,000 games, gating off ~93% of SqrCReLU dimensions).  Per-feature FT
-weights absorb any needed offset.  Biases stay at their baseline `.nnue` values and are
-still saved in the v4 `.tdleaf.bin` format for compatibility.
+FT biases are updated densely every game (all 1,024 values): the gradient is the sum of
+`g_acc[persp][d]` across both perspectives.
 
 ---
 
@@ -190,42 +186,33 @@ m   ← β₁ m + (1−β₁) g                    (first moment)
 v   ← β₂ v + (1−β₂) g²                   (second moment)
 m̂   = m / (1 − β₁ᵗ)                      (bias-corrected)
 v̂   = v / (1 − β₂ᵗ)                      (bias-corrected)
-lr  = LR0 × (floor + (1−floor) / (1 + cnt/C))      (per-weight LR decay with floor)
-Δw  = −lr × m̂ / (√v̂ + ε)                 (Adam step)
-w   ← w − λ × lr × w                      (AdamW weight decay; weights only, not biases/PSQT)
+lr  = LR0 × (floor + (1−floor) / (1 + cnt/C))   (per-weight LR decay with floor)
+Δw  = −lr × m̂ / (√v̂ + ε)
+w   ← w + Δw
 cnt ← cnt + 1
 ```
 
-`t` is incremented once per `nnue_apply_gradients()` call (once per batch).
-
-**Bias correction — per-weight vs global:**  FC layers and PSQT use per-weight bias
-correction: `eff_t = cnt + 1`, so the correction matches the number of times that
-specific weight has been updated.  FT weights instead use the **global** `t` (the batch
-counter) for the β₂ bias correction denominator.  This is intentional: FT weights are
-extremely sparse (mean ~8 updates per weight over 5000 games), so per-weight bc2 at
-`eff_t=1` gives `bc2 = 0.001`, yielding step ≈ ±LR0.  The global bc2 grows with `t`
-(e.g. `bc2 ≈ 0.18` at `t=200`), providing an effective step ≈ 2.7×LR0 for a weight
-seeing its first gradient.  This amplification is critical for FT learning under extreme
-sparsity — without it, FT weights barely move and FC layers overfit to near-random
-features, producing catastrophic eval divergence.
+`t` is incremented once per `nnue_apply_gradients()` call (once per batch).  The bias
+correction denominators `(1−β₁ᵗ)` and `(1−β₂ᵗ)` are hoisted outside all per-weight
+loops for efficiency.
 
 **Per-weight LR decay with floor:** `lr(cnt) = LR0 × (floor + (1 − floor) / (1 + cnt/C))`.
 At `cnt=0` the step size is `LR0`; at `cnt=C` it is halfway between `LR0` and the floor;
-as `cnt→∞` it settles to `LR0 × floor` rather than zero.  The floor
-(`TDLEAF_ADAM_LR_FLOOR`, default 0.05) ensures weights remain trainable indefinitely — even
-heavily-updated parameters still receive 5% of the initial step size per game.  Weights that
-receive gradient every game (FC biases, dense feature rows) converge fastest; rarely-seen
-PSQT buckets retain a higher effective LR for longer.
+as `cnt→∞` it settles to `LR0 × floor` rather than zero.  The floor (`TDLEAF_ADAM_LR_FLOOR`,
+default 0.01) ensures weights remain trainable indefinitely — even heavily-updated parameters
+still receive 1% of the initial step size per game.  Weights that receive gradient every game
+(FC biases, dense feature rows) converge fastest; rarely-seen PSQT buckets retain a higher
+effective LR for longer.
 
 ### Per-Layer Configuration
 
-| Layer | Update Rule | LR0 | Weight Decay | Notes |
-|-------|-------------|-----|--------------|-------|
-| FC0/FC1/FC2 weights | Full Adam | `TDLEAF_ADAM_LR0 = 0.2` | Yes | Float shadow clamped to ±127 after each update |
-| FC0/FC1/FC2 biases  | Full Adam | `TDLEAF_ADAM_LR0 = 0.2` | No | |
-| FT weights | RMSProp (per-weight v, no m) | `TDLEAF_ADAM_LR0 = 0.2` | Yes | Per-weight v (~92 MB); global bc2 — see below |
-| FT biases  | **Not trained** | — | — | Stays at baseline; see note above |
-| PSQT       | Full Adam | `TDLEAF_ADAM_PSQT_LR0 = 2.0` | No | Classical prior; separate LR0 — see below |
+| Layer | Update Rule | LR0 | Notes |
+|-------|-------------|-----|-------|
+| FC0/FC1/FC2 weights | Full Adam | `TDLEAF_ADAM_LR0 = 0.2` | Float shadow clamped to ±127 after each update |
+| FC0/FC1/FC2 biases  | Full Adam | `TDLEAF_ADAM_LR0 = 0.2` | |
+| FT weights | RMSProp (per-weight v, no m) | `TDLEAF_ADAM_LR0 = 0.2` | Per-weight v (~92 MB, OS lazy-paged; physical use ∝ active features) |
+| FT biases  | Full Adam | `TDLEAF_ADAM_LR0 = 0.2` | |
+| PSQT       | Full Adam | `TDLEAF_ADAM_PSQT_LR0 = 2.0` | Separate LR0 required — see below |
 
 ### Why a Separate PSQT LR0?
 
@@ -243,25 +230,6 @@ Without a matching clamp on the float shadow, Adam can push `w_f32` arbitrarily 
 accumulate gradient updates with zero effect on the network.  After each weight update,
 `w_f32 = clamp(w_f32, −127, 127)` keeps the float shadow aligned with the int8 inference
 space.  Not applied to FC2 (output layer, no activation clamping required).
-
-### AdamW Decoupled Weight Decay
-
-After each Adam step, FC weights (FC0/FC1/FC2) and FT weights receive a decoupled weight
-decay update: `w -= λ × lr × w`, where `λ = TDLEAF_WEIGHT_DECAY` (default 1e-4) and `lr`
-is the same per-weight learning rate used by the Adam step (including warmup and decay).
-
-Weight decay is **not** applied to:
-- **FC biases** — standard practice; biases do not benefit from regularization toward
-  zero and decay would fight the learned offset.
-- **FT biases** — not trained at all (see "Trainable Parameters" above).
-- **PSQT weights** — initialized from meaningful classical material + piece-square values.
-  Decay would pull them toward zero, fighting the classical prior that provides the
-  starting point for learning.
-
-The decay is *decoupled* (AdamW-style, Loshchilov & Hutter 2019): the `λ × lr × w` term
-is applied directly to the weight, not injected into the gradient before the Adam m/v
-updates.  This prevents the optimizer's adaptive learning rate from counteracting the
-regularization effect.
 
 ### Session-Local Moments
 
@@ -281,27 +249,25 @@ Moments are **not** persisted to `.tdleaf.bin` because:
 | Constant | Value | Notes |
 |----------|-------|-------|
 | `TDLEAF_ADAM_LR0` | 0.2 | Initial step size for FC/FT layers (float weight units) |
-| `TDLEAF_ADAM_PSQT_LR0` | 2.0 | Initial step size for PSQT (int32 scale; ~10× FC) |
+| `TDLEAF_ADAM_PSQT_LR0` | 2.0 | Initial step size for PSQT (int32 scale; ~1000× FC) |
 | `TDLEAF_ADAM_C` | 5000 | LR half-life in per-weight update counts |
-| `TDLEAF_ADAM_LR_FLOOR` | 0.05 | Long-term LR floor as a fraction of LR0 (5%); lr settles to `LR0 × floor` as cnt→∞ |
+| `TDLEAF_ADAM_LR_FLOOR` | 0.05 | Long-term LR floor as a fraction of LR0; lr settles to `LR0 × floor` as cnt→∞ |
 | `TDLEAF_ADAM_BETA1` | 0.9 | First-moment decay (FC weights/biases, FT biases, PSQT) |
 | `TDLEAF_ADAM_BETA2` | 0.999 | Second-moment decay (all layers) |
 | `TDLEAF_ADAM_EPS` | 1e-8 | Numerical floor in denominator |
 | `TDLEAF_ADAM_WARMUP` | 50 | Linear LR warmup: ramp from 0 to full LR over first N Adam steps (0 = disabled) |
-| `TDLEAF_WEIGHT_DECAY` | 1e-4 | AdamW decoupled weight decay coefficient (FC weights + FT weights only; 0 = disabled) |
 | `TDLEAF_BATCH_SIZE` | 4 | Mini-batch: accumulate gradients across N games before each Adam step |
-| `TDLEAF_LAMBDA_DECISIVE` | 0.8 | Eligibility trace decay for wins/losses (longer traces for decisive games) |
-| `TDLEAF_LAMBDA_DRAW` | 0.5 | Eligibility trace decay for draws (shorter traces reduce balanced-position noise) |
-| `TDLEAF_GRAD_CLIP_NORM` | 1.0 | Max global L2 gradient norm; gradients scaled down if exceeded (0 = disabled) |
-| `TDLEAF_REPLAY_MIN_ERROR` | 0.0 | Skip replay games with cumulative |e[t]| below this threshold (0 = disabled) |
 
-Set `TDLEAF_LAMBDA_DECISIVE` and `TDLEAF_LAMBDA_DRAW` to the same value for symmetric behaviour.
+| `TDLEAF_WEIGHT_DECAY` | 1e-4 | AdamW decoupled weight decay coefficient (FC + FT weights only) |
+| `TDLEAF_GRAD_CLIP_NORM` | 10.0 | Global gradient L2 norm clip threshold; 0 = disabled |
+
 Set `TDLEAF_ADAM_LR_FLOOR = 0.0` to restore the original decay-to-zero behaviour.
 Set `TDLEAF_ADAM_LR0 = 0.0` to disable Adam entirely and fall back to plain gradient
 descent (the original single-step `w -= g` path; all Adam arrays remain zeroed and unused).
 Set `TDLEAF_BATCH_SIZE = 1` to restore per-game Adam steps.
 Set `TDLEAF_ADAM_WARMUP = 0` to disable warmup.
 Set `TDLEAF_WEIGHT_DECAY = 0.0` to disable weight decay.
+Set `TDLEAF_GRAD_CLIP_NORM = 0.0` to disable gradient clipping.
 
 ---
 
@@ -509,60 +475,6 @@ weight snapshots but is no longer part of the default training workflow.
 
 ---
 
-## Why Symmetric Self-Play
-
-TDLeaf training **must** use symmetric self-play (both engines sharing the same learning
-weights) rather than learner-vs-readonly (one engine learns, the other holds fixed weights).
-
-### The learner-vs-readonly failure mode
-
-When one engine learns and the other holds fixed weights, any weight update — even a
-random one — changes the learner's evaluation function and therefore its move choices.
-Different moves lead to different game outcomes, but *different* does not mean *better*
-when the starting point is arbitrary.  This creates a positive feedback loop:
-
-1. The learner's eval drifts from the readonly baseline.
-2. The learner plays differently, often worse (its eval no longer matches the positions
-   it encounters against the readonly opponent's unchanged play style).
-3. Losses produce large TD errors in one direction.
-4. Large TD errors drive further eval drift in the same direction.
-5. The learner's Elo monotonically declines relative to the readonly opponent.
-
-This was observed empirically: at LR0=0.2, the learner diverged by −123 Elo within
-200 games; reducing LR 10× to 0.02 only delayed the onset, reaching −105 Elo by
-game 800.  The problem is structural, not parametric — no learning rate prevents it.
-
-### Why symmetric self-play works
-
-When both engines share the same weights (via the `.tdleaf.bin` delta-merge mechanism),
-weight updates affect both sides equally.  There is no fixed reference point to diverge
-from.  The TD signal comes from game outcomes (wins, draws, losses) relative to the
-network's own predictions, which is the correct learning signal: the network learns to
-make its evaluations more consistent with the results of games played under its own
-evaluation function.
-
-### Measuring training progress
-
-Since both engines share weights, win rates between them are uninformative (they should
-be ~50/50 by construction).  Instead, measure progress by periodic **checkpoint
-validation**: snapshot the weights every N games and play a test match of the snapshot
-against the starting network (or a fixed reference) using `TDLEAF_READONLY=1` binaries.
-
-```sh
-# Build a readonly binary from the snapshot
-perl comp.pl test_snapshot NNUE=1 NNUE_NET=nn-fresh.nnue TDLEAF=1 TDLEAF_READONLY=1 OVERWRITE
-cp learn/nn-fresh.tdleaf.bin run/nn-fresh.tdleaf.bin
-
-# Play against the starting network (no .tdleaf.bin = baseline weights)
-perl comp.pl test_baseline NNUE=1 NNUE_NET=nn-fresh.nnue TDLEAF=1 TDLEAF_READONLY=1 OVERWRITE
-# (do NOT copy a .tdleaf.bin for this binary)
-
-python3 scripts/match.py Leaf_vtest_snapshot Leaf_vtest_baseline -n 100 -tc 5+0.05
-python3 scripts/bayeselo_ratings.py run/pgn/*.pgn --min 20 --report
-```
-
----
-
 ## Hooks in Existing Code
 
 | Location | Change |
@@ -583,51 +495,28 @@ python3 scripts/bayeselo_ratings.py run/pgn/*.pgn --min 20 --report
 
 ## Epoch-Based Replay
 
-`tdleaf_update_after_game()` accumulates live-pass gradients.  On batch boundaries,
-`tdleaf_replay()` adds FC-only replay gradients into the **same** gradient accumulators,
-then applies a single combined Adam step.  This gives FC weights one Adam step per
-batch (not two), stabilising learning against fixed-weight opponents.
+After `tdleaf_update_after_game()` applies the live gradient pass, `tdleaf_replay()`
+runs `TDLEAF_REPLAY_K` (default 1) additional passes over the last `TDLEAF_REPLAY_BUF_N`
+(default 8) completed games stored in a static ring buffer.
 
-Replay iterates over the last `TDLEAF_REPLAY_BUF_N` (default 8) completed games stored
-in a static ring buffer, running `TDLEAF_REPLAY_K` (default 1) passes.
+### How it works (Flavor B)
 
-### How it works (Flavor A — full accumulator rebuild, FC-only gradients)
+1. The completed `TDGameRecord` (accumulator snapshots + feature indices) is pushed into
+   the ring buffer, replacing the oldest entry when full.
+2. For each replay pass, iterate over all buffered games oldest-first:
+   a. `tdleaf_refresh_scores()` rewrites each ply's `score_stm` by calling
+      `nnue_evaluate_acc_raw()` on the stored `acc[][]` against the **current quantized
+      weights**.  The accumulators themselves are frozen (Flavor B limitation — the leaf
+      positions themselves are not re-searched).
+   b. `tdleaf_accumulate_game()` computes TD errors and accumulates gradients exactly
+      as in the live pass.
+3. After all games in the pass are processed, `nnue_apply_gradients()` and
+   `nnue_requantize_fc()` are called once, so the next pass's score refresh sees
+   the updated weights.
+4. Weights are saved to `.tdleaf.bin` after all K passes complete.
 
-1. The completed `TDGameRecord` (accumulator snapshots + feature indices + leaf positions)
-   is pushed into the ring buffer, replacing the oldest entry when full.  Each `TDRecord`
-   stores the leaf `position` so accumulators can be rebuilt from current weights.
-2. Games with cumulative |e[t]| below `TDLEAF_REPLAY_MIN_ERROR` are skipped (prioritized
-   experience replay; set to 0 to replay all games).
-3. For each replay pass, iterate over all buffered games oldest-first:
-   a. `tdleaf_refresh_scores()` rebuilds the accumulator from scratch for each ply using
-      `nnue_init_accumulator()` on the stored leaf position, then re-enumerates active
-      features and re-evaluates `score_stm`.  This ensures both the accumulator and score
-      reflect the current FT and FC weights.
-   b. `tdleaf_accumulate_game()` computes TD errors and accumulates **FC-layer gradients
-      only** (`fc_only=true`).  FT weight, FT bias, and PSQT gradients are suppressed
-      during replay to prevent a positive feedback loop (see below).  The stored
-      `td_error_sum` is updated for future prioritization.
-4. Gradient clipping (`nnue_clip_gradients`) is applied to the combined live + replay
-   gradients before the single Adam step.
-5. `nnue_apply_gradients()` and `nnue_requantize_fc()` are called once for the
-   combined batch.
-6. Weights are saved to `.tdleaf.bin` after all K passes complete.
-
-Score-change clipping, ID-stability weighting, and asymmetric lambda apply identically
-in replay passes (the stored `id_score_variance` values are reused unchanged).
-
-### Why FC-only replay gradients
-
-Full Flavor A replay (FT+FC gradients from rebuilt accumulators) creates a positive
-feedback loop: the live pass updates FT weights → rebuilt accumulators reflect those
-changes → replay FT gradients reinforce the same direction → FT weights overshoot.
-With Adam normalizing even tiny gradients into ~LR-sized steps, this amplification
-causes eval divergence within ~130 FRC games (opening evals reaching ±18 cp).
-
-Suppressing FT/PSQT gradients during replay breaks the feedback loop while preserving
-the benefit of correct TD errors and FC gradients from refreshed accumulators.  FT
-weights learn exclusively from the live pass, which provides fresh gradient signal
-from newly played positions.
+Score-change clipping and ID-stability weighting apply identically in replay passes
+(the stored `id_score_variance` values are reused unchanged).
 
 ### Ablation results (K vs. Elo gain)
 

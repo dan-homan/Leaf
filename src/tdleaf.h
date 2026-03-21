@@ -8,8 +8,8 @@
 //   Weight update:
 //     Δw = Σ_t  e_t * ∇_w d_t   (step size governed by Adam LR schedule)
 //
-// FC layers (FC0/FC1/FC2), FT weights, and PSQT are trained.
-// FT biases are not trained (see nnue.cpp for rationale).
+// FC layers (FC0/FC1/FC2) and FT biases (1024 int16) are trained.  FT weights
+// and PSQT are also trained (FT weights 46 MB, PSQT 720 KB).
 // FP32 shadow copies of the FC weights are maintained in nnue.cpp; after each
 // game the int8 inference arrays are updated via nnue_requantize_fc().
 //
@@ -19,9 +19,8 @@
 #define TDLEAF_H
 
 #include "define.h"
+#include "chess.h"
 #include "nnue.h"
-// Note: tdleaf.h is included from chess.h after the position struct is defined.
-// Do not include chess.h here to avoid circular inclusion.
 
 // ---------------------------------------------------------------------------
 // Hyperparameters (can be overridden by setvalue/environment at runtime)
@@ -42,7 +41,7 @@ static const float TDLEAF_SCORE_CLIP_CP  = 200.0f;
 static const float TDLEAF_ID_VAR_SIGMA2  = 10000.0f;
 // Gradient clipping: if global L2 norm of all gradients exceeds this threshold,
 // scale all gradients by max_norm/norm.  Set to 0 to disable.
-static const float TDLEAF_GRAD_CLIP_NORM = 1.0f;
+static const float TDLEAF_GRAD_CLIP_NORM = 10.0f;
 
 // ---------------------------------------------------------------------------
 // Adam + per-weight LR decay hyperparameters
@@ -60,7 +59,7 @@ static const float TDLEAF_GRAD_CLIP_NORM = 1.0f;
 // Mini-batch: gradients accumulated across BATCH_SIZE games before each Adam step.
 // ---------------------------------------------------------------------------
 static const float TDLEAF_ADAM_LR0      = 0.2f;    // initial step size for FC/FT layers (float weight units)
-static const float TDLEAF_ADAM_PSQT_LR0 = 2.0f;    // initial step size for PSQT (int32 scale ~36k std; needs larger LR)
+static const float TDLEAF_ADAM_PSQT_LR0 = 2.0f;   // initial step size for PSQT (int32 scale ~36k std; needs larger LR)
 static const float TDLEAF_ADAM_C        = 5000.0f;  // LR half-life in per-weight updates (shared)
 // Long-term LR floor: the learning rate settles to LR0 × LR_FLOOR as cnt → ∞
 // rather than approaching zero.  Full decay schedule:
@@ -70,19 +69,15 @@ static const float TDLEAF_ADAM_C        = 5000.0f;  // LR half-life in per-weigh
 //   cnt→∞  → LR0 × LR_FLOOR  (long-term floor)
 // Set to 0.0 to restore the original decay-to-zero behaviour.
 static const float TDLEAF_ADAM_LR_FLOOR = 0.05f;   // long-term fraction of LR0 (5%)
+static const float TDLEAF_ADAM_BETA1    = 0.9f;    // first-moment decay  (FC + FT bias + PSQT)
+static const float TDLEAF_ADAM_BETA2    = 0.999f;  // second-moment decay (all layers)
+static const float TDLEAF_ADAM_EPS      = 1e-8f;   // numerical floor
 // AdamW decoupled weight decay: w -= λ × lr × w after each Adam step.
 // Applied to FC weights and FT weights only (not biases, not PSQT).
 // Set to 0.0 to disable.
 static const float TDLEAF_WEIGHT_DECAY  = 1e-4f;   // decoupled weight decay coefficient
-static const float TDLEAF_ADAM_BETA1    = 0.9f;    // first-moment decay  (FC + FT bias + PSQT)
-static const float TDLEAF_ADAM_BETA2    = 0.999f;  // second-moment decay (all layers)
-static const float TDLEAF_ADAM_EPS      = 1e-8f;   // numerical floor
 static const int   TDLEAF_ADAM_WARMUP   = 50;      // linear LR warmup over first N games (0 = disabled)
 static const int   TDLEAF_BATCH_SIZE    = 4;       // accumulate gradients across N games before Adam step
-
-// Prioritized experience replay: skip replay games whose cumulative |e[t]|
-// falls below this threshold.  Set to 0.0 to disable (replay all games).
-static const float TDLEAF_REPLAY_MIN_ERROR = 0.0f;
 
 // ---------------------------------------------------------------------------
 // Per-ply record: accumulator snapshot + search score
@@ -98,7 +93,6 @@ struct TDRecord {
     // Used for FT and PSQT gradient backprop.
     int     ft_idx[2][NNUE_MAX_FT_PER_PERSP];
     int8_t  n_ft[2];
-    position pos;  // leaf position for Flavor A accumulator rebuild during replay
 };
 
 // ---------------------------------------------------------------------------

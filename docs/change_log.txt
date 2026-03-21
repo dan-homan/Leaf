@@ -1,57 +1,19 @@
 Changes since 2017_12_24
 
-2026_03_20 -- Fix FT under-training: restore global bc2 for FT RMSProp
-               (src/nnue.cpp).
-               Per-weight bias correction (cnt+1) for FT weights gave bc2=0.001 on
-               first update → step=±LR0=±0.2 regardless of training progress.  FT
-               weights are extremely sparse (mean ~8 updates over 5000 games), so this
-               effectively froze the feature transformer while FC layers overfitted to
-               near-random features, producing ±1500 cp opening evals after 5000 games.
-               FT now uses global bc2 (= 1−β₂^t_adam), which amplifies sparse updates
-               by ~2–21×.  FC and PSQT retain per-weight bias correction.
-
-2026_03_20 -- Merge live and replay gradients into single Adam step (src/tdleaf.cpp).
-               Replay restructured: tdleaf_update_after_game() now only accumulates live-pass
-               gradients without applying them.  tdleaf_replay() adds FC-only replay
-               gradients into the same accumulators, then applies a single combined Adam
-               step per batch.  This ensures live+replay gradients are jointly clipped and
-               normalized rather than receiving separate Adam steps.
-
-2026_03_20 -- Disable FT bias training in TDLeaf (src/nnue.cpp).
-               FT bias gradient accumulation and Adam updates are disabled during
-               online TDLeaf learning.  The shared 1024-dim bias vector's gradient
-               is structurally tiny (shifts both perspectives equally, largely
-               cancelling in the score), but Adam normalises these into full LR-sized
-               steps, causing universal negative drift (mean -371 after 5000 games,
-               gating off ~93% of SqrCReLU dimensions).  Per-feature FT weights can
-               absorb any needed offset.  Biases remain at their baseline .nnue values
-               and are still saved/loaded in the v4 .tdleaf.bin format for compatibility.
-
-2026_03_20 -- TDLeaf learning improvements (src/tdleaf.h, src/tdleaf.cpp, src/nnue.h,
-               src/nnue.cpp, src/chess.h).
-               Five changes to improve gradient quality and replay effectiveness:
-               1. Asymmetric lambda: TDLEAF_LAMBDA_DECISIVE=0.8 for wins/losses,
-                  TDLEAF_LAMBDA_DRAW=0.5 for draws.  Decisive games get longer
-                  eligibility traces; draws use shorter traces.
-               2. Per-weight bias correction: Adam bias correction now uses per-weight
-                  update count instead of global t_adam.  Fixes under-correction for
-                  sparse FT/PSQT features.
-               3. Gradient clipping by global norm: TDLEAF_GRAD_CLIP_NORM=1.0 clips
-                  global L2 gradient norm before each Adam step.  Prevents outlier
-                  games from making disproportionately large weight updates.
-               4. Prioritized experience replay: TDLEAF_REPLAY_MIN_ERROR threshold
-                  (default 0, disabled) skips replay games with low TD error sum.
-               5. Flavor A replay: accumulators are rebuilt from stored leaf positions
-                  using current FT weights via nnue_init_accumulator(), eliminating
-                  the gradient inconsistency of Flavor B.  TDRecord now stores the
-                  leaf position (~256 bytes/ply).
-                  **FC-only replay fix:** FT/PSQT gradients are suppressed during
-                  replay (fc_only=true) to prevent a positive feedback loop where
-                  rebuilt accumulators reinforce live-pass FT weight updates.  Full
-                  Flavor A FT backprop caused eval divergence within ~130 FRC games
-                  (opening evals reaching ±18 cp); the FC-only variant is stable
-                  through 200+ games.  FC layers still benefit from correct gradients
-                  via refreshed accumulators.
+2026_03_21 -- TDLeaf training improvements (src/tdleaf.h, src/tdleaf.cpp,
+               src/nnue.cpp, src/nnue.h).
+               Four additions to the optimizer:
+               1. Gradient clipping by global L2 norm (TDLEAF_GRAD_CLIP_NORM=10.0):
+                  safety net against anomalous gradient spikes.  Applied before each
+                  Adam step in live, replay, and flush paths.
+               2. AdamW decoupled weight decay (TDLEAF_WEIGHT_DECAY=1e-4): applied to
+                  FC weights (L0/L1/L2) and FT weights only.  Not applied to biases
+                  or PSQT.
+               3. Asymmetric lambda: TDLEAF_LAMBDA_DECISIVE=0.8 for wins/losses,
+                  TDLEAF_LAMBDA_DRAW=0.5 for draws.  Longer eligibility traces for
+                  decisive games (clearer signal), shorter for draws (less noise).
+               4. LR floor raised from 1% to 5%: long-term learning rate settles at
+                  LR0 × 0.05 instead of LR0 × 0.01.
 
 2026_03_20 -- merge_tdleaf.py: -o is now a filename base (produces <base>.tdleaf.bin
                and optionally <base>.nnue).  New --baseline flag specifies a source
