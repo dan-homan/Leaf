@@ -108,10 +108,11 @@ struct TDRecord {
     float   id_score_variance;               // variance of last TD_ID_HIST ID-depth scores (cp²)
     int     ft_idx[2][NNUE_MAX_FT_PER_PERSP]; // active FT feature indices
     int8_t  n_ft[2];                          // active feature count per perspective
+    position pos;                             // leaf position for Flavor A replay
 };
 ```
 
-Memory: ≈ (2×2048 + 8×4 + 4+4+1+4 + 2×64×4 + 2) bytes × 400 plies ≈ 2.3 MB.
+Memory: ≈ (2×2048 + 8×4 + 4+4+1+4 + 2×64×4 + 2 + ~300) bytes × 400 plies ≈ 2.4 MB.
 
 ### `TDGameRecord`
 
@@ -184,23 +185,27 @@ For each weight parameter w with accumulated gradient g and update count cnt:
 t   ← t + 1                               (global session step counter)
 m   ← β₁ m + (1−β₁) g                    (first moment)
 v   ← β₂ v + (1−β₂) g²                   (second moment)
-m̂   = m / (1 − β₁ᵗ)                      (bias-corrected)
-v̂   = v / (1 − β₂ᵗ)                      (bias-corrected)
+eff_t = cnt + 1                            (per-weight update count)
+m̂   = (eff_t ≥ 20) ? m : m / (1 − β₁^eff_t)   (bc1 skipped when negligible)
+v̂   = v / (1 − β₂^eff_t)                 (bc2 always applied)
 lr  = LR0 × (floor + (1−floor) / (1 + cnt/C))   (per-weight LR decay with floor)
 Δw  = −lr × m̂ / (√v̂ + ε)
 w   ← w + Δw
 cnt ← cnt + 1
 ```
 
-`t` is incremented once per `nnue_apply_gradients()` call (once per batch).  The bias
-correction denominators `(1−β₁ᵗ)` and `(1−β₂ᵗ)` are hoisted outside all per-weight
-loops for efficiency.
+Bias correction uses per-weight `eff_t = cnt + 1` rather than the global `t_adam`.
+bc1 (β₁=0.9) is skipped at cnt≥20 because 0.9²⁰ ≈ 0.12, making bc1 ≈ 0.88 (close
+to 1).  bc2 (β₂=0.999) is **always** applied: 0.999²⁰ ≈ 0.98, so bc2 = 0.02 at
+cnt=20 — skipping would give ~7× oversized steps.  FT RMSProp retains global bc2
+(from `t_adam`) because sparse features (~8 updates/5000g) need the growing global
+correction.
 
 **Per-weight LR decay with floor:** `lr(cnt) = LR0 × (floor + (1 − floor) / (1 + cnt/C))`.
 At `cnt=0` the step size is `LR0`; at `cnt=C` it is halfway between `LR0` and the floor;
 as `cnt→∞` it settles to `LR0 × floor` rather than zero.  The floor (`TDLEAF_ADAM_LR_FLOOR`,
-default 0.01) ensures weights remain trainable indefinitely — even heavily-updated parameters
-still receive 1% of the initial step size per game.  Weights that receive gradient every game
+default 0.05) ensures weights remain trainable indefinitely — even heavily-updated parameters
+still receive 5% of the initial step size per game.  Weights that receive gradient every game
 (FC biases, dense feature rows) converge fastest; rarely-seen PSQT buckets retain a higher
 effective LR for longer.
 
@@ -499,20 +504,20 @@ After `tdleaf_update_after_game()` applies the live gradient pass, `tdleaf_repla
 runs `TDLEAF_REPLAY_K` (default 1) additional passes over the last `TDLEAF_REPLAY_BUF_N`
 (default 8) completed games stored in a static ring buffer.
 
-### How it works (Flavor B)
+### How it works (Flavor A)
 
-1. The completed `TDGameRecord` (accumulator snapshots + feature indices) is pushed into
-   the ring buffer, replacing the oldest entry when full.
+1. The completed `TDGameRecord` (accumulator snapshots, feature indices, and leaf
+   positions) is pushed into the ring buffer, replacing the oldest entry when full.
 2. For each replay pass, iterate over all buffered games oldest-first:
-   a. `tdleaf_refresh_scores()` rewrites each ply's `score_stm` by calling
-      `nnue_evaluate_acc_raw()` on the stored `acc[][]` against the **current quantized
-      weights**.  The accumulators themselves are frozen (Flavor B limitation — the leaf
-      positions themselves are not re-searched).
+   a. `tdleaf_refresh_scores()` rebuilds each ply's accumulator from the stored leaf
+      `position` using `nnue_init_accumulator()` against the **current FT weights**,
+      re-enumerates active features, and re-evaluates `score_stm`.  This ensures
+      FT gradients during replay are self-consistent with the current network.
    b. `tdleaf_accumulate_game()` computes TD errors and accumulates gradients exactly
       as in the live pass.
 3. After all games in the pass are processed, `nnue_apply_gradients()` and
-   `nnue_requantize_fc()` are called once, so the next pass's score refresh sees
-   the updated weights.
+   `nnue_requantize_fc()` are called once, so the next pass's accumulator rebuild
+   sees the updated weights.
 4. Weights are saved to `.tdleaf.bin` after all K passes complete.
 
 Score-change clipping and ID-stability weighting apply identically in replay passes
