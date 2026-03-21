@@ -91,6 +91,7 @@ void tdleaf_record_ply(TDGameRecord &rec,
     r.wtm               = leaf_wtm;
     r.stack             = (pc - 1) / 4;
     r.id_score_variance = id_var;
+    r.pos               = cur;  // store leaf position for Flavor A replay
 
     // Enumerate active features at the leaf position for FT/PSQT backprop.
     // Indices are by actual perspective (0=BLACK, 1=WHITE) matching halfkav2_feature().
@@ -224,14 +225,39 @@ static int           td_replay_count = 0;  // slots filled (saturates at BUF_N)
 // the current quantized weights.  Must be called before tdleaf_accumulate_game
 // in each replay pass so d[t] reflects the current network, not stale weights.
 //
-// Note: acc[][] reflects the FT weights at game-play time (Flavor B limitation).
-// Only score_stm (the FC forward pass output) is updated here.
+// Flavor A: rebuild accumulators from stored positions using current FT weights,
+// re-enumerate active features, and re-evaluate scores.  This ensures FT
+// gradients during replay reflect the current weights, not stale game-time values.
 // ---------------------------------------------------------------------------
 static void tdleaf_refresh_scores(TDGameRecord &rec)
 {
     for (int t = 0; t < rec.n_plies; t++) {
         TDRecord &r = rec.plies[t];
-        int pc = r.stack * 4 + 2;  // representative piece count for bucket
+
+        // Rebuild accumulator from stored position using current FT weights.
+        NNUEAccumulator fresh_acc;
+        nnue_init_accumulator(fresh_acc, r.pos);
+        memcpy(r.acc[0],  fresh_acc.acc[0],  NNUE_HALF_DIMS  * sizeof(int16_t));
+        memcpy(r.acc[1],  fresh_acc.acc[1],  NNUE_HALF_DIMS  * sizeof(int16_t));
+        memcpy(r.psqt[0], fresh_acc.psqt[0], NNUE_PSQT_BKTS * sizeof(int32_t));
+        memcpy(r.psqt[1], fresh_acc.psqt[1], NNUE_PSQT_BKTS * sizeof(int32_t));
+
+        // Re-enumerate active features (must match rebuilt accumulator).
+        for (int p = 0; p < 2; p++) {
+            int ksq = r.pos.plist[p][KING][1];
+            r.n_ft[p] = 0;
+            for (int sd = 0; sd < 2; sd++)
+                for (int pt = PAWN; pt <= KING; pt++)
+                    for (int i = 1; i <= r.pos.plist[sd][pt][0]; i++) {
+                        if (r.n_ft[p] >= NNUE_MAX_FT_PER_PERSP) goto ft_done_refresh;
+                        int fi = halfkav2_feature(p, ksq, r.pos.plist[sd][pt][i], pt, sd);
+                        if (fi >= 0) r.ft_idx[p][r.n_ft[p]++] = fi;
+                    }
+            ft_done_refresh:;
+        }
+
+        // Re-evaluate score from rebuilt accumulator.
+        int pc = r.stack * 4 + 2;
         pc = (pc < 1) ? 1 : (pc > 32) ? 32 : pc;
         r.score_stm = nnue_evaluate_acc_raw(r.acc, r.psqt, (int)r.wtm, pc);
     }
