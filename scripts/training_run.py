@@ -749,6 +749,10 @@ def main():
                 # Advance the best baseline so the next cycle compares against
                 # the newly accepted weights (not the original session start).
                 export_nnue(train_exe, best_nnue_path, "new best (accepted)")
+                # Save a game-count-stamped snapshot for later tournament use.
+                snapshot_name = f"{net_base}-{current_games}g.nnue"
+                snapshot_path = os.path.join(learn_dir, snapshot_name)
+                export_nnue(train_exe, snapshot_path, f"snapshot @ {current_games}g")
                 print(f"  Banked games: {current_games:,}")
             else:
                 if has_checkpoint:
