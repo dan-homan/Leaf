@@ -126,7 +126,9 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
         d[t] = 1.0f / (1.0f + expf(-score_w_cp[t] / TDLEAF_K));
     }
 
-    // 2. Compute TD errors backward
+    // 2. Compute TD errors backward (asymmetric lambda: decisive vs draw)
+    const float lambda = (result == 0.5f) ? TDLEAF_LAMBDA_DRAW : TDLEAF_LAMBDA_DECISIVE;
+
     static float e[MAX_GAME_PLY];
     e[T - 1] = result - d[T - 1];
     for (int t = T - 2; t >= 0; t--) {
@@ -135,7 +137,7 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
         float delta_cp = fabsf(score_w_cp[t + 1] - score_w_cp[t]);
         if (delta_cp > TDLEAF_SCORE_CLIP_CP && delta_cp > 0.0f)
             delta_d *= TDLEAF_SCORE_CLIP_CP / delta_cp;
-        e[t] = delta_d + TDLEAF_LAMBDA * e[t + 1];
+        e[t] = delta_d + lambda * e[t + 1];
     }
 
     // 3. For each ply, run FP32 forward pass + accumulate gradients
@@ -185,6 +187,7 @@ void tdleaf_update_after_game(TDGameRecord &rec, float result, const char *save_
     td_batch_pending++;
 
     if (td_batch_pending >= TDLEAF_BATCH_SIZE) {
+        nnue_clip_gradients(TDLEAF_GRAD_CLIP_NORM);
         nnue_apply_gradients();
         nnue_requantize_fc();
 
@@ -272,6 +275,7 @@ void tdleaf_replay(TDGameRecord &rec, float result, const char *save_path)
         }
         // Apply the summed gradients from all buffered games, then requantize
         // so the next pass's tdleaf_refresh_scores() sees the updated weights.
+        nnue_clip_gradients(TDLEAF_GRAD_CLIP_NORM);
         nnue_apply_gradients();
         nnue_requantize_fc();
     }
@@ -293,6 +297,7 @@ void tdleaf_flush_batch(const char *save_path)
 {
     if (td_batch_pending <= 0) return;
 
+    nnue_clip_gradients(TDLEAF_GRAD_CLIP_NORM);
     nnue_apply_gradients();
     nnue_requantize_fc();
 

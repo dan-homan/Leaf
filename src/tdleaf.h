@@ -25,7 +25,8 @@
 // ---------------------------------------------------------------------------
 // Hyperparameters (can be overridden by setvalue/environment at runtime)
 // ---------------------------------------------------------------------------
-static const float TDLEAF_LAMBDA          = 0.7f;   // eligibility trace decay
+static const float TDLEAF_LAMBDA_DECISIVE  = 0.8f;   // eligibility trace decay for wins/losses
+static const float TDLEAF_LAMBDA_DRAW      = 0.5f;   // eligibility trace decay for draws
 static const float TDLEAF_K               = 400.0f; // sigmoid temperature (centipawns)
 static const int   TDLEAF_MIN_PLIES       = 8;      // skip games shorter than this
 // Approach 1 — TD error clipping.
@@ -38,6 +39,9 @@ static const float TDLEAF_SCORE_CLIP_CP  = 200.0f;
 // Expressed in cp²: 10000 corresponds to a 100 cp std-dev reference.
 // Larger values are more tolerant of ID score instability.
 static const float TDLEAF_ID_VAR_SIGMA2  = 10000.0f;
+// Gradient clipping: if global L2 norm of all gradients exceeds this threshold,
+// scale all gradients by max_norm/norm.  Set to 0 to disable.
+static const float TDLEAF_GRAD_CLIP_NORM = 10.0f;
 
 // ---------------------------------------------------------------------------
 // Adam + per-weight LR decay hyperparameters
@@ -64,10 +68,14 @@ static const float TDLEAF_ADAM_C        = 5000.0f;  // LR half-life in per-weigh
 //   cnt=C  → LR0 × (0.5 + 0.5×LR_FLOOR)  (half-life point)
 //   cnt→∞  → LR0 × LR_FLOOR  (long-term floor)
 // Set to 0.0 to restore the original decay-to-zero behaviour.
-static const float TDLEAF_ADAM_LR_FLOOR = 0.01f;   // long-term fraction of LR0 (1%)
+static const float TDLEAF_ADAM_LR_FLOOR = 0.05f;   // long-term fraction of LR0 (5%)
 static const float TDLEAF_ADAM_BETA1    = 0.9f;    // first-moment decay  (FC + FT bias + PSQT)
 static const float TDLEAF_ADAM_BETA2    = 0.999f;  // second-moment decay (all layers)
 static const float TDLEAF_ADAM_EPS      = 1e-8f;   // numerical floor
+// AdamW decoupled weight decay: w -= λ × lr × w after each Adam step.
+// Applied to FC weights and FT weights only (not biases, not PSQT).
+// Set to 0.0 to disable.
+static const float TDLEAF_WEIGHT_DECAY  = 1e-4f;   // decoupled weight decay coefficient
 static const int   TDLEAF_ADAM_WARMUP   = 50;      // linear LR warmup over first N games (0 = disabled)
 static const int   TDLEAF_BATCH_SIZE    = 4;       // accumulate gradients across N games before Adam step
 

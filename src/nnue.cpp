@@ -1838,6 +1838,86 @@ void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale)
 }
 
 // ---------------------------------------------------------------------------
+// nnue_clip_gradients — compute global L2 norm of all gradient arrays and
+// scale all gradients by max_norm/norm if the norm exceeds max_norm.
+// Returns the pre-clip norm.  If max_norm <= 0, does nothing (returns 0).
+// ---------------------------------------------------------------------------
+float nnue_clip_gradients(float max_norm)
+{
+    if (max_norm <= 0.0f) return 0.0f;
+
+    // Compute global L2 norm across all gradient arrays (use double to avoid overflow).
+    double sum_sq = 0.0;
+    for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
+        for (int i = 0; i < NNUE_L0_SIZE * NNUE_L0_INPUT; i++)
+            sum_sq += (double)grad_l0_w[s][i] * grad_l0_w[s][i];
+        for (int i = 0; i < NNUE_L0_SIZE; i++)
+            sum_sq += (double)grad_l0_b[s][i] * grad_l0_b[s][i];
+        for (int i = 0; i < NNUE_L1_SIZE * NNUE_L1_PADDED; i++)
+            sum_sq += (double)grad_l1_w[s][i] * grad_l1_w[s][i];
+        for (int i = 0; i < NNUE_L1_SIZE; i++)
+            sum_sq += (double)grad_l1_b[s][i] * grad_l1_b[s][i];
+        for (int i = 0; i < NNUE_L2_PADDED; i++)
+            sum_sq += (double)grad_l2_w[s][i] * grad_l2_w[s][i];
+        sum_sq += (double)grad_l2_b[s] * grad_l2_b[s];
+    }
+    // FT weight gradients (only dirty rows).
+    if (ft_dirty && grad_ft_w) {
+        for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
+            if (!ft_dirty[fi]) continue;
+            const float *gw = grad_ft_w + (size_t)fi * NNUE_HALF_DIMS;
+            for (int d = 0; d < NNUE_HALF_DIMS; d++)
+                sum_sq += (double)gw[d] * gw[d];
+        }
+    }
+    // PSQT gradients (only dirty rows).
+    if (ft_dirty && grad_psqt_w) {
+        for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
+            if (!ft_dirty[fi]) continue;
+            const float *gpw = grad_psqt_w + (size_t)fi * NNUE_PSQT_BKTS;
+            for (int b = 0; b < NNUE_PSQT_BKTS; b++)
+                sum_sq += (double)gpw[b] * gpw[b];
+        }
+    }
+    // FT bias gradients.
+    for (int d = 0; d < NNUE_HALF_DIMS; d++)
+        sum_sq += (double)grad_ft_bias[d] * grad_ft_bias[d];
+
+    float norm = (float)sqrt(sum_sq);
+    if (norm <= max_norm) return norm;
+
+    // Scale all gradients by max_norm/norm.
+    float scale = max_norm / norm;
+    fprintf(stderr, "TDLeaf: gradient norm %.3f exceeds %.1f, clipping (scale=%.4f)\n",
+            (double)norm, (double)max_norm, (double)scale);
+    for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
+        for (int i = 0; i < NNUE_L0_SIZE * NNUE_L0_INPUT; i++) grad_l0_w[s][i] *= scale;
+        for (int i = 0; i < NNUE_L0_SIZE; i++)                 grad_l0_b[s][i] *= scale;
+        for (int i = 0; i < NNUE_L1_SIZE * NNUE_L1_PADDED; i++) grad_l1_w[s][i] *= scale;
+        for (int i = 0; i < NNUE_L1_SIZE; i++)                 grad_l1_b[s][i] *= scale;
+        for (int i = 0; i < NNUE_L2_PADDED; i++)               grad_l2_w[s][i] *= scale;
+        grad_l2_b[s] *= scale;
+    }
+    if (ft_dirty && grad_ft_w) {
+        for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
+            if (!ft_dirty[fi]) continue;
+            float *gw = grad_ft_w + (size_t)fi * NNUE_HALF_DIMS;
+            for (int d = 0; d < NNUE_HALF_DIMS; d++) gw[d] *= scale;
+        }
+    }
+    if (ft_dirty && grad_psqt_w) {
+        for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
+            if (!ft_dirty[fi]) continue;
+            float *gpw = grad_psqt_w + (size_t)fi * NNUE_PSQT_BKTS;
+            for (int b = 0; b < NNUE_PSQT_BKTS; b++) gpw[b] *= scale;
+        }
+    }
+    for (int d = 0; d < NNUE_HALF_DIMS; d++) grad_ft_bias[d] *= scale;
+
+    return norm;
+}
+
+// ---------------------------------------------------------------------------
 // nnue_apply_gradients — update FP32 weights from accumulators, increment counts,
 //                        then zero the accumulators.
 // Only weights that received a non-zero gradient this game are updated / counted.
@@ -1886,8 +1966,11 @@ void nnue_apply_gradients()
     for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
         for (int i = 0; i < NNUE_L0_SIZE * NNUE_L0_INPUT; i++) {
             if (grad_l0_w[s][i] != 0.0f) {
+                float lr = lr_decay(TDLEAF_ADAM_LR0, l0_weights_cnt[s][i]);
                 float dw = do_step(grad_l0_w[s][i], m_l0_w[s][i], v_l0_w[s][i], l0_weights_cnt[s][i]);
-                l0_weights_f32[s][i] -= dw;  delta_l0_w[s][i] -= dw;
+                // AdamW: decoupled weight decay (weights only, not biases)
+                float wd = TDLEAF_WEIGHT_DECAY * lr * l0_weights_f32[s][i];
+                l0_weights_f32[s][i] -= dw + wd;  delta_l0_w[s][i] -= dw + wd;
                 // Clamp float shadow to int8 range: prevents zombie weights where the float
                 // shadow drifts beyond ±127 while the requantised inference value is stuck.
                 if (l0_weights_f32[s][i] >  127.0f) l0_weights_f32[s][i] =  127.0f;
@@ -1904,8 +1987,10 @@ void nnue_apply_gradients()
         }
         for (int i = 0; i < NNUE_L1_SIZE * NNUE_L1_PADDED; i++) {
             if (grad_l1_w[s][i] != 0.0f) {
+                float lr = lr_decay(TDLEAF_ADAM_LR0, l1_weights_cnt[s][i]);
                 float dw = do_step(grad_l1_w[s][i], m_l1_w[s][i], v_l1_w[s][i], l1_weights_cnt[s][i]);
-                l1_weights_f32[s][i] -= dw;  delta_l1_w[s][i] -= dw;
+                float wd = TDLEAF_WEIGHT_DECAY * lr * l1_weights_f32[s][i];
+                l1_weights_f32[s][i] -= dw + wd;  delta_l1_w[s][i] -= dw + wd;
                 // Clamp float shadow to int8 range (same reason as FC0).
                 if (l1_weights_f32[s][i] >  127.0f) l1_weights_f32[s][i] =  127.0f;
                 if (l1_weights_f32[s][i] < -127.0f) l1_weights_f32[s][i] = -127.0f;
@@ -1921,8 +2006,10 @@ void nnue_apply_gradients()
         }
         for (int i = 0; i < NNUE_L2_PADDED; i++) {
             if (grad_l2_w[s][i] != 0.0f) {
+                float lr = lr_decay(TDLEAF_ADAM_LR0, l2_weights_cnt[s][i]);
                 float dw = do_step(grad_l2_w[s][i], m_l2_w[s][i], v_l2_w[s][i], l2_weights_cnt[s][i]);
-                l2_weights_f32[s][i] -= dw;  delta_l2_w[s][i] -= dw;
+                float wd = TDLEAF_WEIGHT_DECAY * lr * l2_weights_f32[s][i];
+                l2_weights_f32[s][i] -= dw + wd;  delta_l2_w[s][i] -= dw + wd;
                 l2_weights_cnt[s][i]++;
             }
         }
@@ -1958,7 +2045,9 @@ void nnue_apply_gradients()
                         float sv = sqrtf(vw[d] / bc2) + TDLEAF_ADAM_EPS;
                         float lr = lr_decay(TDLEAF_ADAM_LR0, cnt[d]);
                         float dw = lr * gw[d] / sv;
-                        fw[d] -= dw;  if (fd) fd[d] -= dw;
+                        // AdamW: decoupled weight decay (FT weights, not biases/PSQT)
+                        float wd = TDLEAF_WEIGHT_DECAY * lr * fw[d];
+                        fw[d] -= dw + wd;  if (fd) fd[d] -= dw + wd;
                         cnt[d]++;
                         gw[d] = 0.0f;
                     }
