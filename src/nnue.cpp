@@ -1935,14 +1935,9 @@ void nnue_apply_gradients()
         ? (float)t_adam / (float)TDLEAF_ADAM_WARMUP
         : 1.0f;
 
-    // Per-weight LR with long-term floor and warmup:
-    //   lr(cnt) = warmup × LR0 × (floor + (1 − floor) / (1 + cnt/C))
-    // At cnt=0 → LR0; as cnt→∞ → LR0 × floor (never drops to zero).
-    auto lr_decay = [warmup_factor](float lr0, uint32_t cnt) -> float {
-        return warmup_factor * lr0 * (TDLEAF_ADAM_LR_FLOOR
-                      + (1.0f - TDLEAF_ADAM_LR_FLOOR)
-                        / (1.0f + (float)cnt / TDLEAF_ADAM_C));
-    };
+    // Effective LR: warmup × LR0 (constant after warmup completes).
+    const float fc_lr  = warmup_factor * TDLEAF_ADAM_LR0;
+    const float psqt_lr = warmup_factor * TDLEAF_ADAM_PSQT_LR0;
 
     // Full Adam step for FC layers and FT biases — per-weight bias correction.
     // bc1 (beta1=0.9): skipped at cnt>=20 (0.9^20≈0.12 → bc1≈0.88, close to 1).
@@ -1954,7 +1949,7 @@ void nnue_apply_gradients()
         float m_hat = (eff_t >= 20) ? m
             : m / (1.0f - powf(TDLEAF_ADAM_BETA1, (float)eff_t));
         float v_hat = v / (1.0f - powf(TDLEAF_ADAM_BETA2, (float)eff_t));
-        return lr_decay(TDLEAF_ADAM_LR0, cnt) * m_hat / (sqrtf(v_hat) + TDLEAF_ADAM_EPS);
+        return fc_lr * m_hat / (sqrtf(v_hat) + TDLEAF_ADAM_EPS);
     };
     // PSQT Adam step — same per-weight BC but uses TDLEAF_ADAM_PSQT_LR0.
     auto do_step_psqt = [&](float g, float &m, float &v, uint32_t cnt) -> float {
@@ -1964,16 +1959,15 @@ void nnue_apply_gradients()
         float m_hat = (eff_t >= 20) ? m
             : m / (1.0f - powf(TDLEAF_ADAM_BETA1, (float)eff_t));
         float v_hat = v / (1.0f - powf(TDLEAF_ADAM_BETA2, (float)eff_t));
-        return lr_decay(TDLEAF_ADAM_PSQT_LR0, cnt) * m_hat / (sqrtf(v_hat) + TDLEAF_ADAM_EPS);
+        return psqt_lr * m_hat / (sqrtf(v_hat) + TDLEAF_ADAM_EPS);
     };
 
     for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
         for (int i = 0; i < NNUE_L0_SIZE * NNUE_L0_INPUT; i++) {
             if (grad_l0_w[s][i] != 0.0f) {
-                float lr = lr_decay(TDLEAF_ADAM_LR0, l0_weights_cnt[s][i]);
                 float dw = do_step(grad_l0_w[s][i], m_l0_w[s][i], v_l0_w[s][i], l0_weights_cnt[s][i]);
                 // AdamW: decoupled weight decay (weights only, not biases)
-                float wd = TDLEAF_WEIGHT_DECAY * lr * l0_weights_f32[s][i];
+                float wd = TDLEAF_WEIGHT_DECAY * fc_lr * l0_weights_f32[s][i];
                 l0_weights_f32[s][i] -= dw + wd;  delta_l0_w[s][i] -= dw + wd;
                 // Clamp float shadow to int8 range: prevents zombie weights where the float
                 // shadow drifts beyond ±127 while the requantised inference value is stuck.
@@ -1991,9 +1985,8 @@ void nnue_apply_gradients()
         }
         for (int i = 0; i < NNUE_L1_SIZE * NNUE_L1_PADDED; i++) {
             if (grad_l1_w[s][i] != 0.0f) {
-                float lr = lr_decay(TDLEAF_ADAM_LR0, l1_weights_cnt[s][i]);
                 float dw = do_step(grad_l1_w[s][i], m_l1_w[s][i], v_l1_w[s][i], l1_weights_cnt[s][i]);
-                float wd = TDLEAF_WEIGHT_DECAY * lr * l1_weights_f32[s][i];
+                float wd = TDLEAF_WEIGHT_DECAY * fc_lr * l1_weights_f32[s][i];
                 l1_weights_f32[s][i] -= dw + wd;  delta_l1_w[s][i] -= dw + wd;
                 // Clamp float shadow to int8 range (same reason as FC0).
                 if (l1_weights_f32[s][i] >  127.0f) l1_weights_f32[s][i] =  127.0f;
@@ -2010,9 +2003,8 @@ void nnue_apply_gradients()
         }
         for (int i = 0; i < NNUE_L2_PADDED; i++) {
             if (grad_l2_w[s][i] != 0.0f) {
-                float lr = lr_decay(TDLEAF_ADAM_LR0, l2_weights_cnt[s][i]);
                 float dw = do_step(grad_l2_w[s][i], m_l2_w[s][i], v_l2_w[s][i], l2_weights_cnt[s][i]);
-                float wd = TDLEAF_WEIGHT_DECAY * lr * l2_weights_f32[s][i];
+                float wd = TDLEAF_WEIGHT_DECAY * fc_lr * l2_weights_f32[s][i];
                 l2_weights_f32[s][i] -= dw + wd;  delta_l2_w[s][i] -= dw + wd;
                 l2_weights_cnt[s][i]++;
             }
@@ -2035,7 +2027,7 @@ void nnue_apply_gradients()
         for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
             if (!ft_dirty[fi]) continue;
             // FT weights — per-weight RMSProp (no m; FT rows are too sparse for
-            // first-moment to carry useful directional signal).  Per-weight LR decay via cnt.
+            // first-moment to carry useful directional signal).
             float    *fw  = ft_weights_f32 + (size_t)fi * NNUE_HALF_DIMS;
             float    *gw  = grad_ft_w      + (size_t)fi * NNUE_HALF_DIMS;
             uint32_t *cnt = ft_weights_cnt + (size_t)fi * NNUE_HALF_DIMS;
@@ -2047,10 +2039,9 @@ void nnue_apply_gradients()
                         vw[d] = TDLEAF_ADAM_BETA2 * vw[d]
                                + (1.0f - TDLEAF_ADAM_BETA2) * gw[d] * gw[d];
                         float sv = sqrtf(vw[d] / ft_bc2) + TDLEAF_ADAM_EPS;
-                        float lr = lr_decay(TDLEAF_ADAM_LR0, cnt[d]);
-                        float dw = lr * gw[d] / sv;
+                        float dw = fc_lr * gw[d] / sv;
                         // AdamW: decoupled weight decay (FT weights, not biases/PSQT)
-                        float wd = TDLEAF_WEIGHT_DECAY * lr * fw[d];
+                        float wd = TDLEAF_WEIGHT_DECAY * fc_lr * fw[d];
                         fw[d] -= dw + wd;  if (fd) fd[d] -= dw + wd;
                         cnt[d]++;
                         gw[d] = 0.0f;
@@ -2154,47 +2145,6 @@ void nnue_requantize_fc()
     // Clear score hash — cached evaluations are now stale.
     if (score_table && SCORE_SIZE > 0)
         memset(score_table, 0, SCORE_SIZE * sizeof(score_rec));
-}
-
-// ---------------------------------------------------------------------------
-// nnue_set_cnt — set all per-weight update counts to a fixed value
-//
-// Used by --set-cnt N to prime the Adam LR decay schedule before training
-// on a pre-trained network.  A count of 0 gives full LR0 from game 1.
-// A count of C (=500) halves the initial learning rate (~50% LR0).
-// A count of ~2000 gives ~20% LR0 (appropriate for a well-trained network).
-// After calling this, nnue_save_fc_weights() writes the primed .tdleaf.bin.
-// ---------------------------------------------------------------------------
-void nnue_set_cnt(uint32_t val)
-{
-    for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
-        for (int i = 0; i < NNUE_L0_SIZE * NNUE_L0_INPUT; i++) l0_weights_cnt[s][i] = val;
-        for (int i = 0; i < NNUE_L0_SIZE; i++)                 l0_biases_cnt[s][i]  = val;
-        for (int i = 0; i < NNUE_L1_SIZE * NNUE_L1_PADDED; i++) l1_weights_cnt[s][i] = val;
-        for (int i = 0; i < NNUE_L1_SIZE; i++)                  l1_biases_cnt[s][i]  = val;
-        for (int i = 0; i < NNUE_L2_PADDED; i++)                l2_weights_cnt[s][i] = val;
-        l2_bias_cnt[s] = val;
-    }
-    for (int d = 0; d < NNUE_HALF_DIMS; d++) ft_bias_cnt[d] = val;
-    if (ft_weights_cnt) {
-        size_t ft_sz = (size_t)NNUE_FT_INPUTS * NNUE_HALF_DIMS;
-        for (size_t i = 0; i < ft_sz; i++) ft_weights_cnt[i] = val;
-    }
-    if (psqt_weights_cnt) {
-        size_t psqt_sz = (size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS;
-        for (size_t i = 0; i < psqt_sz; i++) psqt_weights_cnt[i] = val;
-    }
-    printf("TDLeaf: all %u parameter update counts set to %u  "
-           "(Adam LR0 × %.3f)\n",
-           (unsigned)(NNUE_LAYER_STACKS * (NNUE_L0_SIZE * NNUE_L0_INPUT + NNUE_L0_SIZE +
-                                            NNUE_L1_SIZE * NNUE_L1_PADDED + NNUE_L1_SIZE +
-                                            NNUE_L2_PADDED + 1) +
-                      NNUE_HALF_DIMS +
-                      (ft_weights_cnt  ? (size_t)NNUE_FT_INPUTS * NNUE_HALF_DIMS : 0) +
-                      (psqt_weights_cnt ? (size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS : 0)),
-           val,
-           TDLEAF_ADAM_LR_FLOOR + (1.0f - TDLEAF_ADAM_LR_FLOOR)
-               / (1.0f + (float)val / TDLEAF_ADAM_C));
 }
 
 // ---------------------------------------------------------------------------

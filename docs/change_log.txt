@@ -1,5 +1,12 @@
 Changes since 2017_12_24
 
+2026_03_22 -- Remove per-weight LR decay (src/tdleaf.h, src/nnue.cpp, src/nnue.h,
+               src/main.cpp, scripts/training_run.py).
+               AdamW weight decay now handles regularization; LR0 tuned directly
+               (0.13 FC/FT, 1.6 PSQT) instead of starting high and decaying.
+               Removed: TDLEAF_ADAM_C, TDLEAF_ADAM_LR_FLOOR, lr_decay lambda,
+               nnue_set_cnt, --set-cnt CLI flag, _prompt_init_cnt in training_run.py.
+
 2026_03_21 -- training_run.py: save game-count-stamped .nnue snapshots on each
                accepted validation cycle (e.g. nn-training1a-5000g.nnue) for
                later tournament rating progression analysis.

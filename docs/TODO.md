@@ -8,20 +8,17 @@ Planned investigations, improvements, and open questions.
 
 ### Adam hyperparameter tuning
 
-The Adam + per-weight LR decay optimizer (`TDLEAF_ADAM_LR0=0.2`, `TDLEAF_ADAM_PSQT_LR0=2.0`,
-`TDLEAF_ADAM_C=5000`) uses initial guesses that have not been systematically tuned.  A grid
-search varying each independently across 500–1000-game runs would establish better defaults.
+The Adam optimizer (`TDLEAF_ADAM_LR0=0.13`, `TDLEAF_ADAM_PSQT_LR0=1.6`) uses values
+tuned for 5000-game training runs.  Longer runs may benefit from different LR values.
 
 Key questions:
 
-- **FC LR0 (0.2):** After 5,000 games the FC0/FC1 float shadows spread to std≈30/50, filling
+- **FC LR0 (0.13):** After 5,000 games the FC0/FC1 float shadows spread to std≈30/50, filling
   the int8 range.  Float-shadow clamping prevents zombie weights but further training will be
   limited at the ±127 boundary.  Monitor whether the network continues to improve or plateaus
   as the distribution saturates.
-- **PSQT LR0 (2.0):** Tuned separately from FC LR0 since Adam normalises gradient magnitude
+- **PSQT LR0 (1.6):** Tuned separately from FC LR0 since Adam normalises gradient magnitude
   and PSQT operates at int32 scale.  Tune empirically.
-- **C (5000):** LR half-life in per-weight updates.  Larger C extends the fast-learning phase;
-  smaller C converges more aggressively.
 
 ### Horizon noise mitigation — ablation testing plan
 
@@ -115,6 +112,12 @@ FC and PSQT Adam steps use per-weight bias correction (`eff_t = cnt + 1`) instea
 global `t_adam`.  bc1 skipped at cnt≥20 (negligible); bc2 always applied.  FT RMSProp
 retains global bc2 (sparse features need growing global correction).
 
+### ~~Per-weight LR decay removed~~ ✓ Removed (2026-03-22)
+Per-weight LR decay (`TDLEAF_ADAM_C`, `TDLEAF_ADAM_LR_FLOOR`) removed.  AdamW weight
+decay now handles regularization; LR0 tuned directly to the right value (0.13 FC, 1.6
+PSQT) instead of starting high and decaying.  `--set-cnt` and `_prompt_init_cnt` also
+removed as they existed only to prime the LR decay schedule.
+
 ### ~~AdamW decoupled weight decay~~ ✓ Implemented (2026-03-21)
 `TDLEAF_WEIGHT_DECAY=1e-4` applied to FC weights and FT weights after each Adam step.
 Skipped for biases (no benefit) and PSQT (would fight classical prior).
@@ -145,9 +148,10 @@ per-row average.
 Linear warmup over first `TDLEAF_ADAM_WARMUP=50` Adam steps.  Prevents early-training
 instability from cold-start v estimates.  Set `TDLEAF_ADAM_WARMUP=0` to disable.
 
-### ~~Adam + per-weight LR decay~~ ✓ Implemented (2026-03-15)
-Adam optimizer with per-weight LR decay `lr(cnt) = LR0×(floor+(1−floor)/(1+cnt/C))` is live.
-FC/FT: `TDLEAF_ADAM_LR0=0.2`; PSQT: `TDLEAF_ADAM_PSQT_LR0=2.0`; C=5000; floor=0.05.
+### ~~Adam optimizer~~ ✓ Implemented (2026-03-15), LR decay removed (2026-03-22)
+Adam optimizer with fixed LR (constant after warmup).  Per-weight LR decay was removed
+in favour of direct LR tuning + AdamW weight decay.
+FC/FT: `TDLEAF_ADAM_LR0=0.13`; PSQT: `TDLEAF_ADAM_PSQT_LR0=1.6`.
 FC0/FC1 float shadows clamped to ±127 to prevent zombie weights.  See `docs/TDLEAF.md`.
 
 ### ~~Epoch-based replay~~ ✓ Implemented (2026-03-11)

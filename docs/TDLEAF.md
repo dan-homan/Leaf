@@ -173,9 +173,9 @@ needs a different LR0 than FC at int8 scale).  See [Adam Optimizer](#adam-optimi
 
 ---
 
-## Adam Optimizer with Per-Weight LR Decay
+## Adam Optimizer
 
-`nnue_apply_gradients()` uses Adam with per-weight learning-rate decay.
+`nnue_apply_gradients()` uses AdamW with a fixed learning rate (constant after warmup).
 
 ### Algorithm
 
@@ -188,9 +188,8 @@ v   ← β₂ v + (1−β₂) g²                   (second moment)
 eff_t = cnt + 1                            (per-weight update count)
 m̂   = (eff_t ≥ 20) ? m : m / (1 − β₁^eff_t)   (bc1 skipped when negligible)
 v̂   = v / (1 − β₂^eff_t)                 (bc2 always applied)
-lr  = LR0 × (floor + (1−floor) / (1 + cnt/C))   (per-weight LR decay with floor)
-Δw  = −lr × m̂ / (√v̂ + ε)
-w   ← w + Δw
+Δw  = −LR0 × m̂ / (√v̂ + ε)
+w   ← w + Δw − λ × LR0 × w              (AdamW weight decay, weights only)
 cnt ← cnt + 1
 ```
 
@@ -201,23 +200,15 @@ cnt=20 — skipping would give ~7× oversized steps.  FT RMSProp retains global 
 (from `t_adam`) because sparse features (~8 updates/5000g) need the growing global
 correction.
 
-**Per-weight LR decay with floor:** `lr(cnt) = LR0 × (floor + (1 − floor) / (1 + cnt/C))`.
-At `cnt=0` the step size is `LR0`; at `cnt=C` it is halfway between `LR0` and the floor;
-as `cnt→∞` it settles to `LR0 × floor` rather than zero.  The floor (`TDLEAF_ADAM_LR_FLOOR`,
-default 0.05) ensures weights remain trainable indefinitely — even heavily-updated parameters
-still receive 5% of the initial step size per game.  Weights that receive gradient every game
-(FC biases, dense feature rows) converge fastest; rarely-seen PSQT buckets retain a higher
-effective LR for longer.
-
 ### Per-Layer Configuration
 
 | Layer | Update Rule | LR0 | Notes |
 |-------|-------------|-----|-------|
-| FC0/FC1/FC2 weights | Full Adam | `TDLEAF_ADAM_LR0 = 0.2` | Float shadow clamped to ±127 after each update |
-| FC0/FC1/FC2 biases  | Full Adam | `TDLEAF_ADAM_LR0 = 0.2` | |
-| FT weights | RMSProp (per-weight v, no m) | `TDLEAF_ADAM_LR0 = 0.2` | Per-weight v (~92 MB, OS lazy-paged; physical use ∝ active features) |
-| FT biases  | Full Adam | `TDLEAF_ADAM_LR0 = 0.2` | |
-| PSQT       | Full Adam | `TDLEAF_ADAM_PSQT_LR0 = 2.0` | Separate LR0 required — see below |
+| FC0/FC1/FC2 weights | Full Adam | `TDLEAF_ADAM_LR0 = 0.13` | Float shadow clamped to ±127 after each update |
+| FC0/FC1/FC2 biases  | Full Adam | `TDLEAF_ADAM_LR0 = 0.13` | |
+| FT weights | RMSProp (per-weight v, no m) | `TDLEAF_ADAM_LR0 = 0.13` | Per-weight v (~92 MB, OS lazy-paged; physical use ∝ active features) |
+| FT biases  | Full Adam | `TDLEAF_ADAM_LR0 = 0.13` | |
+| PSQT       | Full Adam | `TDLEAF_ADAM_PSQT_LR0 = 1.6` | Separate LR0 required — see below |
 
 ### Why a Separate PSQT LR0?
 
@@ -246,29 +237,23 @@ Moments are **not** persisted to `.tdleaf.bin` because:
 - Persisting them would break the delta-merge mechanism
   used for concurrent multi-instance training.
 - Session-local moments restart cleanly with full bias correction each session.
-- The per-weight `cnt` arrays (which are persisted) carry the durable learning history
-  through the LR decay schedule.
+- The per-weight `cnt` arrays (which are persisted) track update history for
+  per-weight bias correction and monitoring.
 
 ### Hyperparameters (`src/tdleaf.h`)
 
 | Constant | Value | Notes |
 |----------|-------|-------|
-| `TDLEAF_ADAM_LR0` | 0.2 | Initial step size for FC/FT layers (float weight units) |
-| `TDLEAF_ADAM_PSQT_LR0` | 2.0 | Initial step size for PSQT (int32 scale; ~1000× FC) |
-| `TDLEAF_ADAM_C` | 5000 | LR half-life in per-weight update counts |
-| `TDLEAF_ADAM_LR_FLOOR` | 0.05 | Long-term LR floor as a fraction of LR0; lr settles to `LR0 × floor` as cnt→∞ |
+| `TDLEAF_ADAM_LR0` | 0.13 | Step size for FC/FT layers (float weight units) |
+| `TDLEAF_ADAM_PSQT_LR0` | 1.6 | Step size for PSQT (int32 scale; ~1000× FC) |
 | `TDLEAF_ADAM_BETA1` | 0.9 | First-moment decay (FC weights/biases, FT biases, PSQT) |
 | `TDLEAF_ADAM_BETA2` | 0.999 | Second-moment decay (all layers) |
 | `TDLEAF_ADAM_EPS` | 1e-8 | Numerical floor in denominator |
 | `TDLEAF_ADAM_WARMUP` | 50 | Linear LR warmup: ramp from 0 to full LR over first N Adam steps (0 = disabled) |
 | `TDLEAF_BATCH_SIZE` | 4 | Mini-batch: accumulate gradients across N games before each Adam step |
-
 | `TDLEAF_WEIGHT_DECAY` | 1e-4 | AdamW decoupled weight decay coefficient (FC + FT weights only) |
 | `TDLEAF_GRAD_CLIP_NORM` | 10.0 | Global gradient L2 norm clip threshold; 0 = disabled |
 
-Set `TDLEAF_ADAM_LR_FLOOR = 0.0` to restore the original decay-to-zero behaviour.
-Set `TDLEAF_ADAM_LR0 = 0.0` to disable Adam entirely and fall back to plain gradient
-descent (the original single-step `w -= g` path; all Adam arrays remain zeroed and unused).
 Set `TDLEAF_BATCH_SIZE = 1` to restore per-game Adam steps.
 Set `TDLEAF_ADAM_WARMUP = 0` to disable warmup.
 Set `TDLEAF_WEIGHT_DECAY = 0.0` to disable weight decay.

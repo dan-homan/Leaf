@@ -80,30 +80,6 @@ def write_game_count(sidecar_path, count):
         f.write(f"{count}\n")
 
 
-def _prompt_init_cnt(is_fresh_random):
-    """Ask the user for an initial update count to prime Adam LR decay.
-
-    Returns an int (0 = no priming, i.e. full LR0 from game 1).
-
-    The Adam LR decay formula is:  lr(cnt) = LR0 / (1 + cnt / C)  where C=5000.
-    Suggested values:
-      0    — untrained / fresh random network  → full LR0 from game 1
-      5000  — lightly pre-trained               → start at 50% of LR0  (lr × 0.50)
-      10000 — moderately pre-trained            → start at 33% of LR0  (lr × 0.33)
-      20000 — well-trained (e.g. SF15.1 fine-tuning) → start at 20% of LR0  (lr × 0.20)
-    """
-    default = 0 if is_fresh_random else 10000
-    print()
-    print("Initial update count (cnt) for Adam LR decay:")
-    print("  lr(cnt) = LR0 × (0.01 + 0.99 / (1 + cnt / 5000))")
-    print("    0     — untrained / fresh random network  (start at 100% of LR0, floor  1%)")
-    print("    5000  — lightly pre-trained               (start at  51% of LR0, floor  1%)")
-    print("    10000 — moderately pre-trained            (start at  34% of LR0, floor  1%)")
-    print("    20000 — well-trained network              (start at  21% of LR0, floor  1%)")
-    val = int(ask("  Initial cnt", default))
-    return val
-
-
 def wait_until_stable(path, stable_secs=3, timeout=120):
     """Wait until all training engines have finished with the .tdleaf.bin file.
 
@@ -455,7 +431,6 @@ def main():
     # Step 3 — .tdleaf.bin continuity check
     # -----------------------------------------------------------------------
     prior_games = read_game_count(sidecar_path)
-    init_cnt    = None   # None = no --set-cnt step needed
     print()
     if os.path.isfile(tdleaf_bin):
         mtime = datetime.datetime.fromtimestamp(os.path.getmtime(tdleaf_bin))
@@ -471,10 +446,8 @@ def main():
             os.rename(tdleaf_bin, bak)
             prior_games = 0
             write_game_count(sidecar_path, 0)
-            init_cnt = _prompt_init_cnt(do_random_init)
     else:
         print(f"No existing .tdleaf.bin for {net_filename} — starting fresh.")
-        init_cnt = _prompt_init_cnt(do_random_init)
 
     # -----------------------------------------------------------------------
     # Step 4 — Match parameters
@@ -550,9 +523,6 @@ def main():
             print(f"  Depth learner:    {d1_str}   Depth opponent: {d2_str}")
     if fischer:
         print( "  Fischer Random:   yes")
-    if init_cnt is not None and init_cnt > 0:
-        lr_frac = 0.01 + 0.99 / (1.0 + init_cnt / 5000.0)
-        print(f"  Initial cnt:      {init_cnt}  (Adam LR0 × {lr_frac:.2f})")
     print(f"  PGN directory:    {pgn_dir}/")
     print("=" * 62)
 
@@ -561,23 +531,7 @@ def main():
         sys.exit(0)
 
     # -----------------------------------------------------------------------
-    # Step 5a — Prime .tdleaf.bin with initial cnt (if requested)
-    # -----------------------------------------------------------------------
-    if init_cnt is not None and init_cnt > 0:
-        print()
-        lr_frac = 0.01 + 0.99 / (1.0 + init_cnt / 5000.0)
-        print(f"Priming .tdleaf.bin with cnt={init_cnt}  "
-              f"(Adam LR0 × {lr_frac:.2f} from game 1) ...")
-        result = subprocess.run(
-            [train_exe, "--set-cnt", str(init_cnt)],
-            cwd=learn_dir
-        )
-        if result.returncode != 0:
-            print("--set-cnt failed.", file=sys.stderr)
-            sys.exit(result.returncode)
-
-    # -----------------------------------------------------------------------
-    # Step 5b — Training loop (single pass or multi-cycle train-validate)
+    # Step 5 — Training loop (single pass or multi-cycle train-validate)
     # -----------------------------------------------------------------------
     match_py      = os.path.join(run_dir, "match.py")
     current_games = prior_games
