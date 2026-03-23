@@ -1935,8 +1935,9 @@ void nnue_apply_gradients()
         ? (float)t_adam / (float)TDLEAF_ADAM_WARMUP
         : 1.0f;
 
-    // Effective LR: warmup × LR0 (constant after warmup completes).
-    const float fc_lr  = warmup_factor * TDLEAF_ADAM_LR0;
+    // Effective LRs: warmup × LR0 (constant after warmup completes).
+    const float fc_lr   = warmup_factor * TDLEAF_ADAM_LR0;
+    const float ft_lr   = warmup_factor * TDLEAF_ADAM_FT_LR0;
     const float psqt_lr = warmup_factor * TDLEAF_ADAM_PSQT_LR0;
 
     // Full Adam step for FC layers and FT biases — per-weight bias correction.
@@ -2039,9 +2040,9 @@ void nnue_apply_gradients()
                         vw[d] = TDLEAF_ADAM_BETA2 * vw[d]
                                + (1.0f - TDLEAF_ADAM_BETA2) * gw[d] * gw[d];
                         float sv = sqrtf(vw[d] / ft_bc2) + TDLEAF_ADAM_EPS;
-                        float dw = fc_lr * gw[d] / sv;
+                        float dw = ft_lr * gw[d] / sv;
                         // AdamW: decoupled weight decay (FT weights, not biases/PSQT)
-                        float wd = TDLEAF_WEIGHT_DECAY * fc_lr * fw[d];
+                        float wd = TDLEAF_WEIGHT_DECAY * ft_lr * fw[d];
                         fw[d] -= dw + wd;  if (fd) fd[d] -= dw + wd;
                         cnt[d]++;
                         gw[d] = 0.0f;

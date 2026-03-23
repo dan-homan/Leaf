@@ -51,7 +51,8 @@ static const float TDLEAF_GRAD_CLIP_NORM = 10.0f;
 // LR warmup: ramps from 0 to full LR over first WARMUP Adam steps.
 // Mini-batch: gradients accumulated across BATCH_SIZE games before each Adam step.
 // ---------------------------------------------------------------------------
-static const float TDLEAF_ADAM_LR0      = 0.13f;   // step size for FC/FT layers (float weight units)
+static const float TDLEAF_ADAM_LR0      = 0.13f;   // step size for FC layers + FT biases (float weight units)
+static const float TDLEAF_ADAM_FT_LR0   = 0.2f;    // step size for FT weights (sparse; need higher LR than dense FC)
 static const float TDLEAF_ADAM_PSQT_LR0 = 1.6f;    // step size for PSQT (int32 scale ~36k std; needs larger LR)
 static const float TDLEAF_ADAM_BETA1    = 0.9f;    // first-moment decay  (FC + FT bias + PSQT)
 static const float TDLEAF_ADAM_BETA2    = 0.999f;  // second-moment decay (all layers)
