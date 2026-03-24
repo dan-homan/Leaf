@@ -1291,15 +1291,18 @@ static uint32_t  t_adam    = 0;
 // endpoint of a fully-converged training run, not a useful prior for TDLeaf.
 // Zero mean (the core He/Kaiming principle) is the correct starting point.
 //
-// === FT weights: std calibrated to accumulator activation range ===
+// === FT weights: std calibrated for healthy CReLU/SqrCReLU activation ===
 // ~30 features active per position.  Accumulator = sum of ~30 rows, so
-// acc std ≈ √30 × σ.  With σ=5, acc std ≈ 27 — comfortably in the
-// SqrCReLU active zone [0, 127] with good gradient signal.
+// acc std ≈ √30 × σ.  CReLU divides by 64 (>>6 shift), so the accumulator
+// needs values in [0, ~8128] for non-zero CReLU output, and |acc| > 724
+// for non-zero SqrCReLU output.  With σ=44, acc std ≈ 241, giving ~40%
+// non-zero CReLU activations with mean ~3 — rich input for FC0 learning.
+// Too-small σ (e.g. 5) kills >99% of activations, causing mode collapse.
 //
 // === FC weights: small to keep initial positional output ≈ 0 ===
 // FC0 (fan-in 2048, SqrCReLU inputs): σ=1 keeps FC0 output near zero.
-//   SqrCReLU squares its input (range [0, 16129]), amplifying variance;
-//   small FC0 weights are essential to prevent output explosion.
+//   With ~400 active CReLU inputs of mean ~3, FC0 raw ≈ N(0, √400×3×1)
+//   ≈ N(0, 60) — well within int8 range, low saturation risk.
 // FC1 (fan-in 30): σ=3, moderate — smaller fan-in allows slightly larger.
 // FC2 (fan-in 32, output): σ=2, keeps initial positional ≈ 0 cp.
 //
@@ -1317,7 +1320,7 @@ static uint32_t  t_adam    = 0;
 // are initialised together; nnue_apply_gradients keeps them in sync for
 // dirty feature rows.
 // ---------------------------------------------------------------------------
-#define INIT_FT_W_STD     5.0f      // acc std ≈ √30 × 5 ≈ 27; in SqrCReLU sweet spot
+#define INIT_FT_W_STD     44.0f     // acc std ≈ √30 × 44 ≈ 241; ~40% CReLU active
 #define INIT_FC0_W_STD    1.0f      // small — SqrCReLU amplifies variance; prevent explosion
 #define INIT_FC1_W_STD    3.0f      // moderate — fan-in 30, low saturation risk
 #define INIT_FC2_W_STD    2.0f      // small — keep initial positional output ≈ 0 cp

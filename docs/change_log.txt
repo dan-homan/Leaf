@@ -1,5 +1,13 @@
 Changes since 2017_12_24
 
+2026_03_24 -- Fix FT weight init std: 5 → 44 (src/nnue.cpp, docs/).
+               FT std=5 produced acc std≈27, killing >99% of CReLU activations
+               (CReLU divides by 64, needs acc values in [0,8128]).  This caused
+               FT bias drift to -57, mode collapse into ~16 surviving dims, and
+               FC0 passthrough blowup (eval diverged to -1779 cp at starting pos).
+               FT std=44 gives acc std≈241, ~40% CReLU active — matches the
+               proven SF15.1 operating range.  FC stds (1,3,2) unchanged.
+
 2026_03_23 -- Redesign --init-nnue weight initialization (src/nnue.cpp, docs/TDLEAF.md).
                Philosophy: start quiet, let TDLeaf build structure from signal.
                FT weights: N(0,5) — acc std ≈ √30×5 ≈ 27, SqrCReLU sweet spot.
