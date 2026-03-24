@@ -184,10 +184,6 @@ bool nnue_save_fc_weights(const char *path);
 // Load FC-only weights from companion file, overriding what nnue_load() loaded.
 bool nnue_load_fc_weights(const char *path);
 
-// Set all per-weight update counts to a fixed value.  Used by --set-cnt to prime
-// the Adam LR decay schedule before starting training on a pre-trained network.
-void nnue_set_cnt(uint32_t val);
-
 // Evaluate from raw accumulator arrays (used by TDLeaf replay to refresh
 // score_stm from stored acc[][] against current weights, without constructing
 // a full NNUEAccumulator object).

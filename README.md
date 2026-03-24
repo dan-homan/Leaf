@@ -43,18 +43,18 @@ Because this is the exact network shipped with Stockfish 15.1, Leaf's forward pa
 A network trained from scratch by Leaf itself (via TDLeaf(λ) self-play) will initially be weaker than `nn-ad9b42354671.nnue`, which represents years of Stockfish training data.  Match results against the Stockfish net provide the clearest measure of training progress: the goal is to close the gap, then surpass it with a network tuned to Leaf's own search characteristics.  Current result with the SF15.1 net: **92W–8D–0L (96.0%)** vs the classical Leaf eval at 10+0.1s/move.
 
 **3. Weight initialisation for fresh training.**
-Leaf can generate a fresh `.nnue` with `--init-nnue --write-nnue <file>`.  FC and FT weights use zero-mean Gaussians (He/Kaiming principle); FC0's std is reduced to limit saturation at the 1024-input fan-in; all biases are zero; PSQT is seeded from the classical piece-square tables, differentiated by game stage across the 8 buckets.
+Leaf can generate a fresh `.nnue` with `--init-nnue --write-nnue <file>`.  Design philosophy: start quiet — initial positional output near zero so classical material dominates early play; TDLeaf builds structure from signal.
 
 | Layer | Distribution | Notes |
 |-------|-------------|-------|
-| FT weights (int16) | N(0, 44.41) | Zero mean; std calibrated to ~30-feature sum |
-| FC0 weights (int8) | N(0, 3.0) | He-adjusted: ~3% sat vs ~24% at old σ=8.4 |
-| FC1 weights (int8) | N(0, 18.30) | Zero mean; 30 inputs, low saturation risk |
-| FC2 weights (int8) | N(0, 30.0) | Zero mean; output layer |
+| FT weights (int16) | N(0, 5) | acc std ≈ √30 × 5 ≈ 27; SqrCReLU sweet spot |
+| FC0 weights (int8) | N(0, 1) | Small — SqrCReLU amplifies variance |
+| FC1 weights (int8) | N(0, 3) | Moderate — fan-in 30, low saturation risk |
+| FC2 weights (int8) | N(0, 2) | Small — keeps initial positional ≈ 0 cp |
 | FC/FT biases | 0 (zero) | |
-| PSQT | Classical material + piece-square, per game stage | Bucket 0=opening, 6–7=endgame |
+| PSQT | Pure material (no PSQ bonuses) | Same value across all 8 buckets |
 
-All int8 weights use **rejection sampling** (truncated Gaussian): samples outside ±127 are discarded and redrawn rather than clipped, avoiding artificial density spikes at the int8 boundaries.  Biases are zero-initialised because random N(μ,σ) from an unrelated distribution adds noise with no useful prior.  See [`docs/NNUE.md`](docs/NNUE.md) for the He-adjustment derivation and the PSQT bucket-to-stage mapping.
+All int8 weights use **rejection sampling** (truncated Gaussian): samples outside ±127 are discarded and redrawn rather than clipped, avoiding artificial density spikes at the int8 boundaries.  Biases are zero-initialised; PSQT uses pure classical material values (P=100, N=377, B=399, R=596, Q=1197 cp) with no piece-square bonuses — TDLeaf learns positional adjustments.  See [`docs/NNUE.md`](docs/NNUE.md) for details.
 
 The network file itself is not modified by Leaf.  All trained weights are stored in a companion **`.tdleaf.bin`** file and loaded on top of (or instead of) the base network at startup.
 

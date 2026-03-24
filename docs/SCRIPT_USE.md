@@ -96,8 +96,7 @@ python3 training_run.py
    - `[3]` External opponent — `_a` learns; user supplies path to any executable
 3. **Train-validate loop** — optional; see below
 4. **Build** — compiles the required binaries via `src/comp.pl` and moves them to `learn/`
-5. **Continuity** — continue from existing `.tdleaf.bin` or start fresh (with optional
-   Adam `cnt` priming for pre-trained nets)
+5. **Continuity** — continue from existing `.tdleaf.bin` or start fresh
 6. **Match parameters** — TC, concurrency, wait, Fischer Random, per-engine depth limits;
    per-engine TCs (`--tc1` / `--tc2`) when the opponent runs at a different speed
 
