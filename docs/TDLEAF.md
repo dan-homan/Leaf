@@ -419,7 +419,7 @@ This calls `nnue_alloc_arrays()` + `nnue_init_fp32_weights()` + `nnue_init_zero_
 | Component | Distribution | Notes |
 |-----------|-------------|-------|
 | FT weights (int16) | N(0, 44) | Zero mean; acc std ≈ √30 × 44 ≈ 241; ~40% CReLU active |
-| FC0 weights (int8) | N(0, 1) | Small — SqrCReLU amplifies variance; prevents output explosion |
+| FC0 weights (int8) | N(0, 4) | FC0 CReLU ≈ 3.8; keeps FC1→FC2 chain active |
 | FC1 weights (int8) | N(0, 3) | Moderate — fan-in 30, low saturation risk |
 | FC2 weights (int8) | N(0, 2) | Small — keeps initial positional output ≈ 0 cp |
 | All biases | **0** (zero) | FT and FC biases zero-initialised |
@@ -440,8 +440,10 @@ output.  Acc std ≈ 241 gives ~40% non-zero CReLU activations with mean ~3 — 
 input for FC0 learning from game 1.  Too-small σ (e.g. 5) kills >99% of activations,
 causing FT bias drift and mode collapse.
 
-**FC0 weights (σ=1):** with ~400 active CReLU inputs of mean ~3, small FC0 weights keep
-the initial positional output near zero while preserving gradient flow.
+**FC0 weights (σ=4):** each CReLU layer divides by 64 (>>6 shift), so FC0 raw output must
+be large enough that FC0_CReLU = FC0_raw/64 gives useful FC1 inputs.  With σ=4 and ~400
+active CReLU inputs of mean ~3: FC0 raw std ≈ 240, CReLU ≈ 3.8 — healthy FC1 input.
+The passthrough (fwdOut) std ≈ 283 internal units ≈ 5 cp — still quiet.
 
 **PSQT initialisation:** all 8 buckets receive identical pure material values from score.h
 (P=5776, N=21776, B=23046, R=34425, Q=69144 internal units; scale = cp × 5776/100).

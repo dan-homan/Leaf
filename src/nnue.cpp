@@ -1299,12 +1299,15 @@ static uint32_t  t_adam    = 0;
 // non-zero CReLU activations with mean ~3 — rich input for FC0 learning.
 // Too-small σ (e.g. 5) kills >99% of activations, causing mode collapse.
 //
-// === FC weights: small to keep initial positional output ≈ 0 ===
-// FC0 (fan-in 2048, SqrCReLU inputs): σ=1 keeps FC0 output near zero.
-//   With ~400 active CReLU inputs of mean ~3, FC0 raw ≈ N(0, √400×3×1)
-//   ≈ N(0, 60) — well within int8 range, low saturation risk.
-// FC1 (fan-in 30): σ=3, moderate — smaller fan-in allows slightly larger.
-// FC2 (fan-in 32, output): σ=2, keeps initial positional ≈ 0 cp.
+// === FC weights: calibrated for signal to survive the /64 CReLU cascade ===
+// Each CReLU layer divides by 64 (>>6 shift).  FC0 raw must be large enough
+// that FC0_CReLU = FC0_raw/64 gives useful FC1 inputs, otherwise the multi-
+// layer FC chain (FC0→FC1→FC2) is dormant and only the passthrough carries
+// signal.  With σ=4 and ~400 active CReLU inputs of mean ~3:
+//   FC0 raw std ≈ √400 × 3 × 4 ≈ 240, CReLU ≈ 3.8 — healthy FC1 input.
+//   fwdOut std ≈ 240 × 1.18 ≈ 283 internal ≈ 5 cp — still quiet.
+// FC1 (fan-in 30): σ=3, moderate — FC1 CReLU ≈ 0.5, FC2 sees useful input.
+// FC2 (fan-in 32, output): σ=2, positional ≈ 5 cp — quiet enough.
 //
 // === PSQT ===
 // Initialised with pure classical material values (no piece-square bonuses).
@@ -1321,7 +1324,7 @@ static uint32_t  t_adam    = 0;
 // dirty feature rows.
 // ---------------------------------------------------------------------------
 #define INIT_FT_W_STD     44.0f     // acc std ≈ √30 × 44 ≈ 241; ~40% CReLU active
-#define INIT_FC0_W_STD    1.0f      // small — SqrCReLU amplifies variance; prevent explosion
+#define INIT_FC0_W_STD    4.0f      // FC0 CReLU ≈ 3.8; keeps FC1→FC2 chain active
 #define INIT_FC1_W_STD    3.0f      // moderate — fan-in 30, low saturation risk
 #define INIT_FC2_W_STD    2.0f      // small — keep initial positional output ≈ 0 cp
 

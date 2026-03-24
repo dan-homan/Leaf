@@ -250,7 +250,7 @@ to keep the initial positional output near zero (classical material dominates ea
 | Layer | Distribution | Notes |
 |-------|-------------|-------|
 | FT weights (int16) | N(0, 44) | acc std ≈ √30 × 44 ≈ 241; ~40% CReLU active |
-| FC0 weights (int8) | N(0, 1) | Small — SqrCReLU amplifies variance; prevents output explosion |
+| FC0 weights (int8) | N(0, 4) | FC0 CReLU ≈ 3.8; keeps FC1→FC2 chain active |
 | FC1 weights (int8) | N(0, 3) | Moderate — fan-in 30, low saturation risk |
 | FC2 weights (int8) | N(0, 2) | Small — keeps initial positional output ≈ 0 cp |
 | All biases | 0 | Zero-init throughout |

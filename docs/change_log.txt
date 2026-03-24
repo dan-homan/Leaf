@@ -6,7 +6,10 @@ Changes since 2017_12_24
                FT bias drift to -57, mode collapse into ~16 surviving dims, and
                FC0 passthrough blowup (eval diverged to -1779 cp at starting pos).
                FT std=44 gives acc std≈241, ~40% CReLU active — matches the
-               proven SF15.1 operating range.  FC stds (1,3,2) unchanged.
+               proven SF15.1 operating range.
+               FC0 std: 1 → 4 to keep FC1→FC2 chain active (same /64 cascade
+               issue: FC0 CReLU was ~1 with σ=1, now ~3.8 with σ=4).
+               FC1 (σ=3) and FC2 (σ=2) unchanged.
 
 2026_03_23 -- Redesign --init-nnue weight initialization (src/nnue.cpp, docs/TDLEAF.md).
                Philosophy: start quiet, let TDLeaf build structure from signal.
