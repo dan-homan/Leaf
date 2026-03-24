@@ -128,7 +128,7 @@ removed as they existed only to prime the LR decay schedule.
 Skipped for biases (no benefit) and PSQT (would fight classical prior).
 
 ### ~~Gradient clipping by global norm~~ ✓ Implemented (2026-03-21)
-`TDLEAF_GRAD_CLIP_NORM=10.0` clips the global L2 gradient norm before each Adam step.
+`TDLEAF_GRAD_CLIP_NORM=1.0` clips the global L2 gradient norm before each Adam step.
 Applied in `tdleaf_update_after_game`, `tdleaf_replay`, and `tdleaf_flush_batch`.
 Set to 0 to disable.
 

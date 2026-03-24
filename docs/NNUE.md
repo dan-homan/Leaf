@@ -292,7 +292,7 @@ Key hyperparameters (in `src/tdleaf.h`):
 | `TDLEAF_ADAM_FT_LR0` | 0.2 | Adam step size for FT weights (sparse; higher LR) |
 | `TDLEAF_ADAM_PSQT_LR0` | 1.6 | Adam step size for PSQT (int32 scale) |
 | `TDLEAF_WEIGHT_DECAY` | 1e-4 | AdamW decoupled weight decay (FC + FT weights only) |
-| `TDLEAF_GRAD_CLIP_NORM` | 10.0 | Global gradient L2 norm clip threshold |
+| `TDLEAF_GRAD_CLIP_NORM` | 1.0 | Global gradient L2 norm clip threshold |
 
 Adam normalises gradient magnitude — the per-step size in weight-space is governed by
 the LR constants, not raw gradient scale.

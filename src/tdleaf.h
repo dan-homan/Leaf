@@ -40,7 +40,7 @@ static const float TDLEAF_SCORE_CLIP_CP  = 200.0f;
 static const float TDLEAF_ID_VAR_SIGMA2  = 10000.0f;
 // Gradient clipping: if global L2 norm of all gradients exceeds this threshold,
 // scale all gradients by max_norm/norm.  Set to 0 to disable.
-static const float TDLEAF_GRAD_CLIP_NORM = 10.0f;
+static const float TDLEAF_GRAD_CLIP_NORM = 1.0f;
 
 // ---------------------------------------------------------------------------
 // Adam hyperparameters
