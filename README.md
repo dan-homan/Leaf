@@ -47,7 +47,7 @@ Leaf can generate a fresh `.nnue` with `--init-nnue --write-nnue <file>`.  Desig
 
 | Layer | Distribution | Notes |
 |-------|-------------|-------|
-| FT weights (int16) | N(0, 5) | acc std ≈ √30 × 5 ≈ 27; SqrCReLU sweet spot |
+| FT weights (int16) | N(0, 44) | acc std ≈ √30 × 44 ≈ 241; ~40% CReLU active |
 | FC0 weights (int8) | N(0, 1) | Small — SqrCReLU amplifies variance |
 | FC1 weights (int8) | N(0, 3) | Moderate — fan-in 30, low saturation risk |
 | FC2 weights (int8) | N(0, 2) | Small — keeps initial positional ≈ 0 cp |

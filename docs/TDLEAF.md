@@ -418,7 +418,7 @@ This calls `nnue_alloc_arrays()` + `nnue_init_fp32_weights()` + `nnue_init_zero_
 
 | Component | Distribution | Notes |
 |-----------|-------------|-------|
-| FT weights (int16) | N(0, 5) | Zero mean; acc std ≈ √30 × 5 ≈ 27, in SqrCReLU sweet spot |
+| FT weights (int16) | N(0, 44) | Zero mean; acc std ≈ √30 × 44 ≈ 241; ~40% CReLU active |
 | FC0 weights (int8) | N(0, 1) | Small — SqrCReLU amplifies variance; prevents output explosion |
 | FC1 weights (int8) | N(0, 3) | Moderate — fan-in 30, low saturation risk |
 | FC2 weights (int8) | N(0, 2) | Small — keeps initial positional output ≈ 0 cp |
@@ -434,12 +434,14 @@ positional output should be near zero so that classical material dominates early
 TDLeaf learns real patterns from self-play.  Zero means (He/Kaiming principle) are the
 correct starting point — non-zero means from a trained network are endpoints, not priors.
 
-**FT weights (σ=5):** ~30 features active per position, so accumulator std ≈ √30 × 5 ≈ 27.
-This sits comfortably in the SqrCReLU active zone [0, 127] with good gradient signal from
-game 1.
+**FT weights (σ=44):** ~30 features active per position, so accumulator std ≈ √30 × 44 ≈ 241.
+CReLU divides by 64 (>>6 shift), so the accumulator needs values in [0, ~8128] for non-zero
+output.  Acc std ≈ 241 gives ~40% non-zero CReLU activations with mean ~3 — rich, varied
+input for FC0 learning from game 1.  Too-small σ (e.g. 5) kills >99% of activations,
+causing FT bias drift and mode collapse.
 
-**FC0 weights (σ=1):** SqrCReLU squares its input (range [0, 16129]), amplifying variance.
-Small FC0 weights are essential to prevent output explosion at initialisation.
+**FC0 weights (σ=1):** with ~400 active CReLU inputs of mean ~3, small FC0 weights keep
+the initial positional output near zero while preserving gradient flow.
 
 **PSQT initialisation:** all 8 buckets receive identical pure material values from score.h
 (P=5776, N=21776, B=23046, R=34425, Q=69144 internal units; scale = cp × 5776/100).
