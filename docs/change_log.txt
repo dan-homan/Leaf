@@ -1,5 +1,13 @@
 Changes since 2017_12_24
 
+2026_03_23 -- Redesign --init-nnue weight initialization (src/nnue.cpp, docs/TDLEAF.md).
+               Philosophy: start quiet, let TDLeaf build structure from signal.
+               FT weights: N(0,5) — acc std ≈ √30×5 ≈ 27, SqrCReLU sweet spot.
+               FC weights: N(0,{1,3,2}) — small to keep initial positional ≈ 0 cp.
+               PSQT: pure material values (no piece-square bonuses), same all buckets.
+               All means zero (He/Kaiming principle).
+               Added separate TDLEAF_ADAM_FT_LR0=0.2 for sparse FT weights.
+
 2026_03_22 -- Remove per-weight LR decay (src/tdleaf.h, src/nnue.cpp, src/nnue.h,
                src/main.cpp, scripts/training_run.py).
                AdamW weight decay now handles regularization; LR0 tuned directly

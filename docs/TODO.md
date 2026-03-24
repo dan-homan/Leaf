@@ -102,6 +102,11 @@ See memory for full implementation plan.
 
 ## Resolved / Implemented
 
+### ~~Init-nnue redesign~~ ✓ Implemented (2026-03-23)
+Weight initialization redesigned for TDLeaf training (decoupled from SF15.1 statistics).
+FT weights N(0,5), FC weights N(0,{1,3,2}), all means zero, PSQT pure material (no
+piece-square bonuses).  Separate `TDLEAF_ADAM_FT_LR0=0.2` for sparse FT weights.
+
 ### ~~Flavor A replay~~ ✓ Implemented (2026-03-21)
 Replay now rebuilds accumulators from stored leaf positions using current FT weights,
 ensuring FT gradients during replay are self-consistent with the current network.

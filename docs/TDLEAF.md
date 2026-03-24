@@ -166,10 +166,11 @@ FC2 output (positional)
   → PSQT weight rows for each active feature index (sparse)
 ```
 
-The step size for each layer is governed by the Adam LR schedule.  FC, FT, and FT-bias layers
-use `TDLEAF_ADAM_LR0`; PSQT uses `TDLEAF_ADAM_PSQT_LR0` (separate because Adam normalises
-gradient magnitude, so only LR0 sets the per-step size in weight-space — PSQT at int32 scale
-needs a different LR0 than FC at int8 scale).  See [Adam Optimizer](#adam-optimizer-with-per-weight-lr-decay).
+The step size for each layer is governed by the Adam LR schedule.  Three separate LRs:
+`TDLEAF_ADAM_LR0` (FC layers + FT biases), `TDLEAF_ADAM_FT_LR0` (FT weights), and
+`TDLEAF_ADAM_PSQT_LR0` (PSQT).  FT weights use a higher LR than FC because sparse features
+receive far fewer updates (~8 per 5000 games vs. every game for FC); PSQT at int32 scale
+needs a different LR than FC at int8 scale.  See [Adam Optimizer](#adam-optimizer).
 
 ---
 
@@ -206,7 +207,7 @@ correction.
 |-------|-------------|-----|-------|
 | FC0/FC1/FC2 weights | Full Adam | `TDLEAF_ADAM_LR0 = 0.13` | Float shadow clamped to ±127 after each update |
 | FC0/FC1/FC2 biases  | Full Adam | `TDLEAF_ADAM_LR0 = 0.13` | |
-| FT weights | RMSProp (per-weight v, no m) | `TDLEAF_ADAM_LR0 = 0.13` | Per-weight v (~92 MB, OS lazy-paged; physical use ∝ active features) |
+| FT weights | RMSProp (per-weight v, no m) | `TDLEAF_ADAM_FT_LR0 = 0.2` | Sparse; higher LR than FC to compensate for fewer updates |
 | FT biases  | Full Adam | `TDLEAF_ADAM_LR0 = 0.13` | |
 | PSQT       | Full Adam | `TDLEAF_ADAM_PSQT_LR0 = 1.6` | Separate LR0 required — see below |
 
@@ -244,7 +245,8 @@ Moments are **not** persisted to `.tdleaf.bin` because:
 
 | Constant | Value | Notes |
 |----------|-------|-------|
-| `TDLEAF_ADAM_LR0` | 0.13 | Step size for FC/FT layers (float weight units) |
+| `TDLEAF_ADAM_LR0` | 0.13 | Step size for FC layers + FT biases (float weight units) |
+| `TDLEAF_ADAM_FT_LR0` | 0.2 | Step size for FT weights (sparse; need higher LR than dense FC) |
 | `TDLEAF_ADAM_PSQT_LR0` | 1.6 | Step size for PSQT (int32 scale; ~1000× FC) |
 | `TDLEAF_ADAM_BETA1` | 0.9 | First-moment decay (FC weights/biases, FT biases, PSQT) |
 | `TDLEAF_ADAM_BETA2` | 0.999 | Second-moment decay (all layers) |
@@ -416,34 +418,33 @@ This calls `nnue_alloc_arrays()` + `nnue_init_fp32_weights()` + `nnue_init_zero_
 
 | Component | Distribution | Notes |
 |-----------|-------------|-------|
-| FT weights (int16) | N(0, 44.41) | Zero mean; std calibrated to ~30-feature accumulator sum |
-| FC0 weights (int8) | N(0, 3.0) | Zero mean; std He-adjusted for 1024-input fan-in |
-| FC1 weights (int8) | N(0, 18.30) | Zero mean; std unchanged (30 inputs, low sat risk) |
-| FC2 weights (int8) | N(0, 30.0) | Zero mean; std unchanged (output layer) |
+| FT weights (int16) | N(0, 5) | Zero mean; acc std ≈ √30 × 5 ≈ 27, in SqrCReLU sweet spot |
+| FC0 weights (int8) | N(0, 1) | Small — SqrCReLU amplifies variance; prevents output explosion |
+| FC1 weights (int8) | N(0, 3) | Moderate — fan-in 30, low saturation risk |
+| FC2 weights (int8) | N(0, 2) | Small — keeps initial positional output ≈ 0 cp |
 | All biases | **0** (zero) | FT and FC biases zero-initialised |
-| PSQT | Classical material + PSQ, by game stage | See below |
+| PSQT | Pure material (no PSQ bonuses) | Same value across all 8 buckets |
 
 All int8 weight sampling uses **rejection sampling** (not clipping): values outside ±127 are
 discarded and redrawn to avoid density spikes at the int8 boundary.
 
-**Why zero means?**  The Stockfish 15.1 non-zero means (+0.24 FC0, −1.10 FC1, +1.10 FC2,
-−0.71 FT) are a trained endpoint, not a useful prior.  They create a systematic directional
-bias in every neuron from game 1; TDLeaf must first cancel the bias before learning signal.
-Zero mean (the He/Kaiming principle) eliminates this wasted capacity.
+**Design philosophy: start quiet, let TDLeaf build structure from signal.**  Initial NNUE
+positional output should be near zero so that classical material dominates early play
+(reasonable game quality from game 1).  The network gradually grows its influence as
+TDLeaf learns real patterns from self-play.  Zero means (He/Kaiming principle) are the
+correct starting point — non-zero means from a trained network are endpoints, not priors.
 
-**Why FC0 std = 3.0?**  With 1024 SqrCReLU inputs in [0,127] and zero-mean FT weights,
-the effective input scale gives `std(raw>>6) ≈ 23.5 × σ_w`.  The old σ=8.4 produced
-~24% neuron saturation; σ=3.0 reduces this to ~3%, matching the He design target.  The
-He formula itself (σ=√(2/n) ≈ 0.044 FP32) collapses to < 0.1 int8 units at this
-quantization scale and cannot be applied directly.
+**FT weights (σ=5):** ~30 features active per position, so accumulator std ≈ √30 × 5 ≈ 27.
+This sits comfortably in the SqrCReLU active zone [0, 127] with good gradient signal from
+game 1.
 
-**PSQT initialisation:** each of the 8 buckets is seeded with classical `material + piece_sq`
-values from `score.h`, interpolated to the bucket's corresponding game stage.  Bucket 0
-receives opening-stage PSQ values (king safety, central knight bonuses, rook placement);
-buckets 6–7 receive endgame values (king centralization, pawn advancement).  The 8 buckets
-map to the 4 classical stages via effective gstage = 2b for bucket b (2 buckets per stage,
-with linear interpolation at stage boundaries).  White pieces use `whitef[sq]`
-(rank-flip from score.h); black pieces index directly.  Scale: cp × 5776/100.
+**FC0 weights (σ=1):** SqrCReLU squares its input (range [0, 16129]), amplifying variance.
+Small FC0 weights are essential to prevent output explosion at initialisation.
+
+**PSQT initialisation:** all 8 buckets receive identical pure material values from score.h
+(P=5776, N=21776, B=23046, R=34425, Q=69144 internal units; scale = cp × 5776/100).
+No piece-square bonuses are included — TDLeaf learns positional adjustments on top of
+the material prior.  Own pieces contribute positively; opponent pieces negatively.
 
 Biases are zero-initialised because random N(μ,σ) from an unrelated SF15.1 distribution
 adds noise TDLeaf must overcome via its near-cancelling per-game gradient structure.

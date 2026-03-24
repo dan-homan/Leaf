@@ -1281,57 +1281,46 @@ static uint32_t  t_adam    = 0;
 // ---------------------------------------------------------------------------
 // nnue_init_zero_weights — fresh-start FC/FT initialisation + classical PSQT
 //
+// === Design philosophy: start quiet, let TDLeaf build structure from signal ===
+// Initial NNUE positional output should be near zero so that classical material
+// dominates early play (reasonable game quality).  The network gradually grows
+// its influence as TDLeaf learns real patterns from self-play.
+//
 // === Weight means: all zero ===
 // Non-zero means inherited from a trained network (Stockfish 15.1) are the
 // endpoint of a fully-converged training run, not a useful prior for TDLeaf.
-// They create a systematic directional bias in every neuron from game 1 that
-// TDLeaf must first cancel before it can learn signal.  Zero mean (the core
-// He/Kaiming principle) is the correct starting point.
+// Zero mean (the core He/Kaiming principle) is the correct starting point.
 //
-// === FC0 std: He-adjusted for 1024 inputs at int8 scale ===
-// FC0 receives 1024 SqrCReLU outputs in [0,127].  With ~30 active FT features
-// per position and FT weights N(0, 44.4), accumulator dimensions sit near
-// N(0, 243).  After the SqrCReLU pairing the FC0 inputs have:
-//   E[x] ≈ 20,  E[x²] ≈ 2200  (mean of clamped(N(0,243), 0,127) squared pairs)
-// With n_in=1024 inputs and zero-mean int8 weights of std σ_w:
-//   std(raw >> 6) ≈ (1/64) × sqrt(1024 × σ_w² × E[x²]) ≈ 23.5 × σ_w
-// Targeting saturation < 5% of active neurons (matching He's design intent):
-//   σ_w = 3.0  →  std(raw>>6) ≈ 70,  P(sat above 127) ≈ 3%  ✓
-//   σ_w = 8.4  →  std(raw>>6) ≈ 197, P(sat above 127) ≈ 24% ✗
-// At σ_w=3 the He formula is effectively inapplicable (sqrt(2/1024)≈0.044 in
-// FP32 maps to <0.1 int8 units at this quantization scale) — 3.0 is the
-// smallest int8-representable std that achieves the He saturation target.
+// === FT weights: std calibrated to accumulator activation range ===
+// ~30 features active per position.  Accumulator = sum of ~30 rows, so
+// acc std ≈ √30 × σ.  With σ=5, acc std ≈ 27 — comfortably in the
+// SqrCReLU active zone [0, 127] with good gradient signal.
 //
-// === FC1 / FC2 / FT stds: SF15.1 measurements retained ===
-// FC1 (30 inputs): low fan-in greatly reduces saturation sensitivity; sf15.1
-//   std 18.3 remains appropriate, only the mean is zeroed.
-// FC2 (32 inputs, output layer): no activation clamping; std 30 (already
-//   reduced from measured 76.38 in prior code) retained; mean zeroed.
-// FT (int16, 22528×1024): std 44.4 is calibrated to the ~30-feature summation
-//   that fills the accumulator; unchanged.
+// === FC weights: small to keep initial positional output ≈ 0 ===
+// FC0 (fan-in 2048, SqrCReLU inputs): σ=1 keeps FC0 output near zero.
+//   SqrCReLU squares its input (range [0, 16129]), amplifying variance;
+//   small FC0 weights are essential to prevent output explosion.
+// FC1 (fan-in 30): σ=3, moderate — smaller fan-in allows slightly larger.
+// FC2 (fan-in 32, output): σ=2, keeps initial positional ≈ 0 cp.
+//
+// === PSQT ===
+// Initialised with pure classical material values (no piece-square bonuses).
+// The material term already provides a strong prior; TDLeaf learns positional
+// adjustments on top.  Each of the 8 buckets receives the same material value.
 //
 // === Rejection sampling ===
 // Int8 weights use truncated-Gaussian rejection sampling (discard and redraw
 // if |w| > 127) rather than clipping, to avoid density spikes at the int8
 // boundaries.  With the current stds the rejection rate is negligible.
 //
-// === PSQT ===
-// Initialised from classical evaluator piece values + piece-square tables
-// (score.h), with each of the 8 PSQT buckets mapped to an interpolated
-// classical game stage.  See the PSQT block below for details.
-//
 // Both ft_weights (int16, inference) and ft_weights_f32 (float, backprop)
 // are initialised together; nnue_apply_gradients keeps them in sync for
 // dirty feature rows.
 // ---------------------------------------------------------------------------
-#define INIT_FT_W_MEAN    0.0f       // was -0.7119; zero mean (He principle)
-#define INIT_FT_W_STD    44.4149f    // unchanged — int16, ~30 features/position
-#define INIT_FC0_W_MEAN   0.0f       // was +0.2368; zero mean (He principle)
-#define INIT_FC0_W_STD    3.0f       // was 8.4252; He-adjusted: ~3% sat vs ~24%
-#define INIT_FC1_W_MEAN   0.0f       // was -1.0989; zero mean (He principle)
-#define INIT_FC1_W_STD   18.3019f    // unchanged — 30 inputs, low sat risk
-#define INIT_FC2_W_MEAN   0.0f       // was +1.0977; zero mean (He principle)
-#define INIT_FC2_W_STD   30.0000f    // unchanged — output layer, no clamping
+#define INIT_FT_W_STD     5.0f      // acc std ≈ √30 × 5 ≈ 27; in SqrCReLU sweet spot
+#define INIT_FC0_W_STD    1.0f      // small — SqrCReLU amplifies variance; prevent explosion
+#define INIT_FC1_W_STD    3.0f      // moderate — fan-in 30, low saturation risk
+#define INIT_FC2_W_STD    2.0f      // small — keep initial positional output ≈ 0 cp
 
 void nnue_init_zero_weights()
 {
@@ -1339,8 +1328,8 @@ void nnue_init_zero_weights()
     std::mt19937 rng(42);  // fixed seed for reproducibility
     // Truncated normal for int8 weights: reject samples outside [-127, 127]
     // rather than clipping, to avoid artificial density spikes at the boundaries.
-    auto rnd_w = [&](float mean, float std) -> float {
-        std::normal_distribution<float> d(mean, std);
+    auto rnd_w = [&](float std) -> float {
+        std::normal_distribution<float> d(0.0f, std);
         float v;
         do { v = d(rng); } while (v < -127.f || v > 127.f);
         return v;
@@ -1348,15 +1337,15 @@ void nnue_init_zero_weights()
 
     for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
         for (int i = 0; i < NNUE_L0_SIZE * NNUE_L0_INPUT; i++)
-            l0_weights_f32[s][i] = rnd_w(INIT_FC0_W_MEAN, INIT_FC0_W_STD);
+            l0_weights_f32[s][i] = rnd_w(INIT_FC0_W_STD);
         for (int i = 0; i < NNUE_L0_SIZE; i++)
             l0_biases_f32[s][i]  = 0.0f;
         for (int i = 0; i < NNUE_L1_SIZE * NNUE_L1_PADDED; i++)
-            l1_weights_f32[s][i] = rnd_w(INIT_FC1_W_MEAN, INIT_FC1_W_STD);
+            l1_weights_f32[s][i] = rnd_w(INIT_FC1_W_STD);
         for (int i = 0; i < NNUE_L1_SIZE; i++)
             l1_biases_f32[s][i]  = 0.0f;
         for (int i = 0; i < NNUE_L2_PADDED; i++)
-            l2_weights_f32[s][i] = rnd_w(INIT_FC2_W_MEAN, INIT_FC2_W_STD);
+            l2_weights_f32[s][i] = rnd_w(INIT_FC2_W_STD);
         l2_bias_f32[s] = 0.0f;
     }
     memset(l0_weights_cnt, 0, sizeof(l0_weights_cnt));
@@ -1395,29 +1384,16 @@ void nnue_init_zero_weights()
     if (ft_biases)
         memset(ft_biases, 0, NNUE_HALF_DIMS * sizeof(int16_t));
 
-    // ---- FT weights: random; PSQT: classical material + piece-square by game stage ----
+    // ---- FT weights: random; PSQT: pure classical material ----
     // Conversion: V = cp * 5776 / 100.  PSQT is side-to-move based:
     //   own pieces (pside==persp)  → +V  (positive contribution to stm score)
     //   opp pieces (pside!=persp)  → -V  (negative contribution to stm score)
     // Material values from score.h: value[] = {0,100,377,399,596,1197,0}.
-    // King material = 0 (mate sentinel); king piece_sq positional bonuses ARE included.
+    // King material = 0 (mate sentinel).
     // Internal units: cp * 5776 / 100.
     //
-    // The 8 PSQT buckets map to the 4 classical game stages (2 buckets per stage):
-    //   bucket b → effective gstage = 2b → psq_stage = b/2 (capped at 3), rem = (2b)%4
-    //   This matches the classical interpolation: ((4-rem)*stage[s] + rem*stage[s+1]) / 4
-    //   Bucket 0: pure opening (stage 0)
-    //   Buckets 1-2: opening→early MG transition
-    //   Buckets 2-3: early MG
-    //   Buckets 3-4: early→late MG transition
-    //   Buckets 4-5: late MG
-    //   Buckets 5-6: late MG→endgame transition
-    //   Buckets 6-7: endgame (stage 3)
-    //
-    // Square indexing: piece_sq tables are indexed from black's POV (sq 0=a1).
-    //   For white pieces, whitef[psq] rank-flips the index (same as score.cpp).
-    //   Mirror-symmetric (ksq) pairs that share the same feature index fi always
-    //   produce the same PSQ value because the piece_sq tables are file-symmetric.
+    // No piece-square bonuses — just pure material values, same across all 8 buckets.
+    // TDLeaf learns positional adjustments on top of this strong material prior.
     static const float PSQT_VAL[7] = {
         0.f,                        // EMPTY
         100.f * 5776.f / 100.f,     // PAWN   = 5776.0
@@ -1425,15 +1401,14 @@ void nnue_init_zero_weights()
         399.f * 5776.f / 100.f,     // BISHOP = 23046.2
         596.f * 5776.f / 100.f,     // ROOK   = 34425.0
         1197.f * 5776.f / 100.f,    // QUEEN  = 69143.7
-        0.f,                        // KING   = 0 (no material value; PSQ still applied)
+        0.f,                        // KING   = 0 (no material value)
     };
-    static const float PSQ_SCALE = 5776.f / 100.f;  // cp → internal units
 
     if (ft_weights_f32) {
         size_t ft_sz   = (size_t)NNUE_FT_INPUTS * NNUE_HALF_DIMS;
         size_t psqt_sz = (size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS;
         {
-            std::normal_distribution<float> ft_w_dist(INIT_FT_W_MEAN, INIT_FT_W_STD);
+            std::normal_distribution<float> ft_w_dist(0.0f, INIT_FT_W_STD);
             for (size_t i = 0; i < ft_sz; i++) {
                 float v = ft_w_dist(rng);
                 if (v < -32767.f) v = -32767.f;
@@ -1457,10 +1432,8 @@ void nnue_init_zero_weights()
         memset(v_psqt_w,  0, psqt_sz * sizeof(float));
         memset(m_psqt_w,  0, psqt_sz * sizeof(float));
 
-        // Enumerate all possible features and assign classical material + PSQ values.
-        // Each of the 8 PSQT buckets gets a stage-interpolated positional bonus.
-        // Conflicts between mirror-symmetric (ksq) pairs always write the same value
-        // because piece_sq tables are symmetric across the file-mirror axis.
+        // Enumerate all possible features and assign pure material values.
+        // All 8 PSQT buckets receive the same value (no piece-square bonuses).
         for (int persp = 0; persp < 2; persp++) {
             for (int ksq = 0; ksq < 64; ksq++) {
                 for (int psq = 0; psq < 64; psq++) {
@@ -1470,26 +1443,10 @@ void nnue_init_zero_weights()
                             if (fi < 0 || fi >= NNUE_FT_INPUTS) continue;
 
                             float sign = (pside == persp) ? 1.f : -1.f;
-                            float mat  = PSQT_VAL[ptype];
+                            float val  = sign * PSQT_VAL[ptype];
 
-                            // Classical square: black indexes directly, white uses whitef[].
-                            int sq_cl = (pside == WHITE) ? whitef[psq] : psq;
-
-                            for (int b = 0; b < NNUE_PSQT_BKTS; b++) {
-                                // Map bucket b to classical stage via effective gstage = 2b.
-                                int g     = 2 * b;
-                                int stage = g / 4;           // 0..3
-                                int rem   = g % 4;           // 0..3 within-stage progress
-                                int next  = (stage < 3) ? stage + 1 : 3;
-
-                                // Interpolate between adjacent classical stages.
-                                float psq_cp =
-                                    ((4 - rem) * (float)piece_sq[stage][ptype][sq_cl]
-                                   +      rem  * (float)piece_sq[next ][ptype][sq_cl]) / 4.f;
-
-                                psqt_weights_f32[fi * NNUE_PSQT_BKTS + b] =
-                                    sign * (mat + psq_cp * PSQ_SCALE);
-                            }
+                            for (int b = 0; b < NNUE_PSQT_BKTS; b++)
+                                psqt_weights_f32[fi * NNUE_PSQT_BKTS + b] = val;
                         }
                     }
                 }
@@ -1500,9 +1457,13 @@ void nnue_init_zero_weights()
     // Sync all int8/int16/int32 inference arrays from the zeroed float shadows.
     nnue_requantize_fc();
     nnue_zero_initialized = true;
-    printf("NNUE TDLeaf: FC weights=N(0,sigma) He-adjusted (FC0 sigma=3); "
-           "FT weights=N(0,44.4); biases=zero; "
-           "PSQT=classical material+PSQ mapped to 8 game-stage buckets\n");
+    printf("NNUE TDLeaf: FC weights=N(0,{%.0f,%.0f,%.0f}); "
+           "FT weights=N(0,%.0f); biases=zero; "
+           "PSQT=pure material (P=%d N=%d B=%d R=%d Q=%d)\n",
+           INIT_FC0_W_STD, INIT_FC1_W_STD, INIT_FC2_W_STD, INIT_FT_W_STD,
+           (int)(100.f * 5776.f / 100.f), (int)(377.f * 5776.f / 100.f),
+           (int)(399.f * 5776.f / 100.f), (int)(596.f * 5776.f / 100.f),
+           (int)(1197.f * 5776.f / 100.f));
 }
 
 // ---------------------------------------------------------------------------
