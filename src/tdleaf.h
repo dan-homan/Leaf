@@ -54,6 +54,7 @@ static const float TDLEAF_GRAD_CLIP_NORM = 1.0f;
 static const float TDLEAF_ADAM_LR0      = 0.13f;   // step size for FC layers + FT biases (float weight units)
 static const float TDLEAF_ADAM_FT_LR0   = 0.2f;    // step size for FT weights (sparse; need higher LR than dense FC)
 static const float TDLEAF_ADAM_PSQT_LR0 = 1.6f;    // step size for PSQT (int32 scale ~36k std; needs larger LR)
+static const float TDLEAF_ADAM_PV_LR0   = 1.6f;    // step size for dense piece values (same scale as PSQT)
 static const float TDLEAF_ADAM_BETA1    = 0.9f;    // first-moment decay  (FC + FT bias + PSQT)
 static const float TDLEAF_ADAM_BETA2    = 0.999f;  // second-moment decay (all layers)
 static const float TDLEAF_ADAM_EPS      = 1e-8f;   // numerical floor

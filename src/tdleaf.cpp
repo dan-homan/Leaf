@@ -56,7 +56,8 @@ void tdleaf_record_ply(TDGameRecord &rec,
     // This ensures d[t] is computed from what nnue_forward_fp32 actually produces
     // at that position, making the gradient self-consistent.
     // (The propagated search score includes quiescence and may differ.)
-    int leaf_score_stm = nnue_evaluate(acc_a, (int)leaf_wtm, pc);
+    int leaf_score_stm = nnue_evaluate(acc_a, (int)leaf_wtm, pc)
+                       + nnue_dense_piece_val(cur, (int)leaf_wtm, pc);
 
 #if TDLEAF_CHECK_SCORE
     {
@@ -162,6 +163,13 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
         act.n_ft[1] = rec.plies[t].n_ft[1];
         memcpy(act.ft_idx[0], rec.plies[t].ft_idx[0], rec.plies[t].n_ft[0] * sizeof(int));
         memcpy(act.ft_idx[1], rec.plies[t].ft_idx[1], rec.plies[t].n_ft[1] * sizeof(int));
+
+        // Dense piece value gradient: stm_count − opp_count per piece type.
+        int stm_p = rec.plies[t].wtm ? 1 : 0;
+        for (int pt = PAWN; pt <= KING; pt++)
+            act.piece_count_diff[pt - 1] = (int8_t)(rec.plies[t].pos.plist[stm_p][pt][0]
+                                                   - rec.plies[t].pos.plist[stm_p ^ 1][pt][0]);
+
         nnue_accumulate_gradients(act, grad_scale);
     }
 }
@@ -259,7 +267,8 @@ static void tdleaf_refresh_scores(TDGameRecord &rec)
         // Re-evaluate score from rebuilt accumulator.
         int pc = r.stack * 4 + 2;
         pc = (pc < 1) ? 1 : (pc > 32) ? 32 : pc;
-        r.score_stm = nnue_evaluate_acc_raw(r.acc, r.psqt, (int)r.wtm, pc);
+        r.score_stm = nnue_evaluate_acc_raw(r.acc, r.psqt, (int)r.wtm, pc)
+                     + nnue_dense_piece_val(r.pos, (int)r.wtm, pc);
     }
 }
 

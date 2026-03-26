@@ -100,6 +100,24 @@ See memory for full implementation plan.
 
 ---
 
+## Known Issues
+
+### PSQT overflow with fresh init-nnue networks
+
+When using `--init-nnue` to generate a fresh random network, the starting position
+produces a very large `psqt_diff` (~1.8 billion) because the PSQT accumulator sums
+are large int32 values and the subtraction `psqt[stm] - psqt[opp]` overflows.  This
+does not affect play (the score clamps to a bounded range) but produces incorrect
+PSQT-component values until training brings the weights into a sane range.  Pre-trained
+networks (e.g. `nn-ad9b42354671.nnue`) do not exhibit this issue because their PSQT
+values are much smaller in magnitude.
+
+Confirmed pre-existing (present before the dense piece value changes, 2026-03-26).
+Needs investigation: consider whether the PSQT init scale (pure material at int32
+NNUE units) is too large, or whether the accumulator subtraction should use int64.
+
+---
+
 ## Resolved / Implemented
 
 ### ~~Init-nnue redesign~~ ✓ Implemented (2026-03-23)

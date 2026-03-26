@@ -146,6 +146,9 @@ struct NNUEActivations {
     int     ft_idx[2][NNUE_MAX_FT_PER_PERSP]; // active feature indices, indexed by actual persp
     int8_t  n_ft[2];                           // active feature count per perspective
     int8_t  stm_persp;                         // STM perspective index (WHITE=1, BLACK=0)
+    // Dense piece value backprop: stm_count − opp_count per piece type.
+    // Index 0 = PAWN (pt=1), ..., 4 = QUEEN (pt=5); index 5 = KING (always 0).
+    int8_t  piece_count_diff[6];
 };
 
 // Initialise all FC and FT weights to zero, PSQT to 100 cp/piece equivalent.
@@ -190,6 +193,12 @@ bool nnue_load_fc_weights(const char *path);
 int nnue_evaluate_acc_raw(const int16_t acc[2][NNUE_HALF_DIMS],
                            const int32_t psqt[2][NNUE_PSQT_BKTS],
                            int stm, int piece_count);
+
+// Dense piece value contribution (centipawns, stm POV).
+// Returns the correction from trained piece_val parameters.  Add to
+// nnue_evaluate() result for the total score.  Zero if piece_val is
+// uninitialised (loading a pre-existing .nnue without .tdleaf.bin).
+int nnue_dense_piece_val(const struct position &pos, int stm, int piece_count);
 
 #endif // TDLEAF
 

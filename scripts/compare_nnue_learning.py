@@ -45,6 +45,7 @@ TDLEAF_VERSION1 = 1
 TDLEAF_VERSION2 = 2
 TDLEAF_VERSION3 = 3
 TDLEAF_VERSION4 = 4            # adds FT bias section
+TDLEAF_VERSION5 = 5            # adds dense piece value section
 TDLEAF_SCALE    = 128.0        # v2+: file stores w_f32 × TDLEAF_SCALE
 
 # ---------------------------------------------------------------------------
@@ -270,7 +271,7 @@ def read_tdleaf_fc(path):
         if magic != TDLEAF_MAGIC:
             sys.exit(f"Error: bad magic {magic:#010x} in {path}")
 
-        if version in (TDLEAF_VERSION2, TDLEAF_VERSION3, TDLEAF_VERSION4):
+        if version in (TDLEAF_VERSION2, TDLEAF_VERSION3, TDLEAF_VERSION4, TDLEAF_VERSION5):
             data['_has_counts'] = True
             for _ in range(N_STACKS):
                 def rf(n, fh=f):
@@ -317,8 +318,8 @@ def read_tdleaf_fc(path):
         else:
             sys.exit(f"Error: unknown .tdleaf.bin version {version} in {path}")
 
-        # v3/v4: sparse FT/PSQT section after FC stacks
-        if version in (TDLEAF_VERSION3, TDLEAF_VERSION4):
+        # v3/v4/v5: sparse FT/PSQT section after FC stacks
+        if version in (TDLEAF_VERSION3, TDLEAF_VERSION4, TDLEAF_VERSION5):
             n_ft_rows = struct.unpack('<I', f.read(4))[0]
             if n_ft_rows > 0:
                 fi_arr   = np.empty(n_ft_rows, dtype=np.uint32)
@@ -341,13 +342,23 @@ def read_tdleaf_fc(path):
                 data['ft_fi'] = np.empty(0, dtype=np.uint32)
             data['n_ft_rows'] = n_ft_rows
 
-            # v4: FT bias section (appended after sparse FT/PSQT rows)
-            if version == TDLEAF_VERSION4:
+            # v4/v5: FT bias section (appended after sparse FT/PSQT rows)
+            if version in (TDLEAF_VERSION4, TDLEAF_VERSION5):
                 ft_b_raw = np.frombuffer(f.read(HALF_DIMS * 4), dtype=np.float32).copy()
                 ft_b_cnt = np.frombuffer(f.read(HALF_DIMS * 4), dtype=np.uint32).copy()
                 if ft_b_raw.shape == (HALF_DIMS,) and ft_b_cnt.shape == (HALF_DIMS,):
                     data['ft_bias_learned']     = ft_b_raw / TDLEAF_SCALE
                     data['ft_bias_learned_cnt'] = ft_b_cnt
+
+            # v5: dense piece value section (6 piece types × 8 PSQT buckets = 48 values)
+            if version == TDLEAF_VERSION5:
+                N_PIECE_TYPES = 6
+                n_pv = N_PIECE_TYPES * PSQT_BKTS   # 48
+                pv_raw = np.frombuffer(f.read(n_pv * 4), dtype=np.float32).copy()
+                pv_cnt = np.frombuffer(f.read(n_pv * 4), dtype=np.uint32).copy()
+                if pv_raw.shape == (n_pv,) and pv_cnt.shape == (n_pv,):
+                    data['piece_val']     = (pv_raw / TDLEAF_SCALE).reshape(N_PIECE_TYPES, PSQT_BKTS)
+                    data['piece_val_cnt'] = pv_cnt.reshape(N_PIECE_TYPES, PSQT_BKTS)
 
     return data
 
@@ -547,6 +558,42 @@ def print_summary(orig, upd, ft_data=None):
                 nz  = int(np.sum(col == 0))
                 print(f"  {b:>8} {len(col):>10,} {int(col.min()):>8} {int(col.max()):>8}"
                       f" {col.mean():>10.1f} {col.std():>10.1f} {100*nz/len(col):>7.1f}%")
+
+    # -----------------------------------------------------------------------
+    # Dense piece value summary (v5+)
+    # -----------------------------------------------------------------------
+    print()
+    if 'piece_val' in upd:
+        pv = upd['piece_val']       # [6, 8] float (NNUE internal units)
+        pv_cnt = upd['piece_val_cnt']  # [6, 8] uint32
+        piece_names = ['Pawn', 'Knight', 'Bishop', 'Rook', 'Queen', 'King']
+        print(f"━━━━  Dense piece values (v5, corrections in NNUE internal units)  ━━━━")
+        print()
+        # Convert to centipawns for display: cp = value × 100 / 5776
+        pv_cp = pv * 100.0 / 5776.0
+        print(f"  {'Piece':<8}", end="")
+        for b in range(PSQT_BKTS):
+            print(f" {'B'+str(b):>8}", end="")
+        print(f"  {'max cnt':>9}")
+        print(f"  {'─'*8}", end="")
+        for _ in range(PSQT_BKTS):
+            print(f" {'─'*8}", end="")
+        print(f"  {'─'*9}")
+        for pt in range(6):
+            print(f"  {piece_names[pt]:<8}", end="")
+            for b in range(PSQT_BKTS):
+                cp = pv_cp[pt, b]
+                print(f" {cp:>+8.2f}", end="")
+            mx = int(pv_cnt[pt].max())
+            print(f"  {mx:>9}")
+        print()
+        total_updates = int(pv_cnt.sum())
+        ever_updated  = int(np.sum(pv_cnt > 0))
+        print(f"  Total updates: {total_updates:,}  "
+              f"Slots ever updated: {ever_updated}/48  "
+              f"Max count: {int(pv_cnt.max())}")
+    else:
+        print(f"━━━━  Dense piece values (not present — v4 or older .tdleaf.bin)  ━━━━")
 
 # ---------------------------------------------------------------------------
 # Plotting

@@ -64,6 +64,9 @@ int position::score_pos(game_rec *gr, ts_thread_data *tdata NNUE_ACC_DEF)
        for (int pt = PAWN; pt <= QUEEN; pt++)
          pc += plist[s][pt][0];
      int score = nnue_evaluate(*nnue_acc, wtm, pc);
+#if TDLEAF
+     score += nnue_dense_piece_val(*this, wtm, pc);
+#endif
      // qchecks: set to zero when using NNUE (no classical king-safety info)
      qchecks[0] = 0;
      qchecks[1] = 0;
