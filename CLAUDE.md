@@ -93,7 +93,7 @@ errors (unknown types, undeclared identifiers).  These are expected and can be i
 - After each search, `tdleaf_record_ply()` walks the PV to the leaf, snapshots the accumulator, active feature indices, and iterative-deepening score history.
 - After each game, `tdleaf_update_after_game()` computes backward TD errors (λ=0.8 decisive / 0.5 draw), applies score-change clipping (TDLEAF_SCORE_CLIP_CP=200 cp) and ID-stability weighting (TDLEAF_ID_VAR_SIGMA2=10,000 cp²), then backpropagates through FC/FT/PSQT/piece_val layers.  Gradient clipping (L2 norm, threshold 1.0) and AdamW weight decay (1e-4, FC+FT weights only) are applied.
 - `tdleaf_replay()` then runs `TDLEAF_REPLAY_K` (default 1) additional passes over the last `TDLEAF_REPLAY_BUF_N` (default 8) completed games stored in a ring buffer, refreshing scores from current weights before each pass.
-- Dense piece values (`piece_val[6][8]`, 48 floats) learn material corrections on top of PSQT via dense gradient updates; added to eval as `nnue_dense_piece_val()`.
+- Dense piece values (`piece_val[6][8]`, 48 floats) learn material corrections on top of PSQT via dense gradient updates; added to eval as `nnue_dense_piece_val()`.  PSQT gradients are mean-centered per piece-type slot to prevent PSQT from learning redundant material corrections (active only when `piece_val_active`).
 - Weights persist to `<net>.tdleaf.bin` (v5 format); POSIX file locking + delta merging allows concurrent multi-instance training.
 - `material` in `score.cpp` is **already STM (side-to-move) POV** — do not flip it.
 

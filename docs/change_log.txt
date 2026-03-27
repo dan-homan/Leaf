@@ -1,5 +1,12 @@
 Changes since 2017_12_24
 
+2026_03_26 -- Mean-center PSQT gradients per piece-type slot (src/nnue.cpp, docs/).
+               Before each Adam step, the mean PSQT gradient across all dirty features
+               of the same piece-type slot (fi%704/64) is subtracted.  This forces PSQT
+               to learn only positional (per-square) corrections, not material-scale
+               shifts — those are handled by dense piece_val.  Active only when
+               piece_val_active is true.
+
 2026_03_26 -- Add dense piece values (src/nnue.cpp, src/nnue.h, src/tdleaf.cpp,
                src/tdleaf.h, src/score.cpp, docs/).
                New piece_val[6][8] array: 6 piece types × 8 PSQT buckets = 48 float

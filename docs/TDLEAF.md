@@ -132,6 +132,23 @@ g_pv[pt][bucket] += grad_scale × piece_count_diff[pt]
 Full Adam with `TDLEAF_ADAM_PV_LR0 = 1.6` (same as PSQT).  No weight decay is applied.
 Dense piece value gradients are included in the global L2 norm for gradient clipping.
 
+### PSQT gradient mean-centering
+
+Because both PSQT and `piece_val` can learn material-scale corrections, and Adam's
+`1/√v` normalization amplifies sparse PSQT updates to match dense `piece_val` updates
+in magnitude, the two would learn redundant corrections without intervention.
+
+To force PSQT to learn only **positional** (per-square) corrections, PSQT gradients
+are mean-centered per piece-type slot before each Adam step.  The HalfKAv2_hm feature
+index encodes 11 slots (`fi % 704 / 64`): own/opp × {pawn, knight, bishop, rook,
+queen} + king.  For each slot and each PSQT bucket, the mean gradient across all dirty
+features of that slot is subtracted.  This removes the uniform (material-scale)
+component while preserving per-square variation.
+
+Mean-centering is active only when `piece_val_active` is true (i.e., when dense piece
+values are in use).  Without `piece_val`, PSQT is the only material correction channel
+and should not be mean-centered.
+
 ### Persistence
 
 Stored in `.tdleaf.bin` v5 format as 48 float32 values (at 128× resolution) plus 48

@@ -2053,6 +2053,38 @@ void nnue_apply_gradients()
 
     // FT/PSQT: only iterate over dirty feature rows (sparse update).
     if (ft_dirty) {
+        // Mean-center PSQT gradients per piece-type slot before applying.
+        // This forces PSQT to learn only positional (per-square) corrections,
+        // not material-scale shifts — those are handled by dense piece_val.
+        //
+        // Slots (from halfkav2_feature index structure):
+        //   fi % 704 / 64 → 0=own pawn, 1=opp pawn, 2=own knight, ...
+        //                    8=own queen, 9=opp queen, 10=king (both)
+        // For each slot × PSQT bucket, compute the mean gradient across all
+        // dirty features and subtract it.  This removes the uniform component
+        // (material correction) while preserving per-square variation.
+        if (piece_val_active && grad_psqt_w) {
+            float  slot_sum  [11][NNUE_PSQT_BKTS] = {};
+            int    slot_count[11] = {};
+            for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
+                if (!ft_dirty[fi]) continue;
+                int slot = (fi % 704) / 64;
+                slot_count[slot]++;
+                float *gpw = grad_psqt_w + (size_t)fi * NNUE_PSQT_BKTS;
+                for (int b = 0; b < NNUE_PSQT_BKTS; b++)
+                    slot_sum[slot][b] += gpw[b];
+            }
+            for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
+                if (!ft_dirty[fi]) continue;
+                int slot = (fi % 704) / 64;
+                if (slot_count[slot] < 2) continue;
+                float *gpw = grad_psqt_w + (size_t)fi * NNUE_PSQT_BKTS;
+                float inv_n = 1.0f / (float)slot_count[slot];
+                for (int b = 0; b < NNUE_PSQT_BKTS; b++)
+                    gpw[b] -= slot_sum[slot][b] * inv_n;
+            }
+        }
+
         for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
             if (!ft_dirty[fi]) continue;
             // FT weights — per-weight RMSProp (no m; FT rows are too sparse for
