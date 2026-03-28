@@ -73,6 +73,7 @@ position, making the gradient self-consistent.
 | FT biases          | 1,024 int16 | Dense update; static float shadow (4 KB) |
 | FT weights         | 22,528×1,024 int16 | Sparse update; float shadow on heap (~92 MB) |
 | PSQT weights       | 22,528×8 int32 | Sparse update; float shadow (~720 KB) |
+| Dense piece values | 6×8 float      | Dense update; 48 parameters in `piece_val[6][8]` |
 
 FT weights and PSQT are updated sparsely: only the ~30–60 feature rows active at each
 leaf position are touched.  `ft_dirty[FT_INPUTS]` tracks which rows received gradient
@@ -80,6 +81,79 @@ during the game; only dirty rows are scanned in `nnue_apply_gradients`.
 
 FT biases are updated densely every game (all 1,024 values): the gradient is the sum of
 `g_acc[persp][d]` across both perspectives.
+
+Dense piece values (`piece_val[6][8]`) are updated densely every game.  Every position
+contributes gradient for all piece types present on the board, giving ~200 updates per
+game vs ~8 per 5000 games for sparse PSQT features.  See
+[Dense Piece Values](#dense-piece-values) below.
+
+---
+
+## Dense Piece Values
+
+### Motivation
+
+PSQT weights in the feature transformer are updated sparsely — only the ~30–60 active
+feature rows are touched per position.  Any given piece-type/king-bucket combination
+appears infrequently, so material-scale corrections via PSQT converge very slowly
+(~8 updates per 5000 games for a typical feature row).
+
+Dense piece values provide a fast-converging material correction channel.  The
+`piece_val[6][8]` array (6 piece types PAWN..KING × 8 PSQT buckets = 48 floats) is
+initialized to zero; the per-feature PSQT retains the classical material values.
+Every position contributes gradient for every piece type present on the board, giving
+~200 gradient updates per game — orders of magnitude more than sparse PSQT.
+
+### Evaluation
+
+`nnue_dense_piece_val(pos, stm, pc)` computes the piece value correction in centipawns:
+
+```
+piece_count_diff[pt] = count(stm, pt) - count(opp, pt)    for pt in PAWN..KING
+pv_score = Σ_pt  piece_count_diff[pt] × piece_val[pt][bucket]
+```
+
+where `bucket = (pc - 1) / 4` (same PSQT bucket index used by the FC layer stacks).
+The result is added to `nnue_evaluate()` in `score.cpp`.
+
+### Gradient
+
+The gradient follows the same path as PSQT but is dense: for each position in the TD
+update, every piece type present contributes.  `piece_count_diff[6]` is stored in
+`NNUEActivations` alongside the accumulator snapshot.  During backprop, the gradient
+for `piece_val[pt][bucket]` is:
+
+```
+g_pv[pt][bucket] += grad_scale × piece_count_diff[pt]
+```
+
+### Optimizer
+
+Full Adam with `TDLEAF_ADAM_PV_LR0 = 1.6` (same as PSQT).  No weight decay is applied.
+Dense piece value gradients are included in the global L2 norm for gradient clipping.
+
+### PSQT gradient mean-centering
+
+Because both PSQT and `piece_val` can learn material-scale corrections, and Adam's
+`1/√v` normalization amplifies sparse PSQT updates to match dense `piece_val` updates
+in magnitude, the two would learn redundant corrections without intervention.
+
+To force PSQT to learn only **positional** (per-square) corrections, PSQT gradients
+are mean-centered per piece-type slot before each Adam step.  The HalfKAv2_hm feature
+index encodes 11 slots (`fi % 704 / 64`): own/opp × {pawn, knight, bishop, rook,
+queen} + king.  For each slot and each PSQT bucket, the mean gradient across all dirty
+features of that slot is subtracted.  This removes the uniform (material-scale)
+component while preserving per-square variation.
+
+Mean-centering is active only when `piece_val_active` is true (i.e., when dense piece
+values are in use).  Without `piece_val`, PSQT is the only material correction channel
+and should not be mean-centered.
+
+### Persistence
+
+Stored in `.tdleaf.bin` v5 format as 48 float32 values (at 128× resolution) plus 48
+uint32 update counts, appended after the FT bias section.  V4 files are accepted on
+load; piece values start from zero.
 
 ---
 
@@ -108,6 +182,7 @@ struct TDRecord {
     float   id_score_variance;               // variance of last TD_ID_HIST ID-depth scores (cp²)
     int     ft_idx[2][NNUE_MAX_FT_PER_PERSP]; // active FT feature indices
     int8_t  n_ft[2];                          // active feature count per perspective
+    int     piece_count_diff[6];              // count(stm,pt)-count(opp,pt) for dense piece_val
     position pos;                             // leaf position for Flavor A replay
 };
 ```
@@ -166,11 +241,12 @@ FC2 output (positional)
   → PSQT weight rows for each active feature index (sparse)
 ```
 
-The step size for each layer is governed by the Adam LR schedule.  Three separate LRs:
-`TDLEAF_ADAM_LR0` (FC layers + FT biases), `TDLEAF_ADAM_FT_LR0` (FT weights), and
-`TDLEAF_ADAM_PSQT_LR0` (PSQT).  FT weights use a higher LR than FC because sparse features
-receive far fewer updates (~8 per 5000 games vs. every game for FC); PSQT at int32 scale
-needs a different LR than FC at int8 scale.  See [Adam Optimizer](#adam-optimizer).
+The step size for each layer is governed by the Adam LR schedule.  Four separate LRs:
+`TDLEAF_ADAM_LR0` (FC layers + FT biases), `TDLEAF_ADAM_FT_LR0` (FT weights),
+`TDLEAF_ADAM_PSQT_LR0` (PSQT), and `TDLEAF_ADAM_PV_LR0` (dense piece values).
+FT weights use a higher LR than FC because sparse features receive far fewer updates
+(~8 per 5000 games vs. every game for FC); PSQT at int32 scale needs a different LR
+than FC at int8 scale.  See [Adam Optimizer](#adam-optimizer).
 
 ---
 
@@ -210,6 +286,7 @@ correction.
 | FT weights | RMSProp (per-weight v, no m) | `TDLEAF_ADAM_FT_LR0 = 0.2` | Sparse; higher LR than FC to compensate for fewer updates |
 | FT biases  | Full Adam | `TDLEAF_ADAM_LR0 = 0.13` | |
 | PSQT       | Full Adam | `TDLEAF_ADAM_PSQT_LR0 = 1.6` | Separate LR0 required — see below |
+| Dense piece values | Full Adam | `TDLEAF_ADAM_PV_LR0 = 1.6` | Dense; same LR as PSQT, no weight decay |
 
 ### Why a Separate PSQT LR0?
 
@@ -248,6 +325,7 @@ Moments are **not** persisted to `.tdleaf.bin` because:
 | `TDLEAF_ADAM_LR0` | 0.13 | Step size for FC layers + FT biases (float weight units) |
 | `TDLEAF_ADAM_FT_LR0` | 0.2 | Step size for FT weights (sparse; need higher LR than dense FC) |
 | `TDLEAF_ADAM_PSQT_LR0` | 1.6 | Step size for PSQT (int32 scale; ~1000× FC) |
+| `TDLEAF_ADAM_PV_LR0` | 1.6 | Step size for dense piece values (same scale as PSQT) |
 | `TDLEAF_ADAM_BETA1` | 0.9 | First-moment decay (FC weights/biases, FT biases, PSQT) |
 | `TDLEAF_ADAM_BETA2` | 0.999 | Second-moment decay (all layers) |
 | `TDLEAF_ADAM_EPS` | 1e-8 | Numerical floor in denominator |
@@ -312,24 +390,26 @@ Set `TDLEAF_ADAM_WARMUP = 0` to disable warmup.
 
 ---
 
-## Weight Persistence — `.tdleaf.bin` (version 4)
+## Weight Persistence — `.tdleaf.bin` (version 5)
 
 Saved at `{exec_path}nn-ad9b42354671.tdleaf.bin`.  Format:
 
 ```
-[version(4) + 8 FC stacks: per-layer float32×128 weights/biases + uint32 counts]
+[version(5) + 8 FC stacks: per-layer float32×128 weights/biases + uint32 counts]
 [n_ft_rows(4 bytes)]
 [per dirty row: fi(4) + ft_w[1024]×128 as float32[1024] + ft_cnt[1024] as uint32[1024]
                       + psqt_w[8]×128 as float32[8]    + psqt_cnt[8]  as uint32[8]]
-[FT bias section (v4): ft_bias[1024]×128 as float32[1024] + ft_bias_cnt[1024] as uint32[1024]]
+[FT bias section (v4+): ft_bias[1024]×128 as float32[1024] + ft_bias_cnt[1024] as uint32[1024]]
+[Dense piece values (v5): piece_val[6][8] as float32[48] + piece_val_cnt[6][8] as uint32[48]]
 ```
 
 Values are stored at 128× resolution (divide by 128 on load) to preserve sub-integer
 drift across sessions.  Update counts enable weighted averaging of concurrent training runs.
 
-Version 3 files (FC + FT/PSQT, no FT bias) are still accepted on load; FT biases start
-from the `.nnue` baseline and will be included on the next save.
-Version 2 files (FC only) are also still accepted.  A notice is printed in both cases.
+Version 4 files (FC + FT/PSQT + FT bias, no piece values) are accepted on load;
+piece values start from zero and will be included on the next save.
+Version 3 files (FC + FT/PSQT, no FT bias or piece values) are also still accepted.
+Version 2 files (FC only) are also still accepted.  A notice is printed in all cases.
 
 ---
 
@@ -376,6 +456,7 @@ atomic `rename()` of the main file.  The lock is held only during the re-read/wr
 | `ft_delta_f32` (heap) | ~92 MB | FT weight deltas (all rows) |
 | `psqt_delta_f32` (heap) | ~720 KB | PSQT weight deltas |
 | `ft_bias_delta[1024]` | 4 KB | FT bias deltas (static) |
+| `pv_delta[6][8]` | 192 B | Dense piece value deltas |
 
 Deltas are zeroed after each successful write (either on first write or after a
 re-read-merge write).  `nnue_load_fc_weights()` also zeros all deltas to establish a

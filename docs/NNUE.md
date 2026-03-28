@@ -62,6 +62,8 @@ The output follows the Stockfish 15.1 formula exactly:
 value_internal = (psqt_diff / 2 + positional) / OutputScale(16)   [Stockfish Value units]
 centipawns     = value_internal × 100 / NormalizeToPawnValue(361)
                = (psqt_diff / 2 + positional) × 100 / 5776
+piece_val_cp   = nnue_dense_piece_val(pos, stm, pc)   [TDLeaf only; 0 otherwise]
+final_cp       = centipawns + piece_val_cp
 ```
 
 where:
@@ -69,6 +71,10 @@ where:
 - `positional = fc2_out + fwdOut`
 - `fwdOut = fc0_raw[15] × 9600 / 8128`  (passthrough; `600×OutputScale / (127×WeightScaleBits)`)
 - `5776 = 16 × 361`
+- `piece_val_cp` = dense piece value correction from `piece_val[6][8]` (48 TDLeaf-trained
+  floats; 6 piece types × 8 PSQT buckets).  Sums `piece_val[pt][bucket]` for each STM piece
+  and subtracts for each opponent piece.  Initialized to zero; learns material adjustments
+  via dense gradients (~200 updates/game vs ~8/5000g for sparse PSQT features).
 
 Relevant quantization constants in `nnue.h`:
 
@@ -225,8 +231,8 @@ Self-play matches at 1 min + 0.1 s/move, 100 games each:
 
 ## TDLeaf(λ) Online Training
 
-All NNUE layers (FC0/FC1/FC2, FT biases, FT weights, PSQT) can be trained via
-TDLeaf(λ) self-play.  See `docs/TDLEAF.md` for the full reference.
+All NNUE layers (FC0/FC1/FC2, FT biases, FT weights, PSQT, dense piece values) can be
+trained via TDLeaf(λ) self-play.  See `docs/TDLEAF.md` for the full reference.
 Build with `NNUE=1 TDLEAF=1`.
 
 The `scripts/training_run.py` interactive script manages a full training run: net
@@ -291,6 +297,7 @@ Key hyperparameters (in `src/tdleaf.h`):
 | `TDLEAF_ADAM_LR0` | 0.13 | Adam step size for FC layers + FT biases |
 | `TDLEAF_ADAM_FT_LR0` | 0.2 | Adam step size for FT weights (sparse; higher LR) |
 | `TDLEAF_ADAM_PSQT_LR0` | 1.6 | Adam step size for PSQT (int32 scale) |
+| `TDLEAF_ADAM_PV_LR0` | 1.6 | Adam step size for dense piece values |
 | `TDLEAF_WEIGHT_DECAY` | 1e-4 | AdamW decoupled weight decay (FC + FT weights only) |
 | `TDLEAF_GRAD_CLIP_NORM` | 1.0 | Global gradient L2 norm clip threshold |
 

@@ -100,6 +100,12 @@ See memory for full implementation plan.
 
 ---
 
+## Known Issues
+
+(none currently open)
+
+---
+
 ## Resolved / Implemented
 
 ### ~~Init-nnue redesign~~ ✓ Implemented (2026-03-23)
