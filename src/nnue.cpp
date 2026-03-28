@@ -1749,7 +1749,8 @@ void nnue_forward_fp32(const int16_t acc[2][NNUE_HALF_DIMS],
 // nnue_accumulate_gradients — backprop one position, add to grad arrays
 // grad_scale = alpha * e_t * d_t * (1-d_t) / K * (100 / 5776)
 // ---------------------------------------------------------------------------
-void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale)
+void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
+                               bool fc_only)
 {
     int s = act.stack;
 
@@ -1813,6 +1814,12 @@ void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale)
             grad_l0_w[s][o * NNUE_L0_INPUT + i] += g_fc0_raw[o] * act.l0_in[i];
         grad_l0_b[s][o] += g_fc0_raw[o];
     }
+
+    // FC-only mode: skip FT/PSQT/FT-bias/piece_val gradients.
+    // Used during replay to avoid the FT feedback loop (rebuilt accumulators
+    // reflect current FT weights, so FT gradients would reinforce live-pass
+    // updates and cause eval divergence).
+    if (fc_only) return;
 
     // 1. Continue backward: FC0 inputs → accumulator → FT/PSQT weights
     // g_l0_in[i] = Σ_o g_fc0_raw[o] × l0_weights_f32[s][o×L0_INPUT+i]
