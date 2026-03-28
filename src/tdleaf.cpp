@@ -311,17 +311,20 @@ void tdleaf_replay(TDGameRecord &rec, float result, const char *save_path)
             // avoid feedback loop (rebuilt accumulators reflect current FT weights).
             tdleaf_accumulate_game(entry.rec, entry.result, /*fc_only=*/true);
         }
-        // Apply the summed gradients from all buffered games, then requantize
-        // so the next pass's tdleaf_refresh_scores() sees the updated weights.
-        nnue_clip_gradients(TDLEAF_GRAD_CLIP_NORM);
-        nnue_apply_gradients();
-        nnue_requantize_fc();
+        // Multi-pass (K>1): apply + requantize between passes so the next
+        // pass's tdleaf_refresh_scores() sees updated weights.
+        // Final/only pass: leave gradients accumulated — they merge into the
+        // next live batch's Adam step, avoiding a separate replay Adam step
+        // (which would double t_adam growth and corrupt m/v with correlated data).
+        if (pass < tdleaf_replay_k - 1) {
+            nnue_clip_gradients(TDLEAF_GRAD_CLIP_NORM);
+            nnue_apply_gradients();
+            nnue_requantize_fc();
+        }
     }
 
-    if (save_path && save_path[0]) {
-        if (!nnue_save_fc_weights(save_path))
-            fprintf(stderr, "TDLeaf replay: failed to save weights to %s\n", save_path);
-    }
+    // No save here — gradients from the final pass are pending in the grad
+    // arrays and will be applied with the next live batch.
 
     fprintf(stderr, "TDLeaf replay: %d pass(es) x %d game(s) in buffer\n",
             tdleaf_replay_k, n_valid);
