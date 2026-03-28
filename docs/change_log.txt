@@ -1,5 +1,15 @@
 Changes since 2017_12_24
 
+2026_03_28 -- Additive count merging in .tdleaf.bin save (src/nnue.cpp, docs/).
+               Fix: update counts in .tdleaf.bin were merged via max(file, session),
+               which prevented counts from accumulating across training cycles when
+               multiple engines write concurrently or when training_run.py checkpoints.
+               Now uses additive merge: merged_count = file_count + delta_count, where
+               delta_count tracks only updates since the last file sync.  Delta count
+               arrays added for FC, FT bias, PSQT, and piece_val layers (~1.3 MB static
+               + ~720 KB heap for PSQT).  FT weight counts remain max-based (92 MB
+               delta array too expensive; FT counts use global BC, not per-weight).
+
 2026_03_26 -- Mean-center PSQT gradients per piece-type slot (src/nnue.cpp, docs/).
                Before each Adam step, the mean PSQT gradient across all dirty features
                of the same piece-type slot (fi%704/64) is subtracted.  This forces PSQT
