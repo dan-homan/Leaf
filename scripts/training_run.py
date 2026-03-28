@@ -722,22 +722,48 @@ def main():
                           " next cycle.")
 
     except KeyboardInterrupt:
-        print("\n\n[Ctrl-C — exporting current weights before exit ...]")
+        interrupted = True
+        print("\n\n[Ctrl-C — cleaning up ...]")
+    else:
+        interrupted = False
 
     # -----------------------------------------------------------------------
     # Step 6 — Export final .nnue
     # -----------------------------------------------------------------------
     print()
-    output_net_name = f"{net_base}-{current_games}g.nnue"
-    output_net_path = os.path.join(learn_dir, output_net_name)
-    print(f"Exporting final weights → {output_net_name}")
-    result = subprocess.run(
-        [train_exe, "--write-nnue", output_net_path],
-        cwd=learn_dir
-    )
-    if result.returncode != 0:
-        print("--write-nnue failed.", file=sys.stderr)
-        sys.exit(result.returncode)
+    if interrupted and use_loop and current_games > prior_games:
+        # Validation is active and at least one cycle was accepted.
+        # The last validated snapshot already exists at <net>-<current_games>g.nnue.
+        # Do NOT overwrite it with unvalidated weights from the interrupted cycle.
+        # Instead, export unvalidated weights to a separate file.
+        unval_name = f"{net_base}-{current_games}g-unvalidated.nnue"
+        unval_path = os.path.join(learn_dir, unval_name)
+        print(f"Exporting unvalidated weights → {unval_name}")
+        result = subprocess.run(
+            [train_exe, "--write-nnue", unval_path],
+            cwd=learn_dir
+        )
+        if result.returncode != 0:
+            print("--write-nnue failed.", file=sys.stderr)
+        # Revert .tdleaf.bin to the last validated checkpoint so it matches
+        # the validated snapshot .nnue and is ready for the next session.
+        checkpoint_bin = tdleaf_bin + ".checkpoint"
+        if os.path.isfile(checkpoint_bin):
+            shutil.copy2(checkpoint_bin, tdleaf_bin)
+            print(f"  Reverted .tdleaf.bin to last validated checkpoint.")
+        output_net_name = f"{net_base}-{current_games}g.nnue"
+        print(f"  Last validated: {output_net_name}")
+    else:
+        output_net_name = f"{net_base}-{current_games}g.nnue"
+        output_net_path = os.path.join(learn_dir, output_net_name)
+        print(f"Exporting final weights → {output_net_name}")
+        result = subprocess.run(
+            [train_exe, "--write-nnue", output_net_path],
+            cwd=learn_dir
+        )
+        if result.returncode != 0:
+            print("--write-nnue failed.", file=sys.stderr)
+            sys.exit(result.returncode)
 
     # -----------------------------------------------------------------------
     # Summary

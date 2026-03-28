@@ -456,15 +456,32 @@ atomic `rename()` of the main file.  The lock is held only during the re-read/wr
 | `ft_delta_f32` (heap) | ~92 MB | FT weight deltas (all rows) |
 | `psqt_delta_f32` (heap) | ~720 KB | PSQT weight deltas |
 | `ft_bias_delta[1024]` | 4 KB | FT bias deltas (static) |
-| `pv_delta[6][8]` | 192 B | Dense piece value deltas |
+| `delta_piece_val[6][8]` | 192 B | Dense piece value deltas |
 
-Deltas are zeroed after each successful write (either on first write or after a
-re-read-merge write).  `nnue_load_fc_weights()` also zeros all deltas to establish a
-clean baseline.
+**Delta count arrays** (parallel to weight deltas, track update counts since last sync):
 
-**Update-count merging:** counts use `max(file_count, our_count)` — an approximation
-of the total cross-instance update count sufficient for monitoring; exact accumulation
-is not required for correctness.
+| Array | Size | Contents |
+|-------|------|----------|
+| `delta_l0_w_cnt[8][1024×16]` | 512 KB | FC0 weight delta counts |
+| `delta_l0_b_cnt[8][16]` | 512 B | FC0 bias delta counts |
+| `delta_l1_w_cnt[8][32×32]` | 256 KB | FC1 weight delta counts |
+| `delta_l1_b_cnt[8][32]` | 1 KB | FC1 bias delta counts |
+| `delta_l2_w_cnt[8][32]` | 1 KB | FC2 weight delta counts |
+| `delta_l2_b_cnt[8]` | 32 B | FC2 bias delta counts |
+| `delta_ft_bias_cnt[1024]` | 4 KB | FT bias delta counts (static) |
+| `delta_piece_val_cnt[6][8]` | 192 B | Dense piece value delta counts |
+| `delta_psqt_cnt` (heap) | ~720 KB | PSQT delta counts |
+
+Deltas (both weight and count) are zeroed after each successful write (either on first
+write or after a re-read-merge write).  `nnue_load_fc_weights()` also zeros all deltas
+to establish a clean baseline.
+
+**Update-count merging:** counts use additive merge: `merged = file_count + delta_count`.
+Each instance's delta count tracks only updates since the last file sync, so adding it
+to the file's count correctly accumulates across concurrent instances and training cycles.
+FT weight counts remain max-based (`max(file, ours)`) because per-weight delta counts
+would require 92 MB; FT counts use global bias correction so exact counts are less
+critical.
 
 ### Usage with match.py
 

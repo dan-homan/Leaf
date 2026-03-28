@@ -1220,6 +1220,20 @@ static float delta_l1_w[NNUE_LAYER_STACKS][NNUE_L1_SIZE * NNUE_L1_PADDED];
 static float delta_l1_b[NNUE_LAYER_STACKS][NNUE_L1_SIZE];
 static float delta_l2_w[NNUE_LAYER_STACKS][NNUE_L2_PADDED];
 static float delta_l2_b[NNUE_LAYER_STACKS];
+// Per-session delta counts: incremented alongside absolute counts in nnue_apply_gradients.
+// On save, merged count = file_count + delta_count (additive, not max-based).
+// Cleared after each file sync.  FT weights keep max-based merge (counts not used
+// for per-weight BC, and 92 MB delta array would be too expensive).
+static uint32_t delta_l0_w_cnt[NNUE_LAYER_STACKS][NNUE_L0_SIZE * NNUE_L0_INPUT];
+static uint32_t delta_l0_b_cnt[NNUE_LAYER_STACKS][NNUE_L0_SIZE];
+static uint32_t delta_l1_w_cnt[NNUE_LAYER_STACKS][NNUE_L1_SIZE * NNUE_L1_PADDED];
+static uint32_t delta_l1_b_cnt[NNUE_LAYER_STACKS][NNUE_L1_SIZE];
+static uint32_t delta_l2_w_cnt[NNUE_LAYER_STACKS][NNUE_L2_PADDED];
+static uint32_t delta_l2_b_cnt[NNUE_LAYER_STACKS];
+static uint32_t delta_ft_bias_cnt[NNUE_HALF_DIMS];
+static uint32_t delta_piece_val_cnt[6][NNUE_PSQT_BKTS];
+// PSQT delta counts: heap-allocated (~720 KB), parallels psqt_weights_cnt.
+static uint32_t *delta_psqt_cnt = nullptr;
 
 // FT/PSQT float shadow arrays (heap — OS lazy-paged, physical use ∝ active features)
 // ft_weights_f32 / grad_ft_w: [FT_INPUTS × HALF_DIMS]  ~92 MB each
@@ -1380,6 +1394,15 @@ void nnue_init_zero_weights()
     memset(grad_l1_b, 0, sizeof(grad_l1_b));
     memset(grad_l2_w, 0, sizeof(grad_l2_w));
     memset(grad_l2_b, 0, sizeof(grad_l2_b));
+    // Delta counts — zero for fresh network.
+    memset(delta_l0_w_cnt, 0, sizeof(delta_l0_w_cnt));
+    memset(delta_l0_b_cnt, 0, sizeof(delta_l0_b_cnt));
+    memset(delta_l1_w_cnt, 0, sizeof(delta_l1_w_cnt));
+    memset(delta_l1_b_cnt, 0, sizeof(delta_l1_b_cnt));
+    memset(delta_l2_w_cnt, 0, sizeof(delta_l2_w_cnt));
+    memset(delta_l2_b_cnt, 0, sizeof(delta_l2_b_cnt));
+    memset(delta_ft_bias_cnt,   0, sizeof(delta_ft_bias_cnt));
+    memset(delta_piece_val_cnt, 0, sizeof(delta_piece_val_cnt));
 
     // Adam moment arrays — session-local, reset to zero for fresh network.
     memset(v_l0_w,    0, sizeof(v_l0_w));
@@ -1451,6 +1474,9 @@ void nnue_init_zero_weights()
         memset(v_ft_w,    0, ft_sz   * sizeof(float));
         memset(v_psqt_w,  0, psqt_sz * sizeof(float));
         memset(m_psqt_w,  0, psqt_sz * sizeof(float));
+        // PSQT delta counts — heap allocated, parallels psqt_weights_cnt.
+        if (!delta_psqt_cnt) delta_psqt_cnt = new uint32_t[psqt_sz]();
+        memset(delta_psqt_cnt, 0, psqt_sz * sizeof(uint32_t));
 
         // Enumerate all possible features and assign pure material values.
         // All 8 PSQT buckets receive the same value (no piece-square bonuses).
@@ -1582,6 +1608,16 @@ void nnue_init_fp32_weights()
     memset(delta_l1_b,     0, sizeof(delta_l1_b));
     memset(delta_l2_w,     0, sizeof(delta_l2_w));
     memset(delta_l2_b,     0, sizeof(delta_l2_b));
+    memset(delta_l0_w_cnt, 0, sizeof(delta_l0_w_cnt));
+    memset(delta_l0_b_cnt, 0, sizeof(delta_l0_b_cnt));
+    memset(delta_l1_w_cnt, 0, sizeof(delta_l1_w_cnt));
+    memset(delta_l1_b_cnt, 0, sizeof(delta_l1_b_cnt));
+    memset(delta_l2_w_cnt, 0, sizeof(delta_l2_w_cnt));
+    memset(delta_l2_b_cnt, 0, sizeof(delta_l2_b_cnt));
+    memset(delta_ft_bias_cnt, 0, sizeof(delta_ft_bias_cnt));
+    memset(delta_piece_val_cnt, 0, sizeof(delta_piece_val_cnt));
+    if (!delta_psqt_cnt) delta_psqt_cnt = new uint32_t[psqt_sz]();
+    memset(delta_psqt_cnt, 0, psqt_sz * sizeof(uint32_t));
     if (ft_delta_f32)   memset(ft_delta_f32,   0, ft_sz   * sizeof(float));
     if (psqt_delta_f32) memset(psqt_delta_f32, 0, psqt_sz * sizeof(float));
 
@@ -2002,14 +2038,14 @@ void nnue_apply_gradients()
                 // shadow drifts beyond ±127 while the requantised inference value is stuck.
                 if (l0_weights_f32[s][i] >  127.0f) l0_weights_f32[s][i] =  127.0f;
                 if (l0_weights_f32[s][i] < -127.0f) l0_weights_f32[s][i] = -127.0f;
-                l0_weights_cnt[s][i]++;
+                l0_weights_cnt[s][i]++;  delta_l0_w_cnt[s][i]++;
             }
         }
         for (int i = 0; i < NNUE_L0_SIZE; i++) {
             if (grad_l0_b[s][i] != 0.0f) {
                 float dw = do_step(grad_l0_b[s][i], m_l0_b[s][i], v_l0_b[s][i], l0_biases_cnt[s][i]);
                 l0_biases_f32[s][i] -= dw;  delta_l0_b[s][i] -= dw;
-                l0_biases_cnt[s][i]++;
+                l0_biases_cnt[s][i]++;  delta_l0_b_cnt[s][i]++;
             }
         }
         for (int i = 0; i < NNUE_L1_SIZE * NNUE_L1_PADDED; i++) {
@@ -2020,14 +2056,14 @@ void nnue_apply_gradients()
                 // Clamp float shadow to int8 range (same reason as FC0).
                 if (l1_weights_f32[s][i] >  127.0f) l1_weights_f32[s][i] =  127.0f;
                 if (l1_weights_f32[s][i] < -127.0f) l1_weights_f32[s][i] = -127.0f;
-                l1_weights_cnt[s][i]++;
+                l1_weights_cnt[s][i]++;  delta_l1_w_cnt[s][i]++;
             }
         }
         for (int i = 0; i < NNUE_L1_SIZE; i++) {
             if (grad_l1_b[s][i] != 0.0f) {
                 float dw = do_step(grad_l1_b[s][i], m_l1_b[s][i], v_l1_b[s][i], l1_biases_cnt[s][i]);
                 l1_biases_f32[s][i] -= dw;  delta_l1_b[s][i] -= dw;
-                l1_biases_cnt[s][i]++;
+                l1_biases_cnt[s][i]++;  delta_l1_b_cnt[s][i]++;
             }
         }
         for (int i = 0; i < NNUE_L2_PADDED; i++) {
@@ -2035,13 +2071,13 @@ void nnue_apply_gradients()
                 float dw = do_step(grad_l2_w[s][i], m_l2_w[s][i], v_l2_w[s][i], l2_weights_cnt[s][i]);
                 float wd = TDLEAF_WEIGHT_DECAY * fc_lr * l2_weights_f32[s][i];
                 l2_weights_f32[s][i] -= dw + wd;  delta_l2_w[s][i] -= dw + wd;
-                l2_weights_cnt[s][i]++;
+                l2_weights_cnt[s][i]++;  delta_l2_w_cnt[s][i]++;
             }
         }
         if (grad_l2_b[s] != 0.0f) {
             float dw = do_step(grad_l2_b[s], m_l2_b[s], v_l2_b[s], l2_bias_cnt[s]);
             l2_bias_f32[s] -= dw;  delta_l2_b[s] -= dw;
-            l2_bias_cnt[s]++;
+            l2_bias_cnt[s]++;  delta_l2_b_cnt[s]++;
         }
     }
     memset(grad_l0_w, 0, sizeof(grad_l0_w));
@@ -2120,6 +2156,7 @@ void nnue_apply_gradients()
                     float dw = do_step_psqt(gpw[b], m_psqt_w[vi], v_psqt_w[vi], pcnt[b]);
                     pw[b] -= dw;  if (pd) pd[b] -= dw;
                     pcnt[b]++;
+                    if (delta_psqt_cnt) delta_psqt_cnt[(size_t)fi * NNUE_PSQT_BKTS + b]++;
                     gpw[b] = 0.0f;
                 }
             }
@@ -2133,7 +2170,7 @@ void nnue_apply_gradients()
         float dw = do_step(grad_ft_bias[d], m_ft_bias[d], v_ft_bias[d], ft_bias_cnt[d]);
         ft_biases_f32[d] -= dw;
         ft_bias_delta[d] -= dw;
-        ft_bias_cnt[d]++;
+        ft_bias_cnt[d]++;  delta_ft_bias_cnt[d]++;
         grad_ft_bias[d] = 0.0f;
         ft_biases[d] = (int16_t)std::max(-32767.0f,
                                 std::min( 32767.0f, roundf(ft_biases_f32[d])));
@@ -2160,7 +2197,7 @@ void nnue_apply_gradients()
                                       piece_val_cnt[pt][b]);
                 piece_val_f32[pt][b] -= dw;
                 delta_piece_val[pt][b] -= dw;
-                piece_val_cnt[pt][b]++;
+                piece_val_cnt[pt][b]++;  delta_piece_val_cnt[pt][b]++;
                 grad_piece_val[pt][b] = 0.0f;
             }
         }
@@ -2349,7 +2386,7 @@ bool nnue_save_fc_weights(const char *path)
                    (version == TDLEAF_VERSION || version == 4u || version == 3u || version == 2u));
         if (ok) {
             // FC section: float32 × TDLEAF_SCALE per weight, then uint32 counts.
-            // Merge: shadow = file_value + our_delta; count = max(file, ours).
+            // Merge: shadow = file_value + our_delta; count = file_count + our_delta_count.
             for (int s = 0; s < NNUE_LAYER_STACKS && ok; s++) {
                 auto merge_f = [&](float *shadow, float *delta, uint32_t *cnt, int n) -> bool {
                     for (int i = 0; i < n; i++) {
@@ -2360,26 +2397,30 @@ bool nnue_save_fc_weights(const char *path)
                     }
                     return true;
                 };
-                auto merge_cnt = [&](uint32_t *cnt, int n) -> bool {
+                // Additive count merge: cnt = file_count + delta_count.
+                // delta_cnt tracks only updates since last sync, so adding it to
+                // the file's count correctly accumulates across concurrent instances.
+                auto merge_cnt = [&](uint32_t *cnt, uint32_t *dcnt, int n) -> bool {
                     for (int i = 0; i < n; i++) {
                         uint32_t fc;
                         if (fread(&fc, sizeof(uint32_t), 1, cur) != 1) return false;
-                        if (fc > cnt[i]) cnt[i] = fc;
+                        cnt[i] = fc + dcnt[i];
+                        dcnt[i] = 0;
                     }
                     return true;
                 };
                 ok = merge_f(l0_biases_f32[s],  delta_l0_b[s], l0_biases_cnt[s],  NNUE_L0_SIZE)
-                  && merge_cnt(l0_biases_cnt[s],  NNUE_L0_SIZE)
+                  && merge_cnt(l0_biases_cnt[s],  delta_l0_b_cnt[s], NNUE_L0_SIZE)
                   && merge_f(l0_weights_f32[s], delta_l0_w[s], l0_weights_cnt[s], NNUE_L0_SIZE * NNUE_L0_INPUT)
-                  && merge_cnt(l0_weights_cnt[s], NNUE_L0_SIZE * NNUE_L0_INPUT)
+                  && merge_cnt(l0_weights_cnt[s], delta_l0_w_cnt[s], NNUE_L0_SIZE * NNUE_L0_INPUT)
                   && merge_f(l1_biases_f32[s],  delta_l1_b[s], l1_biases_cnt[s],  NNUE_L1_SIZE)
-                  && merge_cnt(l1_biases_cnt[s],  NNUE_L1_SIZE)
+                  && merge_cnt(l1_biases_cnt[s],  delta_l1_b_cnt[s], NNUE_L1_SIZE)
                   && merge_f(l1_weights_f32[s], delta_l1_w[s], l1_weights_cnt[s], NNUE_L1_SIZE * NNUE_L1_PADDED)
-                  && merge_cnt(l1_weights_cnt[s], NNUE_L1_SIZE * NNUE_L1_PADDED)
+                  && merge_cnt(l1_weights_cnt[s], delta_l1_w_cnt[s], NNUE_L1_SIZE * NNUE_L1_PADDED)
                   && merge_f(&l2_bias_f32[s],    &delta_l2_b[s], &l2_bias_cnt[s],   1)
-                  && merge_cnt(&l2_bias_cnt[s],   1)
+                  && merge_cnt(&l2_bias_cnt[s],   &delta_l2_b_cnt[s], 1)
                   && merge_f(l2_weights_f32[s], delta_l2_w[s], l2_weights_cnt[s], NNUE_L2_PADDED)
-                  && merge_cnt(l2_weights_cnt[s], NNUE_L2_PADDED);
+                  && merge_cnt(l2_weights_cnt[s], delta_l2_w_cnt[s], NNUE_L2_PADDED);
             }
             // FT/PSQT sparse section (v3+).
             if (ok && (version >= 3u) && ft_weights_f32) {
@@ -2407,14 +2448,16 @@ bool nnue_save_fc_weights(const char *path)
                             if (fd) fd[d] = 0.0f;
                             if (tmp_wc[d] > wc[d]) wc[d] = tmp_wc[d];
                         }
-                        // Merge PSQT.
+                        // Merge PSQT: additive count merge via delta_psqt_cnt.
                         float    *pw  = psqt_weights_f32 + (size_t)fi * NNUE_PSQT_BKTS;
                         uint32_t *pc  = psqt_weights_cnt + (size_t)fi * NNUE_PSQT_BKTS;
                         float    *pd  = psqt_delta_f32   ? psqt_delta_f32 + (size_t)fi * NNUE_PSQT_BKTS : nullptr;
+                        uint32_t *pdc = delta_psqt_cnt   ? delta_psqt_cnt + (size_t)fi * NNUE_PSQT_BKTS : nullptr;
                         for (int b = 0; b < NNUE_PSQT_BKTS; b++) {
                             pw[b] = tmp_p[b] / TDLEAF_SCALE + (pd ? pd[b] : 0.0f);
                             if (pd) pd[b] = 0.0f;
-                            if (tmp_pc[b] > pc[b]) pc[b] = tmp_pc[b];
+                            if (pdc) { pc[b] = tmp_pc[b] + pdc[b]; pdc[b] = 0; }
+                            else     { if (tmp_pc[b] > pc[b]) pc[b] = tmp_pc[b]; }
                         }
                     }
                 }
@@ -2427,7 +2470,8 @@ bool nnue_save_fc_weights(const char *path)
                         for (int d = 0; d < NNUE_HALF_DIMS; d++) {
                             ft_biases_f32[d] = tmp_b[d] / TDLEAF_SCALE + ft_bias_delta[d];
                             ft_bias_delta[d] = 0.0f;
-                            if (tmp_bc[d] > ft_bias_cnt[d]) ft_bias_cnt[d] = tmp_bc[d];
+                            ft_bias_cnt[d] = tmp_bc[d] + delta_ft_bias_cnt[d];
+                            delta_ft_bias_cnt[d] = 0;
                         }
                     }
                 }
@@ -2441,8 +2485,8 @@ bool nnue_save_fc_weights(const char *path)
                             for (int b = 0; b < NNUE_PSQT_BKTS; b++) {
                                 piece_val_f32[pt][b] = tmp_pv[pt][b] / TDLEAF_SCALE + delta_piece_val[pt][b];
                                 delta_piece_val[pt][b] = 0.0f;
-                                if (tmp_pvc[pt][b] > piece_val_cnt[pt][b])
-                                    piece_val_cnt[pt][b] = tmp_pvc[pt][b];
+                                piece_val_cnt[pt][b] = tmp_pvc[pt][b] + delta_piece_val_cnt[pt][b];
+                                delta_piece_val_cnt[pt][b] = 0;
                             }
                         }
                         piece_val_active = true;
@@ -2461,6 +2505,15 @@ bool nnue_save_fc_weights(const char *path)
             memset(delta_l1_b, 0, sizeof(delta_l1_b));
             memset(delta_l2_w, 0, sizeof(delta_l2_w));
             memset(delta_l2_b, 0, sizeof(delta_l2_b));
+            memset(delta_l0_w_cnt, 0, sizeof(delta_l0_w_cnt));
+            memset(delta_l0_b_cnt, 0, sizeof(delta_l0_b_cnt));
+            memset(delta_l1_w_cnt, 0, sizeof(delta_l1_w_cnt));
+            memset(delta_l1_b_cnt, 0, sizeof(delta_l1_b_cnt));
+            memset(delta_l2_w_cnt, 0, sizeof(delta_l2_w_cnt));
+            memset(delta_l2_b_cnt, 0, sizeof(delta_l2_b_cnt));
+            memset(delta_ft_bias_cnt,   0, sizeof(delta_ft_bias_cnt));
+            memset(delta_piece_val_cnt, 0, sizeof(delta_piece_val_cnt));
+            if (delta_psqt_cnt) memset(delta_psqt_cnt, 0, (size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS * sizeof(uint32_t));
         }
     } else {
         // No existing file — first write.  Clear deltas (incorporated in shadow directly).
@@ -2470,6 +2523,15 @@ bool nnue_save_fc_weights(const char *path)
         memset(delta_l1_b, 0, sizeof(delta_l1_b));
         memset(delta_l2_w, 0, sizeof(delta_l2_w));
         memset(delta_l2_b, 0, sizeof(delta_l2_b));
+        memset(delta_l0_w_cnt, 0, sizeof(delta_l0_w_cnt));
+        memset(delta_l0_b_cnt, 0, sizeof(delta_l0_b_cnt));
+        memset(delta_l1_w_cnt, 0, sizeof(delta_l1_w_cnt));
+        memset(delta_l1_b_cnt, 0, sizeof(delta_l1_b_cnt));
+        memset(delta_l2_w_cnt, 0, sizeof(delta_l2_w_cnt));
+        memset(delta_l2_b_cnt, 0, sizeof(delta_l2_b_cnt));
+        memset(delta_ft_bias_cnt,   0, sizeof(delta_ft_bias_cnt));
+        memset(delta_piece_val_cnt, 0, sizeof(delta_piece_val_cnt));
+        if (delta_psqt_cnt) memset(delta_psqt_cnt, 0, (size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS * sizeof(uint32_t));
         if (ft_delta_f32)   memset(ft_delta_f32,   0, (size_t)NNUE_FT_INPUTS * NNUE_HALF_DIMS  * sizeof(float));
         if (psqt_delta_f32) memset(psqt_delta_f32, 0, (size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS * sizeof(float));
         memset(ft_bias_delta,   0, sizeof(ft_bias_delta));
@@ -2755,6 +2817,15 @@ bool nnue_load_fc_weights(const char *path)
     memset(delta_l1_b, 0, sizeof(delta_l1_b));
     memset(delta_l2_w, 0, sizeof(delta_l2_w));
     memset(delta_l2_b, 0, sizeof(delta_l2_b));
+    memset(delta_l0_w_cnt, 0, sizeof(delta_l0_w_cnt));
+    memset(delta_l0_b_cnt, 0, sizeof(delta_l0_b_cnt));
+    memset(delta_l1_w_cnt, 0, sizeof(delta_l1_w_cnt));
+    memset(delta_l1_b_cnt, 0, sizeof(delta_l1_b_cnt));
+    memset(delta_l2_w_cnt, 0, sizeof(delta_l2_w_cnt));
+    memset(delta_l2_b_cnt, 0, sizeof(delta_l2_b_cnt));
+    memset(delta_ft_bias_cnt,   0, sizeof(delta_ft_bias_cnt));
+    memset(delta_piece_val_cnt, 0, sizeof(delta_piece_val_cnt));
+    if (delta_psqt_cnt) memset(delta_psqt_cnt, 0, (size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS * sizeof(uint32_t));
     if (ft_delta_f32)   memset(ft_delta_f32,   0, (size_t)NNUE_FT_INPUTS * NNUE_HALF_DIMS  * sizeof(float));
     if (psqt_delta_f32) memset(psqt_delta_f32, 0, (size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS * sizeof(float));
     memset(grad_ft_bias,    0, sizeof(grad_ft_bias));
