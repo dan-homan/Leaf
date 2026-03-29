@@ -19,7 +19,7 @@ and <base>.nnue when --baseline is given.  The .nnue is constructed by
 applying merged float weights (divided by TDLEAF_SCALE=128) on top of
 the baseline network, requantizing to int8/int16/int32.
 
-The output .tdleaf.bin is a valid v4 file that can be loaded by Leaf.
+The output .tdleaf.bin is a valid v5 file that can be loaded by Leaf.
 """
 
 import argparse
@@ -30,7 +30,7 @@ from pathlib import Path
 
 # Constants matching nnue.cpp / nnue.h
 TDLEAF_MAGIC   = 0x544D4C46  # "TMLF"
-TDLEAF_VERSION = 4
+TDLEAF_VERSION = 5
 TDLEAF_SCALE   = 128.0
 
 LAYER_STACKS = 8
@@ -121,7 +121,7 @@ class FCBlock:
 
 
 class TDLeafFile:
-    """Parsed .tdleaf.bin v4 file."""
+    """Parsed .tdleaf.bin v5 file."""
     def __init__(self):
         self.version = TDLEAF_VERSION
         self.fc = [FCBlock() for _ in range(LAYER_STACKS)]
@@ -132,6 +132,9 @@ class TDLeafFile:
         # FT biases
         self.ft_bias_w = np.zeros(HALF_DIMS, dtype=np.float32)
         self.ft_bias_c = np.zeros(HALF_DIMS, dtype=np.uint32)
+        # Dense piece values: 6 piece types × 8 PSQT buckets (v5+)
+        self.piece_val_w = np.zeros(6 * PSQT_BKTS, dtype=np.float32)
+        self.piece_val_c = np.zeros(6 * PSQT_BKTS, dtype=np.uint32)
 
     @classmethod
     def load(cls, path):
@@ -141,7 +144,7 @@ class TDLeafFile:
             version = read_u32(f)
             if magic != TDLEAF_MAGIC:
                 raise ValueError(f"{path}: bad magic 0x{magic:08X} (expected 0x{TDLEAF_MAGIC:08X})")
-            if version not in (2, 3, 4):
+            if version not in (2, 3, 4, 5):
                 raise ValueError(f"{path}: unsupported version {version}")
             obj.version = version
 
@@ -164,6 +167,10 @@ class TDLeafFile:
                 obj.ft_bias_w = read_f32_array(f, HALF_DIMS)
                 obj.ft_bias_c = read_u32_array(f, HALF_DIMS)
 
+            if version >= 5:
+                obj.piece_val_w = read_f32_array(f, 6 * PSQT_BKTS)
+                obj.piece_val_c = read_u32_array(f, 6 * PSQT_BKTS)
+
         return obj
 
     def save(self, path):
@@ -184,9 +191,13 @@ class TDLeafFile:
                 write_f32_array(f, ps_w)
                 write_u32_array(f, ps_c)
 
-            # FT biases
+            # FT biases (v4+)
             write_f32_array(f, self.ft_bias_w)
             write_u32_array(f, self.ft_bias_c)
+
+            # Dense piece values (v5)
+            write_f32_array(f, self.piece_val_w)
+            write_u32_array(f, self.piece_val_c)
 
 
 # ---------------------------------------------------------------------------
@@ -461,6 +472,10 @@ def merge_files(files, output_base, baseline_path=None, report=False):
     bias_pairs = [(td.ft_bias_w, td.ft_bias_c) for td in loaded]
     out.ft_bias_w, out.ft_bias_c = weighted_merge_arrays(bias_pairs)
 
+    # --- Dense piece values ---
+    pv_pairs = [(td.piece_val_w, td.piece_val_c) for td in loaded]
+    out.piece_val_w, out.piece_val_c = weighted_merge_arrays(pv_pairs)
+
     # --- Write .tdleaf.bin ---
     tdleaf_path = output_base + '.tdleaf.bin'
     out.save(tdleaf_path)
@@ -577,8 +592,10 @@ def print_report(loaded, merged):
                     int(td.fc[s].l2_weight_c.sum())
                     for s in range(LAYER_STACKS))
         ft_total = sum(int(row[1].sum()) for row in td.ft_rows.values())
+        pv_total = int(td.piece_val_c.sum())
         print(f"  File {i}: FC weight updates={total:,}, "
-              f"FT rows={len(td.ft_rows):,}, FT weight updates={ft_total:,}")
+              f"FT rows={len(td.ft_rows):,}, FT weight updates={ft_total:,}, "
+              f"piece_val updates={pv_total:,}")
 
     # Merged stats
     m_total = sum(int(merged.fc[s].l0_weight_c.sum()) +
@@ -586,8 +603,10 @@ def print_report(loaded, merged):
                   int(merged.fc[s].l2_weight_c.sum())
                   for s in range(LAYER_STACKS))
     m_ft_total = sum(int(row[1].sum()) for row in merged.ft_rows.values())
+    m_pv_total = int(merged.piece_val_c.sum())
     print(f"  Merged: FC weight updates={m_total:,}, "
-          f"FT rows={len(merged.ft_rows):,}, FT weight updates={m_ft_total:,}")
+          f"FT rows={len(merged.ft_rows):,}, FT weight updates={m_ft_total:,}, "
+          f"piece_val updates={m_pv_total:,}")
 
 
 def main():

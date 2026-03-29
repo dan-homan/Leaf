@@ -194,7 +194,7 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
   //-----------------------------  
   // checking book
   //-----------------------------  
-  if(gr->book && !ponder && !uci_in_ponder) {
+  if(gr->book && !ponder && !uci_in_ponder && !analysis_mode) {
     bookm = opening_book(p.hcode, p, gr);
     if(bookm.t) {
      tdata[0].pc[0][0] = bookm; tdata[0].pc[0][1].t = 0;
