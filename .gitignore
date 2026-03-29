@@ -37,3 +37,4 @@ src/*.cpp_*
 src/*.h_save
 src/main_bk.dat
 src/debug.txt
+scripts/__pycache__

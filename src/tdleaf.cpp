@@ -114,7 +114,8 @@ void tdleaf_record_ply(TDGameRecord &rec,
 // tdleaf_accumulate_game — steps 1-3: compute d[], e[], accumulate gradients.
 // Does NOT apply or save.  Called by both tdleaf_update_after_game and replay.
 // ---------------------------------------------------------------------------
-static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
+static void tdleaf_accumulate_game(TDGameRecord &rec, float result,
+                                   bool fc_only = false)
 {
     int T = rec.n_plies;
 
@@ -170,7 +171,7 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
             act.piece_count_diff[pt - 1] = (int8_t)(rec.plies[t].pos.plist[stm_p][pt][0]
                                                    - rec.plies[t].pos.plist[stm_p ^ 1][pt][0]);
 
-        nnue_accumulate_gradients(act, grad_scale);
+        nnue_accumulate_gradients(act, grad_scale, fc_only);
     }
 }
 
@@ -306,10 +307,12 @@ void tdleaf_replay(TDGameRecord &rec, float result, const char *save_path)
 
             // Refresh scores from current weights before forming d[t].
             tdleaf_refresh_scores(entry.rec);
-            tdleaf_accumulate_game(entry.rec, entry.result);
+            // FC-only: suppress FT/PSQT/piece_val gradients during replay to
+            // avoid feedback loop (rebuilt accumulators reflect current FT weights).
+            tdleaf_accumulate_game(entry.rec, entry.result, /*fc_only=*/true);
         }
-        // Apply the summed gradients from all buffered games, then requantize
-        // so the next pass's tdleaf_refresh_scores() sees the updated weights.
+        // Apply the summed replay gradients, then requantize so the next
+        // pass's tdleaf_refresh_scores() sees the updated weights.
         nnue_clip_gradients(TDLEAF_GRAD_CLIP_NORM);
         nnue_apply_gradients();
         nnue_requantize_fc();

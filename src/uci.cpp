@@ -200,6 +200,7 @@ static void uci_send_options()
     printf("option name Threads type spin default 1 min 1 max %d\n", MAX_THREADS);
     printf("option name Ponder type check default false\n");
     printf("option name UCI_AnalyseMode type check default false\n");
+    printf("option name Skill type spin default %d min 1 max 100\n", game.knowledge_scale);
     fflush(stdout);
 }
 
@@ -233,6 +234,11 @@ static void uci_setoption(const std::string &line)
         game.ts.initialize_extra_threads();
     } else if (name_str == "Ponder") {
         ponder_flag = (val_str == "true") ? 1 : 0;
+    } else if (name_str == "Skill") {
+        int v = atoi(val_str.c_str());
+        if (v < 1) v = 1;
+        if (v > 100) v = 100;
+        game.knowledge_scale = v;
     }
     // UCI_AnalyseMode handled per "go infinite"
 }
