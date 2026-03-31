@@ -1356,7 +1356,7 @@ static uint32_t  t_adam    = 0;
 #define INIT_FC1_W_STD    3.0f      // moderate — fan-in 30, low saturation risk
 #define INIT_FC2_W_STD    2.0f      // small — keep initial positional output ≈ 0 cp
 
-void nnue_init_zero_weights()
+void nnue_init_zero_weights(bool noprior)
 {
     // ---- FC layers: zero-mean weights (He principle); FC0 std He-adjusted; biases zero ----
     std::mt19937 rng(42);  // fixed seed for reproducibility
@@ -1437,7 +1437,8 @@ void nnue_init_zero_weights()
     //
     // No piece-square bonuses — just pure material values, same across all 8 buckets.
     // TDLeaf learns positional adjustments on top of this strong material prior.
-    static const float PSQT_VAL[7] = {
+    // Classical material prior (default): piece values from score.h
+    static const float PSQT_VAL_CLASSICAL[7] = {
         0.f,                        // EMPTY
         100.f * 5776.f / 100.f,     // PAWN   = 5776.0
         377.f * 5776.f / 100.f,     // KNIGHT = 21775.5
@@ -1446,6 +1447,17 @@ void nnue_init_zero_weights()
         1197.f * 5776.f / 100.f,    // QUEEN  = 69143.7
         0.f,                        // KING   = 0 (no material value)
     };
+    // No-prior: all pieces at 100 cp — forces learning of material values
+    static const float PSQT_VAL_NOPRIOR[7] = {
+        0.f,                        // EMPTY
+        100.f * 5776.f / 100.f,     // PAWN   = 5776.0
+        100.f * 5776.f / 100.f,     // KNIGHT = 5776.0
+        100.f * 5776.f / 100.f,     // BISHOP = 5776.0
+        100.f * 5776.f / 100.f,     // ROOK   = 5776.0
+        100.f * 5776.f / 100.f,     // QUEEN  = 5776.0
+        0.f,                        // KING   = 0 (no material value)
+    };
+    const float *PSQT_VAL = noprior ? PSQT_VAL_NOPRIOR : PSQT_VAL_CLASSICAL;
 
     if (ft_weights_f32) {
         size_t ft_sz   = (size_t)NNUE_FT_INPUTS * NNUE_HALF_DIMS;
@@ -1518,12 +1530,13 @@ void nnue_init_zero_weights()
     nnue_zero_initialized = true;
     printf("NNUE TDLeaf: FC weights=N(0,{%.0f,%.0f,%.0f}); "
            "FT weights=N(0,%.0f); biases=zero; "
-           "PSQT=pure material (P=%d N=%d B=%d R=%d Q=%d); "
+           "PSQT=%s (P=%d N=%d B=%d R=%d Q=%d); "
            "piece_val=zero (dense corrections)\n",
            INIT_FC0_W_STD, INIT_FC1_W_STD, INIT_FC2_W_STD, INIT_FT_W_STD,
-           (int)(100.f * 5776.f / 100.f), (int)(377.f * 5776.f / 100.f),
-           (int)(399.f * 5776.f / 100.f), (int)(596.f * 5776.f / 100.f),
-           (int)(1197.f * 5776.f / 100.f));
+           noprior ? "uniform 100cp" : "classical material",
+           (int)PSQT_VAL[PAWN], (int)PSQT_VAL[KNIGHT],
+           (int)PSQT_VAL[BISHOP], (int)PSQT_VAL[ROOK],
+           (int)PSQT_VAL[QUEEN]);
 }
 
 // ---------------------------------------------------------------------------
@@ -2007,9 +2020,10 @@ void nnue_apply_gradients()
         : 1.0f;
 
     // Effective LRs: warmup × LR0 (constant after warmup completes).
-    const float fc_lr   = warmup_factor * TDLEAF_ADAM_LR0;
-    const float ft_lr   = warmup_factor * TDLEAF_ADAM_FT_LR0;
-    const float psqt_lr = warmup_factor * TDLEAF_ADAM_PSQT_LR0;
+    const float fc_lr      = warmup_factor * TDLEAF_ADAM_LR0;
+    const float ft_lr      = warmup_factor * TDLEAF_ADAM_FT_LR0;
+    const float ft_bias_lr = warmup_factor * TDLEAF_ADAM_FT_BIAS_LR0;
+    const float psqt_lr    = warmup_factor * TDLEAF_ADAM_PSQT_LR0;
 
     // Full Adam step for FC layers and FT biases — per-weight bias correction.
     // bc1 (beta1=0.9): skipped at cnt>=20 (0.9^20≈0.12 → bc1≈0.88, close to 1).
@@ -2171,10 +2185,22 @@ void nnue_apply_gradients()
         }
     }
 
-    // FT bias update — full Adam per-dimension.
+    // FT bias update — full Adam per-dimension, reduced LR to prevent dying-ReLU.
+    // FT biases are dense (updated ~200×/game) while FT weights are sparse (~8/5000g).
+    // Without a reduced LR, biases race ahead, suppressing dimensions before the
+    // FT weights have learned useful features — the classic dying-ReLU problem.
+    auto do_step_ft_bias = [&](float g, float &m, float &v, uint32_t cnt) -> float {
+        m = TDLEAF_ADAM_BETA1 * m + (1.0f - TDLEAF_ADAM_BETA1) * g;
+        v = TDLEAF_ADAM_BETA2 * v + (1.0f - TDLEAF_ADAM_BETA2) * g * g;
+        uint32_t eff_t = cnt + 1;
+        float m_hat = (eff_t >= 20) ? m
+            : m / (1.0f - powf(TDLEAF_ADAM_BETA1, (float)eff_t));
+        float v_hat = v / (1.0f - powf(TDLEAF_ADAM_BETA2, (float)eff_t));
+        return ft_bias_lr * m_hat / (sqrtf(v_hat) + TDLEAF_ADAM_EPS);
+    };
     for (int d = 0; d < NNUE_HALF_DIMS; d++) {
         if (grad_ft_bias[d] == 0.0f) continue;
-        float dw = do_step(grad_ft_bias[d], m_ft_bias[d], v_ft_bias[d], ft_bias_cnt[d]);
+        float dw = do_step_ft_bias(grad_ft_bias[d], m_ft_bias[d], v_ft_bias[d], ft_bias_cnt[d]);
         ft_biases_f32[d] -= dw;
         ft_bias_delta[d] -= dw;
         ft_bias_cnt[d]++;  delta_ft_bias_cnt[d]++;

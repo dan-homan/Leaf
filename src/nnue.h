@@ -154,7 +154,7 @@ struct NNUEActivations {
 // Initialise all FC and FT weights to zero, PSQT to 100 cp/piece equivalent.
 // Used when starting training from scratch (no .tdleaf.bin found).
 // Writes zero to FC int8 inference arrays and PSQT_100CP to int32 PSQT arrays.
-void nnue_init_zero_weights();
+void nnue_init_zero_weights(bool noprior = false);
 
 // Initialise FP32 shadow copies from the just-loaded int8 arrays.
 // Called once at end of nnue_load().

@@ -242,10 +242,13 @@ def main():
     print()
     print("Starting network:")
     print("  [1] Use existing .nnue file")
-    print("  [2] Initialise a fresh random network")
+    print("  [2] Initialise a fresh random network (classical material prior)")
+    print("  [3] Initialise a fresh random network (no prior — all pieces 100cp)")
     choice = ask("Choice", "1")
 
-    if choice.strip() == "2":
+    init_noprior = False
+    if choice.strip() in ("2", "3"):
+        init_noprior = (choice.strip() == "3")
         default_fresh = f"nn-fresh-{date_str}.nnue"
         fresh_name    = ask("Output filename for fresh network", default_fresh)
         if not fresh_name.endswith(".nnue"):
@@ -416,13 +419,15 @@ def main():
             overwrite = True
 
         if overwrite:
-            print(f"  Initialising fresh network → {net_filename}")
+            init_flag = "--init-nnue-noprior" if init_noprior else "--init-nnue"
+            label = "no-prior" if init_noprior else "classical"
+            print(f"  Initialising fresh network ({label}) → {net_filename}")
             result = subprocess.run(
-                [train_exe, "--init-nnue", "--write-nnue", net_file],
+                [train_exe, init_flag, "--write-nnue", net_file],
                 cwd=learn_dir
             )
             if result.returncode != 0:
-                print("  --init-nnue failed.", file=sys.stderr)
+                print(f"  {init_flag} failed.", file=sys.stderr)
                 sys.exit(1)
         else:
             print("  Using existing fresh net.")
