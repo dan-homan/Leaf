@@ -8,17 +8,16 @@ Planned investigations, improvements, and open questions.
 
 ### Adam hyperparameter tuning
 
-The Adam optimizer (`TDLEAF_ADAM_LR0=0.13`, `TDLEAF_ADAM_PSQT_LR0=1.6`) uses values
-tuned for 5000-game training runs.  Longer runs may benefit from different LR values.
+The Adam optimizer uses five separate LRs tuned from 190k-game weight distribution
+analysis.  Key monitoring points:
 
-Key questions:
-
-- **FC LR0 (0.13):** After 5,000 games the FC0/FC1 float shadows spread to std≈30/50, filling
-  the int8 range.  Float-shadow clamping prevents zombie weights but further training will be
-  limited at the ±127 boundary.  Monitor whether the network continues to improve or plateaus
-  as the distribution saturates.
-- **PSQT LR0 (1.6):** Tuned separately from FC LR0 since Adam normalises gradient magnitude
-  and PSQT operates at int32 scale.  Tune empirically.
+- **FC LR0 (0.1):** FC1 saturation at 0.5% after 190k games; stacks 5,6 at 1.2–1.7%.
+  Reduced from 0.13 to extend runway before saturation becomes problematic.
+- **FT LR0 (1.0):** FT weights barely changed (std 44.006 vs 44.0 init).  With only
+  3–50 updates per weight, FT learning is very slow; high LR compensates.
+- **FT bias LR0 (0.01):** Separate LR prevents dying-ReLU from update frequency asymmetry.
+- **PSQT LR0 (1.6):** PSQT barely moves (std change -44 from 35642 over 190k games).
+  Correct behavior — dense piece_val handles material corrections.
 
 ### Horizon noise mitigation — ablation testing plan
 
@@ -107,6 +106,24 @@ See memory for full implementation plan.
 ---
 
 ## Resolved / Implemented
+
+### ~~Persistent Adam v~~ ✓ Implemented (2026-04-02)
+Adam second-moment (v) arrays and t_adam persisted to .tdleaf.bin v6.  Multi-writer
+merge uses max(v_file, v_local) per element.  FT weight v (~92 MB) excluded.  Momentum
+(m) not persisted — recovers in ~10 steps.  ~564 KB file size increase.
+
+### ~~Separate FT bias LR~~ ✓ Implemented (2026-04-01)
+`TDLEAF_ADAM_FT_BIAS_LR0 = 0.01` (10× slower than FC) prevents dying-ReLU from update
+frequency asymmetry.  FT biases update ~200×/game vs FT weights ~8/5000g.
+
+### ~~--init-nnue-noprior~~ ✓ Implemented (2026-04-01)
+All piece PSQT values initialised at 100cp (uniform) instead of classical material.
+Forces material value learning from scratch.  training_run.py offers the choice.
+
+### ~~FC-only replay~~ ✓ Implemented (2026-03-29)
+Replay with FT/PSQT gradients causes eval divergence; `fc_only=true` suppresses
+FT/PSQT/FT-bias/piece_val gradients during replay.  +20 Elo over 5000 games.
+Subsequently disabled (TDLEAF_REPLAY_K=0) as benefit faded after first 5000 games.
 
 ### ~~Init-nnue redesign~~ ✓ Implemented (2026-03-23)
 Weight initialization redesigned for TDLeaf training (decoupled from SF15.1 statistics).
