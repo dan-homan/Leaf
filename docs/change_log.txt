@@ -1,5 +1,26 @@
 Changes since 2017_12_24
 
+2026_04_02 -- Persist Adam v (second moment) in .tdleaf.bin v6 (src/nnue.cpp, src/tdleaf.h,
+               scripts/).
+               Saves gradient scale (v arrays) and t_adam across sessions so Adam doesn't
+               cold-start with v=0 on every restart.  Multi-writer merge uses max(v_file,
+               v_local) per element — conservative and safe for concurrent training.
+               Momentum (m) is NOT persisted; it recovers in ~10 steps.  FT weight v
+               (~92 MB) excluded — too large and too sparse to matter.  FC + FT bias +
+               PSQT + piece_val v adds ~564 KB to the file.  v5 files auto-upgrade.
+               merge_tdleaf.py and compare_nnue_learning.py updated for v6.
+
+2026_04_01 -- FT bias LR reduction + --init-nnue-noprior option (src/nnue.cpp,
+               src/nnue.h, src/tdleaf.h, src/main.cpp, scripts/training_run.py).
+               Separate FT bias learning rate (TDLEAF_ADAM_FT_BIAS_LR0, 10× slower than
+               FC) to prevent dying-ReLU from update frequency asymmetry (FT biases
+               ~200×/game vs FT weights ~8/5000g).  --init-nnue-noprior flag initialises
+               all piece PSQT values at 100cp, forcing material value learning from
+               scratch.  training_run.py offers the choice when initialising a new network.
+
+2026_03_29 -- Disable replay (TDLEAF_REPLAY_K=0), FC-only replay mode, merge_tdleaf.py
+               v5 support, UCI Skill option, book skip in analysis mode.
+
 2026_03_28 -- Additive count merging in .tdleaf.bin save (src/nnue.cpp, docs/).
                Fix: update counts in .tdleaf.bin were merged via max(file, session),
                which prevented counts from accumulating across training cycles when

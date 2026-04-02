@@ -53,7 +53,7 @@ change between consecutive moves exceeds `TDLEAF_SCORE_CLIP_CP` centipawns — s
 
 where `∇_w d_t = d_t * (1 - d_t) / K * ∇_w score_t`.
 
-Defaults: `λ_decisive = 0.8` (wins/losses), `λ_draw = 0.5` (draws), `K = 400`.
+Defaults: `λ_decisive = 0.8` (wins/losses), `λ_draw = 0.5` (draws), `K = 350`.
 Gradient updates use Adam with per-weight LR decay; see [Adam Optimizer](#adam-optimizer-with-per-weight-lr-decay) below.
 
 **Key design choice:** `d_t` is computed from `nnue_evaluate()` (direct static eval of the
@@ -241,12 +241,14 @@ FC2 output (positional)
   → PSQT weight rows for each active feature index (sparse)
 ```
 
-The step size for each layer is governed by the Adam LR schedule.  Four separate LRs:
-`TDLEAF_ADAM_LR0` (FC layers + FT biases), `TDLEAF_ADAM_FT_LR0` (FT weights),
-`TDLEAF_ADAM_PSQT_LR0` (PSQT), and `TDLEAF_ADAM_PV_LR0` (dense piece values).
-FT weights use a higher LR than FC because sparse features receive far fewer updates
-(~8 per 5000 games vs. every game for FC); PSQT at int32 scale needs a different LR
-than FC at int8 scale.  See [Adam Optimizer](#adam-optimizer).
+The step size for each layer is governed by the Adam LR schedule.  Five separate LRs:
+`TDLEAF_ADAM_LR0` (FC layers), `TDLEAF_ADAM_FT_LR0` (FT weights),
+`TDLEAF_ADAM_FT_BIAS_LR0` (FT biases), `TDLEAF_ADAM_PSQT_LR0` (PSQT), and
+`TDLEAF_ADAM_PV_LR0` (dense piece values).  FT weights use a higher LR than FC because
+sparse features receive far fewer updates (~8 per 5000 games vs. every game for FC);
+FT biases use a reduced LR (10× slower than FC) to prevent dying-ReLU from update
+frequency asymmetry (biases ~200×/game vs FT weights ~8/5000g); PSQT at int32 scale
+needs a different LR than FC at int8 scale.  See [Adam Optimizer](#adam-optimizer).
 
 ---
 
@@ -281,10 +283,10 @@ correction.
 
 | Layer | Update Rule | LR0 | Notes |
 |-------|-------------|-----|-------|
-| FC0/FC1/FC2 weights | Full Adam | `TDLEAF_ADAM_LR0 = 0.13` | Float shadow clamped to ±127 after each update |
-| FC0/FC1/FC2 biases  | Full Adam | `TDLEAF_ADAM_LR0 = 0.13` | |
-| FT weights | RMSProp (per-weight v, no m) | `TDLEAF_ADAM_FT_LR0 = 0.2` | Sparse; higher LR than FC to compensate for fewer updates |
-| FT biases  | Full Adam | `TDLEAF_ADAM_LR0 = 0.13` | |
+| FC0/FC1/FC2 weights | Full Adam | `TDLEAF_ADAM_LR0 = 0.1` | Float shadow clamped to ±127 after each update |
+| FC0/FC1/FC2 biases  | Full Adam | `TDLEAF_ADAM_LR0 = 0.1` | |
+| FT weights | RMSProp (per-weight v, no m) | `TDLEAF_ADAM_FT_LR0 = 1.0` | Sparse; higher LR than FC to compensate for fewer updates |
+| FT biases  | Full Adam | `TDLEAF_ADAM_FT_BIAS_LR0 = 0.01` | Reduced LR to prevent dying-ReLU — see below |
 | PSQT       | Full Adam | `TDLEAF_ADAM_PSQT_LR0 = 1.6` | Separate LR0 required — see below |
 | Dense piece values | Full Adam | `TDLEAF_ADAM_PV_LR0 = 1.6` | Dense; same LR as PSQT, no weight decay |
 
@@ -296,6 +298,16 @@ weights are at int32 scale (std ≈ 36,000) while FC weights are at int8 scale (
 — a ratio of ~1,000×.  Using the same LR0=0.2 for both caused PSQT to change negligibly
 relative to its baseline scale.  `TDLEAF_ADAM_PSQT_LR0` is tuned separately for this reason.
 
+### Why a Separate FT Bias LR0?
+
+FT biases are updated densely (~200 times per game), while FT weights are updated
+sparsely (~8 per 5000 games for a typical feature row).  Without a reduced LR, biases
+race ahead of weights: they drift strongly negative before FT weights have learned
+useful features, suppressing SqrCReLU activations and causing dying-ReLU.  At 190k
+games with the FC LR, FT bias mean drifted to -291 with 100% of biases negative.
+`TDLEAF_ADAM_FT_BIAS_LR0 = 0.01` (10× slower than FC) limits drift to ~-30 over
+190k games — enough adaptation without racing ahead of FT weight convergence.
+
 ### Why Float-Shadow Clamping for FC0/FC1?
 
 FC0 and FC1 use int8 quantized inference weights clamped to ±127 on requantization.
@@ -305,25 +317,36 @@ accumulate gradient updates with zero effect on the network.  After each weight 
 `w_f32 = clamp(w_f32, −127, 127)` keeps the float shadow aligned with the int8 inference
 space.  Not applied to FC2 (output layer, no activation clamping required).
 
-### Session-Local Moments
+### Persistent v, Session-Local m
 
-All m/v arrays and `t_adam` are zeroed at session start in both `nnue_init_fp32_weights()`
-and `nnue_init_zero_weights()`.  Resetting both together keeps bias correction
-`v̂ = v/(1−β₂ᵗ)` mathematically valid from game 1 of each session.
+The second-moment arrays (`v`) and `t_adam` are persisted to `.tdleaf.bin` (v6+) so that
+Adam's gradient scale knowledge survives across sessions.  Without this, every restart
+cold-starts with `v=0`, causing the first ~20 Adam steps to use poorly-scaled learning
+rates until v accumulates a reliable variance estimate.
 
-Moments are **not** persisted to `.tdleaf.bin` because:
-- Persisting them would break the delta-merge mechanism
-  used for concurrent multi-instance training.
-- Session-local moments restart cleanly with full bias correction each session.
-- The per-weight `cnt` arrays (which are persisted) track update history for
-  per-weight bias correction and monitoring.
+First-moment arrays (`m`, momentum) are **not** persisted — they are session-local and
+zeroed at startup.  m recovers in ~10 steps (β₁=0.9), so the cost of resetting is
+negligible.  Persisting m would add complexity for minimal benefit.
+
+**Multi-writer merge for v:** When multiple concurrent training instances save to the
+same `.tdleaf.bin`, v arrays are merged per-element using `max(v_file, v_local)`.  This
+is conservative: a too-large v only slightly slows learning (larger denominator in
+Adam's update), while a too-small v causes instability.  The max-merge is safe because
+v is always non-negative and represents gradient magnitude².
+
+**FT weight v (~92 MB) is NOT persisted** — too large, and FT updates are sparse enough
+(~3–50 per weight over 190k games) that v barely converges before the process restarts.
+
+The per-weight `cnt` arrays (which are also persisted) track update history for
+per-weight bias correction and monitoring.
 
 ### Hyperparameters (`src/tdleaf.h`)
 
 | Constant | Value | Notes |
 |----------|-------|-------|
-| `TDLEAF_ADAM_LR0` | 0.13 | Step size for FC layers + FT biases (float weight units) |
-| `TDLEAF_ADAM_FT_LR0` | 0.2 | Step size for FT weights (sparse; need higher LR than dense FC) |
+| `TDLEAF_ADAM_LR0` | 0.1 | Step size for FC layers (float weight units) |
+| `TDLEAF_ADAM_FT_LR0` | 1.0 | Step size for FT weights (sparse; need higher LR than dense FC) |
+| `TDLEAF_ADAM_FT_BIAS_LR0` | 0.01 | Step size for FT biases (10× slower than FC to prevent dying-ReLU) |
 | `TDLEAF_ADAM_PSQT_LR0` | 1.6 | Step size for PSQT (int32 scale; ~1000× FC) |
 | `TDLEAF_ADAM_PV_LR0` | 1.6 | Step size for dense piece values (same scale as PSQT) |
 | `TDLEAF_ADAM_BETA1` | 0.9 | First-moment decay (FC weights/biases, FT biases, PSQT) |
@@ -390,26 +413,38 @@ Set `TDLEAF_ADAM_WARMUP = 0` to disable warmup.
 
 ---
 
-## Weight Persistence — `.tdleaf.bin` (version 5)
+## Weight Persistence — `.tdleaf.bin` (version 6)
 
-Saved at `{exec_path}nn-ad9b42354671.tdleaf.bin`.  Format:
+Saved at `{exec_path}<network>.tdleaf.bin`.  Format:
 
 ```
-[version(5) + 8 FC stacks: per-layer float32×128 weights/biases + uint32 counts]
+[version(6) + 8 FC stacks: per-layer float32×128 weights/biases + uint32 counts]
 [n_ft_rows(4 bytes)]
 [per dirty row: fi(4) + ft_w[1024]×128 as float32[1024] + ft_cnt[1024] as uint32[1024]
                       + psqt_w[8]×128 as float32[8]    + psqt_cnt[8]  as uint32[8]]
 [FT bias section (v4+): ft_bias[1024]×128 as float32[1024] + ft_bias_cnt[1024] as uint32[1024]]
-[Dense piece values (v5): piece_val[6][8] as float32[48] + piece_val_cnt[6][8] as uint32[48]]
+[Dense piece values (v5+): piece_val[6][8] as float32[48] + piece_val_cnt[6][8] as uint32[48]]
+[Adam v section (v6):
+  t_adam as uint32
+  8 FC stacks × { v_l0_b, v_l0_w, v_l1_b, v_l1_w, v_l2_b, v_l2_w } as raw float32
+  v_ft_bias[1024] as float32
+  v_piece_val[6][8] as float32
+  n_psqt_v_rows as uint32
+  per dirty row: fi(4) + v_psqt[8] as float32[8]
+]
 ```
 
-Values are stored at 128× resolution (divide by 128 on load) to preserve sub-integer
-drift across sessions.  Update counts enable weighted averaging of concurrent training runs.
+Weight values are stored at 128× resolution (divide by 128 on load) to preserve
+sub-integer drift across sessions.  Adam v arrays are stored as raw float32 (no scaling).
+Update counts enable weighted averaging of concurrent training runs.
 
-Version 4 files (FC + FT/PSQT + FT bias, no piece values) are accepted on load;
-piece values start from zero and will be included on the next save.
-Version 3 files (FC + FT/PSQT, no FT bias or piece values) are also still accepted.
-Version 2 files (FC only) are also still accepted.  A notice is printed in all cases.
+The Adam v section (~564 KB for FC + FT bias + piece_val, plus sparse PSQT) persists
+gradient scale across sessions so Adam doesn't cold-start with v=0.  FT weight v
+(~92 MB) is NOT persisted — too large and too sparse to matter.
+
+Version 5 files (no Adam v) are accepted on load; v starts at zero (same as previous
+behavior) and will be included on the next save.
+Versions 2–4 are also still accepted with appropriate defaults.  A notice is printed.
 
 ---
 
@@ -511,6 +546,11 @@ initialised `.nnue` with no source file required:
 perl comp.pl init_nnue NNUE=1 TDLEAF=1
 ./Leaf_vinit_nnue --init-nnue --write-nnue nn-fresh.nnue
 ```
+
+A variant `--init-nnue-noprior` initialises all piece PSQT values at 100 cp (uniform)
+instead of classical material values, forcing the network to learn material values
+from scratch via TDLeaf.  The interactive `scripts/training_run.py` offers both options
+when initialising a new network.
 
 This calls `nnue_alloc_arrays()` + `nnue_init_fp32_weights()` + `nnue_init_zero_weights()`:
 
@@ -615,17 +655,21 @@ Score-change clipping and ID-stability weighting apply identically in replay pas
 
 | K | Result |
 |---|--------|
-| 0 | Baseline — much weaker |
-| 1 | **Current default — nearly as strong as K=2, more conservative** |
-| 2 | Marginally better than K=1 in initial ablation; reduced to K=1 for stability |
+| 0 | **Current default — replay disabled; no long-term benefit observed beyond ~5000 games** |
+| 1 | ~+20 Elo over first 5000 games but benefit fades; FC-only replay required |
+| 2 | Marginally better than K=1 in initial ablation |
 | 3 | Slightly worse than K=2 |
 | 6 | Large regression |
+
+Replay with FT/PSQT gradients causes eval divergence (FT feedback loop); only FC-only
+replay (`fc_only=true` in `nnue_accumulate_gradients`) is viable.  Even FC-only replay
+showed no long-term benefit after the first ~5000 games, so replay is disabled by default.
 
 ### Build flags
 
 | Flag | Default | Effect |
 |------|---------|--------|
-| `TDLEAF_REPLAY_K` | 1 | Replay passes per game; 0 disables replay |
+| `TDLEAF_REPLAY_K` | 0 | Replay passes per game; 0 disables replay |
 | `TDLEAF_REPLAY_BUF_N` | 8 | Ring buffer capacity (~4.5 MB × N static BSS) |
 
 ---
