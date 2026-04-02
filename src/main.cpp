@@ -155,10 +155,16 @@ int main(int argc, char *argv[])
 #if NNUE
   {
     // --init-nnue: create a fresh random-initialised .nnue without reading an existing one.
-    // Requires --write-nnue <filename>; writes the file and exits.
+    //   PSQT initialized with classical piece values (P=100, N=377, B=399, R=596, Q=1197).
+    // --init-nnue-noprior: same, but all piece PSQT values set to 100 cp.
+    //   Forces the network to learn material values from scratch via TDLeaf.
+    // Both require --write-nnue <filename>; writes the file and exits.
     bool init_nnue_mode = false;
-    for (int ai = 1; ai < argc; ai++)
-      if (strcmp(argv[ai], "--init-nnue") == 0) { init_nnue_mode = true; break; }
+    bool init_nnue_noprior = false;
+    for (int ai = 1; ai < argc; ai++) {
+      if (strcmp(argv[ai], "--init-nnue") == 0) { init_nnue_mode = true; }
+      if (strcmp(argv[ai], "--init-nnue-noprior") == 0) { init_nnue_mode = true; init_nnue_noprior = true; }
+    }
 
     if (init_nnue_mode) {
 #if !TDLEAF
@@ -176,7 +182,7 @@ int main(int argc, char *argv[])
       // Allocate arrays, init float shadows, then fill with random distributions.
       nnue_alloc_arrays();
       nnue_init_fp32_weights();
-      nnue_init_zero_weights();
+      nnue_init_zero_weights(init_nnue_noprior);
       // Fall through to the --write-nnue handler below, which will write and exit.
 #endif
     } else {

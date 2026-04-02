@@ -46,15 +46,18 @@ static const float TDLEAF_GRAD_CLIP_NORM = 1.0f;
 // Adam hyperparameters
 //
 // FT weights use RMSProp (per-weight v, no m); all other layers use full Adam.
-// v arrays are session-local (process memory only, not persisted to .tdleaf.bin).
-// t_adam is also session-local; resets alongside v so bias correction is always valid.
+// v arrays (second moment / gradient scale) and t_adam are persisted to .tdleaf.bin
+// (v6+) so gradient scale knowledge survives across sessions.  Multi-writer merge
+// uses max(v_file, v_local) per element.  m (momentum) is session-local.
+// FT weight v (~92 MB) is NOT persisted — too large and too sparse to matter.
 // LR warmup: ramps from 0 to full LR over first WARMUP Adam steps.
 // Mini-batch: gradients accumulated across BATCH_SIZE games before each Adam step.
 // ---------------------------------------------------------------------------
-static const float TDLEAF_ADAM_LR0      = 0.13f;   // step size for FC layers + FT biases (float weight units)
-static const float TDLEAF_ADAM_FT_LR0   = 0.2f;    // step size for FT weights (sparse; need higher LR than dense FC)
-static const float TDLEAF_ADAM_PSQT_LR0 = 1.6f;    // step size for PSQT (int32 scale ~36k std; needs larger LR)
-static const float TDLEAF_ADAM_PV_LR0   = 1.6f;    // step size for dense piece values (same scale as PSQT)
+static const float TDLEAF_ADAM_LR0         = 0.1f;   // step size for FC layers (float weight units)
+static const float TDLEAF_ADAM_FT_LR0      = 1.0f;    // step size for FT weights (sparse; need higher LR than dense FC)
+static const float TDLEAF_ADAM_FT_BIAS_LR0 = 0.01f;  // step size for FT biases (10× slower than FC to prevent dying-ReLU)
+static const float TDLEAF_ADAM_PSQT_LR0    = 1.6f;    // step size for PSQT (int32 scale ~36k std; needs larger LR)
+static const float TDLEAF_ADAM_PV_LR0      = 1.6f;    // step size for dense piece values (same scale as PSQT)
 static const float TDLEAF_ADAM_BETA1    = 0.9f;    // first-moment decay  (FC + FT bias + PSQT)
 static const float TDLEAF_ADAM_BETA2    = 0.999f;  // second-moment decay (all layers)
 static const float TDLEAF_ADAM_EPS      = 1e-8f;   // numerical floor

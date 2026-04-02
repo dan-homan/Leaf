@@ -46,6 +46,7 @@ TDLEAF_VERSION2 = 2
 TDLEAF_VERSION3 = 3
 TDLEAF_VERSION4 = 4            # adds FT bias section
 TDLEAF_VERSION5 = 5            # adds dense piece value section
+TDLEAF_VERSION6 = 6            # adds Adam v (second moment) section
 TDLEAF_SCALE    = 128.0        # v2+: file stores w_f32 × TDLEAF_SCALE
 
 # ---------------------------------------------------------------------------
@@ -271,7 +272,7 @@ def read_tdleaf_fc(path):
         if magic != TDLEAF_MAGIC:
             sys.exit(f"Error: bad magic {magic:#010x} in {path}")
 
-        if version in (TDLEAF_VERSION2, TDLEAF_VERSION3, TDLEAF_VERSION4, TDLEAF_VERSION5):
+        if version in (TDLEAF_VERSION2, TDLEAF_VERSION3, TDLEAF_VERSION4, TDLEAF_VERSION5, TDLEAF_VERSION6, TDLEAF_VERSION6, TDLEAF_VERSION6):
             data['_has_counts'] = True
             for _ in range(N_STACKS):
                 def rf(n, fh=f):
@@ -319,7 +320,7 @@ def read_tdleaf_fc(path):
             sys.exit(f"Error: unknown .tdleaf.bin version {version} in {path}")
 
         # v3/v4/v5: sparse FT/PSQT section after FC stacks
-        if version in (TDLEAF_VERSION3, TDLEAF_VERSION4, TDLEAF_VERSION5):
+        if version in (TDLEAF_VERSION3, TDLEAF_VERSION4, TDLEAF_VERSION5, TDLEAF_VERSION6, TDLEAF_VERSION6):
             n_ft_rows = struct.unpack('<I', f.read(4))[0]
             if n_ft_rows > 0:
                 fi_arr   = np.empty(n_ft_rows, dtype=np.uint32)
@@ -343,7 +344,7 @@ def read_tdleaf_fc(path):
             data['n_ft_rows'] = n_ft_rows
 
             # v4/v5: FT bias section (appended after sparse FT/PSQT rows)
-            if version in (TDLEAF_VERSION4, TDLEAF_VERSION5):
+            if version in (TDLEAF_VERSION4, TDLEAF_VERSION5, TDLEAF_VERSION6):
                 ft_b_raw = np.frombuffer(f.read(HALF_DIMS * 4), dtype=np.float32).copy()
                 ft_b_cnt = np.frombuffer(f.read(HALF_DIMS * 4), dtype=np.uint32).copy()
                 if ft_b_raw.shape == (HALF_DIMS,) and ft_b_cnt.shape == (HALF_DIMS,):
@@ -351,7 +352,7 @@ def read_tdleaf_fc(path):
                     data['ft_bias_learned_cnt'] = ft_b_cnt
 
             # v5: dense piece value section (6 piece types × 8 PSQT buckets = 48 values)
-            if version == TDLEAF_VERSION5:
+            if version in (TDLEAF_VERSION5, TDLEAF_VERSION6):
                 N_PIECE_TYPES = 6
                 n_pv = N_PIECE_TYPES * PSQT_BKTS   # 48
                 pv_raw = np.frombuffer(f.read(n_pv * 4), dtype=np.float32).copy()

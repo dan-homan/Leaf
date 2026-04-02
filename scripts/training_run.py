@@ -36,6 +36,7 @@ import datetime
 import fcntl
 import math
 import os
+import psutil
 import re
 import shutil
 import signal
@@ -227,8 +228,8 @@ def run_match_streaming(cmd, los_stop_hi=None, los_stop_lo=None):
 # ---------------------------------------------------------------------------
 
 def main():
-    cpu_count           = os.cpu_count() or 1
-    default_concurrency = max(1, cpu_count // 2)
+    cpu_count           = psutil.cpu_count(logical=False) or 1
+    default_concurrency = max(1, cpu_count - 1)
     date_str            = datetime.datetime.now().strftime("%y%m%d")   # YYMMDD
 
     print()
@@ -242,10 +243,13 @@ def main():
     print()
     print("Starting network:")
     print("  [1] Use existing .nnue file")
-    print("  [2] Initialise a fresh random network")
+    print("  [2] Initialise a fresh random network (classical material prior)")
+    print("  [3] Initialise a fresh random network (no prior — all pieces 100cp)")
     choice = ask("Choice", "1")
 
-    if choice.strip() == "2":
+    init_noprior = False
+    if choice.strip() in ("2", "3"):
+        init_noprior = (choice.strip() == "3")
         default_fresh = f"nn-fresh-{date_str}.nnue"
         fresh_name    = ask("Output filename for fresh network", default_fresh)
         if not fresh_name.endswith(".nnue"):
@@ -308,10 +312,10 @@ def main():
     print()
     use_loop       = ask_yes_no("Enable train-validate loop?", default="n")
     n_cycles       = 0
-    val_games      = 200
-    los_thresh_pct = 70.0
-    los_stop_hi    = 0.90   # early-stop if LOS rises above this
-    los_stop_lo    = 0.10   # early-stop if LOS falls below this
+    val_games      = 500
+    los_thresh_pct = 50.0
+    los_stop_hi    = 0.99   # early-stop if LOS rises above this
+    los_stop_lo    = 0.01   # early-stop if LOS falls below this
     val_tc         = None   # set in Step 4 after tc1 is known
     # Eval binary names (set in Step 2 if use_loop)
     best_nnue_name = None
@@ -321,10 +325,10 @@ def main():
 
     if use_loop:
         n_cycles       = int(ask("  Cycles (0 = run forever until Ctrl-C)", "0"))
-        val_games      = int(ask("  Validation games per cycle           ", "200"))
-        los_thresh_pct = float(ask("  LOS acceptance threshold (%)        ", "70"))
-        los_stop_hi    = float(ask("  Early-stop if LOS ≥ (%)            ", "90")) / 100.0
-        los_stop_lo    = float(ask("  Early-stop if LOS ≤ (%)            ", "10")) / 100.0
+        val_games      = int(ask("  Validation games per cycle           ", "500"))
+        los_thresh_pct = float(ask("  LOS acceptance threshold (%)        ", "50"))
+        los_stop_hi    = float(ask("  Early-stop if LOS ≥ (%)            ", "99")) / 100.0
+        los_stop_lo    = float(ask("  Early-stop if LOS ≤ (%)            ", "01")) / 100.0
         # val_tc is asked in Step 4 once tc1 is known
         best_nnue_name = f"{net_base}-best.nnue"
         cand_nnue_name = f"{net_base}-cand.nnue"
@@ -416,13 +420,15 @@ def main():
             overwrite = True
 
         if overwrite:
-            print(f"  Initialising fresh network → {net_filename}")
+            init_flag = "--init-nnue-noprior" if init_noprior else "--init-nnue"
+            label = "no-prior" if init_noprior else "classical"
+            print(f"  Initialising fresh network ({label}) → {net_filename}")
             result = subprocess.run(
-                [train_exe, "--init-nnue", "--write-nnue", net_file],
+                [train_exe, init_flag, "--write-nnue", net_file],
                 cwd=learn_dir
             )
             if result.returncode != 0:
-                print("  --init-nnue failed.", file=sys.stderr)
+                print(f"  {init_flag} failed.", file=sys.stderr)
                 sys.exit(1)
         else:
             print("  Using existing fresh net.")
@@ -455,9 +461,9 @@ def main():
     print()
     print("Match parameters:")
     if use_loop:
-        n_games = int(ask("  Games per cycle     [-n]        ", 5000))
+        n_games = int(ask("  Games per cycle     [-n]        ", 10000))
     else:
-        n_games = int(ask("  Games                [-n]        ", 5000))
+        n_games = int(ask("  Games                [-n]        ", 10000))
     tc1         = ask(    "  Learner time control   [--tc1]  ", "0:03+0.05")
     tc2_raw     = ask(    "  Opponent time control  [--tc2]  ", tc1)
     tc2         = tc2_raw if tc2_raw.strip() else tc1

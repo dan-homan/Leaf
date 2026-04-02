@@ -19,7 +19,7 @@ and <base>.nnue when --baseline is given.  The .nnue is constructed by
 applying merged float weights (divided by TDLEAF_SCALE=128) on top of
 the baseline network, requantizing to int8/int16/int32.
 
-The output .tdleaf.bin is a valid v5 file that can be loaded by Leaf.
+The output .tdleaf.bin is a valid v6 file that can be loaded by Leaf.
 """
 
 import argparse
@@ -30,7 +30,7 @@ from pathlib import Path
 
 # Constants matching nnue.cpp / nnue.h
 TDLEAF_MAGIC   = 0x544D4C46  # "TMLF"
-TDLEAF_VERSION = 5
+TDLEAF_VERSION = 6
 TDLEAF_SCALE   = 128.0
 
 LAYER_STACKS = 8
@@ -76,7 +76,7 @@ def write_u32_array(f, arr):
 
 
 class FCBlock:
-    """One layer stack's FC weights and counts."""
+    """One layer stack's FC weights, counts, and Adam v (second moment)."""
     def __init__(self):
         self.l0_bias_w   = np.zeros(L0_SIZE, dtype=np.float32)
         self.l0_bias_c   = np.zeros(L0_SIZE, dtype=np.uint32)
@@ -90,6 +90,13 @@ class FCBlock:
         self.l2_bias_c   = np.zeros(1, dtype=np.uint32)
         self.l2_weight_w = np.zeros(L2_PADDED, dtype=np.float32)
         self.l2_weight_c = np.zeros(L2_PADDED, dtype=np.uint32)
+        # Adam v (second moment) — v6+
+        self.v_l0_bias   = np.zeros(L0_SIZE, dtype=np.float32)
+        self.v_l0_weight = np.zeros(L0_SIZE * L0_INPUT, dtype=np.float32)
+        self.v_l1_bias   = np.zeros(L1_SIZE, dtype=np.float32)
+        self.v_l1_weight = np.zeros(L1_SIZE * L1_PADDED, dtype=np.float32)
+        self.v_l2_bias   = np.zeros(1, dtype=np.float32)
+        self.v_l2_weight = np.zeros(L2_PADDED, dtype=np.float32)
 
     def read(self, f):
         self.l0_bias_w   = read_f32_array(f, L0_SIZE)
@@ -105,6 +112,15 @@ class FCBlock:
         self.l2_weight_w = read_f32_array(f, L2_PADDED)
         self.l2_weight_c = read_u32_array(f, L2_PADDED)
 
+    def read_v(self, f):
+        """Read Adam v (second moment) arrays — v6+."""
+        self.v_l0_bias   = read_f32_array(f, L0_SIZE)
+        self.v_l0_weight = read_f32_array(f, L0_SIZE * L0_INPUT)
+        self.v_l1_bias   = read_f32_array(f, L1_SIZE)
+        self.v_l1_weight = read_f32_array(f, L1_SIZE * L1_PADDED)
+        self.v_l2_bias   = read_f32_array(f, 1)
+        self.v_l2_weight = read_f32_array(f, L2_PADDED)
+
     def write(self, f):
         write_f32_array(f, self.l0_bias_w)
         write_u32_array(f, self.l0_bias_c)
@@ -119,9 +135,18 @@ class FCBlock:
         write_f32_array(f, self.l2_weight_w)
         write_u32_array(f, self.l2_weight_c)
 
+    def write_v(self, f):
+        """Write Adam v arrays — v6+."""
+        write_f32_array(f, self.v_l0_bias)
+        write_f32_array(f, self.v_l0_weight)
+        write_f32_array(f, self.v_l1_bias)
+        write_f32_array(f, self.v_l1_weight)
+        write_f32_array(f, self.v_l2_bias)
+        write_f32_array(f, self.v_l2_weight)
+
 
 class TDLeafFile:
-    """Parsed .tdleaf.bin v5 file."""
+    """Parsed .tdleaf.bin v6 file."""
     def __init__(self):
         self.version = TDLEAF_VERSION
         self.fc = [FCBlock() for _ in range(LAYER_STACKS)]
@@ -135,6 +160,12 @@ class TDLeafFile:
         # Dense piece values: 6 piece types × 8 PSQT buckets (v5+)
         self.piece_val_w = np.zeros(6 * PSQT_BKTS, dtype=np.float32)
         self.piece_val_c = np.zeros(6 * PSQT_BKTS, dtype=np.uint32)
+        # Adam v section (v6+)
+        self.t_adam = 0
+        self.v_ft_bias   = np.zeros(HALF_DIMS, dtype=np.float32)
+        self.v_piece_val = np.zeros(6 * PSQT_BKTS, dtype=np.float32)
+        # Sparse PSQT v: dict keyed by feature index → v_psqt[PSQT_BKTS]
+        self.psqt_v_rows = {}
 
     @classmethod
     def load(cls, path):
@@ -144,7 +175,7 @@ class TDLeafFile:
             version = read_u32(f)
             if magic != TDLEAF_MAGIC:
                 raise ValueError(f"{path}: bad magic 0x{magic:08X} (expected 0x{TDLEAF_MAGIC:08X})")
-            if version not in (2, 3, 4, 5):
+            if version not in (2, 3, 4, 5, 6):
                 raise ValueError(f"{path}: unsupported version {version}")
             obj.version = version
 
@@ -170,6 +201,19 @@ class TDLeafFile:
             if version >= 5:
                 obj.piece_val_w = read_f32_array(f, 6 * PSQT_BKTS)
                 obj.piece_val_c = read_u32_array(f, 6 * PSQT_BKTS)
+
+            if version >= 6:
+                obj.t_adam = read_u32(f)
+                for s in range(LAYER_STACKS):
+                    obj.fc[s].read_v(f)
+                obj.v_ft_bias   = read_f32_array(f, HALF_DIMS)
+                obj.v_piece_val = read_f32_array(f, 6 * PSQT_BKTS)
+                n_pv_rows = read_u32(f)
+                for _ in range(n_pv_rows):
+                    fi = read_u32(f)
+                    if fi >= FT_INPUTS:
+                        break
+                    obj.psqt_v_rows[fi] = read_f32_array(f, PSQT_BKTS)
 
         return obj
 
@@ -198,6 +242,19 @@ class TDLeafFile:
             # Dense piece values (v5)
             write_f32_array(f, self.piece_val_w)
             write_u32_array(f, self.piece_val_c)
+
+            # Adam v section (v6)
+            f.write(struct.pack('<I', self.t_adam))
+            for s in range(LAYER_STACKS):
+                self.fc[s].write_v(f)
+            write_f32_array(f, self.v_ft_bias)
+            write_f32_array(f, self.v_piece_val)
+            # Sparse PSQT v — same dirty rows as FT weights
+            sorted_pv_fi = sorted(self.psqt_v_rows.keys())
+            f.write(struct.pack('<I', len(sorted_pv_fi)))
+            for fi in sorted_pv_fi:
+                f.write(struct.pack('<I', fi))
+                write_f32_array(f, self.psqt_v_rows[fi])
 
 
 # ---------------------------------------------------------------------------
@@ -475,6 +532,26 @@ def merge_files(files, output_base, baseline_path=None, report=False):
     # --- Dense piece values ---
     pv_pairs = [(td.piece_val_w, td.piece_val_c) for td in loaded]
     out.piece_val_w, out.piece_val_c = weighted_merge_arrays(pv_pairs)
+
+    # --- Adam v (max-merge) ---
+    out.t_adam = max(td.t_adam for td in loaded)
+    for s in range(LAYER_STACKS):
+        out.fc[s].v_l0_bias   = np.maximum.reduce([td.fc[s].v_l0_bias   for td in loaded])
+        out.fc[s].v_l0_weight = np.maximum.reduce([td.fc[s].v_l0_weight for td in loaded])
+        out.fc[s].v_l1_bias   = np.maximum.reduce([td.fc[s].v_l1_bias   for td in loaded])
+        out.fc[s].v_l1_weight = np.maximum.reduce([td.fc[s].v_l1_weight for td in loaded])
+        out.fc[s].v_l2_bias   = np.maximum.reduce([td.fc[s].v_l2_bias   for td in loaded])
+        out.fc[s].v_l2_weight = np.maximum.reduce([td.fc[s].v_l2_weight for td in loaded])
+    out.v_ft_bias   = np.maximum.reduce([td.v_ft_bias   for td in loaded])
+    out.v_piece_val = np.maximum.reduce([td.v_piece_val for td in loaded])
+    # Sparse PSQT v: max-merge per dirty row
+    all_pv_fi = set()
+    for td in loaded:
+        all_pv_fi.update(td.psqt_v_rows.keys())
+    zero_pv = np.zeros(PSQT_BKTS, dtype=np.float32)
+    for fi in sorted(all_pv_fi):
+        vals = [td.psqt_v_rows.get(fi, zero_pv) for td in loaded]
+        out.psqt_v_rows[fi] = np.maximum.reduce(vals)
 
     # --- Write .tdleaf.bin ---
     tdleaf_path = output_base + '.tdleaf.bin'
