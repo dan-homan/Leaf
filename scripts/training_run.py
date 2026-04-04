@@ -7,12 +7,15 @@
 #
 # What this script does:
 #   1. Asks for a starting .nnue file or offers to initialise a fresh random one.
-#   2. Builds two training binaries for the chosen network (symmetric self-play;
-#      both write to the shared .tdleaf.bin via the flock+delta-merge mechanism
-#      in nnue.cpp), then moves both binaries to learn/ so all training files
-#      live together.
+#   2. Builds an opponent roster — one or more opponent types that rotate every
+#      N games.  Available types: self-play (symmetric), previous checkpoint
+#      (read-only), or an external engine.  Builds the necessary binaries and
+#      moves them to learn/ so all training files live together.
 #   3. Checks for an existing .tdleaf.bin (continue or start fresh).
 #   4. Asks for match parameters, then runs match.py for N games.
+#      When the roster has multiple opponents (or prev-checkpoint), games are
+#      split into segments of `rotation_interval` games each, with a .nnue
+#      checkpoint exported at every rotation boundary.
 #      PGN files land in  learn/pgn/<net_base>/  so all PGNs for a given net
 #      accumulate in one place across multiple training runs.
 #   5. After matches complete, exports the trained weights to a .nnue file whose
@@ -288,23 +291,70 @@ def main():
     sidecar_path = os.path.join(learn_dir, net_base + ".games")
 
     # -----------------------------------------------------------------------
-    # Step 1b — Training partner selection
+    # Step 1b — Opponent roster (rotation across multiple opponent types)
     # -----------------------------------------------------------------------
+    #
+    # Each roster entry is a dict with:
+    #   "type"  : "self-play" | "prev-checkpoint" | "external"
+    #   "label" : display name
+    #   "exe"   : path to opponent binary (set during build step)
+    #   "path"  : for external opponents, the user-supplied path
+    #
+    # The learner binary (train_exe) is always engine 1.  Opponents rotate
+    # every `rotation_interval` games.  A .nnue checkpoint is exported at
+    # every rotation boundary.
+    #
     print()
-    print("Training partner:")
-    print("  [1] Self-play           — both instances learn (symmetric)")
-    print("  [2] Read-only opponent  — learner vs. fixed-weight copy of same net")
-    print("  [3] External opponent   — learner vs. user-supplied executable")
-    partner_choice = ask("Choice", "1").strip()
+    print("Opponent roster (opponents rotate every N games):")
+    print("  Available opponent types:")
+    print("    [s] Self-play           — both instances learn (symmetric)")
+    print("    [p] Previous checkpoint — learner vs. own recent snapshot (read-only)")
+    print("    [e] External engine     — learner vs. user-supplied executable")
+    print()
 
-    opponent_exe = None   # set for choices 2 and 3
-    if partner_choice == "3":
-        while True:
-            opp_path = ask("  Path to opponent executable").strip()
-            if os.path.isfile(opp_path):
-                opponent_exe = os.path.abspath(opp_path)
+    roster = []
+    while True:
+        default_type = "s" if not roster else ""
+        choice_opp = ask(
+            f"  Add opponent #{len(roster)+1} (s/p/e, empty to finish)",
+            default_type if not roster else None
+        ).strip().lower()
+        if not choice_opp:
+            if roster:
                 break
-            print(f"  File not found: {opp_path}")
+            print("  Roster must have at least one opponent.")
+            continue
+        if choice_opp == "s":
+            roster.append({"type": "self-play", "label": "self-play (symmetric)"})
+        elif choice_opp == "p":
+            roster.append({"type": "prev-checkpoint", "label": "previous checkpoint (read-only)"})
+        elif choice_opp == "e":
+            while True:
+                opp_path = ask("    Path to opponent executable").strip()
+                if os.path.isfile(opp_path):
+                    break
+                if os.path.isfile(os.path.join(learn_dir, opp_path)):
+                    opp_path = os.path.join(learn_dir, opp_path)
+                    break
+                print(f"    File not found: {opp_path}")
+            opp_abs = os.path.abspath(opp_path)
+            roster.append({
+                "type": "external", "label": os.path.basename(opp_abs),
+                "path": opp_abs,
+            })
+        else:
+            print(f"  Unknown type '{choice_opp}' — use s, p, or e.")
+            continue
+        print(f"    Added: {roster[-1]['label']}")
+
+    use_rotation = len(roster) > 1 or any(r["type"] == "prev-checkpoint" for r in roster)
+    rotation_interval = 0
+    if use_rotation:
+        rotation_interval = int(ask("  Games per opponent before rotating", "2000"))
+
+    # Derive which binary types we need to build.
+    need_self_play_exe = any(r["type"] == "self-play" for r in roster)
+    need_checkpoint_exe = any(r["type"] == "prev-checkpoint" for r in roster)
 
     # -----------------------------------------------------------------------
     # Step 1c — Train-validate loop (optional)
@@ -343,42 +393,50 @@ def main():
     nnue_flag   = f"NNUE_NET={net_filename}"
     tdleaf_flags = ["NNUE=1", "TDLEAF=1", nnue_flag]
 
-    if partner_choice == "1":
-        # Symmetric self-play: two learning instances.
-        train_ver2 = f"train_{net_base}_b"
-        train_exe2 = os.path.join(learn_dir, f"Leaf_v{train_ver2}")
-        need_exe2  = True
-        ro_build   = False
-    elif partner_choice == "2":
-        # Read-only opponent: build a second binary with TDLEAF_READONLY=1.
-        train_ver2 = f"train_{net_base}_ro"
-        train_exe2 = os.path.join(learn_dir, f"Leaf_v{train_ver2}")
-        need_exe2  = True
-        ro_build   = True
-    else:
-        # External opponent: no second binary to build.
-        train_ver2 = None
-        train_exe2 = opponent_exe
-        need_exe2  = False
-        ro_build   = False
+    # Self-play partner binary (same net, also learns)
+    selfplay_ver = f"train_{net_base}_b"
+    selfplay_exe = os.path.join(learn_dir, f"Leaf_v{selfplay_ver}")
 
-    exes_exist = os.path.isfile(train_exe) and (not need_exe2 or os.path.isfile(train_exe2))
+    # Read-only opponent binary — uses a *separate* NNUE_NET so we can swap
+    # its .nnue file independently (for prev-checkpoint rotation).
+    checkpoint_opp_nnue = f"{net_base}-opponent.nnue"
+    checkpoint_ver = f"train_{net_base}_ro"
+    checkpoint_exe = os.path.join(learn_dir, f"Leaf_v{checkpoint_ver}")
+
+    # Wire up each roster entry's exe field.
+    for entry in roster:
+        if entry["type"] == "self-play":
+            entry["exe"] = selfplay_exe
+        elif entry["type"] == "prev-checkpoint":
+            entry["exe"] = checkpoint_exe
+        elif entry["type"] == "external":
+            entry["exe"] = entry["path"]
+
+    # Determine which binaries need building.
+    need_binaries = [("learner", train_ver, tdleaf_flags)]
+    if need_self_play_exe:
+        need_binaries.append(("self-play B", selfplay_ver, tdleaf_flags))
+    if need_checkpoint_exe:
+        # Pure inference binary — no TDLEAF, just loads the .nnue file.
+        # The exported .nnue already contains trained FC weights, so no
+        # .tdleaf.bin is needed.
+        ro_flags = ["NNUE=1", f"NNUE_NET={checkpoint_opp_nnue}"]
+        need_binaries.append(("checkpoint opponent", checkpoint_ver, ro_flags))
+
+    all_exist = all(
+        os.path.isfile(os.path.join(learn_dir, f"Leaf_v{ver}"))
+        for _, ver, _ in need_binaries
+    )
     rebuild = True
-    if exes_exist:
+    if all_exist:
         rebuild = ask_yes_no(
             "  Executable(s) already exist.  Rebuild?", default="n")
 
     if rebuild:
-        print(f"  Building learning binary (Leaf_v{train_ver}) ...")
-        if not build_binary(train_ver, tdleaf_flags):
-            print("  Build failed.", file=sys.stderr)
-            sys.exit(1)
-        if need_exe2:
-            label = "read-only" if ro_build else "B"
-            print(f"  Building {label} binary (Leaf_v{train_ver2}) ...")
-            ro_flags = tdleaf_flags + ["TDLEAF_READONLY=1"] if ro_build else tdleaf_flags
-            if not build_binary(train_ver2, ro_flags):
-                print("  Build failed.", file=sys.stderr)
+        for label, ver, flags in need_binaries:
+            print(f"  Building {label} binary (Leaf_v{ver}) ...")
+            if not build_binary(ver, flags):
+                print(f"  {label} build failed.", file=sys.stderr)
                 sys.exit(1)
         print("  Build complete.")
     else:
@@ -486,6 +544,10 @@ def main():
     else:
         total_after_str = f"{prior_games + games_per_cycle:,}"
 
+    # Opening book for non-Fischer games
+    book_path = os.path.join(learn_dir, "normbk02.bin")
+    use_book  = not fischer and os.path.isfile(book_path)
+
     # -----------------------------------------------------------------------
     # PGN directory  —  learn/pgn/<net_base>/
     # -----------------------------------------------------------------------
@@ -500,12 +562,12 @@ def main():
     print("=" * 62)
     print(f"  Net in:           {net_filename}")
     print(f"  Learner:          Leaf_v{train_ver}")
-    if partner_choice == "1":
-        print(f"  Opponent:         Leaf_v{train_ver2}  (symmetric self-play)")
-    elif partner_choice == "2":
-        print(f"  Opponent:         Leaf_v{train_ver2}  (read-only, same net)")
+    if len(roster) == 1 and not use_rotation:
+        print(f"  Opponent:         {roster[0]['label']}")
     else:
-        print(f"  Opponent:         {os.path.basename(train_exe2)}  (external)")
+        print(f"  Opponent roster:  (rotate every {rotation_interval:,} games)")
+        for i, entry in enumerate(roster):
+            print(f"    {i+1}. {entry['label']}")
     if use_loop:
         cycle_label = str(n_cycles) if n_cycles > 0 else "∞"
         print(f"  Loop:             {cycle_label} cycles × {games_per_cycle:,} games/cycle")
@@ -529,6 +591,8 @@ def main():
             print(f"  Depth learner:    {d1_str}   Depth opponent: {d2_str}")
     if fischer:
         print( "  Fischer Random:   yes")
+    elif use_book:
+        print(f"  Opening book:     {os.path.basename(book_path)}")
     print(f"  PGN directory:    {pgn_dir}/")
     print("=" * 62)
 
@@ -543,12 +607,12 @@ def main():
     current_games = prior_games
     cycle_log     = []   # list of (cycle, accepted, vw, vd, vl, los)
 
-    def build_match_cmd(pgn_path):
+    def build_match_cmd(opp_exe, num_games, pgn_path):
         cmd = [
             sys.executable, match_py,
             train_exe,
-            train_exe2,
-            "-n", str(n_games),
+            opp_exe,
+            "-n", str(num_games),
             "-tc", tc1,
             "-c", str(concurrency),
             "--wait", str(wait_ms),
@@ -558,6 +622,8 @@ def main():
             cmd += ["--tc2", tc2]
         if fischer:
             cmd.append("--fischer-random")
+        elif use_book:
+            cmd += ["--openings", book_path]
         if depth1:
             cmd += ["--depth1", str(depth1)]
         if depth2:
@@ -571,6 +637,32 @@ def main():
         if r.returncode != 0:
             print(f"  --write-nnue ({label}) failed.", file=sys.stderr)
             sys.exit(r.returncode)
+
+    # Path where the read-only opponent binary expects its .nnue.
+    checkpoint_opp_nnue_path = os.path.join(learn_dir, checkpoint_opp_nnue)
+    # Tracks the last exported checkpoint (for prev-checkpoint opponent).
+    last_checkpoint_nnue = None
+
+    def prepare_prev_checkpoint_opponent():
+        """Copy the latest checkpoint .nnue to the read-only opponent's expected path.
+
+        If no checkpoint has been exported yet (first segment), use the base net.
+        The opponent binary is pure NNUE (no TDLEAF), so only the .nnue is needed.
+        """
+        nonlocal last_checkpoint_nnue
+        src = last_checkpoint_nnue if last_checkpoint_nnue else net_file
+        label = os.path.basename(src)
+        print(f"  Setting prev-checkpoint opponent → {label}")
+        shutil.copy2(src, checkpoint_opp_nnue_path)
+
+    def export_rotation_checkpoint():
+        """Export current weights to a game-count-stamped checkpoint."""
+        nonlocal last_checkpoint_nnue
+        wait_until_stable(tdleaf_bin)
+        snap_name = f"{net_base}-{current_games}g.nnue"
+        snap_path = os.path.join(learn_dir, snap_name)
+        export_nnue(train_exe, snap_path, f"checkpoint @ {current_games}g")
+        last_checkpoint_nnue = snap_path
 
     # -----------------------------------------------------------------------
     # Step 5b-pre — Set up initial best.nnue baseline (loop mode only).
@@ -627,22 +719,67 @@ def main():
             else:
                 pgn_path = pgn_base_path
 
-            # --- Training match ---
+            # --- Training match (with opponent rotation) ---
             print()
-            result = subprocess.run(build_match_cmd(pgn_path), cwd=run_dir)
-            if result.returncode != 0:
-                print(f"\nMatch run failed (exit code {result.returncode}).",
-                      file=sys.stderr)
-                if use_loop:
-                    print("Weights from completed cycles preserved. Exiting.")
-                else:
-                    print("Game count sidecar NOT updated.")
-                sys.exit(result.returncode)
+            # Track games added in this cycle/run for correct accounting.
+            games_before = current_games
+
+            if use_rotation:
+                # Split this cycle/run into segments, rotating opponents.
+                games_remaining = n_games
+                roster_idx = 0
+                seg_num = 0
+                while games_remaining > 0:
+                    entry = roster[roster_idx % len(roster)]
+                    seg_games = min(rotation_interval, games_remaining)
+                    seg_num += 1
+
+                    print(f"  ── Segment {seg_num}: {seg_games} games vs {entry['label']} ──")
+
+                    # Set up prev-checkpoint opponent if needed.
+                    if entry["type"] == "prev-checkpoint":
+                        prepare_prev_checkpoint_opponent()
+
+                    seg_pgn = pgn_path.replace(".pgn", f"_seg{seg_num:02d}.pgn")
+                    cmd = build_match_cmd(entry["exe"], seg_games, seg_pgn)
+                    result = subprocess.run(cmd, cwd=run_dir)
+                    if result.returncode != 0:
+                        print(f"\nMatch segment failed (exit code {result.returncode}).",
+                              file=sys.stderr)
+                        if use_loop:
+                            print("Weights from completed cycles preserved. Exiting.")
+                        else:
+                            print("Game count sidecar NOT updated.")
+                        sys.exit(result.returncode)
+
+                    games_remaining -= seg_games
+                    current_games += seg_games
+
+                    # Export checkpoint at rotation boundary (if more segments remain).
+                    if games_remaining > 0:
+                        export_rotation_checkpoint()
+
+                    roster_idx += 1
+            else:
+                # Single opponent — run all games at once.
+                opp_exe = roster[0]["exe"]
+                if roster[0]["type"] == "prev-checkpoint":
+                    prepare_prev_checkpoint_opponent()
+                cmd = build_match_cmd(opp_exe, n_games, pgn_path)
+                result = subprocess.run(cmd, cwd=run_dir)
+                if result.returncode != 0:
+                    print(f"\nMatch run failed (exit code {result.returncode}).",
+                          file=sys.stderr)
+                    if use_loop:
+                        print("Weights from completed cycles preserved. Exiting.")
+                    else:
+                        print("Game count sidecar NOT updated.")
+                    sys.exit(result.returncode)
+                current_games += n_games
 
             if not use_loop:
-                # Single-run mode: update count and break
-                write_game_count(sidecar_path, current_games + games_per_cycle)
-                current_games += games_per_cycle
+                # Single-run mode: persist count and break.
+                write_game_count(sidecar_path, current_games)
                 break
 
             # Wait for all engine processes to finish writing .tdleaf.bin.
@@ -684,6 +821,8 @@ def main():
                 ]
                 if fischer:
                     val_cmd.append("--fischer-random")
+                elif use_book:
+                    val_cmd += ["--openings", book_path]
 
                 vw, vd, vl, vrc = run_match_streaming(
                     val_cmd, los_stop_hi=los_stop_hi, los_stop_lo=los_stop_lo)
@@ -704,7 +843,7 @@ def main():
             cycle_log.append((cycle_num, accepted, vw, vd, vl, los))
 
             if accepted:
-                current_games += games_per_cycle
+                # current_games already advanced during training segments.
                 write_game_count(sidecar_path, current_games)
                 # Advance the best baseline so the next cycle compares against
                 # the newly accepted weights (not the original session start).
@@ -715,6 +854,9 @@ def main():
                 export_nnue(train_exe, snapshot_path, f"snapshot @ {current_games}g")
                 print(f"  Banked games: {current_games:,}")
             else:
+                # Revert game count — rejected cycle's games don't count.
+                current_games = games_before
+                write_game_count(sidecar_path, current_games)
                 if has_checkpoint:
                     shutil.copy2(checkpoint_bin, tdleaf_bin)
                     print("  Reverted .tdleaf.bin to pre-cycle checkpoint.")
@@ -779,12 +921,11 @@ def main():
     print("  Training run complete.")
     print(f"  Net in:      {net_filename}")
     print(f"  Net out:     {output_net_name}  (learn/)")
-    if partner_choice == "1":
-        print( "  Mode:        symmetric self-play")
-    elif partner_choice == "2":
-        print( "  Mode:        learner vs. read-only opponent")
+    if len(roster) == 1:
+        print(f"  Mode:        {roster[0]['label']}")
     else:
-        print(f"  Mode:        learner vs. {os.path.basename(train_exe2)}")
+        opp_labels = " → ".join(r["label"] for r in roster)
+        print(f"  Mode:        rotation ({opp_labels})")
     print(f"  Total games: {current_games:,}")
     print(f"  PGN files:   {pgn_dir}/")
     print(f"  .tdleaf.bin: {tdleaf_bin}")

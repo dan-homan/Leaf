@@ -1,5 +1,16 @@
 Changes since 2017_12_24
 
+2026_04_04 -- Opponent roster with rotation in training_run.py (scripts/training_run.py,
+               scripts/match.py, docs/).
+               training_run.py now supports a roster of opponent types (self-play, previous
+               checkpoint, external engine) that rotate every N games.  At each rotation
+               boundary a .nnue checkpoint is exported; the "previous checkpoint" opponent
+               loads the most recently exported checkpoint.  The checkpoint opponent binary
+               is pure NNUE (no TDLEAF) so only the .nnue file is needed — no .tdleaf.bin.
+               match.py: added polyglot .bin book support (book= instead of file= for
+               cutechess-cli).  training_run.py: auto-uses normbk02.bin as opening book
+               when Fischer Random is off.
+
 2026_04_02 -- Persist Adam v (second moment) in .tdleaf.bin v6 (src/nnue.cpp, src/tdleaf.h,
                scripts/).
                Saves gradient scale (v arrays) and t_adam across sessions so Adam doesn't
