@@ -154,6 +154,16 @@ python3 scripts/merge_tdleaf.py run1.tdleaf.bin run2.tdleaf.bin -o merged --base
 
 ### Training workflow summary
 
+The recommended way to train is via `training_run.py`, which handles network init,
+binary compilation, opponent rotation, checkpointing, and optional train-validate loops:
+
+```sh
+cd learn/
+python3 training_run.py
+```
+
+Manual workflow (equivalent to what the script automates):
+
 ```sh
 # 1. Initialise a fresh random network (optional)
 perl src/comp.pl init_nnue NNUE=1 TDLEAF=1 OVERWRITE

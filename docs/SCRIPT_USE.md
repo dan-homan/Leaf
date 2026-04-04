@@ -41,7 +41,7 @@ python3 match.py Leaf_vnew Leaf_v1 Leaf_v2 Leaf_v3 \
 | `--wait MS` | 0 | Milliseconds between games (useful when sharing a `.tdleaf.bin`) |
 | `--depth1 N` | — | Limit engine1 search to depth N |
 | `--depth2 N` | — | Limit engine2 search to depth N |
-| `--openings FILE` | — | EPD or PGN openings file, randomly ordered |
+| `--openings FILE` | — | Openings file: `.epd`, `.pgn`, or `.bin` (polyglot book) |
 
 When more than one opponent is supplied the script enters **gauntlet mode** and
 prints a summary table (Opponent, Games, W, D, L, Score%, Elo diff) at the end.
@@ -90,15 +90,28 @@ python3 training_run.py
 ### Prompt sequence
 
 1. **Starting network** — existing `.nnue` file or a freshly random-initialised one
-2. **Training partner** — choose one of three modes:
-   - `[1]` Symmetric self-play — both `_a` and `_b` instances learn (default)
-   - `[2]` Read-only opponent — `_a` learns; `_ro` holds weights fixed (`TDLEAF_READONLY=1`)
-   - `[3]` External opponent — `_a` learns; user supplies path to any executable
+   (classical material prior or uniform 100cp via `--init-nnue-noprior`)
+2. **Opponent roster** — build a rotation of one or more opponent types:
+   - `[s]` Self-play — both `_a` and `_b` instances learn (symmetric)
+   - `[p]` Previous checkpoint — learner vs. its own recent snapshot (read-only)
+   - `[e]` External engine — learner vs. user-supplied executable
+
+   When the roster has multiple entries (or includes `prev-checkpoint`), the user
+   sets a **rotation interval** — games are split into segments of that many games,
+   cycling through the roster.  A `.nnue` checkpoint is exported at every rotation
+   boundary.  The `prev-checkpoint` opponent always loads the most recently exported
+   checkpoint (or the base net for the first segment).
 3. **Train-validate loop** — optional; see below
-4. **Build** — compiles the required binaries via `src/comp.pl` and moves them to `learn/`
+4. **Build** — compiles only the binaries the roster requires:
+   - Learner (`_a`, TDLEAF=1) — always built
+   - Self-play partner (`_b`, TDLEAF=1) — built if roster includes self-play
+   - Checkpoint opponent (`_ro`, NNUE-only, no TDLEAF) — built with a separate
+     `NNUE_NET` so its `.nnue` can be swapped at rotation boundaries
 5. **Continuity** — continue from existing `.tdleaf.bin` or start fresh
-6. **Match parameters** — TC, concurrency, wait, Fischer Random, per-engine depth limits;
-   per-engine TCs (`--tc1` / `--tc2`) when the opponent runs at a different speed
+6. **Match parameters** — TC, concurrency, wait, Fischer Random (or opening book),
+   per-engine depth limits; per-engine TCs (`--tc1` / `--tc2`) when the opponent
+   runs at a different speed.  When Fischer Random is off and `normbk02.bin` exists
+   in `learn/`, it is automatically used as the opening book.
 
 On completion, trained weights are exported to `<net_base>-<total_games>g.nnue`.
 Game counts accumulate in a `<net_base>.games` sidecar file across runs.
@@ -371,8 +384,9 @@ merged_cnt[i] = sum(cnt[i])
 
 FC layers, FT weights, PSQT weights, and FT biases are all merged with this
 scheme.  Sparse FT/PSQT rows are unioned: a feature row present in any input
-file appears in the output.  The output is always v4 format regardless of input
-versions (v2/v3/v4 are all accepted).
+file appears in the output.  The output is always v6 format; input files v2–v6
+are all accepted.  v6 files include persistent Adam second-moment (v) arrays,
+which are max-merged across inputs.
 
 ### Use cases
 

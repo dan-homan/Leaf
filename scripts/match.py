@@ -171,8 +171,11 @@ def main():
         if not os.path.isfile(args.openings):
             print(f"Error: openings file not found: {args.openings}", file=sys.stderr)
             sys.exit(1)
-        fmt = "epd" if args.openings.lower().endswith(".epd") else "pgn"
-        openings_args = ["-openings", f"file={args.openings}", f"format={fmt}", "order=random"]
+        if args.openings.lower().endswith(".bin"):
+            openings_args = ["-openings", f"book={args.openings}", "order=random"]
+        else:
+            fmt = "epd" if args.openings.lower().endswith(".epd") else "pgn"
+            openings_args = ["-openings", f"file={args.openings}", f"format={fmt}", "order=random"]
 
     name1    = os.path.basename(args.engine1)
     gauntlet = len(args.opponents) > 1
