@@ -641,7 +641,20 @@ def main():
     # Path where the read-only opponent binary expects its .nnue.
     checkpoint_opp_nnue_path = os.path.join(learn_dir, checkpoint_opp_nnue)
     # Tracks the last exported checkpoint (for prev-checkpoint opponent).
-    last_checkpoint_nnue = None
+    # On resume, seed from the highest-numbered existing checkpoint on disk.
+    _ckpt_pattern = re.compile(rf"^{re.escape(net_base)}-(\d+)g\.nnue$")
+    _existing = []
+    for _f in os.listdir(learn_dir):
+        _m = _ckpt_pattern.match(_f)
+        if _m:
+            _existing.append((int(_m.group(1)), os.path.join(learn_dir, _f)))
+    if _existing:
+        last_checkpoint_nnue = max(_existing)[1]
+        if need_checkpoint_exe:
+            print(f"  Resuming: prev-checkpoint opponent will start from "
+                  f"{os.path.basename(last_checkpoint_nnue)}")
+    else:
+        last_checkpoint_nnue = None
 
     def prepare_prev_checkpoint_opponent():
         """Copy the latest checkpoint .nnue to the read-only opponent's expected path.
