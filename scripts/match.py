@@ -167,12 +167,13 @@ def main():
 
     # Openings
     openings_args = []
+    polyglot_book = None   # .bin Polyglot book path (added per-engine, not via -openings)
     if args.openings:
         if not os.path.isfile(args.openings):
             print(f"Error: openings file not found: {args.openings}", file=sys.stderr)
             sys.exit(1)
         if args.openings.lower().endswith(".bin"):
-            openings_args = ["-openings", f"book={args.openings}", "order=random"]
+            polyglot_book = args.openings  # injected into each -engine spec as book=FILE
         else:
             fmt = "epd" if args.openings.lower().endswith(".epd") else "pgn"
             openings_args = ["-openings", f"file={args.openings}", f"format={fmt}", "order=random"]
@@ -221,6 +222,9 @@ def main():
 
         eng1_spec = [f"cmd={exe1}",    f"name={name1}", "proto=xboard", f"dir={run_dir}"]
         eng2_spec = [f"cmd={opp_exe}", f"name={name2}", "proto=xboard", f"dir={run_dir}"]
+        if polyglot_book:
+            eng1_spec.append(f"book={polyglot_book}")
+            eng2_spec.append(f"book={polyglot_book}")
         if args.depth1 is not None:
             eng1_spec.append(f"depth={args.depth1}")
         if args.depth2 is not None:
