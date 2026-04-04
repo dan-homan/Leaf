@@ -607,7 +607,15 @@ def main():
     current_games = prior_games
     cycle_log     = []   # list of (cycle, accepted, vw, vd, vl, los)
 
-    def build_match_cmd(opp_exe, num_games, pgn_path):
+    def build_match_cmd(opp_exe, num_games, pgn_path, is_prev_checkpoint=False):
+        # For prev-checkpoint mode the opponent searches one ply deeper than
+        # the learner to compensate for the learner's weight updates.
+        # depth1=0 means unlimited; adding 1 to unlimited makes no sense, so
+        # only apply the adjustment when the learner has an explicit depth limit.
+        if is_prev_checkpoint and depth1 > 0:
+            eff_depth2 = depth1 + 1
+        else:
+            eff_depth2 = depth2
         cmd = [
             sys.executable, match_py,
             train_exe,
@@ -626,8 +634,8 @@ def main():
             cmd += ["--openings", book_path]
         if depth1:
             cmd += ["--depth1", str(depth1)]
-        if depth2:
-            cmd += ["--depth2", str(depth2)]
+        if eff_depth2:
+            cmd += ["--depth2", str(eff_depth2)]
         return cmd
 
     def export_nnue(exe, dest_path, label):
@@ -750,11 +758,17 @@ def main():
                     print(f"  ── Segment {seg_num}: {seg_games} games vs {entry['label']} ──")
 
                     # Set up prev-checkpoint opponent if needed.
-                    if entry["type"] == "prev-checkpoint":
+                    is_prev = entry["type"] == "prev-checkpoint"
+                    if is_prev:
                         prepare_prev_checkpoint_opponent()
+                        eff_d2 = depth1 + 1 if depth1 > 0 else depth2
+                        d1_str = str(depth1) if depth1 else "unlimited"
+                        d2_str = str(eff_d2) if eff_d2 else "unlimited"
+                        print(f"  Depths: learner={d1_str}  prev-checkpoint opponent={d2_str}")
 
                     seg_pgn = pgn_path.replace(".pgn", f"_seg{seg_num:02d}.pgn")
-                    cmd = build_match_cmd(entry["exe"], seg_games, seg_pgn)
+                    cmd = build_match_cmd(entry["exe"], seg_games, seg_pgn,
+                                         is_prev_checkpoint=is_prev)
                     result = subprocess.run(cmd, cwd=run_dir)
                     if result.returncode != 0:
                         print(f"\nMatch segment failed (exit code {result.returncode}).",
@@ -776,9 +790,15 @@ def main():
             else:
                 # Single opponent — run all games at once.
                 opp_exe = roster[0]["exe"]
-                if roster[0]["type"] == "prev-checkpoint":
+                is_prev = roster[0]["type"] == "prev-checkpoint"
+                if is_prev:
                     prepare_prev_checkpoint_opponent()
-                cmd = build_match_cmd(opp_exe, n_games, pgn_path)
+                    eff_d2 = depth1 + 1 if depth1 > 0 else depth2
+                    d1_str = str(depth1) if depth1 else "unlimited"
+                    d2_str = str(eff_d2) if eff_d2 else "unlimited"
+                    print(f"  Depths: learner={d1_str}  prev-checkpoint opponent={d2_str}")
+                cmd = build_match_cmd(opp_exe, n_games, pgn_path,
+                                     is_prev_checkpoint=is_prev)
                 result = subprocess.run(cmd, cwd=run_dir)
                 if result.returncode != 0:
                     print(f"\nMatch run failed (exit code {result.returncode}).",
