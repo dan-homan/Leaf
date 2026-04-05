@@ -250,7 +250,8 @@ def main():
             "-draw",   "movenumber=40", "movecount=8", "score=10",
             "-resign", "movecount=6",   "score=600",
             "-ratinginterval", "10",
-        ] + games_arg + (["-wait", str(args.wait)] if args.wait > 0 else [])
+        ] + games_arg + (["-wait", str(args.wait)] if args.wait > 0 else []) \
+          + (["-noswap"] if (openings_args or polyglot_book) else [])
 
         if gauntlet:
             print("=" * 60)
