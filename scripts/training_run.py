@@ -885,6 +885,11 @@ def main():
                 snapshot_name = f"{net_base}-{current_games}g.nnue"
                 snapshot_path = os.path.join(learn_dir, snapshot_name)
                 export_nnue(train_exe, snapshot_path, f"snapshot @ {current_games}g")
+                # Keep the prev-checkpoint opponent current: the next cycle's
+                # first prev-checkpoint segment should face the just-accepted
+                # weights, not a stale intra-cycle snapshot.
+                if need_checkpoint_exe:
+                    last_checkpoint_nnue = snapshot_path
                 print(f"  Banked games: {current_games:,}")
             else:
                 # Revert game count — rejected cycle's games don't count.
@@ -893,6 +898,13 @@ def main():
                 if has_checkpoint:
                     shutil.copy2(checkpoint_bin, tdleaf_bin)
                     print("  Reverted .tdleaf.bin to pre-cycle checkpoint.")
+                    # Also revert the prev-checkpoint opponent back to the last
+                    # accepted baseline.  The rejected cycle may have advanced
+                    # last_checkpoint_nnue to an intra-cycle snapshot that is
+                    # now ahead of the reverted .tdleaf.bin, which would make
+                    # the opponent artificially stronger than the learner.
+                    if need_checkpoint_exe:
+                        last_checkpoint_nnue = best_nnue_path
                 else:
                     # No prior checkpoint existed.  Leave the .tdleaf.bin in
                     # place so the next cycle can build on this cycle's
