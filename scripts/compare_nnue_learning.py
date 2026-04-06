@@ -819,17 +819,23 @@ def plot_ft_overview(orig, upd, ft_data, save):
 
     # Top panel: baseline (if --ft-weights loaded)
     ax_top1 = fig.add_subplot(gs_inner1[0])
+
+    def _fw_pct_range(*arrays, pct=99.0):
+        """Symmetric axis limit covering `pct`% of values across all arrays."""
+        combined = np.concatenate([a.ravel().astype(np.float64) for a in arrays])
+        half = (100.0 - pct) / 2.0
+        lo = np.percentile(combined, half)
+        hi = np.percentile(combined, 100.0 - half)
+        return max(abs(lo), abs(hi))
+
     if has_ft_baseline:
         fw_base = ft_data['ft_w'].astype(np.int32)
-        fmax    = max(abs(int(fw_base.min())), abs(int(fw_base.max())), 1)
-        # Widen the shared axis to also cover the learned range so neither
-        # panel silently clips outliers that training pushed outside the
-        # original baseline distribution.
+        # Use 99th-percentile range across baseline (and learned if available)
+        # so a small tail of outliers does not collapse the readable distribution.
+        arrays_for_range = [fw_base]
         if has_v3 and 'ft_w' in upd:
-            fw_learned_tmp = upd['ft_w'].ravel()
-            fmax = max(fmax,
-                       abs(float(fw_learned_tmp.min())),
-                       abs(float(fw_learned_tmp.max())))
+            arrays_for_range.append(upd['ft_w'])
+        fmax    = _fw_pct_range(*arrays_for_range)
         fw_bins = np.linspace(-fmax * 1.05, fmax * 1.05, 80)
         ax_top1.hist(fw_base.ravel(), bins=fw_bins, color='steelblue', alpha=0.75, density=True)
         ax_top1.text(0.98, 0.90, nnue_name, transform=ax_top1.transAxes,
@@ -839,7 +845,8 @@ def plot_ft_overview(orig, upd, ft_data, save):
         ax_top1.text(0.5, 0.5, 'Baseline not loaded\n(use --ft-weights)',
                      transform=ax_top1.transAxes, fontsize=8,
                      ha='center', va='center', color='gray', style='italic')
-    ax_top1.set_title('FT weights (22528×1024 int16)', fontsize=9, fontweight='bold')
+    ax_top1.set_title('FT weights — 99th percentile range (22528×1024 int16)',
+                      fontsize=9, fontweight='bold')
     ax_top1.set_ylabel('density', fontsize=8)
     ax_top1.tick_params(labelbottom=False, labelsize=7)
 
@@ -849,7 +856,7 @@ def plot_ft_overview(orig, upd, ft_data, save):
     if has_v3 and 'ft_w' in upd:
         fw_learned = upd['ft_w'].ravel()
         if fw_bins is None:
-            fw_max_l = max(abs(float(fw_learned.min())), abs(float(fw_learned.max())), 1.0)
+            fw_max_l = _fw_pct_range(fw_learned)
             fw_bins_l = np.linspace(-fw_max_l * 1.05, fw_max_l * 1.05, 80)
         else:
             fw_bins_l = fw_bins
