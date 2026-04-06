@@ -822,6 +822,14 @@ def plot_ft_overview(orig, upd, ft_data, save):
     if has_ft_baseline:
         fw_base = ft_data['ft_w'].astype(np.int32)
         fmax    = max(abs(int(fw_base.min())), abs(int(fw_base.max())), 1)
+        # Widen the shared axis to also cover the learned range so neither
+        # panel silently clips outliers that training pushed outside the
+        # original baseline distribution.
+        if has_v3 and 'ft_w' in upd:
+            fw_learned_tmp = upd['ft_w'].ravel()
+            fmax = max(fmax,
+                       abs(float(fw_learned_tmp.min())),
+                       abs(float(fw_learned_tmp.max())))
         fw_bins = np.linspace(-fmax * 1.05, fmax * 1.05, 80)
         ax_top1.hist(fw_base.ravel(), bins=fw_bins, color='steelblue', alpha=0.75, density=True)
         ax_top1.text(0.98, 0.90, nnue_name, transform=ax_top1.transAxes,
