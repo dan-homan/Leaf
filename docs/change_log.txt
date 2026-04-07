@@ -1,5 +1,15 @@
 Changes since 2017_12_24
 
+2026_04_06 -- make_training_epd.py: generate combined FRC+book opening EPD (scripts/,
+               learn/, docs/).
+               New script that produces training_openings.epd: all 960 Chess960 starting
+               positions + ~2000 positions sampled from normbk02.bin at 8 ply via weighted
+               random walks through the Polyglot book.  Output is deduplicated and shuffled.
+               training_run.py: auto-detects learn/training_openings.epd; when present, uses
+               it as default openings (EPD format + Fischer Random variant) for both training
+               and validation matches, bypassing the separate normbk02.bin / Fischer question.
+               Falls back to existing behaviour when not found.
+
 2026_04_04 -- Opponent roster with rotation in training_run.py (scripts/training_run.py,
                scripts/match.py, docs/).
                training_run.py now supports a roster of opponent types (self-play, previous

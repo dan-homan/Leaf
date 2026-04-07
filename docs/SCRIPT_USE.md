@@ -70,6 +70,44 @@ protocol).
 
 ---
 
+## make_training_epd.py
+
+Generate a combined opening EPD file for TDLeaf training:
+- All 960 Chess960 starting positions (FRC)
+- ~N positions sampled from a Polyglot opening book at a given ply depth
+
+The output is deduplicated, shuffled, and ready for use with
+`-openings file=training_openings.epd format=epd order=random -variant fischerandom`.
+`training_run.py` auto-detects and uses this file when it is present in `learn/`.
+
+```sh
+cd learn/
+
+# Generate with defaults (normbk02.bin at 8 ply, 2000 book positions)
+python3 make_training_epd.py
+
+# Custom book, ply depth, and output name
+python3 make_training_epd.py --book normbk02.bin --ply 8 --book-positions 2000 \
+    --output training_openings.epd
+```
+
+### Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--book FILE` | `normbk02.bin` in script dir | Polyglot `.bin` book to sample from |
+| `--book-positions N` | 2000 | Approximate number of book positions to sample |
+| `--ply N` | 8 | Ply depth for random walks into the book |
+| `--output FILE` | `training_openings.epd` in script dir | Output EPD file |
+| `--seed N` | 42 | Random seed for reproducibility |
+
+Book positions are selected by weighted random walks: at each ply, a move is chosen
+with probability proportional to its `weight` field in the Polyglot entry.  The final
+set is deduplicated by EPD string (FRC positions that happen to also appear in the book
+are not double-counted) and shuffled before writing.
+
+---
+
 ## training_run.py
 
 Interactive TDLeaf(λ) training run manager.  **Invoke from `learn/`** so that
@@ -108,10 +146,14 @@ python3 training_run.py
    - Checkpoint opponent (`_ro`, NNUE-only, no TDLEAF) — built with a separate
      `NNUE_NET` so its `.nnue` can be swapped at rotation boundaries
 5. **Continuity** — continue from existing `.tdleaf.bin` or start fresh
-6. **Match parameters** — TC, concurrency, wait, Fischer Random (or opening book),
-   per-engine depth limits; per-engine TCs (`--tc1` / `--tc2`) when the opponent
-   runs at a different speed.  When Fischer Random is off and `normbk02.bin` exists
-   in `learn/`, it is automatically used as the opening book.
+6. **Match parameters** — TC, concurrency, wait, opening selection, per-engine
+   depth limits; per-engine TCs (`--tc1` / `--tc2`) when the opponent runs at a
+   different speed.  Opening selection priority:
+   - If `learn/training_openings.epd` exists: use it with Fischer Random variant
+     (no question asked — EPD file encodes the intent).
+   - Else if Fischer Random is chosen: use random Chess960 positions.
+   - Else if `normbk02.bin` is in `learn/`: use it as the Polyglot opening book.
+   See `make_training_epd.py` to generate `training_openings.epd`.
 
 On completion, trained weights are exported to `<net_base>-<total_games>g.nnue`.
 Game counts accumulate in a `<net_base>.games` sidecar file across runs.

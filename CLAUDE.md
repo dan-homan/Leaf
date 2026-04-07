@@ -142,6 +142,9 @@ python3 scripts/bayeselo_ratings.py file1.pgn file2.pgn --min 20 --report
 # Remove duplicate games from PGN files
 python3 scripts/pgn_dedup.py input.pgn --output deduped.pgn --report
 
+# Generate combined FRC + book opening EPD (run once from learn/)
+python3 scripts/make_training_epd.py
+
 # Visualise weight changes after training
 python3 scripts/compare_nnue_learning.py learn/nn-fresh.nnue learn/nn-fresh.tdleaf.bin
 
