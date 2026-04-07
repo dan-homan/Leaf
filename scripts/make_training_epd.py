@@ -37,6 +37,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 FRC_COUNT = 960   # total unique Chess960 starting positions
@@ -176,29 +177,31 @@ def sample_book_positions(book_path, n_target, ply, random_suffix, quiet_only, s
 # Eval filtering via UCI engine
 # ---------------------------------------------------------------------------
 
-def fen_for_eval(epd):
-    """Convert an EPD string to a FEN suitable for a standard (non-FRC) engine.
+def _epd_for_setboard(epd):
+    """Return a 4-field EPD with castling stripped, safe for Leaf's setboard command.
 
-    Strips castling rights (sets to '-') to avoid Shredder/Chess960 notation
-    being sent to an engine that may not parse it.  For a balance filter at
-    shallow depth this has negligible effect on the score.
+    Strips castling rights (sets to '-') to avoid Shredder/Chess960 file-letter
+    notation (e.g. 'HAha') that Leaf's xboard parser does not accept.  The en
+    passant square is preserved.  Omitting castling rights has negligible effect
+    on a depth-10 balance eval.
     """
     parts = epd.split()
     ep = parts[3] if len(parts) > 3 else "-"
-    # EPD fields: placement active castling en_passant [opcodes...]
-    # FEN fields: placement active castling en_passant halfmove fullmove
-    return f"{parts[0]} {parts[1]} - {ep} 0 1"
+    return f"{parts[0]} {parts[1]} - {ep}"
 
 
 def _engine_worker(engine_path, epd_batch, score_limit, depth):
-    """Evaluate a batch of EPDs using a single persistent UCI engine process.
+    """Evaluate a batch of EPDs using a single persistent Leaf process (xboard mode).
 
-    Returns a list of (epd, passes) tuples where passes is True when
-    |score| <= score_limit cp.  Positions with a forced mate score are
-    considered unbalanced and filtered out.  Positions where no score
-    could be read are kept (should not happen in normal operation).
+    Uses xboard protocol with 'post' (thinking output) and 'sd N' (depth limit).
+    The score line format emitted by Leaf post output is:
+        <depth>  <score_cp>  <time_cs>  <nodes>  <pv>
+    where score_cp is centipawns from the side-to-move's perspective.
+
+    Returns a list of (epd, passes) tuples.  passes is True when a score was
+    read and |score| <= score_limit.  Positions that produce no score line
+    (e.g. immediate checkmate) are conservatively discarded (passes=False).
     """
-    # Run the engine in its own directory so it can find search.par etc.
     engine_dir = os.path.dirname(os.path.abspath(engine_path))
 
     proc = subprocess.Popen(
@@ -213,56 +216,34 @@ def _engine_worker(engine_path, epd_batch, score_limit, depth):
         proc.stdin.write(s + "\n")
         proc.stdin.flush()
 
-    def readline():
-        # Use explicit readline() rather than iterating over proc.stdout.
-        # The `for line in file` iterator uses internal read-ahead buffering
-        # that deadlocks when alternating writes and reads on a subprocess pipe.
-        return proc.stdout.readline()
+    # xboard setup: force mode (no auto-reply), thinking output, depth cap
+    send("xboard")
+    send("force")
+    send("post")
+    send(f"sd {depth}")
 
-    # UCI handshake
-    send("uci")
-    while True:
-        line = readline()
-        if not line or "uciok" in line:
-            break
-
-    send("isready")
-    while True:
-        line = readline()
-        if not line or "readyok" in line:
-            break
-
-    cp_re   = re.compile(r"score cp (-?\d+)")
-    mate_re = re.compile(r"score mate -?\d+")
-    results = []
+    # Post output format: leading whitespace + depth + score_cp + time + nodes + pv
+    score_re = re.compile(r"^\s+(\d+)\s+(-?\d+)\s+\d+\s+\d+")
+    results  = []
 
     for epd in epd_batch:
-        fen = fen_for_eval(epd)
-        send(f"position fen {fen}")
-        send(f"go depth {depth}")
+        send(f"setboard {_epd_for_setboard(epd)}")
+        send("go")
 
-        score   = None
-        is_mate = False
-        while True:
-            line = readline()
+        last_score = None
+        deadline   = time.time() + 60   # safety timeout per position
+        while time.time() < deadline:
+            line = proc.stdout.readline()
             if not line:
                 break
-            m = cp_re.search(line)
+            m = score_re.match(line)
             if m:
-                score   = int(m.group(1))
-                is_mate = False          # cp score overrides any earlier mate
-            elif mate_re.search(line):
-                is_mate = True
-            if line.startswith("bestmove"):
+                last_score = int(m.group(2))
+            if line.startswith("move"):
                 break
 
-        if is_mate:
-            passes = False               # clearly unbalanced → discard
-        elif score is None:
-            passes = True                # no score read → keep (shouldn't happen)
-        else:
-            passes = abs(score) <= score_limit
-
+        # Conservatively discard if no score was produced
+        passes = (last_score is not None) and (abs(last_score) <= score_limit)
         results.append((epd, passes))
 
     send("quit")
