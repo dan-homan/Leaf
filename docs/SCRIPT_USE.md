@@ -73,12 +73,25 @@ protocol).
 ## make_training_epd.py
 
 Generate a combined opening EPD file for TDLeaf training:
-- All 960 Chess960 starting positions (FRC), optionally replicated K times
-- ~N positions sampled from a Polyglot opening book at a given ply depth
+- All 960 Chess960 starting positions (FRC), with optional random suffix moves
+- ~N positions sampled from a Polyglot opening book at a given ply depth,
+  with optional random suffix moves
 
 The output is shuffled and ready for use with
 `-openings file=training_openings.epd format=epd order=random -variant fischerandom -noswap`.
 `training_run.py` auto-detects and uses this file when it is present in `learn/`.
+
+**Why random suffix moves?**  normbk02.bin at ply 8 converges to only ~2500 unique
+positions due to transpositions.  Adding 1–2 random moves after each book/FRC leaf
+explodes the unique count into the hundreds of thousands, preventing game replication
+in training.  Use `--quiet-only` to restrict suffix moves to non-captures (keeps
+material balanced; recommended).
+
+| Suffix | Book unique | FRC unique (per replicate) |
+|--------|-------------|---------------------------|
+| 0 | ~2,500 | 960 |
+| 1 | ~60,000 | ~19,000 |
+| 2 | ~1,000,000+ | ~300,000+ |
 
 Two sizing modes are available (mutually exclusive):
 
@@ -86,24 +99,27 @@ Two sizing modes are available (mutually exclusive):
 ```sh
 cd learn/
 
-# Default: 960 × 1 FRC + 2000 book = 2960 total
+# Default: 960 FRC + 2000 book, no suffix (2,960 total)
 python3 make_training_epd.py
 
-# 5 replicates of all FRC positions + 2000 book = 6800 total
-python3 make_training_epd.py --frc-replicates 5 --book-positions 2000
+# 2 quiet suffix moves, 21 FRC replicates + 80k book positions
+python3 make_training_epd.py --frc-replicates 21 --book-positions 80000 \
+    --random-suffix 2 --quiet-only
 ```
 
 **Fraction-based** (`--total` / `--frc-fraction`):
 ```sh
 cd learn/
 
-# 100k total, ~20% FRC (computes frc_replicates=21 → 20160 FRC + 79840 book)
-python3 make_training_epd.py --total 100000 --frc-fraction 0.20
+# 100k total, ~20% FRC-derived, 2 quiet suffix moves
+# → frc_replicates=21, 20160 FRC-derived + 79840 book = 100000
+python3 make_training_epd.py --total 100000 --frc-fraction 0.20 \
+    --random-suffix 2 --quiet-only
 ```
 
 Fraction-based sizing: `frc_replicates = max(1, round(total × frc_fraction / 960))`;
-`book_positions = total − 960 × frc_replicates`.  Actual totals may differ slightly
-from `--total` because replicates must be an integer.
+`book_positions = total − 960 × frc_replicates`.  Actual totals may differ by up to
+960 from `--total` because replicates must be an integer.
 
 ### Options
 
@@ -111,17 +127,20 @@ from `--total` because replicates must be an integer.
 |------|---------|-------------|
 | `--book FILE` | `normbk02.bin` in script dir | Polyglot `.bin` book to sample from |
 | `--book-positions N` | 2000 | Number of book positions to sample (explicit mode) |
-| `--frc-replicates K` | 1 | Times each FRC position appears in output (explicit mode) |
+| `--frc-replicates K` | 1 | Samples per FRC position (explicit mode).  Without `--random-suffix`: K identical copies.  With `--random-suffix`: K unique suffix-varied samples per FRC position. |
 | `--total N` | — | Target total output size (fraction mode; use with `--frc-fraction`) |
 | `--frc-fraction F` | — | Desired FRC fraction 0.0–1.0 (fraction mode; use with `--total`) |
-| `--ply N` | 8 | Ply depth for random walks into the book |
+| `--random-suffix K` | 0 | Random moves to play after each book/FRC position; greatly increases unique position count |
+| `--quiet-only` | off | Restrict random suffix moves to non-captures (recommended with `--random-suffix`) |
+| `--ply N` | 8 | Ply depth for book random walks |
 | `--output FILE` | `training_openings.epd` in script dir | Output EPD file |
 | `--seed N` | 42 | Random seed for reproducibility |
 
-Book positions are selected by weighted random walks: at each ply, a move is chosen
-with probability proportional to its `weight` field in the Polyglot entry.  Book
-positions are deduplicated; FRC replication is intentional and preserved.  The
-combined list is shuffled uniformly before writing.
+Book positions are selected by weighted random walks (move probability ∝ Polyglot
+`weight` field), then deduplicated.  With `--random-suffix`, each walk's leaf gets
+additional random (or quiet) moves before deduplication, multiplying the unique count.
+FRC replication without suffix preserves intentional duplicates (for position weighting);
+with suffix, duplicates across replicates are silently dropped (rare).
 
 ---
 

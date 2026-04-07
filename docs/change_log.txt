@@ -1,5 +1,18 @@
 Changes since 2017_12_24
 
+2026_04_07 -- make_training_epd.py: random suffix moves and FRC replication (scripts/, docs/).
+               --random-suffix K: play K random legal moves after each book/FRC position
+               before recording the EPD, exploding the unique position count (normbk02.bin
+               at ply 8 yields ~2500 unique positions; adding 2 suffix moves gives ~1M+).
+               --quiet-only: restrict suffix moves to non-captures (recommended; keeps
+               material balanced).  --frc-replicates K: with --random-suffix, generates K
+               unique suffix-varied samples per FRC position (up to 960×K unique EPDs);
+               without suffix, K identical copies for position weighting.  --total N
+               --frc-fraction F: fraction-based sizing auto-computes frc_replicates and
+               book_positions.  Global deduplication removed (book positions are still
+               deduplicated internally; FRC replication without suffix is intentional).
+               SCRIPT_USE.md updated with unique-count table and revised examples.
+
 2026_04_07 -- make_training_epd.py: FRC replication and fraction-based sizing (scripts/,
                docs/).
                Added --frc-replicates K: include each of the 960 FRC starting positions
