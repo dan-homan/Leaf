@@ -131,7 +131,11 @@ Fraction-based sizing: `frc_replicates = max(1, round(total × frc_fraction / 96
 | `--total N` | — | Target total output size (fraction mode; use with `--frc-fraction`) |
 | `--frc-fraction F` | — | Desired FRC fraction 0.0–1.0 (fraction mode; use with `--total`) |
 | `--random-suffix K` | 0 | Random moves to play after each book/FRC position; greatly increases unique position count |
-| `--quiet-only` | off | Restrict random suffix moves to non-captures (recommended with `--random-suffix`) |
+| `--quiet-only` | off | Restrict random suffix moves to non-captures **and** filter positions by eval balance (see below) |
+| `--eval-binary FILE` | `Leaf_vclassic_eval` in script dir | Leaf binary for eval filtering; only used with `--quiet-only` |
+| `--eval-limit CP` | 50 | Discard positions where `\|score\| > CP` centipawns (default: 50 = 0.5 pawns); only used with `--quiet-only` |
+| `--eval-depth N` | 10 | Search depth for eval filtering; only used with `--quiet-only` |
+| `--eval-workers N` | cpu_count/2 | Parallel eval engine processes; only used with `--quiet-only` |
 | `--ply N` | 8 | Ply depth for book random walks |
 | `--output FILE` | `training_openings.epd` in script dir | Output EPD file |
 | `--seed N` | 42 | Random seed for reproducibility |
@@ -141,6 +145,13 @@ Book positions are selected by weighted random walks (move probability ∝ Polyg
 additional random (or quiet) moves before deduplication, multiplying the unique count.
 FRC replication without suffix preserves intentional duplicates (for position weighting);
 with suffix, duplicates across replicates are silently dropped (rare).
+
+**`--quiet-only` eval filter:** when a `Leaf_vclassic_eval` binary is present, every
+generated position is scored at `--eval-depth` via UCI and positions with `|score| >
+--eval-limit` cp are discarded.  Chess960 castling rights are stripped from the FEN
+before sending to the engine (negligible effect at depth 1).  Compile the eval binary
+with `perl src/comp.pl classic_eval OVERWRITE` (no NNUE, no TDLEAF).  If the binary
+is absent, a warning is printed and the filter is skipped.
 
 ---
 

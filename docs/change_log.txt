@@ -1,5 +1,17 @@
 Changes since 2017_12_24
 
+2026_04_07 -- make_training_epd.py: eval filter for --quiet-only (scripts/, docs/).
+               --quiet-only now also invokes a Leaf eval binary (default: Leaf_vclassic_eval)
+               to score each generated position and discard those with |score| > --eval-limit
+               cp (default: 50 cp = 0.5 pawns).  Uses --eval-workers parallel UCI engine
+               processes for speed.  Chess960 castling rights are stripped from the FEN
+               before evaluation to avoid Shredder notation parsing issues.  Forced-mate
+               positions are always discarded.  If the binary is not found a warning is
+               printed and eval filtering is skipped.  Compile eval binary with:
+               perl src/comp.pl classic_eval OVERWRITE
+               Also: --random-suffix K, --frc-replicates K, --total/--frc-fraction sizing.
+               SCRIPT_USE.md updated with new option table rows and eval-filter description.
+
 2026_04_07 -- make_training_epd.py: random suffix moves and FRC replication (scripts/, docs/).
                --random-suffix K: play K random legal moves after each book/FRC position
                before recording the EPD, exploding the unique position count (normbk02.bin

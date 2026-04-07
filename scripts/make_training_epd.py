@@ -5,9 +5,11 @@
 #   - ~N positions sampled from a Polyglot opening book at a given ply depth,
 #     optionally with K random suffix moves
 #
-# Random suffix moves dramatically increase unique position counts, preventing
-# game replication in training.  Use --quiet-only to restrict suffix moves to
-# non-captures (keeps material balanced).
+# --quiet-only restricts random suffix moves to non-captures AND (when a Leaf eval
+# binary is available) filters the resulting positions to those scoring within
+# --eval-limit centipawns of even.  The default eval binary is Leaf_vclassic_eval
+# in the same directory as this script.  Compile it with:
+#   perl src/comp.pl classic_eval OVERWRITE
 #
 # Sizing modes (mutually exclusive):
 #   Explicit:        --frc-replicates K --book-positions N
@@ -17,11 +19,11 @@
 #   # Default: 960 FRC + 2000 book, no suffix (2,960 total)
 #   python3 make_training_epd.py
 #
-#   # 2 quiet suffix moves → many more unique positions per source
-#   python3 make_training_epd.py --frc-replicates 21 --book-positions 79840 \
+#   # 2 quiet suffix moves + eval filter → balanced, unique positions
+#   python3 make_training_epd.py --frc-replicates 21 --book-positions 80000 \
 #       --random-suffix 2 --quiet-only
 #
-#   # Fraction-based: 100k total, ~20% FRC-derived, 2 quiet suffix moves
+#   # Fraction-based: 100k total, ~20% FRC, 2 quiet suffix moves, eval filtered
 #   python3 make_training_epd.py --total 100000 --frc-fraction 0.20 \
 #       --random-suffix 2 --quiet-only
 #
@@ -31,7 +33,11 @@
 import argparse
 import os
 import random
+import re
+import subprocess
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 FRC_COUNT = 960   # total unique Chess960 starting positions
 
@@ -43,17 +49,21 @@ except ImportError:
     sys.exit(1)
 
 
+# ---------------------------------------------------------------------------
+# Position generation
+# ---------------------------------------------------------------------------
+
 def apply_random_suffix(board, k, quiet_only, rng):
     """Play k random legal moves on board in-place.
 
-    If quiet_only, restricts to non-captures; falls back to any legal move if
-    no quiet moves are available.  Stops early if the position is terminal.
+    If quiet_only, restricts to non-captures; falls back to any legal move
+    if no quiet moves are available.  Stops early if the position is terminal.
     """
     for _ in range(k):
         if quiet_only:
             moves = [m for m in board.legal_moves if not board.is_capture(m)]
             if not moves:
-                moves = list(board.legal_moves)   # fallback: accept any move
+                moves = list(board.legal_moves)   # fallback
         else:
             moves = list(board.legal_moves)
         if not moves:
@@ -70,9 +80,9 @@ def all_frc_epds(replicates, random_suffix, quiet_only, seed):
 
     When random_suffix > 0:
       For each replicate pass, each FRC position gets a fresh random suffix walk
-      (the RNG advances sequentially, so each replicate produces different moves).
-      Duplicate EPDs across replicates are silently skipped; the returned list
-      may be slightly shorter than 960 × replicates if collisions occur (rare).
+      (the RNG advances sequentially so each replicate produces different moves).
+      Duplicate EPDs across replicates are silently skipped (rare); the returned
+      list may be slightly shorter than 960 × replicates.
     """
     rng = random.Random(seed)
     if random_suffix > 0:
@@ -162,8 +172,136 @@ def sample_book_positions(book_path, n_target, ply, random_suffix, quiet_only, s
     return positions
 
 
+# ---------------------------------------------------------------------------
+# Eval filtering via UCI engine
+# ---------------------------------------------------------------------------
+
+def fen_for_eval(epd):
+    """Convert an EPD string to a FEN suitable for a standard (non-FRC) engine.
+
+    Strips castling rights (sets to '-') to avoid Shredder/Chess960 notation
+    being sent to an engine that may not parse it.  For a balance filter at
+    shallow depth this has negligible effect on the score.
+    """
+    parts = epd.split()
+    ep = parts[3] if len(parts) > 3 else "-"
+    # EPD fields: placement active castling en_passant [opcodes...]
+    # FEN fields: placement active castling en_passant halfmove fullmove
+    return f"{parts[0]} {parts[1]} - {ep} 0 1"
+
+
+def _engine_worker(engine_path, epd_batch, score_limit, depth):
+    """Evaluate a batch of EPDs using a single persistent UCI engine process.
+
+    Returns a list of (epd, passes) tuples where passes is True when
+    |score| <= score_limit cp.  Positions with a forced mate score are
+    considered unbalanced and filtered out.  Positions where no score
+    could be read are kept (should not happen in normal operation).
+    """
+    proc = subprocess.Popen(
+        [engine_path],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL, text=True, bufsize=1,
+    )
+
+    def send(s):
+        proc.stdin.write(s + "\n")
+        proc.stdin.flush()
+
+    # UCI handshake
+    send("uci")
+    for line in proc.stdout:
+        if "uciok" in line:
+            break
+    send("isready")
+    for line in proc.stdout:
+        if "readyok" in line:
+            break
+
+    cp_re   = re.compile(r"score cp (-?\d+)")
+    mate_re = re.compile(r"score mate -?\d+")
+    results = []
+
+    for epd in epd_batch:
+        fen = fen_for_eval(epd)
+        send(f"position fen {fen}")
+        send(f"go depth {depth}")
+
+        score   = None
+        is_mate = False
+        for line in proc.stdout:
+            m = cp_re.search(line)
+            if m:
+                score   = int(m.group(1))
+                is_mate = False          # cp score overrides any earlier mate
+            elif mate_re.search(line):
+                is_mate = True
+            if line.startswith("bestmove"):
+                break
+
+        if is_mate:
+            passes = False               # clearly unbalanced → discard
+        elif score is None:
+            passes = True                # no score read → keep (shouldn't happen)
+        else:
+            passes = abs(score) <= score_limit
+
+        results.append((epd, passes))
+
+    send("quit")
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+    return results
+
+
+def filter_by_eval(epds, engine_path, score_limit, depth, n_workers):
+    """Filter EPDs, keeping those with |score| <= score_limit cp.
+
+    Spawns n_workers parallel UCI engine processes for speed.
+    Returns a filtered list preserving original order.
+    """
+    n = len(epds)
+    if n == 0:
+        return []
+
+    batch_size  = max(1, (n + n_workers - 1) // n_workers)
+    batches     = [epds[i : i + batch_size] for i in range(0, n, batch_size)]
+    lock        = threading.Lock()
+    evaluated   = [0]
+    all_results = [None] * len(batches)
+
+    def run_batch(batch_idx, batch):
+        results = _engine_worker(engine_path, batch, score_limit, depth)
+        with lock:
+            evaluated[0] += len(batch)
+            print(f"\r  Evaluated {evaluated[0]:,}/{n:,} ...", end="", flush=True)
+        return batch_idx, results
+
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        futures = [pool.submit(run_batch, i, b) for i, b in enumerate(batches)]
+        for future in as_completed(futures):
+            idx, results = future.result()
+            all_results[idx] = results
+
+    print()   # terminate \r progress line
+
+    # Flatten in original order
+    return [epd
+            for batch_results in all_results
+            for epd, passes in batch_results
+            if passes]
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
 def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
+    cpu_count  = os.cpu_count() or 1
 
     parser = argparse.ArgumentParser(
         description="Generate training_openings.epd: FRC positions + Polyglot book positions.",
@@ -175,26 +313,31 @@ Adding suffix moves explodes the unique count:
   --random-suffix 1  →  ~60k unique book + ~19k unique FRC positions
   --random-suffix 2  →  ~1M+ unique book + ~300k+ unique FRC positions
 
-Use --quiet-only to restrict suffix moves to non-captures (recommended).
+--quiet-only: restricts suffix moves to non-captures AND filters the output
+by a Leaf eval binary (default: Leaf_vclassic_eval), keeping only positions
+within --eval-limit cp of even (scored at depth 10 by default).
+Compile the eval binary with:
+  perl src/comp.pl classic_eval OVERWRITE
 
 Sizing modes (mutually exclusive):
-
-  Explicit (direct control):
+  Explicit:
     python3 make_training_epd.py --frc-replicates 21 --book-positions 80000 \\
         --random-suffix 2 --quiet-only
 
   Fraction-based (auto-compute frc_replicates and book_positions):
     python3 make_training_epd.py --total 100000 --frc-fraction 0.20 \\
         --random-suffix 2 --quiet-only
-    → frc_replicates=21, 20160 FRC-derived + 79840 book = 100000 total
+    → frc_replicates=21, 20160 FRC-derived + 79840 book = ~100000 before filter
 """,
     )
+
+    # Sizing
     parser.add_argument("--book", default=None, metavar="FILE",
                         help="Polyglot book .bin file "
                              "(default: normbk02.bin alongside this script)")
     parser.add_argument("--book-positions", type=int, default=None, metavar="N",
-                        help="Book positions to sample (default: 2000, or computed from "
-                             "--total/--frc-fraction)")
+                        help="Book positions to sample "
+                             "(default: 2000, or computed from --total/--frc-fraction)")
     parser.add_argument("--frc-replicates", type=int, default=None, metavar="K",
                         help="Samples per FRC position (default: 1).  Without "
                              "--random-suffix: K identical copies (for weighting).  "
@@ -205,13 +348,34 @@ Sizing modes (mutually exclusive):
     parser.add_argument("--frc-fraction", type=float, default=None, metavar="F",
                         help="Desired FRC fraction of --total (0.0–1.0); "
                              "auto-computes --frc-replicates and --book-positions")
+
+    # Suffix / quality
     parser.add_argument("--random-suffix", type=int, default=0, metavar="K",
                         help="Random moves to play after each book/FRC position "
-                             "(default: 0).  Greatly increases unique position count.  "
-                             "Pair with --quiet-only for material-balanced positions.")
+                             "(default: 0).  Greatly increases unique position count.")
     parser.add_argument("--quiet-only", action="store_true", default=False,
-                        help="Restrict random suffix moves to non-captures "
-                             "(recommended with --random-suffix)")
+                        help="Restrict random suffix moves to non-captures AND "
+                             "filter output positions to those within --eval-limit cp "
+                             "of even using a Leaf eval binary.")
+
+    # Eval filter (active when --quiet-only)
+    parser.add_argument("--eval-binary", default=None, metavar="FILE",
+                        help="Leaf binary for eval filtering (default: "
+                             "Leaf_vclassic_eval alongside this script).  "
+                             "Only used with --quiet-only.")
+    parser.add_argument("--eval-limit", type=int, default=50, metavar="CP",
+                        help="Discard positions where |score| > this many centipawns "
+                             "(default: 50 = 0.5 pawns).  Only used with --quiet-only.")
+    parser.add_argument("--eval-depth", type=int, default=10, metavar="N",
+                        help="Search depth for eval filtering (default: 10).  "
+                             "Only used with --quiet-only.")
+    parser.add_argument("--eval-workers", type=int,
+                        default=max(1, cpu_count // 2), metavar="N",
+                        help=f"Parallel eval engine processes "
+                             f"(default: {max(1, cpu_count // 2)}; "
+                             f"only used with --quiet-only)")
+
+    # Book walk / output
     parser.add_argument("--ply", type=int, default=8,
                         help="Ply depth for book random walks (default: 8)")
     parser.add_argument("--output", default=None, metavar="FILE",
@@ -244,16 +408,35 @@ Sizing modes (mutually exclusive):
         parser.error("--frc-replicates must be at least 1.")
     if args.random_suffix < 0:
         parser.error("--random-suffix must be >= 0.")
+    if args.eval_limit < 0:
+        parser.error("--eval-limit must be >= 0.")
+    if args.eval_depth < 1:
+        parser.error("--eval-depth must be >= 1.")
 
     book_path   = args.book   or os.path.join(script_dir, "normbk02.bin")
     output_path = args.output or os.path.join(script_dir, "training_openings.epd")
+
+    # --- Resolve eval binary (only matters when --quiet-only) ---
+    eval_binary = None
+    if args.quiet_only:
+        default_eval = os.path.join(script_dir, "Leaf_vclassic_eval")
+        candidate    = args.eval_binary or default_eval
+        if os.path.isfile(candidate):
+            eval_binary = candidate
+            print(f"Eval binary:  {os.path.basename(eval_binary)}"
+                  f"  (limit ±{args.eval_limit} cp, depth {args.eval_depth},"
+                  f" {args.eval_workers} worker(s))")
+        else:
+            print(f"Warning: eval binary not found: {candidate}")
+            print(f"  To enable eval filtering, compile with:")
+            print(f"    perl src/comp.pl classic_eval OVERWRITE")
+            print(f"  Proceeding without eval filter.")
 
     suffix_desc = (f"{args.random_suffix} {'quiet ' if args.quiet_only else ''}random move(s)"
                    if args.random_suffix > 0 else "none")
 
     # --- FRC positions ---
-    frc_label = (f"960 × {frc_replicates} replicates"
-                 if frc_replicates > 1 else "960 × 1")
+    frc_label = f"960 × {frc_replicates} replicates" if frc_replicates > 1 else "960 × 1"
     print(f"Generating FRC positions: {frc_label}, suffix: {suffix_desc} ...")
     frc_epds = all_frc_epds(
         replicates=frc_replicates,
@@ -280,12 +463,26 @@ Sizing modes (mutually exclusive):
             print(f"  Book not found: {book_path} — skipping book positions.")
 
     # --- Combine and shuffle ---
-    # FRC without suffix: intentional duplicates preserved (for weighting).
-    # FRC with suffix: already deduplicated in all_frc_epds().
-    # Book positions: always deduplicated within sample_book_positions().
     combined = frc_epds + book_epds
     rng = random.Random(args.seed + 2)
     rng.shuffle(combined)
+
+    # --- Eval filter (--quiet-only + eval binary present) ---
+    if eval_binary:
+        n_before = len(combined)
+        print(f"\nFiltering {n_before:,} positions by eval "
+              f"(|score| ≤ {args.eval_limit} cp, depth {args.eval_depth}) ...")
+        combined = filter_by_eval(
+            combined, eval_binary,
+            args.eval_limit, args.eval_depth, args.eval_workers,
+        )
+        n_after   = len(combined)
+        n_removed = n_before - n_after
+        print(f"  Kept {n_after:,}  ({n_removed:,} rejected,"
+              f" {n_removed / n_before * 100:.1f}%)")
+        # Re-shuffle after filtering (filter_by_eval preserves generation order)
+        rng2 = random.Random(args.seed + 3)
+        rng2.shuffle(combined)
 
     # --- Write ---
     with open(output_path, "w") as f:
@@ -293,15 +490,15 @@ Sizing modes (mutually exclusive):
             f.write(epd + "\n")
 
     total    = len(combined)
-    frc_pct  = len(frc_epds)  / total * 100 if total else 0
-    book_pct = len(book_epds) / total * 100 if total else 0
+    frc_kept = sum(1 for e in combined if e in set(frc_epds))   # approximate
+    book_kept = total - frc_kept
 
     print(f"\nWritten {total:,} positions → {output_path}")
-    print(f"  FRC-derived:  {len(frc_epds):>8,}  ({frc_pct:.1f}%)")
-    print(f"  Book-derived: {len(book_epds):>8,}  ({book_pct:.1f}%)")
     if args.random_suffix > 0:
         q = "quiet " if args.quiet_only else ""
-        print(f"  Suffix: {args.random_suffix} {q}random move(s) applied to every position")
+        print(f"  Suffix: {args.random_suffix} {q}random move(s) per position")
+    if eval_binary:
+        print(f"  Eval filter: ±{args.eval_limit} cp  (depth {args.eval_depth})")
     print(f"\nUse with cutechess-cli:")
     print(f"  -openings file={os.path.basename(output_path)} format=epd order=random "
           f"-variant fischerandom -noswap")
