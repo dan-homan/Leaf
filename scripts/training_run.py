@@ -287,8 +287,10 @@ def main():
             print(f"  Copying {net_path} → learn/{net_filename}")
             shutil.copy2(net_path, net_file)
 
-    tdleaf_bin   = os.path.join(learn_dir, net_base + ".tdleaf.bin")
-    sidecar_path = os.path.join(learn_dir, net_base + ".games")
+    tdleaf_bin        = os.path.join(learn_dir, net_base + ".tdleaf.bin")
+    sidecar_path      = os.path.join(learn_dir, net_base + ".games")
+    training_epd_path = os.path.join(learn_dir, "training_openings.epd")
+    use_training_epd  = os.path.isfile(training_epd_path)
 
     # -----------------------------------------------------------------------
     # Step 1b — Opponent roster (rotation across multiple opponent types)
@@ -527,7 +529,12 @@ def main():
     tc2         = tc2_raw if tc2_raw.strip() else tc1
     concurrency = int(ask( "  Concurrency         [-c]        ", default_concurrency))
     wait_ms     = int(ask("  Wait between games  [--wait ms] ", 500))
-    fischer     = ask_yes_no("  Fischer Random? [--fischer-random]", default="y")
+    if use_training_epd:
+        print(f"  Opening EPD:      training_openings.epd detected — using FRC+book openings "
+              f"(Fischer variant auto-enabled)")
+        fischer = True
+    else:
+        fischer = ask_yes_no("  Fischer Random? [--fischer-random]", default="y")
     depth1_str  = ask("  Learner depth limit (0=none) [--depth1]", "0")
     depth1      = int(depth1_str) if depth1_str.strip() else 0
     depth2_str  = ask(f"  Opponent depth limit (0=none) [--depth2]", str(depth1))
@@ -544,9 +551,9 @@ def main():
     else:
         total_after_str = f"{prior_games + games_per_cycle:,}"
 
-    # Opening book for non-Fischer games
+    # Opening book for non-Fischer, non-EPD games
     book_path = os.path.join(learn_dir, "normbk02.bin")
-    use_book  = not fischer and os.path.isfile(book_path)
+    use_book  = not use_training_epd and not fischer and os.path.isfile(book_path)
 
     # -----------------------------------------------------------------------
     # PGN directory  —  learn/pgn/<net_base>/
@@ -589,7 +596,9 @@ def main():
             print(f"  Depth limit:      {d1_str} (both engines)")
         else:
             print(f"  Depth learner:    {d1_str}   Depth opponent: {d2_str}")
-    if fischer:
+    if use_training_epd:
+        print(f"  Opening EPD:      training_openings.epd  (FRC+book, Fischer variant)")
+    elif fischer:
         print( "  Fischer Random:   yes")
     elif use_book:
         print(f"  Opening book:     {os.path.basename(book_path)}")
@@ -628,7 +637,9 @@ def main():
         ]
         if tc2 != tc1:
             cmd += ["--tc2", tc2]
-        if fischer:
+        if use_training_epd:
+            cmd += ["--openings", training_epd_path, "--fischer-random"]
+        elif fischer:
             cmd.append("--fischer-random")
         elif use_book:
             cmd += ["--openings", book_path]
@@ -852,7 +863,9 @@ def main():
                     "-c", str(concurrency),
                     "--pgn-out", val_pgn,
                 ]
-                if fischer:
+                if use_training_epd:
+                    val_cmd += ["--openings", training_epd_path, "--fischer-random"]
+                elif fischer:
                     val_cmd.append("--fischer-random")
                 elif use_book:
                     val_cmd += ["--openings", book_path]
