@@ -73,38 +73,55 @@ protocol).
 ## make_training_epd.py
 
 Generate a combined opening EPD file for TDLeaf training:
-- All 960 Chess960 starting positions (FRC)
+- All 960 Chess960 starting positions (FRC), optionally replicated K times
 - ~N positions sampled from a Polyglot opening book at a given ply depth
 
-The output is deduplicated, shuffled, and ready for use with
-`-openings file=training_openings.epd format=epd order=random -variant fischerandom`.
+The output is shuffled and ready for use with
+`-openings file=training_openings.epd format=epd order=random -variant fischerandom -noswap`.
 `training_run.py` auto-detects and uses this file when it is present in `learn/`.
 
+Two sizing modes are available (mutually exclusive):
+
+**Explicit** (`--frc-replicates` / `--book-positions`):
 ```sh
 cd learn/
 
-# Generate with defaults (normbk02.bin at 8 ply, 2000 book positions)
+# Default: 960 × 1 FRC + 2000 book = 2960 total
 python3 make_training_epd.py
 
-# Custom book, ply depth, and output name
-python3 make_training_epd.py --book normbk02.bin --ply 8 --book-positions 2000 \
-    --output training_openings.epd
+# 5 replicates of all FRC positions + 2000 book = 6800 total
+python3 make_training_epd.py --frc-replicates 5 --book-positions 2000
 ```
+
+**Fraction-based** (`--total` / `--frc-fraction`):
+```sh
+cd learn/
+
+# 100k total, ~20% FRC (computes frc_replicates=21 → 20160 FRC + 79840 book)
+python3 make_training_epd.py --total 100000 --frc-fraction 0.20
+```
+
+Fraction-based sizing: `frc_replicates = max(1, round(total × frc_fraction / 960))`;
+`book_positions = total − 960 × frc_replicates`.  Actual totals may differ slightly
+from `--total` because replicates must be an integer.
 
 ### Options
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--book FILE` | `normbk02.bin` in script dir | Polyglot `.bin` book to sample from |
-| `--book-positions N` | 2000 | Approximate number of book positions to sample |
+| `--book-positions N` | 2000 | Number of book positions to sample (explicit mode) |
+| `--frc-replicates K` | 1 | Times each FRC position appears in output (explicit mode) |
+| `--total N` | — | Target total output size (fraction mode; use with `--frc-fraction`) |
+| `--frc-fraction F` | — | Desired FRC fraction 0.0–1.0 (fraction mode; use with `--total`) |
 | `--ply N` | 8 | Ply depth for random walks into the book |
 | `--output FILE` | `training_openings.epd` in script dir | Output EPD file |
 | `--seed N` | 42 | Random seed for reproducibility |
 
 Book positions are selected by weighted random walks: at each ply, a move is chosen
-with probability proportional to its `weight` field in the Polyglot entry.  The final
-set is deduplicated by EPD string (FRC positions that happen to also appear in the book
-are not double-counted) and shuffled before writing.
+with probability proportional to its `weight` field in the Polyglot entry.  Book
+positions are deduplicated; FRC replication is intentional and preserved.  The
+combined list is shuffled uniformly before writing.
 
 ---
 

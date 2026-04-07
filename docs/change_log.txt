@@ -1,5 +1,16 @@
 Changes since 2017_12_24
 
+2026_04_07 -- make_training_epd.py: FRC replication and fraction-based sizing (scripts/,
+               docs/).
+               Added --frc-replicates K: include each of the 960 FRC starting positions
+               K times in the output (for boosting FRC representation in large EPD files).
+               Added --total N --frc-fraction F: convenience mode that computes
+               frc_replicates and book_positions so that FRC entries are approximately
+               the requested fraction of the total.  Example: --total 100000
+               --frc-fraction 0.20 → frc_replicates=21 → 20160 FRC + 79840 book = 100000.
+               Global deduplication removed (was collapsing intentional replicates);
+               book positions are still deduplicated internally.  SCRIPT_USE.md updated.
+
 2026_04_06 -- make_training_epd.py: generate combined FRC+book opening EPD (scripts/,
                learn/, docs/).
                New script that produces training_openings.epd: all 960 Chess960 starting
