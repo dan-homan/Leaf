@@ -198,24 +198,38 @@ def _engine_worker(engine_path, epd_batch, score_limit, depth):
     considered unbalanced and filtered out.  Positions where no score
     could be read are kept (should not happen in normal operation).
     """
+    # Run the engine in its own directory so it can find search.par etc.
+    engine_dir = os.path.dirname(os.path.abspath(engine_path))
+
     proc = subprocess.Popen(
         [engine_path],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL, text=True, bufsize=1,
+        stderr=subprocess.DEVNULL,
+        text=True, bufsize=1,
+        cwd=engine_dir,
     )
 
     def send(s):
         proc.stdin.write(s + "\n")
         proc.stdin.flush()
 
+    def readline():
+        # Use explicit readline() rather than iterating over proc.stdout.
+        # The `for line in file` iterator uses internal read-ahead buffering
+        # that deadlocks when alternating writes and reads on a subprocess pipe.
+        return proc.stdout.readline()
+
     # UCI handshake
     send("uci")
-    for line in proc.stdout:
-        if "uciok" in line:
+    while True:
+        line = readline()
+        if not line or "uciok" in line:
             break
+
     send("isready")
-    for line in proc.stdout:
-        if "readyok" in line:
+    while True:
+        line = readline()
+        if not line or "readyok" in line:
             break
 
     cp_re   = re.compile(r"score cp (-?\d+)")
@@ -229,7 +243,10 @@ def _engine_worker(engine_path, epd_batch, score_limit, depth):
 
         score   = None
         is_mate = False
-        for line in proc.stdout:
+        while True:
+            line = readline()
+            if not line:
+                break
             m = cp_re.search(line)
             if m:
                 score   = int(m.group(1))
