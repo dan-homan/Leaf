@@ -1,5 +1,38 @@
 Changes since 2017_12_24
 
+2026_04_08 -- training_run.py: fix interrupted-run filename collision; add .tdleaf.bin snapshots.
+               Two fixes:
+               (1) On premature termination (Ctrl-C), the final export now uses
+               *-<games>g-partial.nnue instead of *-<games>g.nnue, avoiding silent
+               overwrite of an existing game-count checkpoint.  (The .games sidecar is
+               not updated until a match completes, so current_games may equal prior_games
+               for a single interrupted match.)  If rotation completed some segments before
+               interruption, the completed game count is now banked to .games.
+               (2) At the end of every invocation (normal completion or interrupted), a copy
+               of the current .tdleaf.bin is saved as <net_base>.tdleaf.bin-<games>g for
+               archival and rollback.  The snapshot filename is shown in the export output
+               and the final summary.
+
+2026_04_08 -- match.py: remove automatic -noswap when using opening files (scripts/).
+               -noswap was previously added unconditionally whenever an EPD openings
+               file or Polyglot book was supplied.  With -games 2 -repeat -noswap,
+               cutechess-cli assigns engine1 as white for every game pair, so the
+               learner was always playing white.  The flag is now opt-in via --noswap
+               (default off), which is the correct default for symmetric training.
+
+2026_04_08 -- make_training_epd.py: fix eval worker deadlock and UCI detection (scripts/).
+               Two fixes to the --quiet-only eval filter:
+               (1) Python's file iterator (for line in proc.stdout) uses 8 KB read-ahead
+               buffering that deadlocks when alternating stdin writes and stdout reads on
+               a subprocess pipe.  All loops replaced with explicit proc.stdout.readline()
+               calls.
+               (2) Leaf auto-detects protocol from the first stdin command, but when stdin
+               is a pipe (not a terminal) it stays in interactive CLI mode and ignores
+               "uci".  The eval worker was rewritten to use the xboard protocol instead:
+               startup sequence xboard/force/post/sd N, then per-position setboard/go;
+               score is parsed from the post output line (depth score_cp time nodes pv).
+               Result: no stalls; ~75 positions/sec with 4 workers at depth 10.
+
 2026_04_07 -- make_training_epd.py: eval filter for --quiet-only (scripts/, docs/).
                --quiet-only now also invokes a Leaf eval binary (default: Leaf_vclassic_eval)
                to score each generated position and discard those with |score| > --eval-limit
