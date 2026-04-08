@@ -2425,17 +2425,17 @@ void nnue_requantize_fc()
 //   Total m section: ~563 KB (FC) + 4 KB (FT bias) + sparse PSQT (~1.5 MB)
 //
 // Version 8 additions (current):
-//   Sparse FT v (second-moment) section — persists v_ft_w for the same
-//   dirty feature rows as the FT weight section.  Eliminates the per-restart
-//   FT v cold-start: previously v_ft_w was zeroed at every startup (too large
-//   to persist at 92 MB full), causing noisy/oversized FT updates for the
-//   first ~1000 Adam steps until v re-accumulated.  Sparse persistence bounds
-//   disk cost to O(n_dirty_rows × HALF_DIMS × 4 B) — typically well under 10 MB.
+//   Sparse FT v (second-moment) section — persists v_ft_w for feature rows
+//   where v is non-zero (i.e. where gradient updates have actually occurred
+//   in the current session).  CRITICAL: only non-zero rows are saved.  If a
+//   dirty row has v=0 (e.g. first session from a v7 file, before any Adam
+//   step touches that row), saving it as "warmed" would produce bc2_warm≈1
+//   with v=0, giving sv≈ε and steps ~10,000× LR — catastrophic.
 //   Multi-writer merge uses max(v_file, v_local) per element (same as FC v).
-//   On load, ft_v_warmed[fi] is set to true for restored rows; the RMSProp
-//   update uses t_adam (not t_ft_session) for bc2 of warmed rows, since their
-//   saved v is already calibrated against t_adam steps.
-//     uint32_t n_ft_v_rows: count of dirty rows (same set as FT weight section) (4 B)
+//   On load, ft_v_warmed[fi] is set to true for restored rows so the RMSProp
+//   update uses t_adam (not t_ft_session) for bc2, since the saved v is
+//   already calibrated against t_adam steps.
+//     uint32_t n_ft_v_rows: count of rows with non-zero v (4 B)
 //     For each row:
 //       uint32_t fi                                               (4 B)
 //       float32[HALF_DIMS]          v_ft                          (4096 B)
@@ -2934,22 +2934,35 @@ bool nnue_save_fc_weights(const char *path)
         }
     }
 
-    // Sparse FT v section (v8): v_ft_w rows for dirty FT indices.
-    // Same dirty-row set as FT weights (n_ft_rows already counted above).
+    // Sparse FT v section (v8): v_ft_w rows where v is non-zero.
+    // IMPORTANT: only rows with at least one non-zero v dimension are saved.
+    // Dirty rows with v=0 (e.g. first session from a v7 file — v was never
+    // accumulated) must NOT be saved: on reload they would be marked warmed
+    // (ft_v_warmed[fi]=true) but with v=0 and bc2_warm≈1, giving sv≈ε and
+    // steps ~10,000× the intended LR, catastrophically corrupting FT weights.
     // Merge strategy: max(v_file, v_local) — same as FC v.
     {
-        fwrite(&n_ft_rows, sizeof(uint32_t), 1, f);
+        uint32_t n_ft_v_rows = 0;
         if (v_ft_w) {
             for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
-                const uint32_t *wc = ft_weights_cnt   + (size_t)fi * NNUE_HALF_DIMS;
-                const uint32_t *pc = psqt_weights_cnt + (size_t)fi * NNUE_PSQT_BKTS;
-                bool dirty = false;
-                for (int d = 0; d < NNUE_HALF_DIMS && !dirty; d++) dirty = (wc[d] != 0);
-                for (int b = 0; b < NNUE_PSQT_BKTS && !dirty; b++) dirty = (pc[b] != 0);
-                if (!dirty) continue;
+                const float *vw = v_ft_w + (size_t)fi * NNUE_HALF_DIMS;
+                bool v_nonzero = false;
+                for (int d = 0; d < NNUE_HALF_DIMS && !v_nonzero; d++)
+                    v_nonzero = (vw[d] != 0.0f);
+                if (v_nonzero) n_ft_v_rows++;
+            }
+        }
+        fwrite(&n_ft_v_rows, sizeof(uint32_t), 1, f);
+        if (v_ft_w && n_ft_v_rows > 0) {
+            for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
+                const float *vw = v_ft_w + (size_t)fi * NNUE_HALF_DIMS;
+                bool v_nonzero = false;
+                for (int d = 0; d < NNUE_HALF_DIMS && !v_nonzero; d++)
+                    v_nonzero = (vw[d] != 0.0f);
+                if (!v_nonzero) continue;
                 uint32_t fi_u = (uint32_t)fi;
                 fwrite(&fi_u, sizeof(uint32_t), 1, f);
-                fwrite(v_ft_w + (size_t)fi * NNUE_HALF_DIMS, sizeof(float), NNUE_HALF_DIMS, f);
+                fwrite(vw, sizeof(float), NNUE_HALF_DIMS, f);
             }
         }
     }
