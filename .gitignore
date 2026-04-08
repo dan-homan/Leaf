@@ -25,6 +25,7 @@ learn/*
 !learn/*.py
 !learn/*.pl
 !learn/*.txt
+!learn/training_openings.epd
 
 # Within src/, ignore OS/editor artifacts and binary/backup files
 src/.DS_Store
