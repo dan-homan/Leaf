@@ -43,7 +43,7 @@ Because this is the exact network shipped with Stockfish 15.1, Leaf's forward pa
 A network trained from scratch by Leaf itself (via TDLeaf(λ) self-play) will initially be weaker than `nn-ad9b42354671.nnue`, which represents years of Stockfish training data.  Match results against the Stockfish net provide the clearest measure of training progress: the goal is to close the gap, then surpass it with a network tuned to Leaf's own search characteristics.  Current result with the SF15.1 net: **92W–8D–0L (96.0%)** vs the classical Leaf eval at 10+0.1s/move.
 
 **3. Weight initialisation for fresh training.**
-Leaf can generate a fresh `.nnue` with `--init-nnue --write-nnue <file>`.  Design philosophy: start quiet — initial positional output near zero so classical material dominates early play; TDLeaf builds structure from signal.
+Leaf can generate a fresh `.nnue` with `--init-nnue --write-nnue <file>`.  A variant `--init-nnue-noprior` uses uniform 100 cp piece values instead of classical material, forcing the network to learn material from scratch.  Design philosophy: start quiet — initial positional output near zero so classical material dominates early play; TDLeaf builds structure from signal.
 
 | Layer | Distribution | Notes |
 |-------|-------------|-------|
@@ -80,9 +80,11 @@ Leaf includes a complete **TDLeaf(λ)** reinforcement learning system (Baxter, T
 - Uses PV leaf scores as the TD signal; gradients flow backward through the full NNUE forward pass
 - FT and PSQT are updated **sparsely** — only the ~30–60 active feature rows per position are touched
 - Weights are persisted to a companion `.tdleaf.bin` file after each game, supporting fine-tuning from a starting, pre-trained .nnue or training from a randomly initialised network
+- **Adam optimizer state persistence:** both the second-moment (`v`) and first-moment (`m`) arrays are saved in `.tdleaf.bin` (v6+ and v7+ respectively), so Adam's gradient scale and direction survive training session restarts — eliminating the slow/negative start that occurs when momentum cold-starts at zero
 - **Concurrent multi-instance support:** multiple engine processes can share a single `.tdleaf.bin` via POSIX file locking and per-session delta accumulation with atomic rename
+- **Opponent rotation:** `scripts/training_run.py` manages multi-phase training with configurable opponent rosters (self-play, read-only reference, or external engines), automatic checkpointing, .tdleaf.bin snapshots, and startup backups
 
-Build with `NNUE=1 TDLEAF=1`.  See [`docs/TDLEAF.md`](docs/TDLEAF.md) for the full algorithm, gradient flow, file format, and hyperparameter reference.
+Build with `NNUE=1 TDLEAF=1`.  The recommended training workflow is `scripts/training_run.py` (run from `learn/`).  See [`docs/TDLEAF.md`](docs/TDLEAF.md) for the full algorithm, gradient flow, file format, and hyperparameter reference.
 
 ---
 
@@ -114,7 +116,9 @@ The network file (default: `to-be-trained.nnue`) must be present in the same dir
 
 ## Running
 
-Leaf speaks the **xboard/CECP** protocol exclusively.  Point any xboard-compatible GUI at the binary, or run it directly from the command line:
+Leaf supports **UCI**, **xboard/CECP**, and an **interactive CLI**; the protocol is
+auto-detected from the first command received on stdin.  Point any xboard or UCI
+compatible GUI at the binary, or run it directly from the command line:
 
 ```sh
 cd run/
@@ -125,7 +129,10 @@ Self-play matches between two Leaf versions (requires [cutechess-cli](https://gi
 
 ```sh
 cd run/
+# Default: each opening played twice (both colors) for balance
 python3 match.py Leaf_vA Leaf_vB -n 200 -c 4 -tc 10+0.1
+# --no-repeat: each opening played once, for maximum position diversity in self-play
+python3 match.py Leaf_vA Leaf_vB -n 200 -c 4 -tc 10+0.1 --no-repeat
 ```
 
 ---
