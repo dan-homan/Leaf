@@ -1302,9 +1302,16 @@ static float    *v_ft_w    = nullptr;  // [NNUE_FT_INPUTS × NNUE_HALF_DIMS] —
 static float    *v_psqt_w  = nullptr;  // [NNUE_FT_INPUTS × PSQT_BKTS] — PSQT per-weight v (~720 KB)
 static float    *m_psqt_w  = nullptr;  // [NNUE_FT_INPUTS × PSQT_BKTS] — PSQT per-weight m (~720 KB)
 
-// Session-local Adam step counter.  Incremented once per nnue_apply_gradients() call.
-// Reset alongside the v/m arrays so bias correction v/(1-β²^t) is always valid.
+// Global Adam step counter — persisted in .tdleaf.bin so warmup and FC/PSQT
+// bias correction survive session restarts.
 static uint32_t  t_adam    = 0;
+
+// Session-local FT step counter — intentionally NOT persisted.  v_ft_w is zeroed
+// at every startup (too large to persist), so bc2 must be computed relative to the
+// current session's step count, not the global t_adam.  Using min(t_adam, t_ft_session)
+// for ft_bc2 gives the standard Adam bias-correction formula (v / (1-β²^T)) for
+// the freshly-zeroed v, preventing 31×-oversized FT steps on the first batch.
+static uint32_t  t_ft_session = 0;
 
 // ---------------------------------------------------------------------------
 // nnue_init_zero_weights — fresh-start FC/FT initialisation + classical PSQT
@@ -2009,10 +2016,16 @@ float nnue_clip_gradients(float max_norm)
 void nnue_apply_gradients()
 {
     t_adam++;
+    t_ft_session++;
 
-    // Global bias-correction for FT RMSProp (sparse features need growing
-    // global bc2; per-weight bc2 would be too small at ~8 updates/5000g).
-    const float ft_bc2 = 1.0f - powf(TDLEAF_ADAM_BETA2, (float)t_adam);
+    // FT RMSProp bias-correction: use min(t_adam, t_ft_session) so that the
+    // session-local step count governs bc2 when v_ft_w has just been zeroed at
+    // startup, giving the standard Adam formula v/(1-β²^T_session) rather than
+    // v/(1-β²^t_adam)≈v/1=0 which would produce ~31× oversized steps.
+    // Once t_ft_session exceeds t_adam the min saturates and behaviour is identical
+    // to the original global-t_adam formula.
+    const uint32_t ft_t  = std::min(t_adam, t_ft_session);
+    const float    ft_bc2 = 1.0f - powf(TDLEAF_ADAM_BETA2, (float)ft_t);
 
     // Linear LR warmup: ramp from 0 to full over the first WARMUP Adam steps.
     const float warmup_factor = (TDLEAF_ADAM_WARMUP > 0 && t_adam <= (uint32_t)TDLEAF_ADAM_WARMUP)

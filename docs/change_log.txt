@@ -1,5 +1,25 @@
 Changes since 2017_12_24
 
+2026_04_08 -- TDLeaf: fix FT RMSProp bc2 cold-start causing ~31× oversized FT updates
+               at every session restart (src/nnue.cpp).
+               Root cause: v_ft_w (FT per-weight second moment, ~92 MB) is zeroed at
+               startup because it is too large to persist.  The bc2 denominator for FT
+               was computed from the global t_adam (persisted), which is large after any
+               training — giving ft_bc2≈1.  With v=0 and bc2=1 the first FT step is
+               sv = sqrt(0/1+ε) = ε, so dw = LR/ε ≈ 31× the intended LR magnitude.
+               This caused FT weights to overshoot on every restart, degrading
+               previously learned positional knowledge and causing Elo loss that
+               persisted for thousands of games while v re-accumulated.
+               Fix: introduce a session-local counter t_ft_session (starts at 0 on every
+               process start, not persisted).  Compute ft_bc2 from
+               min(t_adam, t_ft_session) instead of t_adam alone.  When t_ft_session is
+               small (early in a session), this applies correct bias correction for the
+               freshly-zeroed v (standard Adam formula v/(1-β²^T_session)), limiting
+               the first step to the intended ±LR0.  As t_ft_session grows to match
+               t_adam the min saturates and behaviour reverts to the original formula.
+               Note: the existing LR warmup does NOT help this issue — warmup checks
+               t_adam (persisted and already large), so it never re-fires on restarts.
+
 2026_04_08 -- training_run.py: startup .tdleaf.bin backup and .games-before-names fix (scripts/).
                Two improvements:
                (1) When continuing from an existing .tdleaf.bin (not starting fresh),

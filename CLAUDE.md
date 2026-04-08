@@ -95,6 +95,7 @@ errors (unknown types, undeclared identifiers).  These are expected and can be i
 - `tdleaf_replay()` then runs `TDLEAF_REPLAY_K` (default 0, disabled) additional passes over the last `TDLEAF_REPLAY_BUF_N` (default 8) completed games stored in a ring buffer, refreshing scores from current weights before each pass.  Replay uses FC-only gradients (`fc_only=true`) to avoid FT feedback divergence.
 - Dense piece values (`piece_val[6][8]`, 48 floats) learn material corrections on top of PSQT via dense gradient updates; added to eval as `nnue_dense_piece_val()`.  PSQT gradients are mean-centered per piece-type slot to prevent PSQT from learning redundant material corrections (active only when `piece_val_active`).
 - Weights persist to `<net>.tdleaf.bin` (v7 format); POSIX file locking + delta merging allows concurrent multi-instance training.  v6 adds persistent Adam second-moment (v) arrays and `t_adam`; multi-writer merge uses `max(v_file, v_local)`.  v7 adds persistent Adam first-moment (m) arrays; multi-writer merge uses element-wise average `(m_file + m_local) / 2`.  FT weight v/m (~92 MB) excluded.
+- FT RMSProp uses a session-local counter `t_ft_session` (not persisted) for bc2 via `min(t_adam, t_ft_session)`.  This prevents ~31× oversized FT updates on the first Adam step after restart (which would occur if the global `t_adam` were used with freshly-zeroed `v_ft_w`).
 - `material` in `score.cpp` is **already STM (side-to-move) POV** — do not flip it.
 
 ### Protocol support

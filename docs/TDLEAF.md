@@ -345,6 +345,14 @@ about gradient direction should produce a smaller step rather than a random-dire
 are sparse enough (~3–50 per weight over 190k games) that v barely converges before process
 restart.  FT weights use RMSProp (no m array), so FT weight m does not exist.
 
+**FT bc2 cold-start fix:** Because `v_ft_w` is zeroed at every startup, using the global
+`t_adam` (persisted and large) for FT's bc2 would give `bc2≈1` while `v=0`, producing
+`sv = sqrt(0/1+ε) = ε` and step sizes ~31× too large on the first batch — destroying
+previously learned FT weights.  The fix: FT uses `min(t_adam, t_ft_session)` for bc2,
+where `t_ft_session` is a session-local counter starting at 0 on every process launch.
+This gives standard Adam bias correction for the fresh v regardless of how large t_adam is,
+keeping first-step magnitude at the intended ±LR0.
+
 The per-weight `cnt` arrays (which are also persisted) track update history for
 per-weight bias correction and monitoring.
 
