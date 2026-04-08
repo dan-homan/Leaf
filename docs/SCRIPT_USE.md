@@ -42,6 +42,8 @@ python3 match.py Leaf_vnew Leaf_v1 Leaf_v2 Leaf_v3 \
 | `--depth1 N` | — | Limit engine1 search to depth N |
 | `--depth2 N` | — | Limit engine2 search to depth N |
 | `--openings FILE` | — | Openings file: `.epd`, `.pgn`, or `.bin` (polyglot book) |
+| `--no-repeat` | off | Play each opening once (`-rounds N`, no `-games 2 -repeat`).  Increases position diversity; recommended for symmetric self-play. |
+| `--noswap` | off | Pass `-noswap` to cutechess-cli; engine1 always plays white.  Off by default (correct for training). |
 
 When more than one opponent is supplied the script enters **gauntlet mode** and
 prints a summary table (Opponent, Games, W, D, L, Score%, Elo diff) at the end.
@@ -147,11 +149,12 @@ FRC replication without suffix preserves intentional duplicates (for position we
 with suffix, duplicates across replicates are silently dropped (rare).
 
 **`--quiet-only` eval filter:** when a `Leaf_vclassic_eval` binary is present, every
-generated position is scored at `--eval-depth` via UCI and positions with `|score| >
---eval-limit` cp are discarded.  Chess960 castling rights are stripped from the FEN
-before sending to the engine (negligible effect at depth 1).  Compile the eval binary
-with `perl src/comp.pl classic_eval OVERWRITE` (no NNUE, no TDLEAF).  If the binary
-is absent, a warning is printed and the filter is skipped.
+generated position is scored at `--eval-depth` via xboard protocol and positions with
+`|score| > --eval-limit` cp are discarded.  Chess960 castling rights are stripped from
+the EPD before sending to the engine.  `--eval-workers` parallel engine processes run
+concurrently (~75 pos/sec at depth 10 with 4 workers).  Compile the eval binary with
+`perl src/comp.pl classic_eval OVERWRITE` (no NNUE, no TDLEAF).  If the binary is
+absent, a warning is printed and the filter is skipped.
 
 ---
 
@@ -202,8 +205,17 @@ python3 training_run.py
    - Else if `normbk02.bin` is in `learn/`: use it as the Polyglot opening book.
    See `make_training_epd.py` to generate `training_openings.epd`.
 
-On completion, trained weights are exported to `<net_base>-<total_games>g.nnue`.
+On completion, trained weights are exported to `<net_base>-<total_games>g.nnue` and
+a copy of the current `.tdleaf.bin` is saved as `<net_base>.tdleaf.bin-<total_games>g`
+for archival and rollback.  If terminated early with Ctrl-C, the export uses a
+`-partial` suffix to avoid overwriting an existing game-count checkpoint.
 Game counts accumulate in a `<net_base>.games` sidecar file across runs.
+
+**Self-play opening diversity:** when the current opponent segment is symmetric
+self-play (both engines learn), `training_run.py` automatically passes `--no-repeat`
+to `match.py` so each opening is played once rather than twice, maximising the variety
+of positions seen per N games.  Non-self-play segments (prev-checkpoint, external
+engine) retain `-games 2 -repeat` for fairer W/L/D statistics.
 
 ### Train-validate loop
 

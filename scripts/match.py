@@ -131,6 +131,10 @@ def main():
                         help="Pass -noswap to cutechess-cli: don't swap colors between "
                              "paired games.  Off by default (both engines play both sides "
                              "from each opening position, which is correct for training).")
+    parser.add_argument("--no-repeat", action="store_true", default=False,
+                        help="Play each opening once (-rounds N, no -games 2 -repeat). "
+                             "Increases opening diversity at the cost of color-balance "
+                             "per opening.  Recommended for symmetric self-play training.")
     parser.add_argument("--fischer-random", action="store_true", default=False,
                         help="Use Chess960 / Fischer Random starting positions")
     parser.add_argument("--depth1", type=int, default=None, metavar="N",
@@ -214,7 +218,10 @@ def main():
         pgn_base = args.pgn_out or f"match_{name1}_vs_{name2}.pgn"
 
         # rounds/games setup
-        if args.games % 2 == 0:
+        if args.no_repeat:
+            rounds_arg = str(args.games)
+            games_arg  = []
+        elif args.games % 2 == 0:
             rounds_arg = str(args.games // 2)
             games_arg  = ["-games", "2", "-repeat"]
         else:

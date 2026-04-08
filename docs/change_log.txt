@@ -1,5 +1,16 @@
 Changes since 2017_12_24
 
+2026_04_08 -- match.py / training_run.py: --no-repeat flag for single-play-per-opening (scripts/).
+               match.py: new --no-repeat flag passes -rounds N to cutechess-cli without
+               -games 2 -repeat, so each opening position is played once rather than
+               twice (colors swapped).  Increases opening diversity per N games at the
+               cost of per-opening color balance.  Without the flag, even game counts
+               still use -games 2 -repeat as before.
+               training_run.py: self-play segments (both engines learn symmetrically)
+               now pass --no-repeat by default, maximising the variety of positions seen
+               during training.  Non-self-play segments (prev-checkpoint, external engine)
+               retain -games 2 -repeat for fairer W/L/D accounting.
+
 2026_04_08 -- training_run.py: fix interrupted-run filename collision; add .tdleaf.bin snapshots.
                Two fixes:
                (1) On premature termination (Ctrl-C), the final export now uses
