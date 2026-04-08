@@ -209,7 +209,23 @@ On completion, trained weights are exported to `<net_base>-<total_games>g.nnue` 
 a copy of the current `.tdleaf.bin` is saved as `<net_base>.tdleaf.bin-<total_games>g`
 for archival and rollback.  If terminated early with Ctrl-C, the export uses a
 `-partial` suffix to avoid overwriting an existing game-count checkpoint.
-Game counts accumulate in a `<net_base>.games` sidecar file across runs.
+The `<net_base>.games` sidecar is always written to `current_games` at the start of
+Step 6 (before any filename is determined), so sidecar counts and file names stay
+in sync on all exit paths.  Game counts accumulate across runs.
+
+**Startup backup:** when continuing from an existing `.tdleaf.bin`, a copy is saved
+as `.tdleaf.bin.bak` before any training begins.  This allows recovery of the
+pre-run weights if a training session produces bad results or is interrupted at an
+inopportune moment.
+
+**Adam momentum persistence (.tdleaf.bin v7):** the Adam first-moment (m) arrays are
+now persisted across sessions alongside the second-moment (v) arrays introduced in v6.
+Previously m cold-started at zero each run while v was restored, causing the optimizer
+to rediscover gradient directions for the first few thousand games — visible as a slow
+or negative Elo trend at the start of every run.  With v7, the optimizer resumes with
+full directional momentum.  Concurrent-writer merge uses element-wise average
+`(m_file + m_local) / 2`.  Storage overhead: ~1.5 MB.  Existing v6 files upgrade
+automatically on the first save.
 
 **Self-play opening diversity:** when the current opponent segment is symmetric
 self-play (both engines learn), `training_run.py` automatically passes `--no-repeat`

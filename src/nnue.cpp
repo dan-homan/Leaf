@@ -2345,9 +2345,8 @@ void nnue_requantize_fc()
 //     float32[6][PSQT_BKTS] × TDLEAF_SCALE: piece values        (192 B)
 //     uint32_t[6][PSQT_BKTS]: update counts                      (192 B)
 //
-// Version 6 additions (current):
+// Version 6 additions:
 //   Adam v (second-moment) section — persists gradient scale across sessions.
-//   m (first-moment / momentum) is NOT persisted; it recovers in ~10 steps.
 //   Multi-writer merge uses max(v_file, v_local) per element — conservative
 //   and safe for concurrent training instances.
 //     uint32_t t_adam                                              (4 B)
@@ -2366,10 +2365,31 @@ void nnue_requantize_fc()
 //       float32[PSQT_BKTS]         v_psqt                        (32 B)
 //   Total v section: ~563 KB (FC) + 4 KB (FT bias) + sparse PSQT
 //   FT weight v (~92 MB) is NOT persisted — too large, and FT updates
-//   are sparse enough (~3-50 per weight over 190k games) that v barely
-//   converges before the process restarts anyway.
+//   are sparse enough that v barely converges before process restart.
 //
-// Version 5 (legacy): FC + FT/PSQT + FT biases + piece values, no Adam v.
+// Version 7 additions (current):
+//   Adam m (first-moment / momentum) section — persists gradient direction
+//   across sessions to eliminate the slow/negative start at session restart.
+//   Multi-writer merge uses element-wise average (m_file + m_local) / 2:
+//   workers seeing the same gradient sign reinforce each other; conflicting
+//   signs reduce toward zero (appropriate — uncertainty → smaller step).
+//   FT weight m is not applicable (FT uses RMSProp, no m array).
+//   8 stacks × FC m block (raw float32, signed):
+//       float32[L0_SIZE]            m_l0_b                        (64 B)
+//       float32[L0_SIZE*L0_INPUT]   m_l0_w                        (65536 B)
+//       float32[L1_SIZE]            m_l1_b                        (128 B)
+//       float32[L1_SIZE*L1_PADDED]  m_l1_w                        (4096 B)
+//       float32[1]                  m_l2_b                        (4 B)
+//       float32[L2_PADDED]          m_l2_w                        (128 B)
+//     float32[HALF_DIMS]            m_ft_bias                     (4096 B)
+//     float32[6][PSQT_BKTS]        m_piece_val                   (192 B)
+//     uint32_t n_psqt_m_rows: count of dirty PSQT rows           (4 B)
+//     For each dirty row:
+//       uint32_t fi                                               (4 B)
+//       float32[PSQT_BKTS]         m_psqt                        (32 B)
+//   Total m section: ~563 KB (FC) + 4 KB (FT bias) + sparse PSQT (~1.5 MB)
+//
+// Version 5 (legacy): FC + FT/PSQT + FT biases + piece values, no Adam v/m.
 // Version 4 (legacy): FC + FT/PSQT + FT biases, no piece values.
 // Version 3 (legacy): FC + sparse FT/PSQT, no FT bias section.
 // Version 2 (legacy): FC block only, no FT/PSQT section.
@@ -2377,7 +2397,7 @@ void nnue_requantize_fc()
 // ---------------------------------------------------------------------------
 static const float    TDLEAF_SCALE   = 128.0f;
 static const uint32_t TDLEAF_MAGIC   = 0x544D4C46u; // "TMLF"
-static const uint32_t TDLEAF_VERSION = 6u;
+static const uint32_t TDLEAF_VERSION = 7u;
 
 // ---------------------------------------------------------------------------
 // tdleaf_acquire_lock / tdleaf_release_lock
@@ -2441,7 +2461,7 @@ bool nnue_save_fc_weights(const char *path)
         bool ok = (fread(&magic, 4, 1, cur) == 1 &&
                    fread(&version, 4, 1, cur) == 1 &&
                    magic == TDLEAF_MAGIC &&
-                   (version == TDLEAF_VERSION || version == 5u || version == 4u || version == 3u || version == 2u));
+                   (version == TDLEAF_VERSION || version == 6u || version == 5u || version == 4u || version == 3u || version == 2u));
         if (ok) {
             // FC section: float32 × TDLEAF_SCALE per weight, then uint32 counts.
             // Merge: shadow = file_value + our_delta; count = file_count + our_delta_count.
@@ -2587,6 +2607,44 @@ bool nnue_save_fc_weights(const char *path)
                             float *vp = v_psqt_w + (size_t)fi * NNUE_PSQT_BKTS;
                             for (int b = 0; b < NNUE_PSQT_BKTS; b++)
                                 if (tmp_pv[b] > vp[b]) vp[b] = tmp_pv[b];
+                        }
+                    }
+                }
+                // Adam m section (v7+): average-merge per element.
+                // Workers seeing the same gradient direction reinforce each other;
+                // conflicting directions reduce toward zero (appropriate — uncertainty
+                // about direction → smaller step, not a random-direction step).
+                if (version >= 7u) {
+                    auto merge_m = [&](float *m_local, int n) {
+                        float tmp;
+                        for (int i = 0; i < n; i++) {
+                            if (fread(&tmp, sizeof(float), 1, cur) != 1) return;
+                            m_local[i] = 0.5f * (m_local[i] + tmp);
+                        }
+                    };
+                    for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
+                        merge_m(m_l0_b[s], NNUE_L0_SIZE);
+                        merge_m(m_l0_w[s], NNUE_L0_SIZE * NNUE_L0_INPUT);
+                        merge_m(m_l1_b[s], NNUE_L1_SIZE);
+                        merge_m(m_l1_w[s], NNUE_L1_SIZE * NNUE_L1_PADDED);
+                        merge_m(&m_l2_b[s], 1);
+                        merge_m(m_l2_w[s], NNUE_L2_PADDED);
+                    }
+                    merge_m(m_ft_bias, NNUE_HALF_DIMS);
+                    merge_m(&m_piece_val[0][0], 6 * NNUE_PSQT_BKTS);
+                    // Sparse PSQT m.
+                    uint32_t n_pm_rows = 0;
+                    if (fread(&n_pm_rows, sizeof(uint32_t), 1, cur) == 1 && m_psqt_w) {
+                        for (uint32_t k = 0; k < n_pm_rows; k++) {
+                            uint32_t fi;
+                            float tmp_pm[NNUE_PSQT_BKTS];
+                            if (fread(&fi, sizeof(uint32_t), 1, cur) != 1 ||
+                                fi >= (uint32_t)NNUE_FT_INPUTS) break;
+                            if (fread(tmp_pm, sizeof(float), NNUE_PSQT_BKTS, cur)
+                                != (size_t)NNUE_PSQT_BKTS) break;
+                            float *mp = m_psqt_w + (size_t)fi * NNUE_PSQT_BKTS;
+                            for (int b = 0; b < NNUE_PSQT_BKTS; b++)
+                                mp[b] = 0.5f * (mp[b] + tmp_pm[b]);
                         }
                     }
                 }
@@ -2743,7 +2801,7 @@ bool nnue_save_fc_weights(const char *path)
         fwrite(piece_val_cnt, sizeof(uint32_t), 6 * NNUE_PSQT_BKTS, f);
     }
 
-    // Adam v section (v6): t_adam + FC v + FT bias v + piece_val v + sparse PSQT v.
+    // Adam v section (v6+): t_adam + FC v + FT bias v + piece_val v + sparse PSQT v.
     // Raw float32 (no TDLEAF_SCALE — v values are always non-negative and can be
     // large; scaling would lose precision without benefit).
     fwrite(&t_adam, sizeof(uint32_t), 1, f);
@@ -2772,6 +2830,37 @@ bool nnue_save_fc_weights(const char *path)
                 uint32_t fi_u = (uint32_t)fi;
                 fwrite(&fi_u, sizeof(uint32_t), 1, f);
                 fwrite(v_psqt_w + (size_t)fi * NNUE_PSQT_BKTS, sizeof(float), NNUE_PSQT_BKTS, f);
+            }
+        }
+    }
+
+    // Adam m section (v7): FC m + FT bias m + piece_val m + sparse PSQT m.
+    // Raw float32 (signed; m can be positive or negative).
+    for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
+        fwrite(m_l0_b[s], sizeof(float), NNUE_L0_SIZE, f);
+        fwrite(m_l0_w[s], sizeof(float), NNUE_L0_SIZE * NNUE_L0_INPUT, f);
+        fwrite(m_l1_b[s], sizeof(float), NNUE_L1_SIZE, f);
+        fwrite(m_l1_w[s], sizeof(float), NNUE_L1_SIZE * NNUE_L1_PADDED, f);
+        fwrite(&m_l2_b[s], sizeof(float), 1, f);
+        fwrite(m_l2_w[s], sizeof(float), NNUE_L2_PADDED, f);
+    }
+    fwrite(m_ft_bias, sizeof(float), NNUE_HALF_DIMS, f);
+    fwrite(m_piece_val, sizeof(float), 6 * NNUE_PSQT_BKTS, f);
+    // Sparse PSQT m: same dirty rows as weights/v.
+    {
+        uint32_t n_pm_rows = n_ft_rows;
+        fwrite(&n_pm_rows, sizeof(uint32_t), 1, f);
+        if (m_psqt_w) {
+            for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
+                const uint32_t *wc = ft_weights_cnt   + (size_t)fi * NNUE_HALF_DIMS;
+                const uint32_t *pc = psqt_weights_cnt + (size_t)fi * NNUE_PSQT_BKTS;
+                bool dirty = false;
+                for (int d = 0; d < NNUE_HALF_DIMS && !dirty; d++) dirty = (wc[d] != 0);
+                for (int b = 0; b < NNUE_PSQT_BKTS && !dirty; b++) dirty = (pc[b] != 0);
+                if (!dirty) continue;
+                uint32_t fi_u = (uint32_t)fi;
+                fwrite(&fi_u, sizeof(uint32_t), 1, f);
+                fwrite(m_psqt_w + (size_t)fi * NNUE_PSQT_BKTS, sizeof(float), NNUE_PSQT_BKTS, f);
             }
         }
     }
@@ -2830,7 +2919,7 @@ bool nnue_load_fc_weights(const char *path)
     }
 
     // ---- Version 2 / 3 / 4 / 5 / 6: float32 × TDLEAF_SCALE + uint32 counts ----
-    if (version != 2u && version != 3u && version != 4u && version != 5u && version != TDLEAF_VERSION) {
+    if (version != 2u && version != 3u && version != 4u && version != 5u && version != 6u && version != TDLEAF_VERSION) {
         fprintf(stderr, "TDLeaf: unsupported version %u in %s\n", version, path);
         fclose(f); tdleaf_release_lock(lock_fd); return false;
     }
@@ -2963,8 +3052,41 @@ bool nnue_load_fc_weights(const char *path)
             }
             if (vok) adam_v_loaded = true;
             // Non-fatal if v section is truncated — we just start with v=0 for
-            // the missing entries (same as loading a v5 file).
+            // the missing entries (same as loading a v5/v6 file).
         }
+    }
+
+    // Adam m section (v7+): restore momentum from file.
+    bool adam_m_loaded = false;
+    if (ok && version >= 7u) {
+        auto rf = [&](float *dst, int n) -> bool {
+            return fread(dst, sizeof(float), n, f) == (size_t)n;
+        };
+        bool mok = true;
+        for (int s = 0; s < NNUE_LAYER_STACKS && mok; s++) {
+            mok = rf(m_l0_b[s], NNUE_L0_SIZE)
+               && rf(m_l0_w[s], NNUE_L0_SIZE * NNUE_L0_INPUT)
+               && rf(m_l1_b[s], NNUE_L1_SIZE)
+               && rf(m_l1_w[s], NNUE_L1_SIZE * NNUE_L1_PADDED)
+               && rf(&m_l2_b[s], 1)
+               && rf(m_l2_w[s], NNUE_L2_PADDED);
+        }
+        if (mok) mok = rf(m_ft_bias, NNUE_HALF_DIMS);
+        if (mok) mok = rf(&m_piece_val[0][0], 6 * NNUE_PSQT_BKTS);
+        // Sparse PSQT m.
+        uint32_t n_pm_rows = 0;
+        if (mok && fread(&n_pm_rows, sizeof(uint32_t), 1, f) == 1 && m_psqt_w) {
+            for (uint32_t k = 0; k < n_pm_rows; k++) {
+                uint32_t fi;
+                if (fread(&fi, sizeof(uint32_t), 1, f) != 1 ||
+                    fi >= (uint32_t)NNUE_FT_INPUTS) break;
+                float *mp = m_psqt_w + (size_t)fi * NNUE_PSQT_BKTS;
+                if (fread(mp, sizeof(float), NNUE_PSQT_BKTS, f) != (size_t)NNUE_PSQT_BKTS)
+                    break;
+            }
+        }
+        if (mok) adam_m_loaded = true;
+        // Non-fatal if m section is truncated — missing entries stay at 0.
     }
 
     fclose(f);
@@ -3005,17 +3127,21 @@ bool nnue_load_fc_weights(const char *path)
     // For v2/v3 files, ft_biases_f32 was already initialised by nnue_init_fp32_weights.
     nnue_requantize_fc();
     if (version == TDLEAF_VERSION)
-        printf("TDLeaf: loaded v6 weights from %s (%d FT rows, piece_val=%s, adam_v=%s, t_adam=%u)\n",
+        printf("TDLeaf: loaded v7 weights from %s (%d FT rows, piece_val=%s, adam_v=%s, adam_m=%s, t_adam=%u)\n",
                path, n_ft_loaded, piece_val_active ? "yes" : "no",
-               adam_v_loaded ? "yes" : "no", t_adam);
+               adam_v_loaded ? "yes" : "no", adam_m_loaded ? "yes" : "no", t_adam);
+    else if (version == 6u)
+        printf("TDLeaf: loaded v6 weights from %s (%d FT rows, piece_val=%s, adam_v=%s, will upgrade to v7 on next save)\n",
+               path, n_ft_loaded, piece_val_active ? "yes" : "no",
+               adam_v_loaded ? "yes" : "no");
     else if (version == 5u)
-        printf("TDLeaf: loaded v5 weights from %s (%d FT rows, piece_val=%s, will upgrade to v6 on next save)\n",
+        printf("TDLeaf: loaded v5 weights from %s (%d FT rows, piece_val=%s, will upgrade to v7 on next save)\n",
                path, n_ft_loaded, piece_val_active ? "yes" : "no");
     else if (version == 4u)
-        printf("TDLeaf: loaded v4 weights from %s (%d FT rows, will upgrade to v6 on next save)\n",
+        printf("TDLeaf: loaded v4 weights from %s (%d FT rows, will upgrade to v7 on next save)\n",
                path, n_ft_loaded);
     else if (version == 3u)
-        printf("TDLeaf: loaded v3 weights from %s (%d FT rows, will upgrade to v6 on next save)\n",
+        printf("TDLeaf: loaded v3 weights from %s (%d FT rows, will upgrade to v7 on next save)\n",
                path, n_ft_loaded);
     else
         printf("TDLeaf: loaded v2 FC weights from %s (will upgrade to v6 on next save)\n", path);

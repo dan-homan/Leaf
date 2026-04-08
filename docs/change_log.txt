@@ -1,5 +1,39 @@
 Changes since 2017_12_24
 
+2026_04_08 -- training_run.py: startup .tdleaf.bin backup and .games-before-names fix (scripts/).
+               Two improvements:
+               (1) When continuing from an existing .tdleaf.bin (not starting fresh),
+               a copy is saved as .tdleaf.bin.bak before any training begins.  This
+               allows recovery of the pre-run weights if a session produces bad results
+               or is interrupted at an inopportune moment.
+               (2) The .games sidecar is now written to current_games at the very start
+               of Step 6 (before any output filename is determined), so the sidecar
+               count and the game-count embedded in exported filenames are always
+               consistent on all exit paths (clean completion, rotation interruption,
+               Ctrl-C).  Previously .games could lag current_games on some interrupt
+               paths, causing exported files to carry game-count labels that did not
+               match the sidecar.
+
+2026_04_08 -- TDLeaf: persist Adam m (first moment) in .tdleaf.bin v7 (src/nnue.cpp).
+               Adds a new "Adam m" section to the binary file, upgrading the format from
+               v6 to v7.  Motivation: each training session previously cold-started m=0
+               while v (second moment) and t_adam were restored, causing the optimizer to
+               "rediscover" gradient directions for the first few thousand games — observed
+               as a slow or negative Elo trend at the start of every run.
+               What is persisted (same exclusions as v): FC m arrays (all 8 stacks,
+               ~563 KB), FT bias m (4 KB), piece_val m (192 B), sparse PSQT m (same
+               dirty rows as weights/v, ~720 KB max).  FT weight m is not applicable
+               (FT uses RMSProp, no m array).  Total new storage: ~1.5 MB.
+               Multi-writer merge: element-wise average (m_file + m_local) / 2.
+               Rationale: workers seeing the same gradient direction reinforce each other;
+               conflicting directions reduce toward zero (appropriate — uncertainty about
+               direction → smaller step, not a random-direction step).
+               Load: m is fully restored at session start; optimizer continues with
+               directional bias rather than rebuilding from zero.
+               Backward compatibility: v2–v6 files load normally and upgrade to v7 on
+               next save.  merge_tdleaf.py and compare_nnue_learning.py will need
+               updating for the new section (see scripts/).
+
 2026_04_08 -- match.py / training_run.py: --no-repeat flag for single-play-per-opening (scripts/).
                match.py: new --no-repeat flag passes -rounds N to cutechess-cli without
                -games 2 -repeat, so each opening position is played once rather than

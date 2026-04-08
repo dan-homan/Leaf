@@ -512,6 +512,13 @@ def main():
             os.rename(tdleaf_bin, bak)
             prior_games = 0
             write_game_count(sidecar_path, 0)
+        else:
+            # Back up the file before any training writes so it can be
+            # recovered if the run produces bad weights or is interrupted
+            # at an inopportune moment.
+            bak = tdleaf_bin + ".bak"
+            shutil.copy2(tdleaf_bin, bak)
+            print(f"  Backup saved  → {os.path.basename(bak)}")
     else:
         print(f"No existing .tdleaf.bin for {net_filename} — starting fresh.")
 
@@ -941,6 +948,12 @@ def main():
     # -----------------------------------------------------------------------
     # Step 6 — Export final .nnue
     # -----------------------------------------------------------------------
+    # Update the game-count sidecar first so the names we choose below
+    # (which embed current_games) always match what the sidecar records.
+    # Loop mode keeps .games current after each accepted cycle; this write
+    # is the canonical final update for all other exit paths.
+    write_game_count(sidecar_path, current_games)
+
     print()
     if interrupted and use_loop and current_games > prior_games:
         # Validation is active and at least one cycle was accepted.
@@ -965,9 +978,8 @@ def main():
         output_net_name = f"{net_base}-{current_games}g.nnue"
         print(f"  Last validated: {output_net_name}")
     else:
-        # Use -partial suffix on interruption to avoid overwriting an existing
-        # game-count-stamped checkpoint.  (.games was not yet updated, so
-        # current_games may equal prior_games for a single-match interrupted run.)
+        # Use -partial suffix on interruption to signal a non-clean exit and
+        # avoid overwriting an existing game-count-stamped checkpoint.
         if interrupted:
             output_net_name = f"{net_base}-{current_games}g-partial.nnue"
         else:
@@ -982,9 +994,6 @@ def main():
             print("--write-nnue failed.", file=sys.stderr)
             if not interrupted:
                 sys.exit(result.returncode)
-        # If rotation completed some segments before interruption, bank those games.
-        if interrupted and not use_loop and current_games > prior_games:
-            write_game_count(sidecar_path, current_games)
 
     # Save a .tdleaf.bin snapshot at the final game count for archival / rollback.
     if os.path.isfile(tdleaf_bin):
