@@ -84,6 +84,35 @@ def write_game_count(sidecar_path, count):
         f.write(f"{count}\n")
 
 
+def format_game_count(n):
+    """Convert a game count integer to compact scientific-notation suffix.
+
+    Examples: 100000 → '1e5', 150000 → '1.5e5', 40000 → '4e4', 500 → '500'.
+    Counts that are not a clean multiple of a power of 10 (e.g. 123456) are
+    left as plain integers.  The threshold for switching to exponent form is
+    counts >= 10000 (4 trailing zeros or more expresses as Xe4+).
+    """
+    if n <= 0:
+        return str(n)
+    # Strip trailing zeros to find mantissa and exponent
+    x, exp = n, 0
+    while x % 10 == 0:
+        x //= 10
+        exp += 1
+    if exp < 4:
+        # Not enough trailing zeros — keep as plain integer
+        return str(n)
+    # Normalise to mantissa in [1, 10): e.g. x=15, exp=4 → 1.5e5
+    digits = len(str(x))
+    total_exp = exp + digits - 1
+    mantissa = x / 10 ** (digits - 1)
+    if mantissa == int(mantissa):
+        return f"{int(mantissa)}e{total_exp}"
+    # Format mantissa without trailing zeros (e.g. 1.50 → 1.5)
+    m_str = f"{mantissa:.10g}"
+    return f"{m_str}e{total_exp}"
+
+
 def wait_until_stable(path, stable_secs=3, timeout=120):
     """Wait until all training engines have finished with the .tdleaf.bin file.
 
@@ -701,9 +730,9 @@ def main():
         """Export current weights to a game-count-stamped checkpoint."""
         nonlocal last_checkpoint_nnue
         wait_until_stable(tdleaf_bin)
-        snap_name = f"{net_base}-{current_games}g.nnue"
+        snap_name = f"{net_base}-{format_game_count(current_games)}g.nnue"
         snap_path = os.path.join(learn_dir, snap_name)
-        export_nnue(train_exe, snap_path, f"checkpoint @ {current_games}g")
+        export_nnue(train_exe, snap_path, f"checkpoint @ {format_game_count(current_games)}g")
         last_checkpoint_nnue = snap_path
 
     # -----------------------------------------------------------------------
@@ -907,9 +936,9 @@ def main():
                 # the newly accepted weights (not the original session start).
                 export_nnue(train_exe, best_nnue_path, "new best (accepted)")
                 # Save a game-count-stamped snapshot for later tournament use.
-                snapshot_name = f"{net_base}-{current_games}g.nnue"
+                snapshot_name = f"{net_base}-{format_game_count(current_games)}g.nnue"
                 snapshot_path = os.path.join(learn_dir, snapshot_name)
-                export_nnue(train_exe, snapshot_path, f"snapshot @ {current_games}g")
+                export_nnue(train_exe, snapshot_path, f"snapshot @ {format_game_count(current_games)}g")
                 # Keep the prev-checkpoint opponent current: the next cycle's
                 # first prev-checkpoint segment should face the just-accepted
                 # weights, not a stale intra-cycle snapshot.
@@ -960,7 +989,7 @@ def main():
         # The last validated snapshot already exists at <net>-<current_games>g.nnue.
         # Do NOT overwrite it with unvalidated weights from the interrupted cycle.
         # Instead, export unvalidated weights to a separate file.
-        unval_name = f"{net_base}-{current_games}g-unvalidated.nnue"
+        unval_name = f"{net_base}-{format_game_count(current_games)}g-unvalidated.nnue"
         unval_path = os.path.join(learn_dir, unval_name)
         print(f"Exporting unvalidated weights → {unval_name}")
         result = subprocess.run(
@@ -975,15 +1004,15 @@ def main():
         if os.path.isfile(checkpoint_bin):
             shutil.copy2(checkpoint_bin, tdleaf_bin)
             print(f"  Reverted .tdleaf.bin to last validated checkpoint.")
-        output_net_name = f"{net_base}-{current_games}g.nnue"
+        output_net_name = f"{net_base}-{format_game_count(current_games)}g.nnue"
         print(f"  Last validated: {output_net_name}")
     else:
         # Use -partial suffix on interruption to signal a non-clean exit and
         # avoid overwriting an existing game-count-stamped checkpoint.
         if interrupted:
-            output_net_name = f"{net_base}-{current_games}g-partial.nnue"
+            output_net_name = f"{net_base}-{format_game_count(current_games)}g-partial.nnue"
         else:
-            output_net_name = f"{net_base}-{current_games}g.nnue"
+            output_net_name = f"{net_base}-{format_game_count(current_games)}g.nnue"
         output_net_path = os.path.join(learn_dir, output_net_name)
         print(f"Exporting {'partial ' if interrupted else ''}weights → {output_net_name}")
         result = subprocess.run(
@@ -997,7 +1026,7 @@ def main():
 
     # Save a .tdleaf.bin snapshot at the final game count for archival / rollback.
     if os.path.isfile(tdleaf_bin):
-        tdleaf_snap_name = f"{net_base}.tdleaf.bin-{current_games}g"
+        tdleaf_snap_name = f"{net_base}.tdleaf.bin-{format_game_count(current_games)}g"
         tdleaf_snap_path = os.path.join(learn_dir, tdleaf_snap_name)
         shutil.copy2(tdleaf_bin, tdleaf_snap_path)
         print(f"  .tdleaf.bin snapshot → {tdleaf_snap_name}")
@@ -1018,7 +1047,7 @@ def main():
     print(f"  Total games: {current_games:,}")
     print(f"  PGN files:   {pgn_dir}/")
     print(f"  .tdleaf.bin: {tdleaf_bin}")
-    print(f"  .tdleaf.bin snapshot: {net_base}.tdleaf.bin-{current_games}g")
+    print(f"  .tdleaf.bin snapshot: {net_base}.tdleaf.bin-{format_game_count(current_games)}g")
 
     if use_loop and cycle_log:
         accepted_count = sum(1 for _, acc, *_ in cycle_log if acc)
