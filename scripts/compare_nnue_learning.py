@@ -47,6 +47,7 @@ TDLEAF_VERSION3 = 3
 TDLEAF_VERSION4 = 4            # adds FT bias section
 TDLEAF_VERSION5 = 5            # adds dense piece value section
 TDLEAF_VERSION6 = 6            # adds Adam v (second moment) section
+TDLEAF_VERSION7 = 7            # adds Adam m (first moment) section
 TDLEAF_SCALE    = 128.0        # v2+: file stores w_f32 × TDLEAF_SCALE
 
 # ---------------------------------------------------------------------------
@@ -272,7 +273,7 @@ def read_tdleaf_fc(path):
         if magic != TDLEAF_MAGIC:
             sys.exit(f"Error: bad magic {magic:#010x} in {path}")
 
-        if version in (TDLEAF_VERSION2, TDLEAF_VERSION3, TDLEAF_VERSION4, TDLEAF_VERSION5, TDLEAF_VERSION6, TDLEAF_VERSION6, TDLEAF_VERSION6):
+        if version in (TDLEAF_VERSION2, TDLEAF_VERSION3, TDLEAF_VERSION4, TDLEAF_VERSION5, TDLEAF_VERSION6, TDLEAF_VERSION7):
             data['_has_counts'] = True
             for _ in range(N_STACKS):
                 def rf(n, fh=f):
@@ -317,10 +318,11 @@ def read_tdleaf_fc(path):
                 data['fc2_w'   ].append(np.frombuffer(f.read(L2_PADDED),          dtype=np.int8 ).copy())
             # no counts for v1
         else:
-            sys.exit(f"Error: unknown .tdleaf.bin version {version} in {path}")
+            sys.exit(f"Error: unknown .tdleaf.bin version {version} in {path} "
+                     f"(supported: 1–7)")
 
         # v3/v4/v5: sparse FT/PSQT section after FC stacks
-        if version in (TDLEAF_VERSION3, TDLEAF_VERSION4, TDLEAF_VERSION5, TDLEAF_VERSION6, TDLEAF_VERSION6):
+        if version in (TDLEAF_VERSION3, TDLEAF_VERSION4, TDLEAF_VERSION5, TDLEAF_VERSION6, TDLEAF_VERSION7):
             n_ft_rows = struct.unpack('<I', f.read(4))[0]
             if n_ft_rows > 0:
                 fi_arr   = np.empty(n_ft_rows, dtype=np.uint32)
@@ -344,7 +346,7 @@ def read_tdleaf_fc(path):
             data['n_ft_rows'] = n_ft_rows
 
             # v4/v5: FT bias section (appended after sparse FT/PSQT rows)
-            if version in (TDLEAF_VERSION4, TDLEAF_VERSION5, TDLEAF_VERSION6):
+            if version in (TDLEAF_VERSION4, TDLEAF_VERSION5, TDLEAF_VERSION6, TDLEAF_VERSION7):
                 ft_b_raw = np.frombuffer(f.read(HALF_DIMS * 4), dtype=np.float32).copy()
                 ft_b_cnt = np.frombuffer(f.read(HALF_DIMS * 4), dtype=np.uint32).copy()
                 if ft_b_raw.shape == (HALF_DIMS,) and ft_b_cnt.shape == (HALF_DIMS,):
@@ -352,7 +354,7 @@ def read_tdleaf_fc(path):
                     data['ft_bias_learned_cnt'] = ft_b_cnt
 
             # v5: dense piece value section (6 piece types × 8 PSQT buckets = 48 values)
-            if version in (TDLEAF_VERSION5, TDLEAF_VERSION6):
+            if version in (TDLEAF_VERSION5, TDLEAF_VERSION6, TDLEAF_VERSION7):
                 N_PIECE_TYPES = 6
                 n_pv = N_PIECE_TYPES * PSQT_BKTS   # 48
                 pv_raw = np.frombuffer(f.read(n_pv * 4), dtype=np.float32).copy()
@@ -360,6 +362,38 @@ def read_tdleaf_fc(path):
                 if pv_raw.shape == (n_pv,) and pv_cnt.shape == (n_pv,):
                     data['piece_val']     = (pv_raw / TDLEAF_SCALE).reshape(N_PIECE_TYPES, PSQT_BKTS)
                     data['piece_val_cnt'] = pv_cnt.reshape(N_PIECE_TYPES, PSQT_BKTS)
+
+            # v6: Adam v (second moment) section — skip it (not displayed)
+            if version in (TDLEAF_VERSION6, TDLEAF_VERSION7):
+                t_adam = struct.unpack('<I', f.read(4))[0]
+                data['t_adam'] = t_adam
+                # Skip FC v arrays: 8 stacks × (L0_SIZE + L0_SIZE*L0_INPUT + L1_SIZE +
+                #                                L1_SIZE*L1_PADDED + 1 + L2_PADDED) float32
+                fc_v_floats = (L0_SIZE + L0_SIZE * L0_INPUT +
+                               L1_SIZE + L1_SIZE * L1_PADDED +
+                               1 + L2_PADDED)
+                f.read(N_STACKS * fc_v_floats * 4)
+                # Skip FT bias v and piece_val v
+                f.read(HALF_DIMS * 4)          # v_ft_bias
+                f.read(6 * PSQT_BKTS * 4)     # v_piece_val
+                # Skip sparse PSQT v rows
+                n_pv_rows = struct.unpack('<I', f.read(4))[0]
+                f.read(n_pv_rows * (4 + PSQT_BKTS * 4))
+
+            # v7: Adam m (first moment) section — skip it (not displayed)
+            if version == TDLEAF_VERSION7:
+                # Skip FC m arrays: same layout as FC v
+                fc_m_floats = (L0_SIZE + L0_SIZE * L0_INPUT +
+                               L1_SIZE + L1_SIZE * L1_PADDED +
+                               1 + L2_PADDED)
+                f.read(N_STACKS * fc_m_floats * 4)
+                # Skip m_ft_bias and m_piece_val
+                f.read(HALF_DIMS * 4)          # m_ft_bias
+                f.read(6 * PSQT_BKTS * 4)     # m_piece_val
+                # Skip sparse PSQT m rows
+                n_pm_rows = struct.unpack('<I', f.read(4))[0]
+                f.read(n_pm_rows * (4 + PSQT_BKTS * 4))
+                data['adam_m_loaded'] = True
 
     return data
 
@@ -595,6 +629,21 @@ def print_summary(orig, upd, ft_data=None):
               f"Max count: {int(pv_cnt.max())}")
     else:
         print(f"━━━━  Dense piece values (not present — v4 or older .tdleaf.bin)  ━━━━")
+
+    # -----------------------------------------------------------------------
+    # Adam optimizer state summary (v6/v7)
+    # -----------------------------------------------------------------------
+    print()
+    t_adam = upd.get('t_adam', None)
+    if t_adam is not None:
+        print(f"━━━━  Adam optimizer state  ━━━━")
+        print(f"  t_adam (step counter): {t_adam:,}")
+        if upd.get('adam_m_loaded'):
+            print(f"  Adam v (second moment): loaded (v6+)")
+            print(f"  Adam m (first moment):  loaded (v7)")
+        else:
+            print(f"  Adam v (second moment): loaded (v6+)")
+            print(f"  Adam m (first moment):  not present (v6 or older)")
 
 # ---------------------------------------------------------------------------
 # Plotting
