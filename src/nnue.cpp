@@ -1299,6 +1299,8 @@ static float m_l2_b[NNUE_LAYER_STACKS]                                 = {};
 static float m_ft_bias[NNUE_HALF_DIMS]                                  = {};
 
 static float    *v_ft_w    = nullptr;  // [NNUE_FT_INPUTS × NNUE_HALF_DIMS] — FT per-weight second moment (~92 MB, OS lazy-paged)
+static bool     *ft_v_warmed = nullptr; // [NNUE_FT_INPUTS] — true if v_ft_w row was loaded from disk (v8+).
+                                        // Warmed rows use t_adam for bc2; fresh rows use min(t_adam,t_ft_session).
 static float    *v_psqt_w  = nullptr;  // [NNUE_FT_INPUTS × PSQT_BKTS] — PSQT per-weight v (~720 KB)
 static float    *m_psqt_w  = nullptr;  // [NNUE_FT_INPUTS × PSQT_BKTS] — PSQT per-weight m (~720 KB)
 
@@ -1427,6 +1429,7 @@ void nnue_init_zero_weights(bool noprior)
     memset(m_l2_b,    0, sizeof(m_l2_b));
     memset(m_ft_bias, 0, sizeof(m_ft_bias));
     t_adam = 0;
+    if (ft_v_warmed) memset(ft_v_warmed, 0, NNUE_FT_INPUTS * sizeof(bool));
 
     // ---- FT biases: zero init ----
     // FT weights already break symmetry across dimensions, so zero FT biases
@@ -1609,6 +1612,7 @@ void nnue_init_fp32_weights()
         ft_delta_f32     = new float   [ft_sz]();    // zero-initialised
         psqt_delta_f32   = new float   [psqt_sz]();  // zero-initialised
         // Adam heap arrays — session-local moment arrays for FT and PSQT.
+        ft_v_warmed = new bool[NNUE_FT_INPUTS](); // zero-init: no rows warmed yet
         v_ft_w    = new float[ft_sz]();    // per-weight FT second moment (~92 MB, OS lazy-paged)
         v_psqt_w  = new float[psqt_sz]();
         m_psqt_w  = new float[psqt_sz]();
@@ -1621,6 +1625,7 @@ void nnue_init_fp32_weights()
     memset(grad_ft_w,        0, ft_sz   * sizeof(float));
     memset(grad_psqt_w,      0, psqt_sz * sizeof(float));
     memset(ft_dirty,         0, NNUE_FT_INPUTS * sizeof(bool));
+    memset(ft_v_warmed,      0, NNUE_FT_INPUTS * sizeof(bool));
     // Zero delta accumulators — fresh session, no pending changes yet.
     memset(delta_l0_w,     0, sizeof(delta_l0_w));
     memset(delta_l0_b,     0, sizeof(delta_l0_b));
@@ -2018,23 +2023,39 @@ void nnue_apply_gradients()
     t_adam++;
     t_ft_session++;
 
-    // FT RMSProp bias-correction: use min(t_adam, t_ft_session) so that the
-    // session-local step count governs bc2 when v_ft_w has just been zeroed at
-    // startup, giving the standard Adam formula v/(1-β²^T_session) rather than
-    // v/(1-β²^t_adam)≈v/1=0 which would produce ~31× oversized steps.
-    // Once t_ft_session exceeds t_adam the min saturates and behaviour is identical
-    // to the original global-t_adam formula.
-    const uint32_t ft_t  = std::min(t_adam, t_ft_session);
-    const float    ft_bc2 = 1.0f - powf(TDLEAF_ADAM_BETA2, (float)ft_t);
+    // FT RMSProp bias-correction — two bc2 values to handle mixed warmed/fresh rows.
+    //
+    // "Cold" rows: v_ft_w was zeroed at startup (not loaded from disk).  Use
+    // min(t_adam, t_ft_session) so bc2 tracks the actual sample count rather than
+    // the persisted t_adam, preventing ~31× oversized first steps.
+    //
+    // "Warm" rows: v_ft_w was restored from disk (ft_v_warmed[fi] == true).  The
+    // saved v is already a reliable estimate of E[g²] calibrated against t_adam
+    // steps.  Using t_ft_session here would under-correct bc2 (bc2_small → v/bc2
+    // >> E[g²] → step >> LR), so we use t_adam directly.
+    const uint32_t ft_t        = std::min(t_adam, t_ft_session);
+    const float    ft_bc2_cold  = 1.0f - powf(TDLEAF_ADAM_BETA2, (float)ft_t);
+    const float    ft_bc2_warm  = 1.0f - powf(TDLEAF_ADAM_BETA2, (float)t_adam);
 
     // Linear LR warmup: ramp from 0 to full over the first WARMUP Adam steps.
+    // Keyed on t_adam (persisted), so this only fires during the very first session.
     const float warmup_factor = (TDLEAF_ADAM_WARMUP > 0 && t_adam <= (uint32_t)TDLEAF_ADAM_WARMUP)
         ? (float)t_adam / (float)TDLEAF_ADAM_WARMUP
         : 1.0f;
 
-    // Effective LRs: warmup × LR0 (constant after warmup completes).
+    // Per-session FT LR warmup: ramp FT LR from 0→full over the first
+    // TDLEAF_FT_SESSION_WARMUP Adam steps of each session.  Damps FT weight
+    // updates during the v_ft_w accumulation phase at every restart, regardless
+    // of whether v was loaded from disk.  Keyed on t_ft_session (not persisted).
+    const float ft_session_factor =
+        (TDLEAF_FT_SESSION_WARMUP > 0 && t_ft_session <= (uint32_t)TDLEAF_FT_SESSION_WARMUP)
+        ? (float)t_ft_session / (float)TDLEAF_FT_SESSION_WARMUP
+        : 1.0f;
+
+    // Effective LRs.  FT weights get an extra per-session ramp; all others only
+    // have the one-time global warmup (keyed on persisted t_adam).
     const float fc_lr      = warmup_factor * TDLEAF_ADAM_LR0;
-    const float ft_lr      = warmup_factor * TDLEAF_ADAM_FT_LR0;
+    const float ft_lr      = warmup_factor * ft_session_factor * TDLEAF_ADAM_FT_LR0;
     const float ft_bias_lr = warmup_factor * TDLEAF_ADAM_FT_BIAS_LR0;
     const float psqt_lr    = warmup_factor * TDLEAF_ADAM_PSQT_LR0;
 
@@ -2164,6 +2185,10 @@ void nnue_apply_gradients()
             uint32_t *cnt = ft_weights_cnt + (size_t)fi * NNUE_HALF_DIMS;
             float    *fd  = ft_delta_f32 ? ft_delta_f32 + (size_t)fi * NNUE_HALF_DIMS : nullptr;
             if (v_ft_w) {
+                // Select bias correction: warm rows (v loaded from disk) use t_adam;
+                // cold rows (v=0 at startup) use min(t_adam, t_ft_session).
+                const float ft_bc2 = (ft_v_warmed && ft_v_warmed[fi])
+                                     ? ft_bc2_warm : ft_bc2_cold;
                 float *vw = v_ft_w + (size_t)fi * NNUE_HALF_DIMS;
                 for (int d = 0; d < NNUE_HALF_DIMS; d++) {
                     if (gw[d] != 0.0f) {
@@ -2380,13 +2405,10 @@ void nnue_requantize_fc()
 //   FT weight v (~92 MB) is NOT persisted — too large, and FT updates
 //   are sparse enough that v barely converges before process restart.
 //
-// Version 7 additions (current):
+// Version 7 additions:
 //   Adam m (first-moment / momentum) section — persists gradient direction
-//   across sessions to eliminate the slow/negative start at session restart.
-//   Multi-writer merge uses element-wise average (m_file + m_local) / 2:
-//   workers seeing the same gradient sign reinforce each other; conflicting
-//   signs reduce toward zero (appropriate — uncertainty → smaller step).
-//   FT weight m is not applicable (FT uses RMSProp, no m array).
+//   across sessions.  Multi-writer merge uses element-wise average
+//   (m_file + m_local) / 2.  FT weight m not applicable (RMSProp, no m).
 //   8 stacks × FC m block (raw float32, signed):
 //       float32[L0_SIZE]            m_l0_b                        (64 B)
 //       float32[L0_SIZE*L0_INPUT]   m_l0_w                        (65536 B)
@@ -2402,6 +2424,23 @@ void nnue_requantize_fc()
 //       float32[PSQT_BKTS]         m_psqt                        (32 B)
 //   Total m section: ~563 KB (FC) + 4 KB (FT bias) + sparse PSQT (~1.5 MB)
 //
+// Version 8 additions (current):
+//   Sparse FT v (second-moment) section — persists v_ft_w for the same
+//   dirty feature rows as the FT weight section.  Eliminates the per-restart
+//   FT v cold-start: previously v_ft_w was zeroed at every startup (too large
+//   to persist at 92 MB full), causing noisy/oversized FT updates for the
+//   first ~1000 Adam steps until v re-accumulated.  Sparse persistence bounds
+//   disk cost to O(n_dirty_rows × HALF_DIMS × 4 B) — typically well under 10 MB.
+//   Multi-writer merge uses max(v_file, v_local) per element (same as FC v).
+//   On load, ft_v_warmed[fi] is set to true for restored rows; the RMSProp
+//   update uses t_adam (not t_ft_session) for bc2 of warmed rows, since their
+//   saved v is already calibrated against t_adam steps.
+//     uint32_t n_ft_v_rows: count of dirty rows (same set as FT weight section) (4 B)
+//     For each row:
+//       uint32_t fi                                               (4 B)
+//       float32[HALF_DIMS]          v_ft                          (4096 B)
+//   Total FT v section: 4 + n_dirty × 4100 B (e.g. 5 MB for 1250 dirty rows)
+//
 // Version 5 (legacy): FC + FT/PSQT + FT biases + piece values, no Adam v/m.
 // Version 4 (legacy): FC + FT/PSQT + FT biases, no piece values.
 // Version 3 (legacy): FC + sparse FT/PSQT, no FT bias section.
@@ -2410,7 +2449,7 @@ void nnue_requantize_fc()
 // ---------------------------------------------------------------------------
 static const float    TDLEAF_SCALE   = 128.0f;
 static const uint32_t TDLEAF_MAGIC   = 0x544D4C46u; // "TMLF"
-static const uint32_t TDLEAF_VERSION = 7u;
+static const uint32_t TDLEAF_VERSION = 8u;
 
 // ---------------------------------------------------------------------------
 // tdleaf_acquire_lock / tdleaf_release_lock
@@ -2661,6 +2700,23 @@ bool nnue_save_fc_weights(const char *path)
                         }
                     }
                 }
+                // Sparse FT v section (v8+): max-merge v_ft_w rows.
+                if (version >= 8u && v_ft_w) {
+                    uint32_t n_ftv_rows = 0;
+                    if (fread(&n_ftv_rows, sizeof(uint32_t), 1, cur) == 1) {
+                        for (uint32_t k = 0; k < n_ftv_rows; k++) {
+                            uint32_t fi;
+                            float tmp_v[NNUE_HALF_DIMS];
+                            if (fread(&fi, sizeof(uint32_t), 1, cur) != 1 ||
+                                fi >= (uint32_t)NNUE_FT_INPUTS) break;
+                            if (fread(tmp_v, sizeof(float), NNUE_HALF_DIMS, cur)
+                                != (size_t)NNUE_HALF_DIMS) break;
+                            float *vw = v_ft_w + (size_t)fi * NNUE_HALF_DIMS;
+                            for (int d = 0; d < NNUE_HALF_DIMS; d++)
+                                if (tmp_v[d] > vw[d]) vw[d] = tmp_v[d];
+                        }
+                    }
+                }
             }
         }
         fclose(cur);
@@ -2874,6 +2930,26 @@ bool nnue_save_fc_weights(const char *path)
                 uint32_t fi_u = (uint32_t)fi;
                 fwrite(&fi_u, sizeof(uint32_t), 1, f);
                 fwrite(m_psqt_w + (size_t)fi * NNUE_PSQT_BKTS, sizeof(float), NNUE_PSQT_BKTS, f);
+            }
+        }
+    }
+
+    // Sparse FT v section (v8): v_ft_w rows for dirty FT indices.
+    // Same dirty-row set as FT weights (n_ft_rows already counted above).
+    // Merge strategy: max(v_file, v_local) — same as FC v.
+    {
+        fwrite(&n_ft_rows, sizeof(uint32_t), 1, f);
+        if (v_ft_w) {
+            for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
+                const uint32_t *wc = ft_weights_cnt   + (size_t)fi * NNUE_HALF_DIMS;
+                const uint32_t *pc = psqt_weights_cnt + (size_t)fi * NNUE_PSQT_BKTS;
+                bool dirty = false;
+                for (int d = 0; d < NNUE_HALF_DIMS && !dirty; d++) dirty = (wc[d] != 0);
+                for (int b = 0; b < NNUE_PSQT_BKTS && !dirty; b++) dirty = (pc[b] != 0);
+                if (!dirty) continue;
+                uint32_t fi_u = (uint32_t)fi;
+                fwrite(&fi_u, sizeof(uint32_t), 1, f);
+                fwrite(v_ft_w + (size_t)fi * NNUE_HALF_DIMS, sizeof(float), NNUE_HALF_DIMS, f);
             }
         }
     }
@@ -3102,6 +3178,25 @@ bool nnue_load_fc_weights(const char *path)
         // Non-fatal if m section is truncated — missing entries stay at 0.
     }
 
+    // Sparse FT v section (v8+): restore v_ft_w from disk and mark rows as warmed.
+    int n_ft_v_loaded = 0;
+    if (ok && version >= 8u && v_ft_w) {
+        uint32_t n_ftv_rows = 0;
+        if (fread(&n_ftv_rows, sizeof(uint32_t), 1, f) == 1) {
+            for (uint32_t k = 0; k < n_ftv_rows; k++) {
+                uint32_t fi;
+                if (fread(&fi, sizeof(uint32_t), 1, f) != 1 ||
+                    fi >= (uint32_t)NNUE_FT_INPUTS) break;
+                float *vw = v_ft_w + (size_t)fi * NNUE_HALF_DIMS;
+                if (fread(vw, sizeof(float), NNUE_HALF_DIMS, f)
+                    != (size_t)NNUE_HALF_DIMS) break;
+                if (ft_v_warmed) ft_v_warmed[fi] = true;
+                n_ft_v_loaded++;
+            }
+        }
+        // Non-fatal if FT v section is truncated; unloaded rows use t_ft_session bc2.
+    }
+
     fclose(f);
     tdleaf_release_lock(lock_fd);
     if (!ok) {
@@ -3140,24 +3235,28 @@ bool nnue_load_fc_weights(const char *path)
     // For v2/v3 files, ft_biases_f32 was already initialised by nnue_init_fp32_weights.
     nnue_requantize_fc();
     if (version == TDLEAF_VERSION)
-        printf("TDLeaf: loaded v7 weights from %s (%d FT rows, piece_val=%s, adam_v=%s, adam_m=%s, t_adam=%u)\n",
+        printf("TDLeaf: loaded v8 weights from %s (%d FT rows, %d FT-v rows, piece_val=%s, adam_v=%s, adam_m=%s, t_adam=%u)\n",
+               path, n_ft_loaded, n_ft_v_loaded, piece_val_active ? "yes" : "no",
+               adam_v_loaded ? "yes" : "no", adam_m_loaded ? "yes" : "no", t_adam);
+    else if (version == 7u)
+        printf("TDLeaf: loaded v7 weights from %s (%d FT rows, piece_val=%s, adam_v=%s, adam_m=%s, t_adam=%u, will upgrade to v8 on next save)\n",
                path, n_ft_loaded, piece_val_active ? "yes" : "no",
                adam_v_loaded ? "yes" : "no", adam_m_loaded ? "yes" : "no", t_adam);
     else if (version == 6u)
-        printf("TDLeaf: loaded v6 weights from %s (%d FT rows, piece_val=%s, adam_v=%s, will upgrade to v7 on next save)\n",
+        printf("TDLeaf: loaded v6 weights from %s (%d FT rows, piece_val=%s, adam_v=%s, will upgrade to v8 on next save)\n",
                path, n_ft_loaded, piece_val_active ? "yes" : "no",
                adam_v_loaded ? "yes" : "no");
     else if (version == 5u)
-        printf("TDLeaf: loaded v5 weights from %s (%d FT rows, piece_val=%s, will upgrade to v7 on next save)\n",
+        printf("TDLeaf: loaded v5 weights from %s (%d FT rows, piece_val=%s, will upgrade to v8 on next save)\n",
                path, n_ft_loaded, piece_val_active ? "yes" : "no");
     else if (version == 4u)
-        printf("TDLeaf: loaded v4 weights from %s (%d FT rows, will upgrade to v7 on next save)\n",
+        printf("TDLeaf: loaded v4 weights from %s (%d FT rows, will upgrade to v8 on next save)\n",
                path, n_ft_loaded);
     else if (version == 3u)
-        printf("TDLeaf: loaded v3 weights from %s (%d FT rows, will upgrade to v7 on next save)\n",
+        printf("TDLeaf: loaded v3 weights from %s (%d FT rows, will upgrade to v8 on next save)\n",
                path, n_ft_loaded);
     else
-        printf("TDLeaf: loaded v2 FC weights from %s (will upgrade to v6 on next save)\n", path);
+        printf("TDLeaf: loaded v2 FC weights from %s (will upgrade to v8 on next save)\n", path);
     return true;
 }
 

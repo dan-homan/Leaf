@@ -67,7 +67,11 @@ static const float TDLEAF_ADAM_EPS      = 1e-8f;   // numerical floor
 // Applied to FC weights and FT weights only (not biases, not PSQT).
 // Set to 0.0 to disable.
 static const float TDLEAF_WEIGHT_DECAY  = 1e-4f;   // decoupled weight decay coefficient
-static const int   TDLEAF_ADAM_WARMUP   = 50;      // linear LR warmup over first N games (0 = disabled)
+static const int   TDLEAF_ADAM_WARMUP        = 50;  // linear LR warmup over first N Adam steps (0 = disabled)
+                                                     // Keyed on t_adam (persisted) so only fires in first session.
+static const int   TDLEAF_FT_SESSION_WARMUP  = 100; // per-session FT LR ramp over first N Adam steps.
+                                                     // Applied every restart via t_ft_session (not persisted).
+                                                     // Damps FT updates during the v_ft_w accumulation phase.
 static const int   TDLEAF_BATCH_SIZE    = 4;       // accumulate gradients across N games before Adam step
 
 // ---------------------------------------------------------------------------

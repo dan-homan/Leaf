@@ -1,5 +1,25 @@
 Changes since 2017_12_24
 
+2026_04_08 -- tdleaf: add sparse v_ft_w persistence (.tdleaf.bin v8) and per-session
+               FT LR warmup to eliminate per-restart Elo dip (src/nnue.cpp,
+               src/tdleaf.h, scripts/merge_tdleaf.py, scripts/compare_nnue_learning.py).
+               Root cause: v_ft_w (FT per-weight second moment, ~92 MB) was zeroed at
+               every session restart (too large to persist at full size).  Even with the
+               t_ft_session bc2 fix, the per-weight adaptive step sizes were noisier for
+               ~1000 Adam steps (4000 games) while v re-accumulated, causing a 10–20 Elo
+               dip that recovered over a few thousand games.
+               Fix 1 — sparse v_ft_w persistence (v8 format): v_ft_w rows for all dirty
+               feature indices (same set as FT weight rows) are saved/restored with max-
+               merge across training instances.  Restored rows set ft_v_warmed[fi]=true so
+               the RMSProp bc2 uses t_adam rather than t_ft_session (correct for warmed v).
+               Fix 2 — per-session FT LR warmup: ramp FT LR from 0→full over first
+               TDLEAF_FT_SESSION_WARMUP=100 Adam steps (400 games) of each session via
+               t_ft_session.  Damps FT updates during the v accumulation phase regardless
+               of whether v was loaded from disk.  Applies every restart, unlike the
+               existing TDLEAF_ADAM_WARMUP which fires only in the first session.
+               v7 files load correctly (no v8 FT v section → v_ft_w stays zero, all rows
+               cold → same behaviour as before, now with session warmup applied).
+
 2026_04_08 -- training: remove automatic +1 depth bonus for prev-checkpoint opponent
                (scripts/training_run.py).  The bonus was intended to compensate for
                the learner's mid-session weight updates but in practice biased match
