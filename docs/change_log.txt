@@ -1,5 +1,10 @@
 Changes since 2017_12_24
 
+2026_04_08 -- training: remove automatic +1 depth bonus for prev-checkpoint opponent
+               (scripts/training_run.py).  The bonus was intended to compensate for
+               the learner's mid-session weight updates but in practice biased match
+               results and was not clearly beneficial.  Both engines now use depth2.
+
 2026_04_08 -- TDLeaf: reduce sigmoid temperature K from 350 cp to 290 cp (src/tdleaf.h).
                Empirically fitted from 968,453 self-play games (91M annotated positions)
                via maximum-likelihood estimation: sigmoid(score/K) vs game result.
