@@ -960,16 +960,33 @@ def main():
         output_net_name = f"{net_base}-{current_games}g.nnue"
         print(f"  Last validated: {output_net_name}")
     else:
-        output_net_name = f"{net_base}-{current_games}g.nnue"
+        # Use -partial suffix on interruption to avoid overwriting an existing
+        # game-count-stamped checkpoint.  (.games was not yet updated, so
+        # current_games may equal prior_games for a single-match interrupted run.)
+        if interrupted:
+            output_net_name = f"{net_base}-{current_games}g-partial.nnue"
+        else:
+            output_net_name = f"{net_base}-{current_games}g.nnue"
         output_net_path = os.path.join(learn_dir, output_net_name)
-        print(f"Exporting final weights → {output_net_name}")
+        print(f"Exporting {'partial ' if interrupted else ''}weights → {output_net_name}")
         result = subprocess.run(
             [train_exe, "--write-nnue", output_net_path],
             cwd=learn_dir
         )
         if result.returncode != 0:
             print("--write-nnue failed.", file=sys.stderr)
-            sys.exit(result.returncode)
+            if not interrupted:
+                sys.exit(result.returncode)
+        # If rotation completed some segments before interruption, bank those games.
+        if interrupted and not use_loop and current_games > prior_games:
+            write_game_count(sidecar_path, current_games)
+
+    # Save a .tdleaf.bin snapshot at the final game count for archival / rollback.
+    if os.path.isfile(tdleaf_bin):
+        tdleaf_snap_name = f"{net_base}.tdleaf.bin-{current_games}g"
+        tdleaf_snap_path = os.path.join(learn_dir, tdleaf_snap_name)
+        shutil.copy2(tdleaf_bin, tdleaf_snap_path)
+        print(f"  .tdleaf.bin snapshot → {tdleaf_snap_name}")
 
     # -----------------------------------------------------------------------
     # Summary
@@ -987,6 +1004,7 @@ def main():
     print(f"  Total games: {current_games:,}")
     print(f"  PGN files:   {pgn_dir}/")
     print(f"  .tdleaf.bin: {tdleaf_bin}")
+    print(f"  .tdleaf.bin snapshot: {net_base}.tdleaf.bin-{current_games}g")
 
     if use_loop and cycle_log:
         accepted_count = sum(1 for _, acc, *_ in cycle_log if acc)
