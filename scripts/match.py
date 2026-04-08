@@ -127,6 +127,10 @@ def main():
                              "with -i > 1 an iteration number is appended before the extension")
     parser.add_argument("--openings", default=None, metavar="FILE",
                         help="Openings file (.epd or .pgn); randomly ordered")
+    parser.add_argument("--noswap", action="store_true", default=False,
+                        help="Pass -noswap to cutechess-cli: don't swap colors between "
+                             "paired games.  Off by default (both engines play both sides "
+                             "from each opening position, which is correct for training).")
     parser.add_argument("--fischer-random", action="store_true", default=False,
                         help="Use Chess960 / Fischer Random starting positions")
     parser.add_argument("--depth1", type=int, default=None, metavar="N",
@@ -251,7 +255,7 @@ def main():
             "-resign", "movecount=6",   "score=600",
             "-ratinginterval", "10",
         ] + games_arg + (["-wait", str(args.wait)] if args.wait > 0 else []) \
-          + (["-noswap"] if (openings_args or polyglot_book) else [])
+          + (["-noswap"] if args.noswap else [])
 
         if gauntlet:
             print("=" * 60)
