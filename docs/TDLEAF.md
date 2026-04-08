@@ -31,7 +31,7 @@ For a game of T half-moves:
 
 - `d_t` = sigmoid of the **NNUE static evaluation at the PV leaf position** at ply t,
   from White's perspective:
-  `d_t = 1 / (1 + exp(-score_white_t / K))`, K ≈ 400 cp.
+  `d_t = 1 / (1 + exp(-score_white_t / K))`, K = 290 cp.
 - `z` = game result from White's perspective: 1.0 = White wins, 0.5 = draw, 0.0 = Black wins.
 
 **Temporal difference errors (backward view):**
@@ -53,7 +53,7 @@ change between consecutive moves exceeds `TDLEAF_SCORE_CLIP_CP` centipawns — s
 
 where `∇_w d_t = d_t * (1 - d_t) / K * ∇_w score_t`.
 
-Defaults: `λ_decisive = 0.8` (wins/losses), `λ_draw = 0.5` (draws), `K = 350`.
+Defaults: `λ_decisive = 0.8` (wins/losses), `λ_draw = 0.5` (draws), `K = 290` (empirically fitted from 968k self-play games).
 Gradient updates use Adam with per-weight LR decay; see [Adam Optimizer](#adam-optimizer-with-per-weight-lr-decay) below.
 
 **Key design choice:** `d_t` is computed from `nnue_evaluate()` (direct static eval of the

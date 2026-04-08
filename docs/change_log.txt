@@ -1,5 +1,14 @@
 Changes since 2017_12_24
 
+2026_04_08 -- TDLeaf: reduce sigmoid temperature K from 350 cp to 290 cp (src/tdleaf.h).
+               Empirically fitted from 968,453 self-play games (91M annotated positions)
+               via maximum-likelihood estimation: sigmoid(score/K) vs game result.
+               Optimal K ≈ 292 cp (NLL=0.5608 vs 0.5629 at K=350; Brier 0.14177 vs 0.14344).
+               K=350 was too soft — at ±200–400 cp the sigmoid underestimated win/loss
+               probability by 3–8%.  K=290 better matches the empirical sharpness of
+               Leaf's self-play results at moderate evaluations.  The NLL well is broad
+               (250–325 cp), so 290 is chosen as a round value near the optimum.
+
 2026_04_08 -- TDLeaf: fix FT RMSProp bc2 cold-start causing ~31× oversized FT updates
                at every session restart (src/nnue.cpp).
                Root cause: v_ft_w (FT per-weight second moment, ~92 MB) is zeroed at

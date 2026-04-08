@@ -26,7 +26,9 @@
 // ---------------------------------------------------------------------------
 static const float TDLEAF_LAMBDA_DECISIVE  = 0.8f;   // eligibility trace decay for wins/losses
 static const float TDLEAF_LAMBDA_DRAW      = 0.5f;   // eligibility trace decay for draws
-static const float TDLEAF_K               = 350.0f; // sigmoid temperature (centipawns)
+static const float TDLEAF_K               = 290.0f; // sigmoid temperature (centipawns)
+                                                     // Empirically fitted from 968k self-play games
+                                                     // (MLE over 91M positions): optimum ~292 cp.
 static const int   TDLEAF_MIN_PLIES       = 8;      // skip games shorter than this
 // Approach 1 — TD error clipping.
 // When the white-POV score change between consecutive moves exceeds this
