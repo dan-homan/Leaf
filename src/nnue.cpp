@@ -2513,7 +2513,7 @@ bool nnue_save_fc_weights(const char *path)
         bool ok = (fread(&magic, 4, 1, cur) == 1 &&
                    fread(&version, 4, 1, cur) == 1 &&
                    magic == TDLEAF_MAGIC &&
-                   (version == TDLEAF_VERSION || version == 6u || version == 5u || version == 4u || version == 3u || version == 2u));
+                   (version == TDLEAF_VERSION || version == 7u || version == 6u || version == 5u || version == 4u || version == 3u || version == 2u));
         if (ok) {
             // FC section: float32 × TDLEAF_SCALE per weight, then uint32 counts.
             // Merge: shadow = file_value + our_delta; count = file_count + our_delta_count.
@@ -3021,7 +3021,7 @@ bool nnue_load_fc_weights(const char *path)
     }
 
     // ---- Version 2 / 3 / 4 / 5 / 6: float32 × TDLEAF_SCALE + uint32 counts ----
-    if (version != 2u && version != 3u && version != 4u && version != 5u && version != 6u && version != TDLEAF_VERSION) {
+    if (version != 2u && version != 3u && version != 4u && version != 5u && version != 6u && version != 7u && version != TDLEAF_VERSION) {
         fprintf(stderr, "TDLeaf: unsupported version %u in %s\n", version, path);
         fclose(f); tdleaf_release_lock(lock_fd); return false;
     }
