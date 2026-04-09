@@ -2886,7 +2886,7 @@ bool nnue_save_fc_weights(const char *path)
     fwrite(v_piece_val, sizeof(float), 6 * NNUE_PSQT_BKTS, f);
     // Sparse PSQT v: write v for each dirty row (same dirty-row set as weights).
     {
-        uint32_t n_pv_rows = n_ft_rows;  // same dirty rows
+        uint32_t n_pv_rows = v_psqt_w ? n_ft_rows : 0u;
         fwrite(&n_pv_rows, sizeof(uint32_t), 1, f);
         if (v_psqt_w) {
             for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
@@ -2917,7 +2917,7 @@ bool nnue_save_fc_weights(const char *path)
     fwrite(m_piece_val, sizeof(float), 6 * NNUE_PSQT_BKTS, f);
     // Sparse PSQT m: same dirty rows as weights/v.
     {
-        uint32_t n_pm_rows = n_ft_rows;
+        uint32_t n_pm_rows = m_psqt_w ? n_ft_rows : 0u;
         fwrite(&n_pm_rows, sizeof(uint32_t), 1, f);
         if (m_psqt_w) {
             for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {

@@ -1,5 +1,19 @@
 Changes since 2017_12_24
 
+2026_04_09 -- tdleaf: fix wtm_sign inversion in gradient accumulation (src/tdleaf.cpp).
+               The sign was `rec.plies[t].wtm ? -1 : +1` (backwards).  When white is to
+               move at the leaf, score_white = +score_stm so gradient flows positively
+               (wtm_sign should be +1); when black to move, score_white = -score_stm
+               (wtm_sign should be -1).  The inverted sign caused gradient direction to be
+               negated for all white-to-move leaf positions (~50% of positions), pushing
+               weights systematically in the wrong direction for half of training examples.
+               Fixed: `rec.plies[t].wtm ? +1 : -1`.
+
+2026_04_09 -- tdleaf: fix latent PSQT v/m null-pointer count mismatch in nnue_save_fc_weights
+               (src/nnue.cpp).  When v_psqt_w or m_psqt_w is null, the PSQT v/m row count
+               was written as n_ft_rows (non-zero) but no data followed, corrupting the
+               file for any reader.  Fixed: write 0 when the pointer is null.
+
 2026_04_08 -- tdleaf: add sparse v_ft_w persistence (.tdleaf.bin v8) and per-session
                FT LR warmup to eliminate per-restart Elo dip (src/nnue.cpp,
                src/tdleaf.h, scripts/merge_tdleaf.py, scripts/compare_nnue_learning.py).
