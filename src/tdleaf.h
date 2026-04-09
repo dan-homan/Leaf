@@ -51,7 +51,7 @@ static const float TDLEAF_GRAD_CLIP_NORM = 1.0f;
 // v arrays (second moment / gradient scale) and t_adam are persisted to .tdleaf.bin
 // (v6+) so gradient scale knowledge survives across sessions.  Multi-writer merge
 // uses max(v_file, v_local) per element.  m (momentum) is session-local.
-// FT weight v (~92 MB) is NOT persisted — too large and too sparse to matter.
+// FT weight v (~92 MB) is sparsely persisted in v8+ (only non-zero rows saved).
 // LR warmup: ramps from 0 to full LR over first WARMUP Adam steps.
 // Mini-batch: gradients accumulated across BATCH_SIZE games before each Adam step.
 // ---------------------------------------------------------------------------
