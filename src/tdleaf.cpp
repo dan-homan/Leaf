@@ -148,7 +148,7 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result,
 
     for (int t = 0; t < T; t++) {
         float sig_grad = d[t] * (1.0f - d[t]) / TDLEAF_K;
-        float wtm_sign = rec.plies[t].wtm ? 1.0f : -1.0f;
+        float wtm_sign = rec.plies[t].wtm ? -1.0f : 1.0f;
         float id_weight = 1.0f / (1.0f + rec.plies[t].id_score_variance / TDLEAF_ID_VAR_SIGMA2);
         float grad_scale = e[t] * sig_grad * cp_factor * wtm_sign * id_weight;
 

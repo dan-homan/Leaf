@@ -1,13 +1,15 @@
 Changes since 2017_12_24
 
-2026_04_09 -- tdleaf: fix wtm_sign inversion in gradient accumulation (src/tdleaf.cpp).
-               The sign was `rec.plies[t].wtm ? -1 : +1` (backwards).  When white is to
-               move at the leaf, score_white = +score_stm so gradient flows positively
-               (wtm_sign should be +1); when black to move, score_white = -score_stm
-               (wtm_sign should be -1).  The inverted sign caused gradient direction to be
-               negated for all white-to-move leaf positions (~50% of positions), pushing
-               weights systematically in the wrong direction for half of training examples.
-               Fixed: `rec.plies[t].wtm ? +1 : -1`.
+2026_04_09 -- tdleaf: revert erroneous wtm_sign change in gradient accumulation (src/tdleaf.cpp).
+               A previous commit incorrectly "fixed" `wtm_sign = wtm ? -1 : +1` to `? +1 : -1`,
+               reasoning that score_white = +score_stm when white to move so the sign should be +1.
+               That analysis ignored that grad_scale acts as a VALUE ascent signal (e[t] > 0 means
+               "increase score"), but nnue_apply_gradients uses weight -= dw (descent semantics).
+               The combined ascent-via-descent requires grad_scale to be NEGATIVE when the score
+               should increase (so dw < 0 → weight increases → score rises).  With wtm_sign = -1
+               (white to move), grad_scale = e[t] * pos * (-1) < 0 when e[t] > 0 ✓.  The "fixed"
+               +1 sign caused 0-40 results against material_eval after 10k training games (complete
+               gradient inversion).  Reverted to original `wtm ? -1 : +1`.
 
 2026_04_09 -- tdleaf: fix latent PSQT v/m null-pointer count mismatch in nnue_save_fc_weights
                (src/nnue.cpp).  When v_psqt_w or m_psqt_w is null, the PSQT v/m row count
