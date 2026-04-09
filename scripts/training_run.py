@@ -596,7 +596,8 @@ def main():
     # -----------------------------------------------------------------------
     pgn_dir       = os.path.join(learn_dir, "pgn", net_base)
     os.makedirs(pgn_dir, exist_ok=True)
-    pgn_base_path = os.path.join(pgn_dir, f"match_{net_base}.pgn")
+    pgn_start_tag = format_game_count(prior_games) + "g"
+    pgn_base_path = os.path.join(pgn_dir, f"match_{net_base}_{pgn_start_tag}.pgn")
 
     # -----------------------------------------------------------------------
     # Confirm
@@ -777,7 +778,7 @@ def main():
                     shutil.copy2(tdleaf_bin, checkpoint_bin)
 
                 pgn_path = os.path.join(
-                    pgn_dir, f"match_{net_base}_cycle{cycle_num:02d}.pgn")
+                    pgn_dir, f"match_{net_base}_{pgn_start_tag}_cycle{cycle_num:02d}.pgn")
             else:
                 pgn_path = pgn_base_path
 
@@ -874,7 +875,7 @@ def main():
                 print(f"\n  Validation: skipped (no prior trained baseline)  → {verdict}")
             else:
                 val_pgn = os.path.join(
-                    pgn_dir, f"val_{net_base}_cycle{cycle_num:02d}.pgn")
+                    pgn_dir, f"val_{net_base}_{pgn_start_tag}_cycle{cycle_num:02d}.pgn")
                 print(f"  Validation: {val_games} games @ {val_tc}"
                       f"   (candidate vs best)")
                 val_cmd = [
