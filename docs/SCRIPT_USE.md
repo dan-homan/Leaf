@@ -520,3 +520,46 @@ which are max-merged across inputs.
 *(Not in active use.)*  Earlier self-play driver for TDLeaf training, predating
 `training_run.py`.  Kept in `scripts/` for reference; no symlinks are provided
 in `run/` or `learn/`.
+
+---
+
+## pgn_winrate.py
+
+Analyse win/draw/loss rates per N-game window for one player in a PGN file.
+Auto-detects the non-baseline player (anything that is not `*material_eval*`).
+Useful for spotting training collapses, peak performance windows, and whether
+the engine recovers after a crash.
+
+### Usage
+
+```sh
+# Auto-detect player, 100-game windows (default)
+python3 scripts/pgn_winrate.py learn/pgn/run1/match_run1_0g.pgn
+
+# Explicit player and window size
+python3 scripts/pgn_winrate.py learn/pgn/run1/match_run1_0g.pgn \
+    --player Leaf_vtrain_nn-fresh_a --window 200
+
+# CSV output (for plotting / further processing)
+python3 scripts/pgn_winrate.py learn/pgn/run1/match_run1_0g.pgn --csv
+```
+
+### Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `pgn_file` (positional) | *(required)* | PGN file to analyse |
+| `--player <name>` | auto-detect | Player name to track |
+| `--opponent <name>` | *(none)* | Opponent name; used to auto-detect the other player |
+| `--window <N>` | 100 | Number of games per analysis window |
+| `--csv` | off | Emit CSV instead of a formatted table |
+
+### Output
+
+Formatted table with columns W / D / L / Win% / Draw% / Loss% / Score% per
+window, followed by totals and a summary that reports:
+
+- Starting win rate (first window)
+- Peak win rate and which window it occurred in
+- First window where win rate drops below 5%
+- Whether/when the win rate recovers above 5% after a crash

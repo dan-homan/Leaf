@@ -93,7 +93,8 @@ errors (unknown types, undeclared identifiers).  These are expected and can be i
 - After each search, `tdleaf_record_ply()` walks the PV to the leaf, snapshots the accumulator, active feature indices, and iterative-deepening score history.
 - After each game, `tdleaf_update_after_game()` computes backward TD errors (λ=0.8 decisive / 0.5 draw), applies score-change clipping (TDLEAF_SCORE_CLIP_CP=200 cp) and ID-stability weighting (TDLEAF_ID_VAR_SIGMA2=10,000 cp²), then backpropagates through FC/FT/PSQT/piece_val layers.  Five separate Adam LRs: FC (0.1), FT (1.0), FT bias (0.01), PSQT (1.6), piece_val (1.6).  Gradient clipping (L2 norm, threshold 1.0) and AdamW weight decay (1e-4, FC+FT weights only) are applied.  FT bias uses a reduced LR to prevent dying-ReLU from update frequency asymmetry.
 - `tdleaf_replay()` then runs `TDLEAF_REPLAY_K` (default 0, disabled) additional passes over the last `TDLEAF_REPLAY_BUF_N` (default 8) completed games stored in a ring buffer, refreshing scores from current weights before each pass.  Replay uses FC-only gradients (`fc_only=true`) to avoid FT feedback divergence.
-- Dense piece values (`piece_val[6][8]`, 48 floats) learn material corrections on top of PSQT via dense gradient updates; added to eval as `nnue_dense_piece_val()`.  PSQT gradients are mean-centered per piece-type slot to prevent PSQT from learning redundant material corrections (active only when `piece_val_active`).
+- Dense piece values (`piece_val[6][8]`, 48 floats) hold the base material prior and learn material corrections via dense gradient updates (~200/game); added to eval as `nnue_dense_piece_val()`.  PSQT starts at zero and learns only positional corrections; PSQT gradients are mean-centered per piece-type slot to prevent PSQT from absorbing material shifts (handled exclusively by piece_val, active when `piece_val_active`).  For fresh networks (`--init-nnue`): PSQT=0, piece_val=classical material (P=100,N=377,B=399,R=596,Q=1197 cp).  For `--init-nnue-noprior`: PSQT=0, piece_val=0 (learns all values from scratch).  Initialising PSQT with material values caused a 5000–7000-game training crash: large material evaluations saturate the sigmoid (sigmoid(1197/290)≈0.98 for queen), requiring impossibly high win rates from fresh engines to avoid net-corrosive PSQT gradients.
+- **FC0 passthrough initialization:** FC0 output 15 (`NNUE_L0_DIRECT`) bypasses FC1/FC2 and contributes `fc0_raw[15] × 9600/8128` directly to the positional score before the `×100/5776` conversion.  With random FC0 weights (std=4) this creates ≈81 cp score noise at initialization, overwhelming the 100 cp/pawn piece_val signal.  The passthrough row is zero-initialized; gradient still flows through it so it learns normally from game 1.
 - Weights persist to `<net>.tdleaf.bin` (v8 format); POSIX file locking + delta merging allows concurrent multi-instance training.  v6 adds persistent Adam second-moment (v) arrays and `t_adam`; multi-writer merge uses `max(v_file, v_local)`.  v7 adds persistent Adam first-moment (m) arrays; multi-writer merge uses element-wise average `(m_file + m_local) / 2`.  v8 adds sparse FT v persistence (same dirty-row set as FT weights); merge uses `max(v_file, v_local)`.  FT weight m not persisted (FT uses RMSProp, no m).
 - FT RMSProp uses a session-local counter `t_ft_session` (not persisted) for bc2 via `min(t_adam, t_ft_session)` for cold rows.  Rows whose `v_ft_w` was restored from disk (`ft_v_warmed[fi]==true`) use `t_adam` directly for bc2 since their saved v is already calibrated.  This prevents ~31× oversized FT updates on the first Adam step after restart.
 - `v_ft_w` (FT per-weight second moment, ~92 MB) is now sparsely persisted in .tdleaf.bin v8 for feature rows where v is **non-zero** (rows with zero v — e.g. first session from v7 — are explicitly excluded: saving a zero-v row as "warmed" causes bc2_warm≈1 with v=0, giving sv≈ε and ~10,000× oversized steps).  This eliminates the per-restart FT v cold-start that caused a 10–20 Elo dip for the first ~1000 Adam steps.  A per-session FT LR warmup (`TDLEAF_FT_SESSION_WARMUP=100` Adam steps) damps FT updates while v accumulates, covering both loaded (warmed) and fresh rows.
@@ -155,6 +156,11 @@ python3 scripts/merge_tdleaf.py run1.tdleaf.bin run2.tdleaf.bin -o merged --repo
 
 # Merge and also produce a .nnue file from a baseline network
 python3 scripts/merge_tdleaf.py run1.tdleaf.bin run2.tdleaf.bin -o merged --baseline nn-start.nnue
+
+# Win/draw/loss rate analysis per N-game window (default 100) for one player in a PGN
+python3 scripts/pgn_winrate.py learn/pgn/run1/match_run1_0g.pgn
+python3 scripts/pgn_winrate.py learn/pgn/run1/match_run1_0g.pgn --player Leaf_vtrain_nn-fresh_a --window 200
+python3 scripts/pgn_winrate.py learn/pgn/run1/match_run1_0g.pgn --csv
 ```
 
 ### Training workflow summary
@@ -173,7 +179,7 @@ Manual workflow (equivalent to what the script automates):
 # 1. Initialise a fresh random network (optional)
 perl src/comp.pl init_nnue NNUE=1 TDLEAF=1 OVERWRITE
 ./run/Leaf_vinit_nnue --init-nnue --write-nnue learn/nn-fresh.nnue
-# Or with uniform 100cp piece values (no classical material prior):
+# Or with no material prior at all (learns piece values from scratch):
 ./run/Leaf_vinit_nnue --init-nnue-noprior --write-nnue learn/nn-fresh.nnue
 
 # 2. Build training binaries (symmetric self-play: both engines learn)
