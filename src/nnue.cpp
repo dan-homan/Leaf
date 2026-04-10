@@ -483,7 +483,7 @@ bool nnue_write_nnue(const char *dst_path)
     // Build new description.
     char new_desc[4096];
     if (nnue_zero_initialized || !orig_desc[0])
-        snprintf(new_desc, sizeof(new_desc), "Random init + classical material+PSQ by game stage");
+        snprintf(new_desc, sizeof(new_desc), "Random init; PSQT=symmetric classical (own=+V,enemy=-V); piece_val=0");
     else
         snprintf(new_desc, sizeof(new_desc), "%s Trained by Leaf TDLeaf", orig_desc);
     uint32_t new_desc_size = (uint32_t)strlen(new_desc);
@@ -1381,6 +1381,15 @@ void nnue_init_zero_weights(bool noprior)
     for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
         for (int i = 0; i < NNUE_L0_SIZE * NNUE_L0_INPUT; i++)
             l0_weights_f32[s][i] = rnd_w(INIT_FC0_W_STD);
+        // Zero the passthrough row (output NNUE_L0_DIRECT): fc0_raw[L0_DIRECT] feeds
+        // directly to the final score as fwdOut = fc0_raw[15] * 9600/8128.  With random
+        // weights this creates ~81 cp score noise at init (std 4 × √1024 inputs ×
+        // SqrCReLU mean ≈ 20 → fc0_raw std ≈ 4 000; scaled: ≈ 81 cp), overwhelming the
+        // 100 cp/pawn piece_val signal and preventing material-aware play from game 1.
+        // Starting at zero eliminates this noise; gradient still flows through the
+        // passthrough (g_fc0_raw[15] += g_pos × 9600/8128) so it learns normally.
+        for (int i = 0; i < NNUE_L0_INPUT; i++)
+            l0_weights_f32[s][NNUE_L0_DIRECT * NNUE_L0_INPUT + i] = 0.0f;
         for (int i = 0; i < NNUE_L0_SIZE; i++)
             l0_biases_f32[s][i]  = 0.0f;
         for (int i = 0; i < NNUE_L1_SIZE * NNUE_L1_PADDED; i++)
@@ -1434,41 +1443,36 @@ void nnue_init_zero_weights(bool noprior)
     // ---- FT biases: zero init ----
     // FT weights already break symmetry across dimensions, so zero FT biases
     // are sufficient to get varied SqrCReLU activations from game 1.
+    // ft_biases_f32 must also be explicitly zeroed here: nnue_init_fp32_weights()
+    // (called just before this) copies ft_biases → ft_biases_f32, but ft_biases
+    // was only just allocated (uninitialized memory) when called from --init-nnue
+    // mode.  Without this zero, the initial nnue_save_fc_weights() call saves
+    // garbage values as FT biases, corrupting every subsequent training session.
     if (ft_biases)
         memset(ft_biases, 0, NNUE_HALF_DIMS * sizeof(int16_t));
+    memset(ft_biases_f32, 0, NNUE_HALF_DIMS * sizeof(float));
 
-    // ---- FT weights: random; PSQT: pure classical material ----
-    // Conversion: V = cp * 5776 / 100.  PSQT is side-to-move based:
-    //   own pieces (pside==persp)  → +V  (positive contribution to stm score)
-    //   opp pieces (pside!=persp)  → -V  (negative contribution to stm score)
-    // Material values from score.h: value[] = {0,100,377,399,596,1197,0}.
-    // King material = 0 (mate sentinel).
-    // Internal units: cp * 5776 / 100.
+    // ---- FT weights: random; PSQT: classical material (if !noprior), else zero ----
+    // PSQT provides the base material signal.  Despite sigmoid saturation for large
+    // material advantages (sigmoid(1197/290) ≈ 0.985), PSQT recovers from corrosive
+    // gradients because its 180,224 parameters are updated HETEROGENEOUSLY and SPARSELY:
+    // each (king_sq, piece_sq) feature row is updated only when that exact configuration
+    // appears in a leaf position.  Different features erode at different rates; positional
+    // features (piece activity, king safety) can receive constructive gradient even while
+    // material features erode.  A partial material signal persists until FC/FT learns
+    // enough chess to provide recovery (~7000 games).
     //
-    // No piece-square bonuses — just pure material values, same across all 8 buckets.
-    // TDLeaf learns positional adjustments on top of this strong material prior.
-    // Classical material prior (default): piece values from score.h
-    static const float PSQT_VAL_CLASSICAL[7] = {
-        0.f,                        // EMPTY
-        100.f * 5776.f / 100.f,     // PAWN   = 5776.0
-        377.f * 5776.f / 100.f,     // KNIGHT = 21775.5
-        399.f * 5776.f / 100.f,     // BISHOP = 23046.2
-        596.f * 5776.f / 100.f,     // ROOK   = 34425.0
-        1197.f * 5776.f / 100.f,    // QUEEN  = 69143.7
-        0.f,                        // KING   = 0 (no material value)
-    };
-    // No-prior: all pieces at 100 cp — forces learning of material values
-    static const float PSQT_VAL_NOPRIOR[7] = {
-        0.f,                        // EMPTY
-        100.f * 5776.f / 100.f,     // PAWN   = 5776.0
-        100.f * 5776.f / 100.f,     // KNIGHT = 5776.0
-        100.f * 5776.f / 100.f,     // BISHOP = 5776.0
-        100.f * 5776.f / 100.f,     // ROOK   = 5776.0
-        100.f * 5776.f / 100.f,     // QUEEN  = 5776.0
-        0.f,                        // KING   = 0 (no material value)
-    };
-    const float *PSQT_VAL = noprior ? PSQT_VAL_NOPRIOR : PSQT_VAL_CLASSICAL;
-
+    // Contrast with dense piece_val as the material source: 48 global scalars, updated
+    // ~200×/game.  Once corrosive gradient drives them negative the entire material
+    // evaluation inverts, the engine plays to lose pieces, and FC/FT training is corrupted
+    // by abnormal game positions — no recovery is possible.
+    //
+    // PSQT scale: own-piece features set to 2 × cp × 5776/100 so that
+    //   (psqt_diff / 2) × 100/5776 = cp contribution to the score.
+    // Enemy-piece features stay at zero: psqt_diff = own_val − 0 = own_val, giving the
+    // correct one-sided material contribution without double-counting.
+    //
+    // noprior: PSQT=0, piece_val=0 — everything learned from scratch.
     if (ft_weights_f32) {
         size_t ft_sz   = (size_t)NNUE_FT_INPUTS * NNUE_HALF_DIMS;
         size_t psqt_sz = (size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS;
@@ -1482,7 +1486,38 @@ void nnue_init_zero_weights(bool noprior)
                 ft_weights[i]     = (int16_t)v;
             }
         }
-        memset(psqt_weights_f32, 0, psqt_sz * sizeof(float));
+        // PSQT init: symmetric — own-piece features = +V, enemy-piece features = -V.
+        // V = cp × 5776/100 so that psqt_diff contribution of one own piece is:
+        //   psqt[stm] += +V, psqt[opp] += -V  →  psqt_diff = 2V
+        //   score = psqt_diff/2 × 100/5776 = V × 100/5776 = cp  ✓
+        // Both signs required: own positive (piece good for me), enemy negative (piece bad for me).
+        // Feature layout within each king-bucket (PS_NB=704 entries per bucket):
+        //   ps_slot = (fi % PS_NB) / 128 → 0=pawn, 1=knight, 2=bishop, 3=rook, 4=queen, 5=king
+        //   is_own  = (fi % PS_NB) % 128 < 64  (own-piece squares are [0,63], enemy are [64,127])
+        if (!noprior) {
+            static const float PSQT_CLASSICAL[6] = {
+                1.f * 100.f  * 5776.f / 100.f,  // ps_slot 0: PAWN   = 5776.0
+                1.f * 377.f  * 5776.f / 100.f,  // ps_slot 1: KNIGHT = 21775.5
+                1.f * 399.f  * 5776.f / 100.f,  // ps_slot 2: BISHOP = 23046.2
+                1.f * 596.f  * 5776.f / 100.f,  // ps_slot 3: ROOK   = 34425.0
+                1.f * 1197.f * 5776.f / 100.f,  // ps_slot 4: QUEEN  = 69138.1
+                0.f,                             // ps_slot 5: KING   = 0
+            };
+            for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
+                int fi_in_bkt = fi % PS_NB;
+                int ps_slot   = fi_in_bkt / 128;
+                bool is_own   = (fi_in_bkt % 128) < 64;
+                float val = 0.f;
+                if (ps_slot < 5)
+                    val = is_own ? PSQT_CLASSICAL[ps_slot] : -PSQT_CLASSICAL[ps_slot];
+                float   *fp = psqt_weights_f32 + (size_t)fi * NNUE_PSQT_BKTS;
+                int32_t *ip = psqt_weights     + (size_t)fi * NNUE_PSQT_BKTS;
+                for (int b = 0; b < NNUE_PSQT_BKTS; b++) { fp[b] = val; ip[b] = (int32_t)roundf(val); }
+            }
+        } else {
+            memset(psqt_weights_f32, 0, psqt_sz * sizeof(float));
+            memset(psqt_weights,     0, psqt_sz * sizeof(int32_t));
+        }
         memset(ft_weights_cnt,   0, ft_sz   * sizeof(uint32_t));
         memset(psqt_weights_cnt, 0, psqt_sz * sizeof(uint32_t));
         memset(grad_ft_w,        0, ft_sz   * sizeof(float));
@@ -1499,34 +1534,12 @@ void nnue_init_zero_weights(bool noprior)
         // PSQT delta counts — heap allocated, parallels psqt_weights_cnt.
         if (!delta_psqt_cnt) delta_psqt_cnt = new uint32_t[psqt_sz]();
         memset(delta_psqt_cnt, 0, psqt_sz * sizeof(uint32_t));
-
-        // Enumerate all possible features and assign pure material values.
-        // All 8 PSQT buckets receive the same value (no piece-square bonuses).
-        // TDLeaf learns positional adjustments on top of this strong material prior.
-        for (int persp = 0; persp < 2; persp++) {
-            for (int ksq = 0; ksq < 64; ksq++) {
-                for (int psq = 0; psq < 64; psq++) {
-                    for (int ptype = PAWN; ptype <= KING; ptype++) {
-                        for (int pside = 0; pside < 2; pside++) {
-                            int fi = halfkav2_feature(persp, ksq, psq, ptype, pside);
-                            if (fi < 0 || fi >= NNUE_FT_INPUTS) continue;
-
-                            float sign = (pside == persp) ? 1.f : -1.f;
-                            float val  = sign * PSQT_VAL[ptype];
-
-                            for (int b = 0; b < NNUE_PSQT_BKTS; b++)
-                                psqt_weights_f32[fi * NNUE_PSQT_BKTS + b] = val;
-                        }
-                    }
-                }
-            }
-        }
     }
 
-    // Dense piece values: zero-initialised.
-    // Per-feature PSQT provides base material; piece_val learns dense corrections
-    // to the material scale for the sigmoid.  Dense updates (~200/game vs ~8/5000g
-    // for sparse PSQT) allow piece_val to converge quickly.
+    // Dense piece values: start at zero — learns corrections on top of PSQT material.
+    // piece_val handles fast-converging material corrections via dense updates (~200/game);
+    // PSQT provides the base material prior and all positional knowledge.
+    // Clamped >= 0 in nnue_apply_gradients to prevent anti-material death spiral.
     memset(piece_val_f32,   0, sizeof(piece_val_f32));
     memset(grad_piece_val,  0, sizeof(grad_piece_val));
     memset(m_piece_val,     0, sizeof(m_piece_val));
@@ -1538,15 +1551,11 @@ void nnue_init_zero_weights(bool noprior)
     // Sync all int8/int16/int32 inference arrays from the zeroed float shadows.
     nnue_requantize_fc();
     nnue_zero_initialized = true;
-    printf("NNUE TDLeaf: FC weights=N(0,{%.0f,%.0f,%.0f}); "
+    printf("NNUE TDLeaf: FC weights=N(0,{%.0f,%.0f,%.0f}) passthrough[15]=0; "
            "FT weights=N(0,%.0f); biases=zero; "
-           "PSQT=%s (P=%d N=%d B=%d R=%d Q=%d); "
-           "piece_val=zero (dense corrections)\n",
+           "PSQT=%s; piece_val=zero (learns corrections)\n",
            INIT_FC0_W_STD, INIT_FC1_W_STD, INIT_FC2_W_STD, INIT_FT_W_STD,
-           noprior ? "uniform 100cp" : "classical material",
-           (int)PSQT_VAL[PAWN], (int)PSQT_VAL[KNIGHT],
-           (int)PSQT_VAL[BISHOP], (int)PSQT_VAL[ROOK],
-           (int)PSQT_VAL[QUEEN]);
+           noprior ? "zero (noprior)" : "symmetric classical (own=+V,enemy=-V; P=100 N=377 B=399 R=596 Q=1197 cp)");
 }
 
 // ---------------------------------------------------------------------------
@@ -1858,8 +1867,12 @@ void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
 
     // SqrCReLU backward:
     //   l0_in[p*512+j] = clamp(a[j],0,127) * clamp(a[j+512],0,127) / 128
-    //   g_acc[persp][j]     += g_l0_in[p*512+j] * clamp(a[j+512],0,127) / 128  (if a[j]>0)
-    //   g_acc[persp][j+512] += g_l0_in[p*512+j] * clamp(a[j],    0,127) / 128  (if a[j+512]>0)
+    //   ∂l0_in/∂a[j]     = clamp(a[j+512],0,127) / 128  IFF 0 < a[j]     < 127, else 0
+    //   ∂l0_in/∂a[j+512] = clamp(a[j],    0,127) / 128  IFF 0 < a[j+512] < 127, else 0
+    // IMPORTANT: gradient is 0 when acc is saturated (≥127) OR dead (≤0).
+    // Passing gradient through saturated neurons (the old `clo > 0` bug) caused a
+    // positive-feedback loop: large biases → more saturation → incorrect gradient
+    // pushes biases higher → crash.
     // l0_in layout: [stm_512 | opp_512]  where p=0 is stm, p=1 is opp.
     float g_acc[2][NNUE_HALF_DIMS] = {};
     int stm_p = (int)act.stm_persp;
@@ -1874,8 +1887,8 @@ void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
             float clo = (vlo < 0.0f) ? 0.0f : (vlo > 127.0f) ? 127.0f : vlo;
             float chi = (vhi < 0.0f) ? 0.0f : (vhi > 127.0f) ? 127.0f : vhi;
             float g   = gi[j] * (1.0f / 128.0f);
-            if (clo > 0.0f) g_a[j]       += g * chi;
-            if (chi > 0.0f) g_a[j + 512] += g * clo;
+            if (vlo > 0.0f && vlo < 127.0f) g_a[j]       += g * chi;
+            if (vhi > 0.0f && vhi < 127.0f) g_a[j + 512] += g * clo;
         }
     }
 
@@ -2052,8 +2065,7 @@ void nnue_apply_gradients()
         ? (float)t_ft_session / (float)TDLEAF_FT_SESSION_WARMUP
         : 1.0f;
 
-    // Effective LRs.  FT weights get an extra per-session ramp; all others only
-    // have the one-time global warmup (keyed on persisted t_adam).
+    // Effective LRs.
     const float fc_lr      = warmup_factor * TDLEAF_ADAM_LR0;
     const float ft_lr      = warmup_factor * ft_session_factor * TDLEAF_ADAM_FT_LR0;
     const float ft_bias_lr = warmup_factor * TDLEAF_ADAM_FT_BIAS_LR0;
@@ -2266,8 +2278,15 @@ void nnue_apply_gradients()
                 float dw = do_step_pv(grad_piece_val[pt][b],
                                       m_piece_val[pt][b], v_piece_val[pt][b],
                                       piece_val_cnt[pt][b]);
-                piece_val_f32[pt][b] -= dw;
-                delta_piece_val[pt][b] -= dw;
+                float old_val = piece_val_f32[pt][b];
+                // Clamp piece_val >= 0: negative piece values invert material
+                // evaluation (engine plays to lose material), creating an
+                // unrecoverable death spiral.  At zero, the engine has neutral
+                // material knowledge (same as noprior), which FC/FT can recover
+                // from.  The Adam moments continue to advance so the clamp is
+                // lifted as soon as the gradient turns constructive.
+                piece_val_f32[pt][b] = std::max(0.0f, old_val - dw);
+                delta_piece_val[pt][b] += piece_val_f32[pt][b] - old_val;
                 piece_val_cnt[pt][b]++;  delta_piece_val_cnt[pt][b]++;
                 grad_piece_val[pt][b] = 0.0f;
             }
