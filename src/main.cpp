@@ -155,10 +155,10 @@ int main(int argc, char *argv[])
 #if NNUE
   {
     // --init-nnue: create a fresh random-initialised .nnue without reading an existing one.
-    //   PSQT initialized with classical piece values (P=100, N=377, B=399, R=596, Q=1197).
-    // --init-nnue-noprior: same, but all piece PSQT values set to 100 cp.
-    //   Forces the network to learn material values from scratch via TDLeaf.
-    // Both require --write-nnue <filename>; writes the file and exits.
+    //   PSQT=0; piece_val=classical material (P=100, N=377, B=399, R=596, Q=1197 cp).
+    // --init-nnue-noprior: same but piece_val=0 — learns all material values from scratch.
+    // Both require --write-nnue <filename>; write the .nnue AND a companion .tdleaf.bin
+    // (piece_val is stored in .tdleaf.bin, not in the .nnue format), then exit.
     bool init_nnue_mode = false;
     bool init_nnue_noprior = false;
     for (int ai = 1; ai < argc; ai++) {
@@ -171,11 +171,11 @@ int main(int argc, char *argv[])
       fprintf(stderr, "--init-nnue requires a TDLEAF build (compile with -D TDLEAF=1)\n");
       return 1;
 #else
-      // Verify --write-nnue is also present.
-      bool has_write = false;
+      // Find the --write-nnue <filename> argument.
+      const char *write_nnue_path = nullptr;
       for (int ai = 1; ai < argc - 1; ai++)
-        if (strcmp(argv[ai], "--write-nnue") == 0) { has_write = true; break; }
-      if (!has_write) {
+        if (strcmp(argv[ai], "--write-nnue") == 0) { write_nnue_path = argv[ai + 1]; break; }
+      if (!write_nnue_path) {
         fprintf(stderr, "--init-nnue requires --write-nnue <filename>\n");
         return 1;
       }
@@ -183,7 +183,28 @@ int main(int argc, char *argv[])
       nnue_alloc_arrays();
       nnue_init_fp32_weights();
       nnue_init_zero_weights(init_nnue_noprior);
-      // Fall through to the --write-nnue handler below, which will write and exit.
+      // Write .nnue file.
+      if (!nnue_write_nnue(write_nnue_path)) {
+        fprintf(stderr, "--write-nnue: failed to write %s\n", write_nnue_path);
+        return 1;
+      }
+      // Write companion .tdleaf.bin so piece_val (classical material prior) survives
+      // into the first training session.  piece_val is not part of the .nnue format;
+      // without this file the training binary starts with piece_val=0 (no material).
+      {
+        char tdbin[FILENAME_MAX];
+        snprintf(tdbin, sizeof(tdbin), "%s", write_nnue_path);
+        char *dot = strrchr(tdbin, '.');
+        if (dot && strcmp(dot, ".nnue") == 0)
+          strcpy(dot, ".tdleaf.bin");
+        else
+          strncat(tdbin, ".tdleaf.bin", sizeof(tdbin) - strlen(tdbin) - 1);
+        if (!nnue_save_fc_weights(tdbin))
+          fprintf(stderr, "--init-nnue: failed to write %s\n", tdbin);
+        else
+          printf("TDLeaf: initial weights saved to %s\n", tdbin);
+      }
+      return 0;
 #endif
     } else {
       char nnue_path[FILENAME_MAX];
