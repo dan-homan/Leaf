@@ -44,6 +44,7 @@ import psutil
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -51,6 +52,7 @@ import time
 learn_dir = os.path.dirname(os.path.abspath(__file__))
 run_dir   = os.path.normpath(os.path.join(learn_dir, "../run"))
 src_dir   = os.path.normpath(os.path.join(learn_dir, "../src"))
+tools_dir = os.path.normpath(os.path.join(learn_dir, "../tools"))
 
 
 # ---------------------------------------------------------------------------
@@ -70,6 +72,78 @@ def ask_yes_no(prompt, default="y"):
     if not val:
         return default == "y"
     return val.startswith("y")
+
+
+def discover_external_engines():
+    """Scan tools/engines/ for available external engines.
+
+    Returns a list of (display_name, absolute_path) tuples.
+    """
+    engines = []
+    engines_dir = os.path.join(tools_dir, "engines")
+    if not os.path.isdir(engines_dir):
+        return engines
+    for d in sorted(os.listdir(engines_dir)):
+        dp = os.path.join(engines_dir, d)
+        if not os.path.isdir(dp):
+            continue
+        candidates = []
+        for f in os.listdir(dp):
+            fp = os.path.join(dp, f)
+            if not os.path.isfile(fp):
+                continue
+            try:
+                st = os.stat(fp)
+                if st.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
+                    candidates.append((f, fp, st.st_size))
+            except OSError:
+                pass
+        if not candidates:
+            continue
+        match = [c for c in candidates if d.lower() in c[0].lower()]
+        best = max(match, key=lambda c: c[2]) if match else max(candidates, key=lambda c: c[2])
+        engines.append((d, best[1]))
+    return engines
+
+
+def pick_external_engine():
+    """Interactive external engine selection. Returns absolute path or None."""
+    engines = discover_external_engines()
+    if not engines:
+        print("    No engines found in tools/engines/.")
+        while True:
+            opp_path = ask("    Path to opponent executable").strip()
+            if os.path.isfile(opp_path):
+                return os.path.abspath(opp_path)
+            if os.path.isfile(os.path.join(learn_dir, opp_path)):
+                return os.path.abspath(os.path.join(learn_dir, opp_path))
+            print(f"    File not found: {opp_path}")
+
+    print("    Available external engines:")
+    for i, (name, path) in enumerate(engines, 1):
+        print(f"      [{i}] {name}")
+    print(f"      [c] Custom path")
+    print()
+
+    while True:
+        choice = input("    Select: ").strip()
+        if not choice:
+            continue
+        if choice.lower() == "c":
+            while True:
+                opp_path = ask("    Path to opponent executable").strip()
+                if os.path.isfile(opp_path):
+                    return os.path.abspath(opp_path)
+                if os.path.isfile(os.path.join(learn_dir, opp_path)):
+                    return os.path.abspath(os.path.join(learn_dir, opp_path))
+                print(f"    File not found: {opp_path}")
+        try:
+            n = int(choice)
+            if 1 <= n <= len(engines):
+                return engines[n - 1][1]
+        except ValueError:
+            pass
+        print(f"    Invalid selection: {choice}")
 
 
 def read_game_count(sidecar_path):
@@ -486,15 +560,7 @@ def main():
         elif choice_opp == "r":
             roster.append({"type": "readonly", "label": "read-only mirror (frozen during segment)"})
         elif choice_opp == "e":
-            while True:
-                opp_path = ask("    Path to opponent executable").strip()
-                if os.path.isfile(opp_path):
-                    break
-                if os.path.isfile(os.path.join(learn_dir, opp_path)):
-                    opp_path = os.path.join(learn_dir, opp_path)
-                    break
-                print(f"    File not found: {opp_path}")
-            opp_abs = os.path.abspath(opp_path)
+            opp_abs = pick_external_engine()
             roster.append({
                 "type": "external", "label": os.path.basename(opp_abs),
                 "path": opp_abs,

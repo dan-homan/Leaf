@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 #
-# Run a head-to-head match or gauntlet between Leaf executables using cutechess-cli.
-# Run from the run directory:
+# Run a head-to-head match or gauntlet between chess engines using cutechess-cli.
+# Run from the engine/run directory:
 #
-#   python3 match.py Leaf_vA Leaf_vB [options]
-#   python3 match.py Leaf_vA Leaf_vB Leaf_vC ... [options]  # gauntlet
+#   python3 match.py                              # fully interactive
+#   python3 match.py Leaf_vA                      # interactive for opponent/options
+#   python3 match.py Leaf_vA Leaf_vB [options]    # CLI mode (no prompts)
+#   python3 match.py Leaf_vA Leaf_vB Leaf_vC ...  # gauntlet
 #
 # Examples:
 #   python3 match.py Leaf_v2026_03_01 Leaf_vtest
@@ -21,16 +23,133 @@ import argparse
 import math
 import os
 import re
+import stat
 import subprocess
 import sys
 
-run_dir       = os.path.dirname(os.path.abspath(__file__))
-cutechess_cli = os.path.normpath(os.path.join(run_dir, "../tools/cutechess-1.4.0/build/cutechess-cli"))
+script_dir    = os.path.dirname(os.path.abspath(__file__))
+run_dir       = os.path.normpath(os.path.join(script_dir, "../run"))
+tools_dir     = os.path.normpath(os.path.join(script_dir, "../tools"))
+cutechess_cli = os.path.normpath(os.path.join(tools_dir, "cutechess-1.4.0/build/cutechess-cli"))
 
 
 def resolve_exe(name):
     """Return absolute path: join with run_dir unless already absolute."""
     return name if os.path.isabs(name) else os.path.join(run_dir, name)
+
+
+def discover_engines():
+    """Scan for available engines.
+
+    Returns (leaf_engines, external_engines) where each is a list of
+    (display_name, absolute_path) tuples.
+    """
+    leaf_engines = []
+    if os.path.isdir(run_dir):
+        for f in sorted(os.listdir(run_dir)):
+            if not f.startswith("Leaf_v"):
+                continue
+            p = os.path.join(run_dir, f)
+            if os.path.isfile(p) and not f.endswith((".lock", ".py", ".pl", ".txt")):
+                # Check executable
+                try:
+                    if os.stat(p).st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
+                        leaf_engines.append((f, p))
+                except OSError:
+                    pass
+
+    external_engines = []
+    engines_dir = os.path.join(tools_dir, "engines")
+    if os.path.isdir(engines_dir):
+        for d in sorted(os.listdir(engines_dir)):
+            dp = os.path.join(engines_dir, d)
+            if not os.path.isdir(dp):
+                continue
+            # Find the main executable: prefer a file whose name contains
+            # the directory name, otherwise pick the largest executable.
+            candidates = []
+            for f in os.listdir(dp):
+                fp = os.path.join(dp, f)
+                if not os.path.isfile(fp):
+                    continue
+                try:
+                    st = os.stat(fp)
+                    if st.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
+                        candidates.append((f, fp, st.st_size))
+                except OSError:
+                    pass
+            if not candidates:
+                continue
+            # Prefer name match, then largest
+            match = [c for c in candidates if d.lower() in c[0].lower()]
+            if match:
+                best = max(match, key=lambda c: c[2])
+            else:
+                best = max(candidates, key=lambda c: c[2])
+            external_engines.append((d, best[1]))
+
+    return leaf_engines, external_engines
+
+
+def pick_engine(prompt, leaf_engines, external_engines):
+    """Interactive engine selection. Returns (name, absolute_path) or exits."""
+    print(f"\n{prompt}")
+    idx = 1
+    entries = []  # (display, name, path)
+    if leaf_engines:
+        print("  Leaf binaries (engine/run/):")
+        for name, path in leaf_engines:
+            print(f"    [{idx}] {name}")
+            entries.append((name, name, path))
+            idx += 1
+    if external_engines:
+        print("  External engines (tools/engines/):")
+        for name, path in external_engines:
+            print(f"    [{idx}] {name}")
+            entries.append((name, name, path))
+            idx += 1
+    print(f"  [c] Custom path")
+    print()
+
+    while True:
+        choice = input("  Select: ").strip()
+        if not choice:
+            continue
+        if choice.lower() == "c":
+            while True:
+                p = input("  Path to engine: ").strip()
+                if os.path.isfile(p):
+                    return (os.path.basename(p), os.path.abspath(p))
+                # Try relative to run_dir
+                rp = os.path.join(run_dir, p)
+                if os.path.isfile(rp):
+                    return (os.path.basename(p), os.path.abspath(rp))
+                print(f"  File not found: {p}")
+        try:
+            n = int(choice)
+            if 1 <= n <= len(entries):
+                _, name, path = entries[n - 1]
+                return (name, path)
+        except ValueError:
+            # Maybe they typed a name directly
+            p = resolve_exe(choice)
+            if os.path.isfile(p):
+                return (choice, p)
+        print(f"  Invalid selection: {choice}")
+
+
+def ask(prompt, default=None):
+    suffix = f" [{default}]" if default is not None else ""
+    val = input(f"{prompt}{suffix}: ").strip()
+    return val if val else (str(default) if default is not None else "")
+
+
+def ask_yes_no(prompt, default="n"):
+    hint = "Y/n" if default == "y" else "y/N"
+    val = input(f"{prompt} [{hint}]: ").strip().lower()
+    if not val:
+        return default == "y"
+    return val.startswith("y")
 
 
 def elo_from_wdl(w, d, l):
@@ -97,11 +216,14 @@ def main():
     default_concurrency = max(1, cpu_count // 2)
 
     parser = argparse.ArgumentParser(
-        description="Run a match or gauntlet between Leaf versions via cutechess-cli.",
+        description="Run a match or gauntlet between chess engines via cutechess-cli.\n"
+                    "Run with no arguments for interactive mode.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("engine1", help="Probe engine (name in run/ or absolute path)")
-    parser.add_argument("opponents", nargs="+",
+    parser.add_argument("engine1", nargs="?", default=None,
+                        help="Probe engine (name in run/ or absolute path). "
+                             "Omit for interactive selection.")
+    parser.add_argument("opponents", nargs="*",
                         help="Opponent engine(s). More than one → gauntlet mode.")
     parser.add_argument("-n", "--games", type=int, default=100,
                         help="Games per iteration per opponent (default: 100)")
@@ -118,6 +240,12 @@ def main():
                         help="Override time control for engine1 only (default: same as -tc)")
     parser.add_argument("--tc2", default=None, metavar="TC",
                         help="Override time control for engine2 only (default: same as -tc)")
+    parser.add_argument("--proto", default="uci", choices=["uci", "xboard"],
+                        help="Protocol for both engines (default: uci)")
+    parser.add_argument("--proto1", default=None, choices=["uci", "xboard"],
+                        help="Override protocol for engine1 only")
+    parser.add_argument("--proto2", default=None, choices=["uci", "xboard"],
+                        help="Override protocol for engine2 only")
     parser.add_argument("--pgn", default=None, metavar="FILE",
                         help="Persistent PGN: all games from all opponents/iterations are "
                              "appended to this file (cutechess -pgnout FILE append)")
@@ -147,7 +275,56 @@ def main():
                         help="Milliseconds to wait between games (default: 0)")
     args = parser.parse_args()
 
+    # -----------------------------------------------------------------------
+    # Interactive mode: fill in missing engines and options
+    # -----------------------------------------------------------------------
+    interactive = args.engine1 is None or not args.opponents
+    leaf_engines = ext_engines = None
+
+    if args.engine1 is None:
+        leaf_engines, ext_engines = discover_engines()
+        name1, exe1 = pick_engine("Select engine 1:", leaf_engines, ext_engines)
+        args.engine1 = name1
+    else:
+        exe1 = resolve_exe(args.engine1)
+
+    if not args.opponents:
+        if leaf_engines is None:
+            leaf_engines, ext_engines = discover_engines()
+        opponents_list = []
+        print("\nAdd opponents (press Enter when done):")
+        while True:
+            n_opp = len(opponents_list)
+            label = f"opponent #{n_opp + 1}" if n_opp > 0 else "opponent"
+            name, path = pick_engine(f"Select {label}:", leaf_engines, ext_engines)
+            opponents_list.append((name, path))
+            print(f"  Added: {name}")
+            if not ask_yes_no("  Add another opponent?", "n"):
+                break
+        args.opponents = [name for name, _ in opponents_list]
+        opponent_exes = [path for _, path in opponents_list]
+    else:
+        opponent_exes = None  # resolved below
+
+    # Interactive options (only when we entered interactive engine selection)
+    if interactive and opponent_exes is not None:
+        print()
+        val = ask("Games per opponent", args.games)
+        args.games = int(val)
+        val = ask("Time control", args.time_control)
+        args.time_control = val
+        val = ask("Concurrency", args.concurrency)
+        args.concurrency = int(val)
+        val = ask("Iterations", args.iterations)
+        args.iterations = int(val)
+        args.fischer_random = ask_yes_no("Fischer Random (Chess960)?", "n")
+        openings = ask("Openings file (empty for none)", "")
+        if openings:
+            args.openings = openings
+
+    # -----------------------------------------------------------------------
     # Validate
+    # -----------------------------------------------------------------------
     if args.concurrency < 1:
         parser.error("--concurrency must be at least 1")
     if args.concurrency > cpu_count:
@@ -160,18 +337,24 @@ def main():
         parser.error("--iterations must be at least 1")
 
     # Resolve executables
-    exe1 = resolve_exe(args.engine1)
+    if not os.path.isabs(exe1):
+        exe1 = resolve_exe(args.engine1)
     if not os.path.isfile(exe1):
         print(f"Error: executable not found: {exe1}", file=sys.stderr)
         sys.exit(1)
 
-    opponent_exes = []
-    for opp in args.opponents:
-        exe = resolve_exe(opp)
-        if not os.path.isfile(exe):
-            print(f"Error: executable not found: {exe}", file=sys.stderr)
-            sys.exit(1)
-        opponent_exes.append(exe)
+    if opponent_exes is None:
+        opponent_exes = []
+        for opp in args.opponents:
+            exe = resolve_exe(opp)
+            if not os.path.isfile(exe):
+                print(f"Error: executable not found: {exe}", file=sys.stderr)
+                sys.exit(1)
+            opponent_exes.append(exe)
+
+    # Protocols
+    proto1 = args.proto1 or args.proto
+    proto2 = args.proto2 or args.proto
 
     # Openings
     openings_args = []
@@ -191,7 +374,7 @@ def main():
     multi    = args.iterations > 1
 
     # Header
-    print(f"Probe engine: {name1}")
+    print(f"\nProbe engine: {name1}")
     if gauntlet:
         print(f"Gauntlet vs:  {', '.join(os.path.basename(o) for o in args.opponents)}")
     depth_str = ""
@@ -203,6 +386,7 @@ def main():
                   else f"{args.tc1 or args.time_control} / {args.tc2 or args.time_control}")
     print(f"Games: {args.games}   Iterations: {args.iterations}   "
           f"Concurrency: {args.concurrency}   TC: {tc_display}   "
+          f"Protocol: {proto1}/{proto2}   "
           f"Fischer Random: {'on' if args.fischer_random else 'off'}{depth_str}")
     if args.pgn:
         print(f"Persistent PGN: {args.pgn}")
@@ -231,8 +415,13 @@ def main():
         tc1 = args.tc1 or args.time_control
         tc2 = args.tc2 or args.time_control
 
-        eng1_spec = [f"cmd={exe1}",    f"name={name1}", "proto=xboard", f"dir={run_dir}"]
-        eng2_spec = [f"cmd={opp_exe}", f"name={name2}", "proto=xboard", f"dir={run_dir}"]
+        # Per-engine dir: use the directory containing each binary so engines
+        # can find their data files (books, NNUE nets, etc.)
+        dir1 = os.path.dirname(exe1)
+        dir2 = os.path.dirname(opp_exe)
+
+        eng1_spec = [f"cmd={exe1}",    f"name={name1}", f"proto={proto1}", f"dir={dir1}"]
+        eng2_spec = [f"cmd={opp_exe}", f"name={name2}", f"proto={proto2}", f"dir={dir2}"]
         if polyglot_book:
             eng1_spec.append(f"book={polyglot_book}")
             eng2_spec.append(f"book={polyglot_book}")
