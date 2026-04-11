@@ -29,13 +29,28 @@ import sys
 
 script_dir    = os.path.dirname(os.path.abspath(__file__))
 run_dir       = os.path.normpath(os.path.join(script_dir, "../run"))
+learn_dir     = os.path.normpath(os.path.join(script_dir, "../learn"))
 tools_dir     = os.path.normpath(os.path.join(script_dir, "../../tools"))
 cutechess_cli = os.path.normpath(os.path.join(tools_dir, "cutechess-1.4.0/build/cutechess-cli"))
 
 
 def resolve_exe(name):
-    """Return absolute path: join with run_dir unless already absolute."""
-    return name if os.path.isabs(name) else os.path.join(run_dir, name)
+    """Return absolute path: check cwd, run_dir, and learn_dir."""
+    if os.path.isabs(name):
+        return name
+    # Check current working directory first
+    if os.path.isfile(name):
+        return os.path.abspath(name)
+    # Then run/
+    p = os.path.join(run_dir, name)
+    if os.path.isfile(p):
+        return p
+    # Then learn/
+    p = os.path.join(learn_dir, name)
+    if os.path.isfile(p):
+        return p
+    # Fall back to run_dir (will fail at the existence check later)
+    return os.path.join(run_dir, name)
 
 
 def discover_engines():
