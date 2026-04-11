@@ -97,18 +97,19 @@ Leaf uses a unity build — `engine/src/Leaf.cc` includes all other `.cpp` files
 g++ -o Leaf engine/src/Leaf.cc -O3 -D VERS="dev" -pthread
 ```
 
-**With NNUE evaluation:**
+**With NNUE evaluation (from `engine/run/`):**
 ```sh
-perl engine/src/comp.pl <version> NNUE=1
-# e.g.  perl engine/src/comp.pl 2026_03_09a NNUE=1
+cd engine/run/
+perl comp.pl <version> NNUE=1
+# e.g.  perl comp.pl 2026_03_09a NNUE=1
 ```
 
 **With NNUE + TDLeaf(λ) learning:**
 ```sh
-perl engine/src/comp.pl <version> NNUE=1 TDLEAF=1
+perl comp.pl <version> NNUE=1 TDLEAF=1
 ```
 
-The `perl comp.pl` build script handles include paths, optimization flags, and optional `OVERWRITE` to skip the interactive prompt.  Built binaries land in `run/` with the name `Leaf_v<version>`.
+The `perl comp.pl` build script handles include paths, optimization flags, and optional `OVERWRITE` to skip the interactive prompt.  Built binaries land in `engine/run/` with the name `Leaf_v<version>`.
 
 The network file (default: `to-be-trained.nnue`) must be present in the same directory as the binary, or in the directory from which the engine is launched.  A fresh network can be generated with `--init-nnue --write-nnue <file>` before training.  Any Stockfish 15.1–era HalfKAv2_hm network is compatible and can be substituted at compile time with `NNUE_NET=<filename>`.
 
@@ -121,14 +122,14 @@ auto-detected from the first command received on stdin.  Point any xboard or UCI
 compatible GUI at the binary, or run it directly from the command line:
 
 ```sh
-cd run/
+cd engine/run/
 ./Leaf_v2026_03_09a
 ```
 
 Self-play matches between two Leaf versions (requires [cutechess-cli](https://github.com/cutechess/cutechess)):
 
 ```sh
-cd run/
+cd engine/run/
 # Default: each opening played twice (both colors) for balance
 python3 match.py Leaf_vA Leaf_vB -n 200 -c 4 -tc 10+0.1
 # --no-repeat: each opening played once, for maximum position diversity in self-play

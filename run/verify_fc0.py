@@ -1,1 +1,0 @@
-../scripts/verify_fc0.py

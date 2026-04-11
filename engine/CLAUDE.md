@@ -15,24 +15,24 @@ protocol is auto-detected from the first command received on stdin.
 
 ## Build System
 
-Compilation is managed by `engine/src/comp.pl`.  The build uses a **unity build** pattern: `engine/src/Leaf.cc`
+Compilation is managed by `src/comp.pl`.  The build uses a **unity build** pattern: `src/Leaf.cc`
 includes every other `.cpp` file as a single translation unit.  Binaries land in `run/`.
 
 ```sh
 # Classical eval (no NNUE)
-perl engine/src/comp.pl <version>
+perl src/comp.pl <version>
 
 # NNUE eval
-perl engine/src/comp.pl <version> NNUE=1
+perl src/comp.pl <version> NNUE=1
 
 # NNUE + TDLeaf(λ) training
-perl engine/src/comp.pl <version> NNUE=1 TDLEAF=1
+perl src/comp.pl <version> NNUE=1 TDLEAF=1
 
 # Read-only weights (inference only)
-perl engine/src/comp.pl <version> NNUE=1 TDLEAF=1 TDLEAF_READONLY=1
+perl src/comp.pl <version> NNUE=1 TDLEAF=1 TDLEAF_READONLY=1
 
 # Skip interactive overwrite prompt
-perl engine/src/comp.pl <version> NNUE=1 OVERWRITE
+perl src/comp.pl <version> NNUE=1 OVERWRITE
 ```
 
 Binary naming: `run/Leaf_v<version>` — e.g. `Leaf_v2026_03_09a`, `Leaf_vtrain_nn-fresh`.
@@ -55,7 +55,7 @@ The `.nnue` network file and `.tdleaf.bin` weights file must reside in the same 
 
 ## Architecture
 
-### Unity build (`engine/src/Leaf.cc` include order)
+### Unity build (`src/Leaf.cc` include order)
 
 `main.cpp` → `uci.cpp` → `attacks.cpp` → `exmove.cpp` → `swap.cpp` → `moves.cpp` → `captures.cpp` →
 `captchecks.cpp` → `hash.cpp` → `smp.cpp` → `search.cpp` → `score.cpp` →
@@ -70,15 +70,15 @@ errors (unknown types, undeclared identifiers).  These are expected and can be i
 
 | File | Role |
 |------|------|
-| `engine/src/main.cpp` | Protocol detection, xboard/CECP loop, CLI loop, game loop, TDLeaf hooks (`tdleaf_record_ply`, `tdleaf_update_after_game`, `tdleaf_replay`) |
-| `engine/src/uci.cpp` | Full UCI implementation: I/O reader thread, command queue, `uci_loop()`, `uci_dispatch_go()`, `uci_set_position()`, `uci_check_interrupt()`, `uci_send_info()` |
-| `engine/src/search.cpp` | PVS alpha-beta, null-move pruning, LMR, lazy SMP, iterative deepening; tracks `id_scores[]` for TDLeaf |
-| `engine/src/score.cpp` | Classical hand-crafted eval + NNUE dispatch; NNUE/pawn/score hash probe/store |
-| `engine/src/nnue.cpp` | NNUE forward pass (int8 inference + NEON), FP32 shadow weights, gradient accumulation, `.tdleaf.bin` I/O |
-| `engine/src/tdleaf.cpp` | PV walking, TD error computation (with score-change clipping + ID-stability weighting), gradient backprop |
-| `engine/src/chess.h` | All major structs: `position`, `move`, `move_list`, `tree_search`, `game_rec` |
-| `engine/src/define.h` | Compile-time constants and flag defaults (`NNUE`, `TDLEAF`, `MATERIAL_ONLY`, piece encodings, `MAXD`, `MAX_GAME_PLY`) |
-| `engine/src/tdleaf.h` | TDLeaf hyperparameters, `TDRecord`, `TDGameRecord`, function declarations |
+| `src/main.cpp` | Protocol detection, xboard/CECP loop, CLI loop, game loop, TDLeaf hooks (`tdleaf_record_ply`, `tdleaf_update_after_game`, `tdleaf_replay`) |
+| `src/uci.cpp` | Full UCI implementation: I/O reader thread, command queue, `uci_loop()`, `uci_dispatch_go()`, `uci_set_position()`, `uci_check_interrupt()`, `uci_send_info()` |
+| `src/search.cpp` | PVS alpha-beta, null-move pruning, LMR, lazy SMP, iterative deepening; tracks `id_scores[]` for TDLeaf |
+| `src/score.cpp` | Classical hand-crafted eval + NNUE dispatch; NNUE/pawn/score hash probe/store |
+| `src/nnue.cpp` | NNUE forward pass (int8 inference + NEON), FP32 shadow weights, gradient accumulation, `.tdleaf.bin` I/O |
+| `src/tdleaf.cpp` | PV walking, TD error computation (with score-change clipping + ID-stability weighting), gradient backprop |
+| `src/chess.h` | All major structs: `position`, `move`, `move_list`, `tree_search`, `game_rec` |
+| `src/define.h` | Compile-time constants and flag defaults (`NNUE`, `TDLEAF`, `MATERIAL_ONLY`, piece encodings, `MAXD`, `MAX_GAME_PLY`) |
+| `src/tdleaf.h` | TDLeaf hyperparameters, `TDRecord`, `TDGameRecord`, function declarations |
 
 ### NNUE architecture (HalfKAv2_hm, Stockfish 15.1–compatible)
 
@@ -123,44 +123,44 @@ TDLeaf learning is inactive in UCI mode (the engine never calls `make_move()`, s
 - `material` is already from the side-to-move's perspective (see `exmove.cpp:223`).
 - Piece encoding: `PAWN=1 … KING=6`; white pieces are `+8` (e.g. `WPAWN=9`).
 - `NOMOVE` terminates PV arrays.
-- All docs live in `engine/docs/`; update `engine/docs/change_log.txt` when making notable changes.
+- All docs live in `docs/`; update `docs/change_log.txt` when making notable changes.
 
 ---
 
 ## Scripts
 
-All scripts live in `engine/scripts/`; `run/` and `learn/` have symlinks for in-place invocation.
-See `engine/docs/SCRIPT_USE.md` for full option tables.
+All scripts live in `scripts/`; `run/` and `learn/` have symlinks for in-place invocation.
+See `docs/SCRIPT_USE.md` for full option tables.
 
 ```sh
 # Run a match (from run/)
-python3 engine/scripts/match.py Leaf_vA Leaf_vB -n 200 -c 4 -tc 5+0.05
+python3 scripts/match.py Leaf_vA Leaf_vB -n 200 -c 4 -tc 5+0.05
 
 # Interactive training run (from learn/)
-python3 engine/scripts/training_run.py
+python3 scripts/training_run.py
 
 # Bayesian Elo ratings (one or more PGN files combined)
-python3 engine/scripts/bayeselo_ratings.py file1.pgn file2.pgn --min 20 --report
+python3 scripts/bayeselo_ratings.py file1.pgn file2.pgn --min 20 --report
 
 # Remove duplicate games from PGN files
-python3 engine/scripts/pgn_dedup.py input.pgn --output deduped.pgn --report
+python3 scripts/pgn_dedup.py input.pgn --output deduped.pgn --report
 
 # Generate combined FRC + book opening EPD (run once from learn/)
-python3 engine/scripts/make_training_epd.py
+python3 scripts/make_training_epd.py
 
 # Visualise weight changes after training
-python3 engine/scripts/compare_nnue_learning.py learn/nn-fresh.nnue learn/nn-fresh.tdleaf.bin
+python3 scripts/compare_nnue_learning.py learn/nn-fresh.nnue learn/nn-fresh.tdleaf.bin
 
 # Merge multiple .tdleaf.bin files (count-weighted averaging)
-python3 engine/scripts/merge_tdleaf.py run1.tdleaf.bin run2.tdleaf.bin -o merged --report
+python3 scripts/merge_tdleaf.py run1.tdleaf.bin run2.tdleaf.bin -o merged --report
 
 # Merge and also produce a .nnue file from a baseline network
-python3 engine/scripts/merge_tdleaf.py run1.tdleaf.bin run2.tdleaf.bin -o merged --baseline nn-start.nnue
+python3 scripts/merge_tdleaf.py run1.tdleaf.bin run2.tdleaf.bin -o merged --baseline nn-start.nnue
 
 # Win/draw/loss rate analysis per N-game window (default 100) for one player in a PGN
-python3 engine/scripts/pgn_winrate.py learn/pgn/run1/match_run1_0g.pgn
-python3 engine/scripts/pgn_winrate.py learn/pgn/run1/match_run1_0g.pgn --player Leaf_vtrain_nn-fresh_a --window 200
-python3 engine/scripts/pgn_winrate.py learn/pgn/run1/match_run1_0g.pgn --csv
+python3 scripts/pgn_winrate.py learn/pgn/run1/match_run1_0g.pgn
+python3 scripts/pgn_winrate.py learn/pgn/run1/match_run1_0g.pgn --player Leaf_vtrain_nn-fresh_a --window 200
+python3 scripts/pgn_winrate.py learn/pgn/run1/match_run1_0g.pgn --csv
 ```
 
 ### Training workflow summary
@@ -177,14 +177,14 @@ Manual workflow (equivalent to what the script automates):
 
 ```sh
 # 1. Initialise a fresh random network (optional)
-perl engine/src/comp.pl init_nnue NNUE=1 TDLEAF=1 OVERWRITE
+perl src/comp.pl init_nnue NNUE=1 TDLEAF=1 OVERWRITE
 ./run/Leaf_vinit_nnue --init-nnue --write-nnue learn/nn-fresh.nnue
 # Or with no material prior at all (learns piece values from scratch):
 ./run/Leaf_vinit_nnue --init-nnue-noprior --write-nnue learn/nn-fresh.nnue
 
 # 2. Build training binaries (symmetric self-play: both engines learn)
-perl engine/src/comp.pl train_fresh_a NNUE=1 NNUE_NET=learn/nn-fresh.nnue TDLEAF=1 OVERWRITE
-perl engine/src/comp.pl train_fresh_b NNUE=1 NNUE_NET=learn/nn-fresh.nnue TDLEAF=1 OVERWRITE
+perl src/comp.pl train_fresh_a NNUE=1 NNUE_NET=learn/nn-fresh.nnue TDLEAF=1 OVERWRITE
+perl src/comp.pl train_fresh_b NNUE=1 NNUE_NET=learn/nn-fresh.nnue TDLEAF=1 OVERWRITE
 
 # 3. Run training matches (from learn/)
 python3 match.py Leaf_vtrain_fresh_a Leaf_vtrain_fresh_b -c 5 -tc 0:03+0.05 --wait 500 -n 500
@@ -199,9 +199,9 @@ engine/
   src/          Source code (unity-built via Leaf.cc)
   docs/         Documentation (NNUE.md, TDLEAF.md, TODO.md, TRAINING.md, SCRIPT_USE.md, change_log.txt)
   scripts/      Python automation scripts
+  run/          Compiled binaries + runtime config (search.par, opening book)
+  learn/        Training artifacts: .nnue, .tdleaf.bin, .games, pgn/
 gui/            LeafGUI Flutter chess GUI (see gui/CLAUDE.md)
-run/            Compiled binaries + runtime config (search.par, opening book)
-learn/          Training artifacts: .nnue, .tdleaf.bin, .games, pgn/
 logos/          Shared logo assets
 tools/          Third-party tools (cutechess-1.4.0/, BayesElo/)
 TB/, TB_34/     Tablebase data (not in git)

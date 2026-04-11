@@ -3,7 +3,7 @@
 # Build a distributable LeafGUI.app with Leaf engine bundled.
 #
 # Usage: ./scripts/build_release.sh [engine_version]
-#   engine_version: name of the binary in run/ (default: Leaf_vcurrent)
+#   engine_version: name of the binary in engine/run/ (default: Leaf_vcurrent)
 #
 # The resulting .app is placed in gui/build/macos/Build/Products/Release/
 #
@@ -12,7 +12,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ENGINE_BIN="${1:-Leaf_vcurrent}"
-ENGINE_PATH="$REPO_ROOT/run/$ENGINE_BIN"
+ENGINE_PATH="$REPO_ROOT/engine/run/$ENGINE_BIN"
 
 if [ ! -f "$ENGINE_PATH" ]; then
     echo "Error: Engine binary not found at $ENGINE_PATH"
@@ -45,19 +45,19 @@ cp "$ENGINE_PATH" "$ENGINES_DIR/Leaf"
 chmod +x "$ENGINES_DIR/Leaf"
 
 for DATA_FILE in main_bk.dat search.par; do
-    if [ -f "$REPO_ROOT/run/$DATA_FILE" ]; then
-        cp "$REPO_ROOT/run/$DATA_FILE" "$ENGINES_DIR/"
+    if [ -f "$REPO_ROOT/engine/run/$DATA_FILE" ]; then
+        cp "$REPO_ROOT/engine/run/$DATA_FILE" "$ENGINES_DIR/"
         echo "  Copied $DATA_FILE"
     else
-        echo "  Warning: $DATA_FILE not found in run/"
+        echo "  Warning: $DATA_FILE not found in engine/run/"
     fi
 done
 
-if [ -n "$NNUE_FILE" ] && [ -f "$REPO_ROOT/run/$NNUE_FILE" ]; then
-    cp "$REPO_ROOT/run/$NNUE_FILE" "$ENGINES_DIR/"
+if [ -n "$NNUE_FILE" ] && [ -f "$REPO_ROOT/engine/run/$NNUE_FILE" ]; then
+    cp "$REPO_ROOT/engine/run/$NNUE_FILE" "$ENGINES_DIR/"
     echo "  Copied $NNUE_FILE"
 elif [ -n "$NNUE_FILE" ]; then
-    echo "  Warning: $NNUE_FILE not found in run/"
+    echo "  Warning: $NNUE_FILE not found in engine/run/"
 fi
 
 echo ""

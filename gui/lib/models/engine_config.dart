@@ -30,7 +30,7 @@ class EngineConfig {
     }
 
     // Development fallback: use local Leaf binary directly.
-    const devPath = '/Users/danielhoman/Leaf/run/Leaf_vcurrent';
+    const devPath = '/Users/danielhoman/Leaf/engine/run/Leaf_vcurrent';
     if (File(devPath).existsSync()) return devPath;
 
     // Last resort: expected bundled path (will show error on start).

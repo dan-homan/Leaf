@@ -58,7 +58,7 @@ my $arch_flags = ($native || $os eq "Darwin")
 my $x86_flags = $is_arm ? "" : "-mpopcnt";
 
 print "Compiling $filename...\n";
-$compile = "g++ -o $filename ../engine/src/Leaf.cc -O3 $arch_flags $x86_flags -funroll-loops -ffast-math -flto -D VERS=$verstring $extra_arg -pthread -Wno-unused-result";
+$compile = "g++ -o $filename ../src/Leaf.cc -O3 $arch_flags $x86_flags -funroll-loops -ffast-math -flto -D VERS=$verstring $extra_arg -pthread -Wno-unused-result";
 print "$compile\n";
 print "Tablebase support not included, use TABLEBASES=1 to include\n";
 $temp = `$compile`;

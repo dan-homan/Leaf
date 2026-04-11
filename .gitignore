@@ -4,7 +4,7 @@
 # tb_src/ is local only (tablebases source, not tracked)
 tb_src/
 
-# Except engine/, gui/, logos/, run/*.py, run/*.txt, learn/, and this file
+# Except engine/, gui/, logos/, scripts/, and root files
 !engine/
 !engine/**
 !gui/
@@ -17,16 +17,19 @@ scripts/*
 !.gitignore
 !README.md
 !CLAUDE.md
-!run/
-run/*
-!run/*.py
-!run/*.txt
-!learn/
-learn/*
-!learn/*.py
-!learn/*.pl
-!learn/*.txt
-!learn/training_openings.epd
+
+# Within engine/run/, only track scripts and config (not binaries or data files)
+engine/run/*
+!engine/run/*.py
+!engine/run/*.pl
+!engine/run/*.txt
+
+# Within engine/learn/, only track scripts and config
+engine/learn/*
+!engine/learn/*.py
+!engine/learn/*.pl
+!engine/learn/*.txt
+!engine/learn/training_openings.epd
 
 # Within engine/src/, ignore OS/editor artifacts and binary/backup files
 engine/src/.DS_Store
