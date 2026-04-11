@@ -458,11 +458,7 @@ def main():
             "-engine", *eng1_spec,
             "-engine", *eng2_spec,
             "-each",   *each_tc, *(["ponder"] if args.ponder else []),
-            # -variant fischerandom is only needed for xboard protocol; for UCI,
-            # the FRC positions in the EPD/FEN are sufficient and -variant causes
-            # cutechess to reject engines that don't advertise UCI_Chess960.
-            *([ "-variant", "fischerandom"] if args.fischer_random
-              and (proto1 == "xboard" or proto2 == "xboard") else []),
+            *([ "-variant", "fischerandom"] if args.fischer_random else []),
             "-concurrency", str(args.concurrency),
             "-rounds", rounds_arg,
             "-recover",

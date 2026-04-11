@@ -25,6 +25,7 @@ static int uci_go_movestogo = 0;
 static int uci_go_movetime  = -1;
 static int uci_go_depth     = 0;
 static int uci_go_infinite  = 0;
+static int uci_chess960     = 0;   // UCI_Chess960 option
 
 //----------------------------------------------------------------------
 // I/O reader thread
@@ -69,11 +70,28 @@ static std::string uci_dequeue_blocking()
 //----------------------------------------------------------------------
 
 // Convert a Leaf move to UCI string (e.g. "e2e4", "e7e8q")
-static void uci_move_str(move m, char out[6])
+static void uci_move_str(move m, char out[6], const position *pos = nullptr)
 {
     if (!m.t) { strcpy(out, "0000"); return; }
     int from = m.b.from;
     int to   = m.b.to;
+
+    // UCI_Chess960: castling is encoded as king-captures-own-rook
+    if (uci_chess960 && (m.b.type & CASTLE) && pos) {
+        // to is the king's destination (g1/c1/g8/c8 internally);
+        // output the rook's starting square instead.
+        int side = (from < 8) ? WHITE : BLACK;
+        int rook_sq;
+        if (to == 6 || to == 62)     // king-side
+            rook_sq = pos->Krook[side];
+        else                         // queen-side
+            rook_sq = pos->Qrook[side];
+        out[0] = 'a' + (from    & 7);  out[1] = '1' + (from    >> 3);
+        out[2] = 'a' + (rook_sq & 7);  out[3] = '1' + (rook_sq >> 3);
+        out[4] = '\0';
+        return;
+    }
+
     out[0] = 'a' + (from & 7);  out[1] = '1' + (from >> 3);
     out[2] = 'a' + (to   & 7);  out[3] = '1' + (to   >> 3);
     out[4] = '\0';
@@ -108,15 +126,42 @@ static move uci_parse_move(const char *s, position &p, ts_thread_data *tdata_ptr
         }
     }
 
+    // UCI_Chess960: castling is king-captures-own-rook.
+    // Detect king moving to own rook square and try as castling first.
+    int castle_to = -1;
+    if (uci_chess960) {
+        int piece = p.sq[from] & 7;  // strip color bits
+        if (piece == KING) {
+            int side = (fr == 0) ? WHITE : BLACK;
+            if (to == p.Krook[side]) {
+                castle_to = (side == WHITE) ? 6 : 62;   // g1 or g8
+            } else if (to == p.Qrook[side]) {
+                castle_to = (side == WHITE) ? 2 : 58;   // c1 or c8
+            }
+        }
+    }
+
     move_list ml;
     p.allmoves(&ml, tdata_ptr);
+
+    // If this could be castling, try that first.
+    if (castle_to >= 0) {
+        for (int i = 0; i < ml.count; i++) {
+            move m = ml.mv[i].m;
+            if (m.b.from != from || m.b.to != castle_to) continue;
+            if (!(m.b.type & CASTLE)) continue;
+            position tmp = p;
+            if (tmp.exec_move(m, 0)) return m;
+        }
+    }
+
+    // Standard move matching (also handles non-castling king moves to rook square).
     for (int i = 0; i < ml.count; i++) {
         move m = ml.mv[i].m;
         if (m.b.from != from || m.b.to != to) continue;
         if (promo && !(m.b.type & PROMOTE)) continue;
         if (promo && m.b.promote != promo) continue;
         if (!promo && (m.b.type & PROMOTE)) continue;
-        // Verify legality
         position tmp = p;
         if (tmp.exec_move(m, 0)) return m;
     }
@@ -200,6 +245,7 @@ static void uci_send_options()
     printf("option name Threads type spin default 1 min 1 max %d\n", MAX_THREADS);
     printf("option name Ponder type check default false\n");
     printf("option name UCI_AnalyseMode type check default false\n");
+    printf("option name UCI_Chess960 type check default false\n");
     printf("option name Skill type spin default %d min 1 max 100\n", game.knowledge_scale);
     fflush(stdout);
 }
@@ -234,6 +280,8 @@ static void uci_setoption(const std::string &line)
         game.ts.initialize_extra_threads();
     } else if (name_str == "Ponder") {
         ponder_flag = (val_str == "true") ? 1 : 0;
+    } else if (name_str == "UCI_Chess960") {
+        uci_chess960 = (val_str == "true") ? 1 : 0;
     } else if (name_str == "Skill") {
         int v = atoi(val_str.c_str());
         if (v < 1) v = 1;
@@ -432,7 +480,7 @@ static void uci_dispatch_go(const std::string &line)
     }
 
     char best_str[6] = "0000";
-    uci_move_str(game.best, best_str);
+    uci_move_str(game.best, best_str, &game.pos);
 
     // Ponder move is PV[1] if ponder option is on
     move ponder_mv; ponder_mv.t = 0;
@@ -445,7 +493,7 @@ static void uci_dispatch_go(const std::string &line)
         position tmp = game.pos;
         if (tmp.exec_move(game.best, 0)) {
             char ponder_str[6] = "0000";
-            uci_move_str(ponder_mv, ponder_str);
+            uci_move_str(ponder_mv, ponder_str, &tmp);
             printf("bestmove %s ponder %s\n", best_str, ponder_str);
         } else {
             printf("bestmove %s\n", best_str);
@@ -488,7 +536,7 @@ void uci_send_info(int score, int depth, int elapsed_cs, unsigned long long node
         move m = ts->tdata[0].pc[0][i];
         if (!m.t) break;
         char ms[6];
-        uci_move_str(m, ms);
+        uci_move_str(m, ms, &p);
         printf(" %s", ms);
         if (!p.exec_move(m, 0)) break;
     }
