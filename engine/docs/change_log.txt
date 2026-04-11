@@ -1,6 +1,12 @@
 Changes since 2017_12_24
 
-2026_04_11 -- scripts: match.py — add interactive mode (run with no args to discover engines
+2026_04_11 -- uci: add UCI_Chess960 support.  When enabled via setoption, castling moves use
+               king-captures-own-rook notation (e.g. e1h1 instead of e1g1) in bestmove, ponder,
+               and PV output.  Incoming castling moves are detected by king targeting its own rook
+               square and mapped to the internal king-destination representation.  Handles all
+               Chess960 edge cases including adjacent king-rook and king-on-destination positions.
+               Tested: 150 FRC games via cutechess-cli with zero errors.
+             scripts: match.py — add interactive mode (run with no args to discover engines
                and configure match interactively), UCI protocol default (--proto uci, with
                --proto1/--proto2 per-engine overrides), engine discovery from engine/run/ and
                tools/engines/, per-engine working directory from binary location.
