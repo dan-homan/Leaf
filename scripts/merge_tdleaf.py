@@ -19,7 +19,7 @@ and <base>.nnue when --baseline is given.  The .nnue is constructed by
 applying merged float weights (divided by TDLEAF_SCALE=128) on top of
 the baseline network, requantizing to int8/int16/int32.
 
-The output .tdleaf.bin is a valid v6 file that can be loaded by Leaf.
+The output .tdleaf.bin is a valid v8 file that can be loaded by Leaf.
 """
 
 import argparse
@@ -30,7 +30,7 @@ from pathlib import Path
 
 # Constants matching nnue.cpp / nnue.h
 TDLEAF_MAGIC   = 0x544D4C46  # "TMLF"
-TDLEAF_VERSION = 6
+TDLEAF_VERSION = 8
 TDLEAF_SCALE   = 128.0
 
 LAYER_STACKS = 8
@@ -76,7 +76,7 @@ def write_u32_array(f, arr):
 
 
 class FCBlock:
-    """One layer stack's FC weights, counts, and Adam v (second moment)."""
+    """One layer stack's FC weights, counts, Adam v (second moment), and Adam m (first moment)."""
     def __init__(self):
         self.l0_bias_w   = np.zeros(L0_SIZE, dtype=np.float32)
         self.l0_bias_c   = np.zeros(L0_SIZE, dtype=np.uint32)
@@ -97,6 +97,13 @@ class FCBlock:
         self.v_l1_weight = np.zeros(L1_SIZE * L1_PADDED, dtype=np.float32)
         self.v_l2_bias   = np.zeros(1, dtype=np.float32)
         self.v_l2_weight = np.zeros(L2_PADDED, dtype=np.float32)
+        # Adam m (first moment) — v7+
+        self.m_l0_bias   = np.zeros(L0_SIZE, dtype=np.float32)
+        self.m_l0_weight = np.zeros(L0_SIZE * L0_INPUT, dtype=np.float32)
+        self.m_l1_bias   = np.zeros(L1_SIZE, dtype=np.float32)
+        self.m_l1_weight = np.zeros(L1_SIZE * L1_PADDED, dtype=np.float32)
+        self.m_l2_bias   = np.zeros(1, dtype=np.float32)
+        self.m_l2_weight = np.zeros(L2_PADDED, dtype=np.float32)
 
     def read(self, f):
         self.l0_bias_w   = read_f32_array(f, L0_SIZE)
@@ -144,9 +151,27 @@ class FCBlock:
         write_f32_array(f, self.v_l2_bias)
         write_f32_array(f, self.v_l2_weight)
 
+    def read_m(self, f):
+        """Read Adam m (first moment) arrays — v7+."""
+        self.m_l0_bias   = read_f32_array(f, L0_SIZE)
+        self.m_l0_weight = read_f32_array(f, L0_SIZE * L0_INPUT)
+        self.m_l1_bias   = read_f32_array(f, L1_SIZE)
+        self.m_l1_weight = read_f32_array(f, L1_SIZE * L1_PADDED)
+        self.m_l2_bias   = read_f32_array(f, 1)
+        self.m_l2_weight = read_f32_array(f, L2_PADDED)
+
+    def write_m(self, f):
+        """Write Adam m arrays — v7+."""
+        write_f32_array(f, self.m_l0_bias)
+        write_f32_array(f, self.m_l0_weight)
+        write_f32_array(f, self.m_l1_bias)
+        write_f32_array(f, self.m_l1_weight)
+        write_f32_array(f, self.m_l2_bias)
+        write_f32_array(f, self.m_l2_weight)
+
 
 class TDLeafFile:
-    """Parsed .tdleaf.bin v6 file."""
+    """Parsed .tdleaf.bin v8 file."""
     def __init__(self):
         self.version = TDLEAF_VERSION
         self.fc = [FCBlock() for _ in range(LAYER_STACKS)]
@@ -166,6 +191,13 @@ class TDLeafFile:
         self.v_piece_val = np.zeros(6 * PSQT_BKTS, dtype=np.float32)
         # Sparse PSQT v: dict keyed by feature index → v_psqt[PSQT_BKTS]
         self.psqt_v_rows = {}
+        # Adam m section (v7+)
+        self.m_ft_bias   = np.zeros(HALF_DIMS, dtype=np.float32)
+        self.m_piece_val = np.zeros(6 * PSQT_BKTS, dtype=np.float32)
+        # Sparse PSQT m: dict keyed by feature index → m_psqt[PSQT_BKTS]
+        self.psqt_m_rows = {}
+        # Sparse FT v section (v8+): dict keyed by feature index → v_ft[HALF_DIMS]
+        self.ft_v_rows = {}
 
     @classmethod
     def load(cls, path):
@@ -175,7 +207,7 @@ class TDLeafFile:
             version = read_u32(f)
             if magic != TDLEAF_MAGIC:
                 raise ValueError(f"{path}: bad magic 0x{magic:08X} (expected 0x{TDLEAF_MAGIC:08X})")
-            if version not in (2, 3, 4, 5, 6):
+            if version not in (2, 3, 4, 5, 6, 7, 8):
                 raise ValueError(f"{path}: unsupported version {version}")
             obj.version = version
 
@@ -214,6 +246,26 @@ class TDLeafFile:
                     if fi >= FT_INPUTS:
                         break
                     obj.psqt_v_rows[fi] = read_f32_array(f, PSQT_BKTS)
+
+            if version >= 7:
+                for s in range(LAYER_STACKS):
+                    obj.fc[s].read_m(f)
+                obj.m_ft_bias   = read_f32_array(f, HALF_DIMS)
+                obj.m_piece_val = read_f32_array(f, 6 * PSQT_BKTS)
+                n_pm_rows = read_u32(f)
+                for _ in range(n_pm_rows):
+                    fi = read_u32(f)
+                    if fi >= FT_INPUTS:
+                        break
+                    obj.psqt_m_rows[fi] = read_f32_array(f, PSQT_BKTS)
+
+            if version >= 8:
+                n_ftv_rows = read_u32(f)
+                for _ in range(n_ftv_rows):
+                    fi = read_u32(f)
+                    if fi >= FT_INPUTS:
+                        break
+                    obj.ft_v_rows[fi] = read_f32_array(f, HALF_DIMS)
 
         return obj
 
@@ -255,6 +307,25 @@ class TDLeafFile:
             for fi in sorted_pv_fi:
                 f.write(struct.pack('<I', fi))
                 write_f32_array(f, self.psqt_v_rows[fi])
+
+            # Adam m section (v7)
+            for s in range(LAYER_STACKS):
+                self.fc[s].write_m(f)
+            write_f32_array(f, self.m_ft_bias)
+            write_f32_array(f, self.m_piece_val)
+            # Sparse PSQT m
+            sorted_pm_fi = sorted(self.psqt_m_rows.keys())
+            f.write(struct.pack('<I', len(sorted_pm_fi)))
+            for fi in sorted_pm_fi:
+                f.write(struct.pack('<I', fi))
+                write_f32_array(f, self.psqt_m_rows[fi])
+
+            # Sparse FT v section (v8)
+            sorted_ftv_fi = sorted(self.ft_v_rows.keys())
+            f.write(struct.pack('<I', len(sorted_ftv_fi)))
+            for fi in sorted_ftv_fi:
+                f.write(struct.pack('<I', fi))
+                write_f32_array(f, self.ft_v_rows[fi])
 
 
 # ---------------------------------------------------------------------------
@@ -553,6 +624,34 @@ def merge_files(files, output_base, baseline_path=None, report=False):
         vals = [td.psqt_v_rows.get(fi, zero_pv) for td in loaded]
         out.psqt_v_rows[fi] = np.maximum.reduce(vals)
 
+    # --- Adam m (mean-merge) ---
+    for s in range(LAYER_STACKS):
+        out.fc[s].m_l0_bias   = np.mean([td.fc[s].m_l0_bias   for td in loaded], axis=0)
+        out.fc[s].m_l0_weight = np.mean([td.fc[s].m_l0_weight for td in loaded], axis=0)
+        out.fc[s].m_l1_bias   = np.mean([td.fc[s].m_l1_bias   for td in loaded], axis=0)
+        out.fc[s].m_l1_weight = np.mean([td.fc[s].m_l1_weight for td in loaded], axis=0)
+        out.fc[s].m_l2_bias   = np.mean([td.fc[s].m_l2_bias   for td in loaded], axis=0)
+        out.fc[s].m_l2_weight = np.mean([td.fc[s].m_l2_weight for td in loaded], axis=0)
+    out.m_ft_bias   = np.mean([td.m_ft_bias   for td in loaded], axis=0)
+    out.m_piece_val = np.mean([td.m_piece_val for td in loaded], axis=0)
+    # Sparse PSQT m: mean-merge per dirty row
+    all_pm_fi = set()
+    for td in loaded:
+        all_pm_fi.update(td.psqt_m_rows.keys())
+    zero_pm = np.zeros(PSQT_BKTS, dtype=np.float32)
+    for fi in sorted(all_pm_fi):
+        present = [td.psqt_m_rows[fi] for td in loaded if fi in td.psqt_m_rows]
+        out.psqt_m_rows[fi] = np.mean(present, axis=0).astype(np.float32)
+
+    # --- Sparse FT v (max-merge) — v8 ---
+    all_ftv_fi = set()
+    for td in loaded:
+        all_ftv_fi.update(td.ft_v_rows.keys())
+    zero_ftv = np.zeros(HALF_DIMS, dtype=np.float32)
+    for fi in sorted(all_ftv_fi):
+        vals = [td.ft_v_rows.get(fi, zero_ftv) for td in loaded]
+        out.ft_v_rows[fi] = np.maximum.reduce(vals)
+
     # --- Write .tdleaf.bin ---
     tdleaf_path = output_base + '.tdleaf.bin'
     out.save(tdleaf_path)
@@ -658,9 +757,10 @@ def write_merged_nnue(merged_td, baseline_path, nnue_out_path):
 
 
 def print_report(loaded, merged):
-    """Print summary statistics about the merge."""
+    """Print summary statistics about the merge (output is v8)."""
     print("\n--- Merge Report ---")
     print(f"Input files: {len(loaded)}")
+    print(f"Output format: v8 (includes Adam m first-moment + sparse FT v second-moment arrays)")
 
     # FC total counts per file
     for i, td in enumerate(loaded):

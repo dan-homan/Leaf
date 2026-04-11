@@ -31,7 +31,7 @@ For a game of T half-moves:
 
 - `d_t` = sigmoid of the **NNUE static evaluation at the PV leaf position** at ply t,
   from White's perspective:
-  `d_t = 1 / (1 + exp(-score_white_t / K))`, K ≈ 400 cp.
+  `d_t = 1 / (1 + exp(-score_white_t / K))`, K = 290 cp.
 - `z` = game result from White's perspective: 1.0 = White wins, 0.5 = draw, 0.0 = Black wins.
 
 **Temporal difference errors (backward view):**
@@ -53,7 +53,7 @@ change between consecutive moves exceeds `TDLEAF_SCORE_CLIP_CP` centipawns — s
 
 where `∇_w d_t = d_t * (1 - d_t) / K * ∇_w score_t`.
 
-Defaults: `λ_decisive = 0.8` (wins/losses), `λ_draw = 0.5` (draws), `K = 350`.
+Defaults: `λ_decisive = 0.8` (wins/losses), `λ_draw = 0.5` (draws), `K = 290` (empirically fitted from 968k self-play games).
 Gradient updates use Adam with per-weight LR decay; see [Adam Optimizer](#adam-optimizer-with-per-weight-lr-decay) below.
 
 **Key design choice:** `d_t` is computed from `nnue_evaluate()` (direct static eval of the
@@ -317,16 +317,18 @@ accumulate gradient updates with zero effect on the network.  After each weight 
 `w_f32 = clamp(w_f32, −127, 127)` keeps the float shadow aligned with the int8 inference
 space.  Not applied to FC2 (output layer, no activation clamping required).
 
-### Persistent v, Session-Local m
+### Persistent v and m
 
-The second-moment arrays (`v`) and `t_adam` are persisted to `.tdleaf.bin` (v6+) so that
+**Second-moment arrays (`v`) and `t_adam`** are persisted to `.tdleaf.bin` (v6+) so that
 Adam's gradient scale knowledge survives across sessions.  Without this, every restart
 cold-starts with `v=0`, causing the first ~20 Adam steps to use poorly-scaled learning
 rates until v accumulates a reliable variance estimate.
 
-First-moment arrays (`m`, momentum) are **not** persisted — they are session-local and
-zeroed at startup.  m recovers in ~10 steps (β₁=0.9), so the cost of resetting is
-negligible.  Persisting m would add complexity for minimal benefit.
+**First-moment arrays (`m`, momentum)** are persisted to `.tdleaf.bin` (v7+).  Persisting
+m eliminates a slow or negative Elo trend observed at the start of every training session:
+without m, the optimizer has no directional bias and early gradient noise can push weights
+the wrong way for thousands of games before a consistent signal accumulates.  With m
+restored, the optimizer continues in the learned gradient direction from the previous session.
 
 **Multi-writer merge for v:** When multiple concurrent training instances save to the
 same `.tdleaf.bin`, v arrays are merged per-element using `max(v_file, v_local)`.  This
@@ -334,8 +336,22 @@ is conservative: a too-large v only slightly slows learning (larger denominator 
 Adam's update), while a too-small v causes instability.  The max-merge is safe because
 v is always non-negative and represents gradient magnitude².
 
-**FT weight v (~92 MB) is NOT persisted** — too large, and FT updates are sparse enough
-(~3–50 per weight over 190k games) that v barely converges before the process restarts.
+**Multi-writer merge for m:** m arrays are merged per-element using the element-wise
+average `(m_file + m_local) / 2`.  Workers seeing the same gradient direction reinforce
+each other; conflicting directions reduce toward zero — appropriate, since uncertainty
+about gradient direction should produce a smaller step rather than a random-direction step.
+
+**FT weight v and m are NOT persisted** — v is ~92 MB (too large), and FT weight updates
+are sparse enough (~3–50 per weight over 190k games) that v barely converges before process
+restart.  FT weights use RMSProp (no m array), so FT weight m does not exist.
+
+**FT bc2 cold-start fix:** Because `v_ft_w` is zeroed at every startup, using the global
+`t_adam` (persisted and large) for FT's bc2 would give `bc2≈1` while `v=0`, producing
+`sv = sqrt(0/1+ε) = ε` and step sizes ~31× too large on the first batch — destroying
+previously learned FT weights.  The fix: FT uses `min(t_adam, t_ft_session)` for bc2,
+where `t_ft_session` is a session-local counter starting at 0 on every process launch.
+This gives standard Adam bias correction for the fresh v regardless of how large t_adam is,
+keeping first-step magnitude at the intended ±LR0.
 
 The per-weight `cnt` arrays (which are also persisted) track update history for
 per-weight bias correction and monitoring.
@@ -413,18 +429,18 @@ Set `TDLEAF_ADAM_WARMUP = 0` to disable warmup.
 
 ---
 
-## Weight Persistence — `.tdleaf.bin` (version 6)
+## Weight Persistence — `.tdleaf.bin` (version 7)
 
 Saved at `{exec_path}<network>.tdleaf.bin`.  Format:
 
 ```
-[version(6) + 8 FC stacks: per-layer float32×128 weights/biases + uint32 counts]
+[version(7) + 8 FC stacks: per-layer float32×128 weights/biases + uint32 counts]
 [n_ft_rows(4 bytes)]
 [per dirty row: fi(4) + ft_w[1024]×128 as float32[1024] + ft_cnt[1024] as uint32[1024]
                       + psqt_w[8]×128 as float32[8]    + psqt_cnt[8]  as uint32[8]]
 [FT bias section (v4+): ft_bias[1024]×128 as float32[1024] + ft_bias_cnt[1024] as uint32[1024]]
 [Dense piece values (v5+): piece_val[6][8] as float32[48] + piece_val_cnt[6][8] as uint32[48]]
-[Adam v section (v6):
+[Adam v section (v6+):
   t_adam as uint32
   8 FC stacks × { v_l0_b, v_l0_w, v_l1_b, v_l1_w, v_l2_b, v_l2_w } as raw float32
   v_ft_bias[1024] as float32
@@ -432,19 +448,29 @@ Saved at `{exec_path}<network>.tdleaf.bin`.  Format:
   n_psqt_v_rows as uint32
   per dirty row: fi(4) + v_psqt[8] as float32[8]
 ]
+[Adam m section (v7+):
+  8 FC stacks × { m_l0_b, m_l0_w, m_l1_b, m_l1_w, m_l2_b, m_l2_w } as raw float32
+  m_ft_bias[1024] as float32
+  m_piece_val[6][8] as float32
+  n_psqt_m_rows as uint32
+  per dirty row: fi(4) + m_psqt[8] as float32[8]
+]
 ```
 
 Weight values are stored at 128× resolution (divide by 128 on load) to preserve
-sub-integer drift across sessions.  Adam v arrays are stored as raw float32 (no scaling).
+sub-integer drift across sessions.  Adam v and m arrays are stored as raw float32 (no scaling).
 Update counts enable weighted averaging of concurrent training runs.
 
 The Adam v section (~564 KB for FC + FT bias + piece_val, plus sparse PSQT) persists
-gradient scale across sessions so Adam doesn't cold-start with v=0.  FT weight v
-(~92 MB) is NOT persisted — too large and too sparse to matter.
+gradient scale across sessions so Adam doesn't cold-start with v=0.  The Adam m section
+(~563 KB for FC + FT bias + piece_val, plus sparse PSQT) persists gradient direction so
+the optimizer continues in the learned direction from the previous session — eliminating
+the slow/negative Elo trend at the start of each new training run.  FT weight v/m
+(~92 MB each) are NOT persisted — too large, and FT weights use RMSProp (no m array).
 
-Version 5 files (no Adam v) are accepted on load; v starts at zero (same as previous
-behavior) and will be included on the next save.
-Versions 2–4 are also still accepted with appropriate defaults.  A notice is printed.
+Version 6 files (no Adam m) are accepted on load; m starts at zero and will be included
+on the next save.  Versions 2–5 are also still accepted with appropriate defaults.
+A notice is printed on load for any version upgrade.
 
 ---
 
@@ -520,12 +546,24 @@ critical.
 
 ### Usage with match.py
 
+The recommended way to run training is via `scripts/training_run.py`, which handles
+binary compilation, opponent rotation, checkpointing, .tdleaf.bin snapshots, and
+startup backups automatically.  For manual control:
+
 When running parallel self-play via cutechess-cli with multiple concurrent TDLEAF
 instances, add `--wait MS` to `match.py` to insert a pause between games.  This reduces
 contention on the `.tdleaf.bin.lock` file and gives each instance time to complete its
-write cycle before the next game starts:
+write cycle before the next game starts.
+
+For symmetric self-play (both engines learning from the same `.tdleaf.bin`), use
+`--no-repeat` to play each opening once (maximising position diversity) rather than the
+default which replays each opening twice for color balance:
 
 ```sh
+# Symmetric self-play — each opening once, maximum diversity
+python3 match.py Leaf_vtrain_a Leaf_vtrain_b -n 200 -c 4 --wait 500 --no-repeat
+
+# Asymmetric (learner vs. read-only reference) — default repeat for color balance
 python3 match.py Leaf_vtrain_a Leaf_vtrain_ro -n 200 -c 4 --wait 500
 ```
 
@@ -629,7 +667,7 @@ weight snapshots but is no longer part of the default training workflow.
 ## Epoch-Based Replay
 
 After `tdleaf_update_after_game()` applies the live gradient pass, `tdleaf_replay()`
-runs `TDLEAF_REPLAY_K` (default 1) additional passes over the last `TDLEAF_REPLAY_BUF_N`
+runs `TDLEAF_REPLAY_K` (default 0, disabled) additional passes over the last `TDLEAF_REPLAY_BUF_N`
 (default 8) completed games stored in a static ring buffer.
 
 ### How it works (Flavor A)

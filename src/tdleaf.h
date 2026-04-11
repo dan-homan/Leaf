@@ -26,7 +26,9 @@
 // ---------------------------------------------------------------------------
 static const float TDLEAF_LAMBDA_DECISIVE  = 0.8f;   // eligibility trace decay for wins/losses
 static const float TDLEAF_LAMBDA_DRAW      = 0.5f;   // eligibility trace decay for draws
-static const float TDLEAF_K               = 350.0f; // sigmoid temperature (centipawns)
+static const float TDLEAF_K               = 290.0f; // sigmoid temperature (centipawns)
+                                                     // Empirically fitted from 968k self-play games
+                                                     // (MLE over 91M positions): optimum ~292 cp.
 static const int   TDLEAF_MIN_PLIES       = 8;      // skip games shorter than this
 // Approach 1 — TD error clipping.
 // When the white-POV score change between consecutive moves exceeds this
@@ -49,11 +51,11 @@ static const float TDLEAF_GRAD_CLIP_NORM = 1.0f;
 // v arrays (second moment / gradient scale) and t_adam are persisted to .tdleaf.bin
 // (v6+) so gradient scale knowledge survives across sessions.  Multi-writer merge
 // uses max(v_file, v_local) per element.  m (momentum) is session-local.
-// FT weight v (~92 MB) is NOT persisted — too large and too sparse to matter.
+// FT weight v (~92 MB) is sparsely persisted in v8+ (only non-zero rows saved).
 // LR warmup: ramps from 0 to full LR over first WARMUP Adam steps.
 // Mini-batch: gradients accumulated across BATCH_SIZE games before each Adam step.
 // ---------------------------------------------------------------------------
-static const float TDLEAF_ADAM_LR0         = 0.1f;   // step size for FC layers (float weight units)
+static const float TDLEAF_ADAM_LR0         = 0.01f;  // step size for FC layers (float weight units)
 static const float TDLEAF_ADAM_FT_LR0      = 1.0f;    // step size for FT weights (sparse; need higher LR than dense FC)
 static const float TDLEAF_ADAM_FT_BIAS_LR0 = 0.01f;  // step size for FT biases (10× slower than FC to prevent dying-ReLU)
 static const float TDLEAF_ADAM_PSQT_LR0    = 1.6f;    // step size for PSQT (int32 scale ~36k std; needs larger LR)
@@ -65,7 +67,11 @@ static const float TDLEAF_ADAM_EPS      = 1e-8f;   // numerical floor
 // Applied to FC weights and FT weights only (not biases, not PSQT).
 // Set to 0.0 to disable.
 static const float TDLEAF_WEIGHT_DECAY  = 1e-4f;   // decoupled weight decay coefficient
-static const int   TDLEAF_ADAM_WARMUP   = 50;      // linear LR warmup over first N games (0 = disabled)
+static const int   TDLEAF_ADAM_WARMUP        = 50;  // linear LR warmup over first N Adam steps (0 = disabled)
+                                                     // Keyed on t_adam (persisted) so only fires in first session.
+static const int   TDLEAF_FT_SESSION_WARMUP  = 100; // per-session FT LR ramp over first N Adam steps.
+                                                     // Applied every restart via t_ft_session (not persisted).
+                                                     // Damps FT updates during the v_ft_w accumulation phase.
 static const int   TDLEAF_BATCH_SIZE    = 4;       // accumulate gradients across N games before Adam step
 
 // ---------------------------------------------------------------------------

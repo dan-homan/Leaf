@@ -127,6 +127,14 @@ def main():
                              "with -i > 1 an iteration number is appended before the extension")
     parser.add_argument("--openings", default=None, metavar="FILE",
                         help="Openings file (.epd or .pgn); randomly ordered")
+    parser.add_argument("--noswap", action="store_true", default=False,
+                        help="Pass -noswap to cutechess-cli: don't swap colors between "
+                             "paired games.  Off by default (both engines play both sides "
+                             "from each opening position, which is correct for training).")
+    parser.add_argument("--no-repeat", action="store_true", default=False,
+                        help="Play each opening once (-rounds N, no -games 2 -repeat). "
+                             "Increases opening diversity at the cost of color-balance "
+                             "per opening.  Recommended for symmetric self-play training.")
     parser.add_argument("--fischer-random", action="store_true", default=False,
                         help="Use Chess960 / Fischer Random starting positions")
     parser.add_argument("--depth1", type=int, default=None, metavar="N",
@@ -167,12 +175,13 @@ def main():
 
     # Openings
     openings_args = []
+    polyglot_book = None   # .bin Polyglot book path (added per-engine, not via -openings)
     if args.openings:
         if not os.path.isfile(args.openings):
             print(f"Error: openings file not found: {args.openings}", file=sys.stderr)
             sys.exit(1)
         if args.openings.lower().endswith(".bin"):
-            openings_args = ["-openings", f"book={args.openings}", "order=random"]
+            polyglot_book = args.openings  # injected into each -engine spec as book=FILE
         else:
             fmt = "epd" if args.openings.lower().endswith(".epd") else "pgn"
             openings_args = ["-openings", f"file={args.openings}", f"format={fmt}", "order=random"]
@@ -209,7 +218,10 @@ def main():
         pgn_base = args.pgn_out or f"match_{name1}_vs_{name2}.pgn"
 
         # rounds/games setup
-        if args.games % 2 == 0:
+        if args.no_repeat:
+            rounds_arg = str(args.games)
+            games_arg  = []
+        elif args.games % 2 == 0:
             rounds_arg = str(args.games // 2)
             games_arg  = ["-games", "2", "-repeat"]
         else:
@@ -221,6 +233,9 @@ def main():
 
         eng1_spec = [f"cmd={exe1}",    f"name={name1}", "proto=xboard", f"dir={run_dir}"]
         eng2_spec = [f"cmd={opp_exe}", f"name={name2}", "proto=xboard", f"dir={run_dir}"]
+        if polyglot_book:
+            eng1_spec.append(f"book={polyglot_book}")
+            eng2_spec.append(f"book={polyglot_book}")
         if args.depth1 is not None:
             eng1_spec.append(f"depth={args.depth1}")
         if args.depth2 is not None:
@@ -246,7 +261,8 @@ def main():
             "-draw",   "movenumber=40", "movecount=8", "score=10",
             "-resign", "movecount=6",   "score=600",
             "-ratinginterval", "10",
-        ] + games_arg + (["-wait", str(args.wait)] if args.wait > 0 else [])
+        ] + games_arg + (["-wait", str(args.wait)] if args.wait > 0 else []) \
+          + (["-noswap"] if args.noswap else [])
 
         if gauntlet:
             print("=" * 60)

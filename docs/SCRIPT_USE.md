@@ -42,6 +42,8 @@ python3 match.py Leaf_vnew Leaf_v1 Leaf_v2 Leaf_v3 \
 | `--depth1 N` | — | Limit engine1 search to depth N |
 | `--depth2 N` | — | Limit engine2 search to depth N |
 | `--openings FILE` | — | Openings file: `.epd`, `.pgn`, or `.bin` (polyglot book) |
+| `--no-repeat` | off | Play each opening once (`-rounds N`, no `-games 2 -repeat`).  Increases position diversity; recommended for symmetric self-play. |
+| `--noswap` | off | Pass `-noswap` to cutechess-cli; engine1 always plays white.  Off by default (correct for training). |
 
 When more than one opponent is supplied the script enters **gauntlet mode** and
 prints a summary table (Opponent, Games, W, D, L, Score%, Elo diff) at the end.
@@ -67,6 +69,92 @@ cd run/
 
 Expected result: ~50% score, Elo difference within ±50 (same engine, different wire
 protocol).
+
+---
+
+## make_training_epd.py
+
+Generate a combined opening EPD file for TDLeaf training:
+- All 960 Chess960 starting positions (FRC), with optional random suffix moves
+- ~N positions sampled from a Polyglot opening book at a given ply depth,
+  with optional random suffix moves
+
+The output is shuffled and ready for use with
+`-openings file=training_openings.epd format=epd order=random -variant fischerandom -noswap`.
+`training_run.py` auto-detects and uses this file when it is present in `learn/`.
+
+**Why random suffix moves?**  normbk02.bin at ply 8 converges to only ~2500 unique
+positions due to transpositions.  Adding 1–2 random moves after each book/FRC leaf
+explodes the unique count into the hundreds of thousands, preventing game replication
+in training.  Use `--quiet-only` to restrict suffix moves to non-captures (keeps
+material balanced; recommended).
+
+| Suffix | Book unique | FRC unique (per replicate) |
+|--------|-------------|---------------------------|
+| 0 | ~2,500 | 960 |
+| 1 | ~60,000 | ~19,000 |
+| 2 | ~1,000,000+ | ~300,000+ |
+
+Two sizing modes are available (mutually exclusive):
+
+**Explicit** (`--frc-replicates` / `--book-positions`):
+```sh
+cd learn/
+
+# Default: 960 FRC + 2000 book, no suffix (2,960 total)
+python3 make_training_epd.py
+
+# 2 quiet suffix moves, 21 FRC replicates + 80k book positions
+python3 make_training_epd.py --frc-replicates 21 --book-positions 80000 \
+    --random-suffix 2 --quiet-only
+```
+
+**Fraction-based** (`--total` / `--frc-fraction`):
+```sh
+cd learn/
+
+# 100k total, ~20% FRC-derived, 2 quiet suffix moves
+# → frc_replicates=21, 20160 FRC-derived + 79840 book = 100000
+python3 make_training_epd.py --total 100000 --frc-fraction 0.20 \
+    --random-suffix 2 --quiet-only
+```
+
+Fraction-based sizing: `frc_replicates = max(1, round(total × frc_fraction / 960))`;
+`book_positions = total − 960 × frc_replicates`.  Actual totals may differ by up to
+960 from `--total` because replicates must be an integer.
+
+### Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--book FILE` | `normbk02.bin` in script dir | Polyglot `.bin` book to sample from |
+| `--book-positions N` | 2000 | Number of book positions to sample (explicit mode) |
+| `--frc-replicates K` | 1 | Samples per FRC position (explicit mode).  Without `--random-suffix`: K identical copies.  With `--random-suffix`: K unique suffix-varied samples per FRC position. |
+| `--total N` | — | Target total output size (fraction mode; use with `--frc-fraction`) |
+| `--frc-fraction F` | — | Desired FRC fraction 0.0–1.0 (fraction mode; use with `--total`) |
+| `--random-suffix K` | 0 | Random moves to play after each book/FRC position; greatly increases unique position count |
+| `--quiet-only` | off | Restrict random suffix moves to non-captures **and** filter positions by eval balance (see below) |
+| `--eval-binary FILE` | `Leaf_vclassic_eval` in script dir | Leaf binary for eval filtering; only used with `--quiet-only` |
+| `--eval-limit CP` | 50 | Discard positions where `\|score\| > CP` centipawns (default: 50 = 0.5 pawns); only used with `--quiet-only` |
+| `--eval-depth N` | 10 | Search depth for eval filtering; only used with `--quiet-only` |
+| `--eval-workers N` | cpu_count/2 | Parallel eval engine processes; only used with `--quiet-only` |
+| `--ply N` | 8 | Ply depth for book random walks |
+| `--output FILE` | `training_openings.epd` in script dir | Output EPD file |
+| `--seed N` | 42 | Random seed for reproducibility |
+
+Book positions are selected by weighted random walks (move probability ∝ Polyglot
+`weight` field), then deduplicated.  With `--random-suffix`, each walk's leaf gets
+additional random (or quiet) moves before deduplication, multiplying the unique count.
+FRC replication without suffix preserves intentional duplicates (for position weighting);
+with suffix, duplicates across replicates are silently dropped (rare).
+
+**`--quiet-only` eval filter:** when a `Leaf_vclassic_eval` binary is present, every
+generated position is scored at `--eval-depth` via xboard protocol and positions with
+`|score| > --eval-limit` cp are discarded.  Chess960 castling rights are stripped from
+the EPD before sending to the engine.  `--eval-workers` parallel engine processes run
+concurrently (~75 pos/sec at depth 10 with 4 workers).  Compile the eval binary with
+`perl src/comp.pl classic_eval OVERWRITE` (no NNUE, no TDLEAF).  If the binary is
+absent, a warning is printed and the filter is skipped.
 
 ---
 
@@ -108,13 +196,42 @@ python3 training_run.py
    - Checkpoint opponent (`_ro`, NNUE-only, no TDLEAF) — built with a separate
      `NNUE_NET` so its `.nnue` can be swapped at rotation boundaries
 5. **Continuity** — continue from existing `.tdleaf.bin` or start fresh
-6. **Match parameters** — TC, concurrency, wait, Fischer Random (or opening book),
-   per-engine depth limits; per-engine TCs (`--tc1` / `--tc2`) when the opponent
-   runs at a different speed.  When Fischer Random is off and `normbk02.bin` exists
-   in `learn/`, it is automatically used as the opening book.
+6. **Match parameters** — TC, concurrency, wait, opening selection, per-engine
+   depth limits; per-engine TCs (`--tc1` / `--tc2`) when the opponent runs at a
+   different speed.  Opening selection priority:
+   - If `learn/training_openings.epd` exists: use it with Fischer Random variant
+     (no question asked — EPD file encodes the intent).
+   - Else if Fischer Random is chosen: use random Chess960 positions.
+   - Else if `normbk02.bin` is in `learn/`: use it as the Polyglot opening book.
+   See `make_training_epd.py` to generate `training_openings.epd`.
 
-On completion, trained weights are exported to `<net_base>-<total_games>g.nnue`.
-Game counts accumulate in a `<net_base>.games` sidecar file across runs.
+On completion, trained weights are exported to `<net_base>-<total_games>g.nnue` and
+a copy of the current `.tdleaf.bin` is saved as `<net_base>.tdleaf.bin-<total_games>g`
+for archival and rollback.  If terminated early with Ctrl-C, the export uses a
+`-partial` suffix to avoid overwriting an existing game-count checkpoint.
+The `<net_base>.games` sidecar is always written to `current_games` at the start of
+Step 6 (before any filename is determined), so sidecar counts and file names stay
+in sync on all exit paths.  Game counts accumulate across runs.
+
+**Startup backup:** when continuing from an existing `.tdleaf.bin`, a copy is saved
+as `.tdleaf.bin.bak` before any training begins.  This allows recovery of the
+pre-run weights if a training session produces bad results or is interrupted at an
+inopportune moment.
+
+**Adam momentum persistence (.tdleaf.bin v7):** the Adam first-moment (m) arrays are
+now persisted across sessions alongside the second-moment (v) arrays introduced in v6.
+Previously m cold-started at zero each run while v was restored, causing the optimizer
+to rediscover gradient directions for the first few thousand games — visible as a slow
+or negative Elo trend at the start of every run.  With v7, the optimizer resumes with
+full directional momentum.  Concurrent-writer merge uses element-wise average
+`(m_file + m_local) / 2`.  Storage overhead: ~1.5 MB.  Existing v6 files upgrade
+automatically on the first save.
+
+**Self-play opening diversity:** when the current opponent segment is symmetric
+self-play (both engines learn), `training_run.py` automatically passes `--no-repeat`
+to `match.py` so each opening is played once rather than twice, maximising the variety
+of positions seen per N games.  Non-self-play segments (prev-checkpoint, external
+engine) retain `-games 2 -repeat` for fairer W/L/D statistics.
 
 ### Train-validate loop
 
@@ -403,3 +520,46 @@ which are max-merged across inputs.
 *(Not in active use.)*  Earlier self-play driver for TDLeaf training, predating
 `training_run.py`.  Kept in `scripts/` for reference; no symlinks are provided
 in `run/` or `learn/`.
+
+---
+
+## pgn_winrate.py
+
+Analyse win/draw/loss rates per N-game window for one player in a PGN file.
+Auto-detects the non-baseline player (anything that is not `*material_eval*`).
+Useful for spotting training collapses, peak performance windows, and whether
+the engine recovers after a crash.
+
+### Usage
+
+```sh
+# Auto-detect player, 100-game windows (default)
+python3 scripts/pgn_winrate.py learn/pgn/run1/match_run1_0g.pgn
+
+# Explicit player and window size
+python3 scripts/pgn_winrate.py learn/pgn/run1/match_run1_0g.pgn \
+    --player Leaf_vtrain_nn-fresh_a --window 200
+
+# CSV output (for plotting / further processing)
+python3 scripts/pgn_winrate.py learn/pgn/run1/match_run1_0g.pgn --csv
+```
+
+### Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `pgn_file` (positional) | *(required)* | PGN file to analyse |
+| `--player <name>` | auto-detect | Player name to track |
+| `--opponent <name>` | *(none)* | Opponent name; used to auto-detect the other player |
+| `--window <N>` | 100 | Number of games per analysis window |
+| `--csv` | off | Emit CSV instead of a formatted table |
+
+### Output
+
+Formatted table with columns W / D / L / Win% / Draw% / Loss% / Score% per
+window, followed by totals and a summary that reports:
+
+- Starting win rate (first window)
+- Peak win rate and which window it occurred in
+- First window where win rate drops below 5%
+- Whether/when the win rate recovers above 5% after a crash

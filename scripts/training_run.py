@@ -9,8 +9,9 @@
 #   1. Asks for a starting .nnue file or offers to initialise a fresh random one.
 #   2. Builds an opponent roster — one or more opponent types that rotate every
 #      N games.  Available types: self-play (symmetric), previous checkpoint
-#      (read-only), or an external engine.  Builds the necessary binaries and
-#      moves them to learn/ so all training files live together.
+#      (read-only .nnue), read-only mirror (frozen .tdleaf.bin during segment),
+#      or an external engine.  Builds the necessary binaries and moves them to
+#      learn/ so all training files live together.
 #   3. Checks for an existing .tdleaf.bin (continue or start fresh).
 #   4. Asks for match parameters, then runs match.py for N games.
 #      When the roster has multiple opponents (or prev-checkpoint), games are
@@ -82,6 +83,35 @@ def read_game_count(sidecar_path):
 def write_game_count(sidecar_path, count):
     with open(sidecar_path, "w") as f:
         f.write(f"{count}\n")
+
+
+def format_game_count(n):
+    """Convert a game count integer to compact scientific-notation suffix.
+
+    Examples: 100000 → '1e5', 150000 → '1.5e5', 40000 → '4e4', 500 → '500'.
+    Counts that are not a clean multiple of a power of 10 (e.g. 123456) are
+    left as plain integers.  The threshold for switching to exponent form is
+    counts >= 10000 (4 trailing zeros or more expresses as Xe4+).
+    """
+    if n <= 0:
+        return str(n)
+    # Strip trailing zeros to find mantissa and exponent
+    x, exp = n, 0
+    while x % 10 == 0:
+        x //= 10
+        exp += 1
+    if exp < 4:
+        # Not enough trailing zeros — keep as plain integer
+        return str(n)
+    # Normalise to mantissa in [1, 10): e.g. x=15, exp=4 → 1.5e5
+    digits = len(str(x))
+    total_exp = exp + digits - 1
+    mantissa = x / 10 ** (digits - 1)
+    if mantissa == int(mantissa):
+        return f"{int(mantissa)}e{total_exp}"
+    # Format mantissa without trailing zeros (e.g. 1.50 → 1.5)
+    m_str = f"{mantissa:.10g}"
+    return f"{m_str}e{total_exp}"
 
 
 def wait_until_stable(path, stable_secs=3, timeout=120):
@@ -172,6 +202,128 @@ def compute_los(w, d, l):
         return 1.0 if score > 0.5 else 0.0
     z = (score - 0.5) / math.sqrt(var / n)
     return 0.5 * math.erfc(-z / math.sqrt(2.0))
+
+
+def parse_pgn_results(pgn_path, engine1_name):
+    """Parse a PGN file and return a list of per-game scores from engine1's POV.
+
+    Returns a list of floats: 1.0 (engine1 win), 0.5 (draw), 0.0 (engine1 loss).
+    Games with unknown results ('*') are skipped.
+    """
+    results = []
+    if not os.path.isfile(pgn_path):
+        return results
+
+    # We need to figure out which color engine1 played in each game and
+    # combine that with the game result.
+    white_tag = re.compile(r'^\[White\s+"(.+?)"\]')
+    result_tag = re.compile(r'^\[Result\s+"(.+?)"\]')
+
+    current_white = None
+    with open(pgn_path) as f:
+        for line in f:
+            line = line.strip()
+            m = white_tag.match(line)
+            if m:
+                current_white = m.group(1)
+                continue
+            m = result_tag.match(line)
+            if m:
+                res_str = m.group(1)
+                if res_str == "*":
+                    current_white = None
+                    continue
+                # Determine if engine1 was White.
+                e1_is_white = (current_white is not None and
+                               engine1_name in current_white)
+                if res_str == "1-0":
+                    results.append(1.0 if e1_is_white else 0.0)
+                elif res_str == "0-1":
+                    results.append(0.0 if e1_is_white else 1.0)
+                elif res_str == "1/2-1/2":
+                    results.append(0.5)
+                current_white = None
+    return results
+
+
+def analyze_segment_progress(pgn_path, engine1_name, window_frac=0.25,
+                             min_window=10):
+    """Analyze in-segment learning progress from a PGN file.
+
+    Compares engine1's score in the first `window_frac` of games against
+    the last `window_frac` using LOS.  Also fits an OLS linear trend on
+    game scores as a diagnostic.
+
+    Returns a dict with:
+      n_games, early_wdl, late_wdl, early_score, late_score,
+      los (late > early), trend_slope, trend_r2, verdict
+    or None if there aren't enough games.
+    """
+    scores = parse_pgn_results(pgn_path, engine1_name)
+    n = len(scores)
+    window = max(min_window, int(n * window_frac))
+
+    if n < 2 * window:
+        return None   # not enough games to compare
+
+    early = scores[:window]
+    late  = scores[-window:]
+
+    def wdl_from_scores(sc):
+        w = sum(1 for s in sc if s == 1.0)
+        d = sum(1 for s in sc if s == 0.5)
+        l = sum(1 for s in sc if s == 0.0)
+        return w, d, l
+
+    ew, ed, el = wdl_from_scores(early)
+    lw, ld, ll = wdl_from_scores(late)
+    early_pct = (ew + 0.5 * ed) / len(early) * 100.0
+    late_pct  = (lw + 0.5 * ld) / len(late) * 100.0
+
+    # LOS that late window is better than early window.
+    # Treat early as "opponent baseline" (losses) and late as "candidate" (wins).
+    # We compute LOS from the late-vs-early differential.
+    delta_w = max(0, lw - ew)   # net wins gained
+    delta_l = max(0, ll - el) if ll > el else 0
+    delta_d = window - delta_w - delta_l
+    if delta_d < 0:
+        delta_d = 0
+    # More robust: use the actual score difference with normal approx.
+    diff = (late_pct - early_pct) / 100.0   # fraction
+    # Variance of score difference (independent samples)
+    var_early = (ew * (1.0 - early_pct/100)**2 +
+                 ed * (0.5 - early_pct/100)**2 +
+                 el * (0.0 - early_pct/100)**2) / len(early)
+    var_late  = (lw * (1.0 - late_pct/100)**2 +
+                 ld * (0.5 - late_pct/100)**2 +
+                 ll * (0.0 - late_pct/100)**2) / len(late)
+    var_diff = var_early / len(early) + var_late / len(late)
+    if var_diff > 0:
+        z = diff / math.sqrt(var_diff)
+        los = 0.5 * math.erfc(-z / math.sqrt(2.0))
+    else:
+        los = 1.0 if diff > 0 else (0.0 if diff < 0 else 0.5)
+
+    # OLS linear trend: score_i = a + b*i
+    x_mean = (n - 1) / 2.0
+    y_mean = sum(scores) / n
+    ss_xy = sum((i - x_mean) * (s - y_mean) for i, s in enumerate(scores))
+    ss_xx = sum((i - x_mean) ** 2 for i in range(n))
+    slope = ss_xy / ss_xx if ss_xx > 0 else 0.0
+    ss_yy = sum((s - y_mean) ** 2 for s in scores)
+    r2 = (ss_xy ** 2) / (ss_xx * ss_yy) if ss_xx > 0 and ss_yy > 0 else 0.0
+
+    return {
+        "n_games": n,
+        "early_wdl": (ew, ed, el),
+        "late_wdl": (lw, ld, ll),
+        "early_score": early_pct,
+        "late_score": late_pct,
+        "los": los,
+        "trend_slope": slope,     # score change per game
+        "trend_r2": r2,
+        "window": window,
+    }
 
 
 def run_match_streaming(cmd, los_stop_hi=None, los_stop_lo=None):
@@ -287,15 +439,17 @@ def main():
             print(f"  Copying {net_path} → learn/{net_filename}")
             shutil.copy2(net_path, net_file)
 
-    tdleaf_bin   = os.path.join(learn_dir, net_base + ".tdleaf.bin")
-    sidecar_path = os.path.join(learn_dir, net_base + ".games")
+    tdleaf_bin        = os.path.join(learn_dir, net_base + ".tdleaf.bin")
+    sidecar_path      = os.path.join(learn_dir, net_base + ".games")
+    training_epd_path = os.path.join(learn_dir, "training_openings.epd")
+    use_training_epd  = os.path.isfile(training_epd_path)
 
     # -----------------------------------------------------------------------
     # Step 1b — Opponent roster (rotation across multiple opponent types)
     # -----------------------------------------------------------------------
     #
     # Each roster entry is a dict with:
-    #   "type"  : "self-play" | "prev-checkpoint" | "external"
+    #   "type"  : "self-play" | "prev-checkpoint" | "readonly" | "external"
     #   "label" : display name
     #   "exe"   : path to opponent binary (set during build step)
     #   "path"  : for external opponents, the user-supplied path
@@ -309,6 +463,7 @@ def main():
     print("  Available opponent types:")
     print("    [s] Self-play           — both instances learn (symmetric)")
     print("    [p] Previous checkpoint — learner vs. own recent snapshot (read-only)")
+    print("    [r] Read-only mirror    — current weights, frozen during segment")
     print("    [e] External engine     — learner vs. user-supplied executable")
     print()
 
@@ -316,7 +471,7 @@ def main():
     while True:
         default_type = "s" if not roster else ""
         choice_opp = ask(
-            f"  Add opponent #{len(roster)+1} (s/p/e, empty to finish)",
+            f"  Add opponent #{len(roster)+1} (s/p/r/e, empty to finish)",
             default_type if not roster else None
         ).strip().lower()
         if not choice_opp:
@@ -328,6 +483,8 @@ def main():
             roster.append({"type": "self-play", "label": "self-play (symmetric)"})
         elif choice_opp == "p":
             roster.append({"type": "prev-checkpoint", "label": "previous checkpoint (read-only)"})
+        elif choice_opp == "r":
+            roster.append({"type": "readonly", "label": "read-only mirror (frozen during segment)"})
         elif choice_opp == "e":
             while True:
                 opp_path = ask("    Path to opponent executable").strip()
@@ -343,11 +500,12 @@ def main():
                 "path": opp_abs,
             })
         else:
-            print(f"  Unknown type '{choice_opp}' — use s, p, or e.")
+            print(f"  Unknown type '{choice_opp}' — use s, p, r, or e.")
             continue
         print(f"    Added: {roster[-1]['label']}")
 
-    use_rotation = len(roster) > 1 or any(r["type"] == "prev-checkpoint" for r in roster)
+    use_rotation = (len(roster) > 1
+                    or any(r["type"] in ("prev-checkpoint", "readonly") for r in roster))
     rotation_interval = 0
     if use_rotation:
         rotation_interval = int(ask("  Games per opponent before rotating", "2000"))
@@ -355,6 +513,7 @@ def main():
     # Derive which binary types we need to build.
     need_self_play_exe = any(r["type"] == "self-play" for r in roster)
     need_checkpoint_exe = any(r["type"] == "prev-checkpoint" for r in roster)
+    need_readonly_exe = any(r["type"] == "readonly" for r in roster)
 
     # -----------------------------------------------------------------------
     # Step 1c — Train-validate loop (optional)
@@ -384,6 +543,37 @@ def main():
         cand_nnue_name = f"{net_base}-cand.nnue"
 
     # -----------------------------------------------------------------------
+    # Step 1d — Segment progress analysis (optional, rotation mode only)
+    # -----------------------------------------------------------------------
+    # When playing static opponents (prev-checkpoint, external), compare the
+    # learner's score in the first N games vs the last N games of each segment
+    # to detect in-segment improvement.  If the learner is getting worse,
+    # revert the .tdleaf.bin to the pre-segment state.
+    has_static_opponents = any(
+        r["type"] in ("prev-checkpoint", "readonly", "external") for r in roster
+    )
+    use_seg_analysis    = False
+    seg_accept_los      = 0.60
+    seg_reject_los      = 0.40
+    seg_window_frac     = 0.25
+    seg_min_window      = 20
+
+    if use_rotation and has_static_opponents:
+        print()
+        use_seg_analysis = ask_yes_no(
+            "Enable in-segment progress analysis for static opponents?",
+            default="n")
+        if use_seg_analysis:
+            seg_accept_los  = float(ask(
+                "  Accept LOS threshold (%)", "60")) / 100.0
+            seg_reject_los  = float(ask(
+                "  Reject LOS threshold (%)", "40")) / 100.0
+            seg_window_frac = float(ask(
+                "  Window fraction (0-0.5) ", "0.25"))
+            seg_min_window  = int(ask(
+                "  Minimum window size     ", "20"))
+
+    # -----------------------------------------------------------------------
     # Step 2 — Build executables  (comp.pl runs in run/, binaries moved to learn/)
     # -----------------------------------------------------------------------
     print()
@@ -397,11 +587,17 @@ def main():
     selfplay_ver = f"train_{net_base}_b"
     selfplay_exe = os.path.join(learn_dir, f"Leaf_v{selfplay_ver}")
 
-    # Read-only opponent binary — uses a *separate* NNUE_NET so we can swap
-    # its .nnue file independently (for prev-checkpoint rotation).
+    # Prev-checkpoint opponent binary — uses a *separate* NNUE_NET so we can
+    # swap its .nnue file independently (for prev-checkpoint rotation).
     checkpoint_opp_nnue = f"{net_base}-opponent.nnue"
     checkpoint_ver = f"train_{net_base}_ro"
     checkpoint_exe = os.path.join(learn_dir, f"Leaf_v{checkpoint_ver}")
+
+    # Read-only mirror binary — same NNUE_NET as learner, loads .tdleaf.bin
+    # at startup but does not write.  Frozen during a segment; refreshes
+    # weights when cutechess-cli restarts it for the next segment.
+    readonly_ver = f"train_{net_base}_rom"
+    readonly_exe = os.path.join(learn_dir, f"Leaf_v{readonly_ver}")
 
     # Wire up each roster entry's exe field.
     for entry in roster:
@@ -409,6 +605,8 @@ def main():
             entry["exe"] = selfplay_exe
         elif entry["type"] == "prev-checkpoint":
             entry["exe"] = checkpoint_exe
+        elif entry["type"] == "readonly":
+            entry["exe"] = readonly_exe
         elif entry["type"] == "external":
             entry["exe"] = entry["path"]
 
@@ -422,6 +620,11 @@ def main():
         # .tdleaf.bin is needed.
         ro_flags = ["NNUE=1", f"NNUE_NET={checkpoint_opp_nnue}"]
         need_binaries.append(("checkpoint opponent", checkpoint_ver, ro_flags))
+    if need_readonly_exe:
+        # TDLEAF_READONLY: loads .tdleaf.bin at startup (current learner
+        # weights) but skips all ply recording and weight updates.
+        rom_flags = ["NNUE=1", "TDLEAF=1", "TDLEAF_READONLY=1", nnue_flag]
+        need_binaries.append(("read-only mirror", readonly_ver, rom_flags))
 
     all_exist = all(
         os.path.isfile(os.path.join(learn_dir, f"Leaf_v{ver}"))
@@ -510,6 +713,13 @@ def main():
             os.rename(tdleaf_bin, bak)
             prior_games = 0
             write_game_count(sidecar_path, 0)
+        else:
+            # Back up the file before any training writes so it can be
+            # recovered if the run produces bad weights or is interrupted
+            # at an inopportune moment.
+            bak = tdleaf_bin + ".bak"
+            shutil.copy2(tdleaf_bin, bak)
+            print(f"  Backup saved  → {os.path.basename(bak)}")
     else:
         print(f"No existing .tdleaf.bin for {net_filename} — starting fresh.")
 
@@ -527,7 +737,12 @@ def main():
     tc2         = tc2_raw if tc2_raw.strip() else tc1
     concurrency = int(ask( "  Concurrency         [-c]        ", default_concurrency))
     wait_ms     = int(ask("  Wait between games  [--wait ms] ", 500))
-    fischer     = ask_yes_no("  Fischer Random? [--fischer-random]", default="y")
+    if use_training_epd:
+        print(f"  Opening EPD:      training_openings.epd detected — using FRC+book openings "
+              f"(Fischer variant auto-enabled)")
+        fischer = True
+    else:
+        fischer = ask_yes_no("  Fischer Random? [--fischer-random]", default="y")
     depth1_str  = ask("  Learner depth limit (0=none) [--depth1]", "0")
     depth1      = int(depth1_str) if depth1_str.strip() else 0
     depth2_str  = ask(f"  Opponent depth limit (0=none) [--depth2]", str(depth1))
@@ -544,16 +759,17 @@ def main():
     else:
         total_after_str = f"{prior_games + games_per_cycle:,}"
 
-    # Opening book for non-Fischer games
+    # Opening book for non-Fischer, non-EPD games
     book_path = os.path.join(learn_dir, "normbk02.bin")
-    use_book  = not fischer and os.path.isfile(book_path)
+    use_book  = not use_training_epd and not fischer and os.path.isfile(book_path)
 
     # -----------------------------------------------------------------------
     # PGN directory  —  learn/pgn/<net_base>/
     # -----------------------------------------------------------------------
     pgn_dir       = os.path.join(learn_dir, "pgn", net_base)
     os.makedirs(pgn_dir, exist_ok=True)
-    pgn_base_path = os.path.join(pgn_dir, f"match_{net_base}.pgn")
+    pgn_start_tag = format_game_count(prior_games) + "g"
+    pgn_base_path = os.path.join(pgn_dir, f"match_{net_base}_{pgn_start_tag}.pgn")
 
     # -----------------------------------------------------------------------
     # Confirm
@@ -589,10 +805,16 @@ def main():
             print(f"  Depth limit:      {d1_str} (both engines)")
         else:
             print(f"  Depth learner:    {d1_str}   Depth opponent: {d2_str}")
-    if fischer:
+    if use_training_epd:
+        print(f"  Opening EPD:      training_openings.epd  (FRC+book, Fischer variant)")
+    elif fischer:
         print( "  Fischer Random:   yes")
     elif use_book:
         print(f"  Opening book:     {os.path.basename(book_path)}")
+    if use_seg_analysis:
+        print(f"  Seg. analysis:    accept≥{seg_accept_los*100:.0f}%  "
+              f"reject≤{seg_reject_los*100:.0f}%  "
+              f"window={seg_window_frac:.0%} (min {seg_min_window})")
     print(f"  PGN directory:    {pgn_dir}/")
     print("=" * 62)
 
@@ -607,7 +829,7 @@ def main():
     current_games = prior_games
     cycle_log     = []   # list of (cycle, accepted, vw, vd, vl, los)
 
-    def build_match_cmd(opp_exe, num_games, pgn_path):
+    def build_match_cmd(opp_exe, num_games, pgn_path, no_repeat=False):
         cmd = [
             sys.executable, match_py,
             train_exe,
@@ -620,7 +842,9 @@ def main():
         ]
         if tc2 != tc1:
             cmd += ["--tc2", tc2]
-        if fischer:
+        if use_training_epd:
+            cmd += ["--openings", training_epd_path, "--fischer-random"]
+        elif fischer:
             cmd.append("--fischer-random")
         elif use_book:
             cmd += ["--openings", book_path]
@@ -628,6 +852,8 @@ def main():
             cmd += ["--depth1", str(depth1)]
         if depth2:
             cmd += ["--depth2", str(depth2)]
+        if no_repeat:
+            cmd.append("--no-repeat")
         return cmd
 
     def export_nnue(exe, dest_path, label):
@@ -641,7 +867,20 @@ def main():
     # Path where the read-only opponent binary expects its .nnue.
     checkpoint_opp_nnue_path = os.path.join(learn_dir, checkpoint_opp_nnue)
     # Tracks the last exported checkpoint (for prev-checkpoint opponent).
-    last_checkpoint_nnue = None
+    # On resume, seed from the highest-numbered existing checkpoint on disk.
+    _ckpt_pattern = re.compile(rf"^{re.escape(net_base)}-(\d+)g\.nnue$")
+    _existing = []
+    for _f in os.listdir(learn_dir):
+        _m = _ckpt_pattern.match(_f)
+        if _m:
+            _existing.append((int(_m.group(1)), os.path.join(learn_dir, _f)))
+    if _existing:
+        last_checkpoint_nnue = max(_existing)[1]
+        if need_checkpoint_exe:
+            print(f"  Resuming: prev-checkpoint opponent will start from "
+                  f"{os.path.basename(last_checkpoint_nnue)}")
+    else:
+        last_checkpoint_nnue = None
 
     def prepare_prev_checkpoint_opponent():
         """Copy the latest checkpoint .nnue to the read-only opponent's expected path.
@@ -659,9 +898,9 @@ def main():
         """Export current weights to a game-count-stamped checkpoint."""
         nonlocal last_checkpoint_nnue
         wait_until_stable(tdleaf_bin)
-        snap_name = f"{net_base}-{current_games}g.nnue"
+        snap_name = f"{net_base}-{format_game_count(current_games)}g.nnue"
         snap_path = os.path.join(learn_dir, snap_name)
-        export_nnue(train_exe, snap_path, f"checkpoint @ {current_games}g")
+        export_nnue(train_exe, snap_path, f"checkpoint @ {format_game_count(current_games)}g")
         last_checkpoint_nnue = snap_path
 
     # -----------------------------------------------------------------------
@@ -715,7 +954,7 @@ def main():
                     shutil.copy2(tdleaf_bin, checkpoint_bin)
 
                 pgn_path = os.path.join(
-                    pgn_dir, f"match_{net_base}_cycle{cycle_num:02d}.pgn")
+                    pgn_dir, f"match_{net_base}_{pgn_start_tag}_cycle{cycle_num:02d}.pgn")
             else:
                 pgn_path = pgn_base_path
 
@@ -729,6 +968,7 @@ def main():
                 games_remaining = n_games
                 roster_idx = 0
                 seg_num = 0
+                seg_reverts = 0   # count of reverted segments this cycle/run
                 while games_remaining > 0:
                     entry = roster[roster_idx % len(roster)]
                     seg_games = min(rotation_interval, games_remaining)
@@ -736,12 +976,25 @@ def main():
 
                     print(f"  ── Segment {seg_num}: {seg_games} games vs {entry['label']} ──")
 
+                    is_static = entry["type"] in ("prev-checkpoint", "readonly", "external")
+
+                    # Save pre-segment .tdleaf.bin for potential revert.
+                    seg_checkpoint = None
+                    if use_seg_analysis and is_static and os.path.isfile(tdleaf_bin):
+                        seg_checkpoint = tdleaf_bin + ".seg_checkpoint"
+                        wait_until_stable(tdleaf_bin)
+                        shutil.copy2(tdleaf_bin, seg_checkpoint)
+
                     # Set up prev-checkpoint opponent if needed.
-                    if entry["type"] == "prev-checkpoint":
+                    is_prev = entry["type"] == "prev-checkpoint"
+                    if is_prev:
                         prepare_prev_checkpoint_opponent()
 
                     seg_pgn = pgn_path.replace(".pgn", f"_seg{seg_num:02d}.pgn")
-                    cmd = build_match_cmd(entry["exe"], seg_games, seg_pgn)
+                    cmd = build_match_cmd(entry["exe"], seg_games, seg_pgn,
+                                         no_repeat=(entry["type"] == "self-play"))
+                    # Extract learner binary name for PGN parsing.
+                    train_basename = os.path.basename(train_exe)
                     result = subprocess.run(cmd, cwd=run_dir)
                     if result.returncode != 0:
                         print(f"\nMatch segment failed (exit code {result.returncode}).",
@@ -755,17 +1008,63 @@ def main():
                     games_remaining -= seg_games
                     current_games += seg_games
 
+                    # --- In-segment progress analysis ---
+                    if use_seg_analysis and is_static and seg_checkpoint:
+                        wait_until_stable(tdleaf_bin)
+                        analysis = analyze_segment_progress(
+                            seg_pgn, train_basename,
+                            window_frac=seg_window_frac,
+                            min_window=seg_min_window)
+                        if analysis is not None:
+                            ew, ed, el = analysis["early_wdl"]
+                            lw, ld, ll = analysis["late_wdl"]
+                            print(f"\n  Segment progress ({analysis['n_games']} games, "
+                                  f"window={analysis['window']}):")
+                            print(f"    Early {analysis['window']}g: "
+                                  f"W={ew} D={ed} L={el}  "
+                                  f"score={analysis['early_score']:.1f}%")
+                            print(f"    Late  {analysis['window']}g: "
+                                  f"W={lw} D={ld} L={ll}  "
+                                  f"score={analysis['late_score']:.1f}%")
+                            print(f"    LOS(late>early): {analysis['los']*100:.1f}%"
+                                  f"   trend: {analysis['trend_slope']*1000:+.2f}/1000g"
+                                  f"  R²={analysis['trend_r2']:.3f}")
+
+                            if analysis["los"] >= seg_accept_los:
+                                print(f"    → ACCEPT (LOS ≥ {seg_accept_los*100:.0f}%)")
+                            elif analysis["los"] < seg_reject_los:
+                                print(f"    → REJECT (LOS < {seg_reject_los*100:.0f}%)"
+                                      f" — reverting .tdleaf.bin")
+                                shutil.copy2(seg_checkpoint, tdleaf_bin)
+                                seg_reverts += 1
+                            else:
+                                print(f"    → INCONCLUSIVE "
+                                      f"({seg_reject_los*100:.0f}% ≤ LOS < "
+                                      f"{seg_accept_los*100:.0f}%) — keeping")
+                        else:
+                            print(f"  Segment analysis: not enough games "
+                                  f"(need ≥{2*seg_min_window})")
+
+                    # Clean up segment checkpoint.
+                    if seg_checkpoint and os.path.isfile(seg_checkpoint):
+                        os.remove(seg_checkpoint)
+
                     # Export checkpoint at rotation boundary (if more segments remain).
                     if games_remaining > 0:
                         export_rotation_checkpoint()
 
                     roster_idx += 1
+
+                if seg_reverts > 0:
+                    print(f"\n  Segments reverted this run: {seg_reverts}")
             else:
                 # Single opponent — run all games at once.
                 opp_exe = roster[0]["exe"]
-                if roster[0]["type"] == "prev-checkpoint":
+                is_prev = roster[0]["type"] == "prev-checkpoint"
+                if is_prev:
                     prepare_prev_checkpoint_opponent()
-                cmd = build_match_cmd(opp_exe, n_games, pgn_path)
+                cmd = build_match_cmd(opp_exe, n_games, pgn_path,
+                                     no_repeat=(roster[0]["type"] == "self-play"))
                 result = subprocess.run(cmd, cwd=run_dir)
                 if result.returncode != 0:
                     print(f"\nMatch run failed (exit code {result.returncode}).",
@@ -808,7 +1107,7 @@ def main():
                 print(f"\n  Validation: skipped (no prior trained baseline)  → {verdict}")
             else:
                 val_pgn = os.path.join(
-                    pgn_dir, f"val_{net_base}_cycle{cycle_num:02d}.pgn")
+                    pgn_dir, f"val_{net_base}_{pgn_start_tag}_cycle{cycle_num:02d}.pgn")
                 print(f"  Validation: {val_games} games @ {val_tc}"
                       f"   (candidate vs best)")
                 val_cmd = [
@@ -819,7 +1118,9 @@ def main():
                     "-c", str(concurrency),
                     "--pgn-out", val_pgn,
                 ]
-                if fischer:
+                if use_training_epd:
+                    val_cmd += ["--openings", training_epd_path, "--fischer-random"]
+                elif fischer:
                     val_cmd.append("--fischer-random")
                 elif use_book:
                     val_cmd += ["--openings", book_path]
@@ -849,9 +1150,14 @@ def main():
                 # the newly accepted weights (not the original session start).
                 export_nnue(train_exe, best_nnue_path, "new best (accepted)")
                 # Save a game-count-stamped snapshot for later tournament use.
-                snapshot_name = f"{net_base}-{current_games}g.nnue"
+                snapshot_name = f"{net_base}-{format_game_count(current_games)}g.nnue"
                 snapshot_path = os.path.join(learn_dir, snapshot_name)
-                export_nnue(train_exe, snapshot_path, f"snapshot @ {current_games}g")
+                export_nnue(train_exe, snapshot_path, f"snapshot @ {format_game_count(current_games)}g")
+                # Keep the prev-checkpoint opponent current: the next cycle's
+                # first prev-checkpoint segment should face the just-accepted
+                # weights, not a stale intra-cycle snapshot.
+                if need_checkpoint_exe:
+                    last_checkpoint_nnue = snapshot_path
                 print(f"  Banked games: {current_games:,}")
             else:
                 # Revert game count — rejected cycle's games don't count.
@@ -860,6 +1166,13 @@ def main():
                 if has_checkpoint:
                     shutil.copy2(checkpoint_bin, tdleaf_bin)
                     print("  Reverted .tdleaf.bin to pre-cycle checkpoint.")
+                    # Also revert the prev-checkpoint opponent back to the last
+                    # accepted baseline.  The rejected cycle may have advanced
+                    # last_checkpoint_nnue to an intra-cycle snapshot that is
+                    # now ahead of the reverted .tdleaf.bin, which would make
+                    # the opponent artificially stronger than the learner.
+                    if need_checkpoint_exe:
+                        last_checkpoint_nnue = best_nnue_path
                 else:
                     # No prior checkpoint existed.  Leave the .tdleaf.bin in
                     # place so the next cycle can build on this cycle's
@@ -878,13 +1191,19 @@ def main():
     # -----------------------------------------------------------------------
     # Step 6 — Export final .nnue
     # -----------------------------------------------------------------------
+    # Update the game-count sidecar first so the names we choose below
+    # (which embed current_games) always match what the sidecar records.
+    # Loop mode keeps .games current after each accepted cycle; this write
+    # is the canonical final update for all other exit paths.
+    write_game_count(sidecar_path, current_games)
+
     print()
     if interrupted and use_loop and current_games > prior_games:
         # Validation is active and at least one cycle was accepted.
         # The last validated snapshot already exists at <net>-<current_games>g.nnue.
         # Do NOT overwrite it with unvalidated weights from the interrupted cycle.
         # Instead, export unvalidated weights to a separate file.
-        unval_name = f"{net_base}-{current_games}g-unvalidated.nnue"
+        unval_name = f"{net_base}-{format_game_count(current_games)}g-unvalidated.nnue"
         unval_path = os.path.join(learn_dir, unval_name)
         print(f"Exporting unvalidated weights → {unval_name}")
         result = subprocess.run(
@@ -899,19 +1218,32 @@ def main():
         if os.path.isfile(checkpoint_bin):
             shutil.copy2(checkpoint_bin, tdleaf_bin)
             print(f"  Reverted .tdleaf.bin to last validated checkpoint.")
-        output_net_name = f"{net_base}-{current_games}g.nnue"
+        output_net_name = f"{net_base}-{format_game_count(current_games)}g.nnue"
         print(f"  Last validated: {output_net_name}")
     else:
-        output_net_name = f"{net_base}-{current_games}g.nnue"
+        # Use -partial suffix on interruption to signal a non-clean exit and
+        # avoid overwriting an existing game-count-stamped checkpoint.
+        if interrupted:
+            output_net_name = f"{net_base}-{format_game_count(current_games)}g-partial.nnue"
+        else:
+            output_net_name = f"{net_base}-{format_game_count(current_games)}g.nnue"
         output_net_path = os.path.join(learn_dir, output_net_name)
-        print(f"Exporting final weights → {output_net_name}")
+        print(f"Exporting {'partial ' if interrupted else ''}weights → {output_net_name}")
         result = subprocess.run(
             [train_exe, "--write-nnue", output_net_path],
             cwd=learn_dir
         )
         if result.returncode != 0:
             print("--write-nnue failed.", file=sys.stderr)
-            sys.exit(result.returncode)
+            if not interrupted:
+                sys.exit(result.returncode)
+
+    # Save a .tdleaf.bin snapshot at the final game count for archival / rollback.
+    if os.path.isfile(tdleaf_bin):
+        tdleaf_snap_name = f"{net_base}.tdleaf.bin-{format_game_count(current_games)}g"
+        tdleaf_snap_path = os.path.join(learn_dir, tdleaf_snap_name)
+        shutil.copy2(tdleaf_bin, tdleaf_snap_path)
+        print(f"  .tdleaf.bin snapshot → {tdleaf_snap_name}")
 
     # -----------------------------------------------------------------------
     # Summary
@@ -929,6 +1261,7 @@ def main():
     print(f"  Total games: {current_games:,}")
     print(f"  PGN files:   {pgn_dir}/")
     print(f"  .tdleaf.bin: {tdleaf_bin}")
+    print(f"  .tdleaf.bin snapshot: {net_base}.tdleaf.bin-{format_game_count(current_games)}g")
 
     if use_loop and cycle_log:
         accepted_count = sum(1 for _, acc, *_ in cycle_log if acc)

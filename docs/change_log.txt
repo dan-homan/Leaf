@@ -1,5 +1,314 @@
 Changes since 2017_12_24
 
+2026_04_10 -- tdleaf: reduce FC Adam LR from 0.1 to 0.01 to eliminate early-training Elo dip
+               (src/tdleaf.h).  Root cause: Adam's adaptive LR amplifies gradient noise when FT
+               weights are still random (first ~200 Adam steps / 800 games).  Unlike SGD, where
+               incoherent gradients cancel and FC barely moves, Adam takes a step of approximately
+               sign(g) × LR regardless of gradient coherence — causing FC to random-walk in weight
+               space and overfit to the current (random) FT encoding.  When FT later provides real
+               signal, FC must unlearn this wrong mapping, producing a performance dip at ~1000 games
+               with recovery only after ~5000 games.
+               Investigation confirmed no bugs in FC gradient computation: backward passes for
+               SqrCReLU (sq > 0 && sq < 127), CReLU (v > 0 && v < 127), gradient signs (wtm_sign),
+               Adam bias corrections (per-weight cnt), and AdamW weight decay all correct.
+               The dip is intrinsic Adam behavior with high LR, not a code defect.
+               Experiments (all fresh 10k-game runs):
+                 LR=0.1:  deep dip, no full recovery by 10k games
+                 LR=0.03: shallower dip, partial recovery
+                 LR=0.01: much shallower dip, strongest peak at 10k games
+                 LR=0.03 + per-session FC warmup (200 steps): similar end result to LR=0.01
+               LR=0.01 chosen as simplest approach with best outcome; per-session warmup adds
+               no benefit over simply using the lower LR.
+
+2026_04_10 -- tdleaf: fix SqrCReLU backward pass — gradient was passed through saturated neurons
+               (src/nnue.cpp).  Condition `clo > 0.0f` (old) was true for saturated accumulators
+               (clo == 127), creating a positive feedback loop: large FT biases → more saturation
+               → incorrect gradient pushes biases higher → eventual int16 saturation (~31000).
+               Fixed to `vlo > 0.0f && vlo < 127.0f` (gradient only in linear range).
+
+2026_04_10 -- tdleaf: fix --init-nnue producing corrupted FT biases in initial .tdleaf.bin
+               (src/nnue.cpp).  Root cause: nnue_alloc_arrays() uses `new int16_t[N]` (no (),
+               so memory is uninitialised).  nnue_init_fp32_weights() then copies these garbage
+               values into ft_biases_f32 before nnue_init_zero_weights() zeroes the int16 array —
+               but ft_biases_f32 was never zeroed.  The initial nnue_save_fc_weights() call then
+               wrote the garbage (× TDLEAF_SCALE=128) as FT biases: values 2313–31082, corrupting
+               every subsequent training session before any games were played.
+               Fix: added memset(ft_biases_f32, 0, ...) in nnue_init_zero_weights() after the
+               int16 zero, ensuring both arrays are clean before the initial save.
+
+2026_04_09 -- nnue_init: fix PSQT initialization to symmetric convention (src/nnue.cpp).
+               Previous fix (own=+2V, enemy=0) produced the correct score mathematically but
+               caused catastrophic FT bias explosion during training: FT biases grew to ~+31000
+               int16 (near saturation limit) instead of staying near 0.  With saturated FT biases,
+               all 1024 SqrCReLU outputs are always at maximum regardless of position — the
+               positional path becomes a fixed constant and the engine cannot learn chess.
+               Root cause confirmed by comparing trained checkpoints at 10k games:
+               - Working run (260402, symmetric init): FT biases = -7 int16 (near zero)
+               - Broken run (260409, asymmetric init): FT biases = +31082 int16 (saturated)
+               Fix: symmetric PSQT initialization matching the successful March 26 / April 2 design:
+               own-piece features = +V (positive), enemy-piece features = -V (negative),
+               where V = cp × 5776/100.  Score: psqt_diff = 2V → score = V×100/5776 = cp ✓.
+               Queen: own=+69139, enemy=-69139 (vs wrong: own=+138277, enemy=0).
+               Both signs required in PSQT for healthy FT bias training dynamics.
+               PSQT init from April 2 successful run:
+               Restored: PSQT initialized symmetrically (own=+V, enemy=-V).  piece_val=0 (learns
+               corrections on top of PSQT).
+               Kept from previous fix attempts: FC0 passthrough zero (eliminates ~81 cp noise),
+               piece_val clamp >= 0 (safety net), companion .tdleaf.bin on --init-nnue, and
+               compare_nnue_learning.py display fix (was showing 2× actual centipawns).
+
+2026_04_09 -- piece_val: reduce init to 10% of classical + clamp >= 0 to fix training crash
+               (src/nnue.cpp).  Root cause of the crash (starts 37%, peak 52%, permanent crash
+               by game 1100): two compounding issues.
+               (1) Sigmoid saturation: classical piece_val (queen=1197 cp) gives sigmoid(1197/290)
+               ≈ 0.985 at init → a fresh engine needs >98.5% win rate from queen-up positions for a
+               constructive gradient.  Unachievable → corrosive gradient → piece_val erodes.
+               (2) No lower bound: piece_val erodes past 0 into negative values (dense updates, ~200/
+               game).  Negative piece_val inverts material evaluation: engine prefers fewer pieces →
+               actively gives away material → loses every game → no recovery.  This differs from the
+               old PSQT=classical run (recovered at 7000g) because PSQT has heterogeneous sparse updates
+               that can't go globally negative, while piece_val is a single scalar per piece type.
+               Fix 1: init piece_val at 10% of classical (P=10, N=38, B=40, R=60, Q=120 cp).
+               sigmoid(120/290) ≈ 0.59 → requires only 59% win rate from queen-up, achievable from
+               game 1.  Relative ordering preserved; piece_val grows toward equilibrium as engine learns.
+               Fix 2: clamp piece_val >= 0 after each Adam step.  If corrosive gradient still erodes
+               piece_val to 0, it stays at 0 (neutral material knowledge) rather than inverting.
+               FC/FT continues to learn; piece_val receives constructive gradient and recovers once the
+               engine can win >50% from material-advantage positions.
+
+2026_04_09 -- nnue_init: zero FC0 passthrough row at init to eliminate ~81 cp score noise
+               (src/nnue.cpp).  FC0 output NNUE_L0_DIRECT (index 15) bypasses FC1/FC2 and feeds
+               directly to the final score: fwdOut = fc0_raw[15] × 9600/8128, then added to
+               positional before the ×100/5776 conversion.  With random FC0 weights (std=4 int8)
+               and SqrCReLU inputs (mean ≈ 20, fan-in 1024), fc0_raw[15] has std ≈ 4000 in int32
+               → fwdOut ≈ 81 cp std.  This noise overwhelms piece_val's 100 cp/pawn signal from
+               game 1, causing the engine to ignore material in roughly half its evaluations.
+               Fix: after the random FC0 init, zero the weights for output neuron 15 specifically.
+               The other 15 FC0 outputs (0–14) keep random weights for symmetry breaking.  Gradient
+               still flows through the passthrough (g_fc0_raw[15] += g_pos × 9600/8128) so it
+               learns from game 1.  Also fixed compare_nnue_learning.py piece_val display: was
+               showing 2× actual centipawns (missing the /2 from score formula); now correct.
+
+2026_04_09 -- nnue_init: fix --init-nnue not persisting piece_val to companion .tdleaf.bin
+               (src/main.cpp).  piece_val is stored in .tdleaf.bin, not in the .nnue format.
+               Previously, --init-nnue fell through to the --write-nnue handler which only
+               wrote the .nnue file; the training binary then found no .tdleaf.bin and started
+               with piece_val=0 (no material knowledge).  Fix: --init-nnue now handles the
+               write itself, derives the .tdleaf.bin path by replacing .nnue→.tdleaf.bin in
+               the --write-nnue argument, and saves both files before returning.
+
+2026_04_09 -- nnue_init: move material prior from PSQT to piece_val to fix 7000-game training crash
+               (src/nnue.cpp).  Root cause: initialising per-feature PSQT with classical material
+               values (queen=1197 cp) saturates the TDLeaf sigmoid for material-imbalanced positions
+               (sigmoid(1197/290) ≈ 0.98).  The net gradient direction for PSQT is constructive only
+               if P(win|material_adv) > sigmoid(score/K).  A fresh engine cannot win queen-up games
+               at 98%+, so the gradient is reliably corrosive — it erodes PSQT material values,
+               making the engine play worse, losing more material-up games, accelerating the erosion.
+               This destructive feedback loop collapses training for 5,000–7,000+ games before FC/FT
+               learn enough chess to break it.
+               Fix: PSQT is now zero-initialised; piece_val receives the classical material prior
+               (P=100, N=377, B=399, R=596, Q=1197 cp) in both modes except noprior.  piece_val is
+               self-correcting (dense updates, ~200/game): if piece_val is too high the gradient
+               reduces it; if too low the gradient increases it.  There is no feedback amplification.
+               piece_val scale: uses 2 × (cp × 5776/100) so that the /2 in the score formula
+               (pv_diff/2 × 100/5776) gives the correct centipawn contribution.
+               noprior mode: piece_val=0, PSQT=0 — engine learns all material from scratch via
+               dense piece_val updates; gradient is constructive whenever P(win) > 50%.
+
+2026_04_09 -- tdleaf: revert erroneous wtm_sign change in gradient accumulation (src/tdleaf.cpp).
+               A previous commit incorrectly "fixed" `wtm_sign = wtm ? -1 : +1` to `? +1 : -1`,
+               reasoning that score_white = +score_stm when white to move so the sign should be +1.
+               That analysis ignored that grad_scale acts as a VALUE ascent signal (e[t] > 0 means
+               "increase score"), but nnue_apply_gradients uses weight -= dw (descent semantics).
+               The combined ascent-via-descent requires grad_scale to be NEGATIVE when the score
+               should increase (so dw < 0 → weight increases → score rises).  With wtm_sign = -1
+               (white to move), grad_scale = e[t] * pos * (-1) < 0 when e[t] > 0 ✓.  The "fixed"
+               +1 sign caused 0-40 results against material_eval after 10k training games (complete
+               gradient inversion).  Reverted to original `wtm ? -1 : +1`.
+
+2026_04_09 -- tdleaf: fix latent PSQT v/m null-pointer count mismatch in nnue_save_fc_weights
+               (src/nnue.cpp).  When v_psqt_w or m_psqt_w is null, the PSQT v/m row count
+               was written as n_ft_rows (non-zero) but no data followed, corrupting the
+               file for any reader.  Fixed: write 0 when the pointer is null.
+
+2026_04_08 -- tdleaf: add sparse v_ft_w persistence (.tdleaf.bin v8) and per-session
+               FT LR warmup to eliminate per-restart Elo dip (src/nnue.cpp,
+               src/tdleaf.h, scripts/merge_tdleaf.py, scripts/compare_nnue_learning.py).
+               Root cause: v_ft_w (FT per-weight second moment, ~92 MB) was zeroed at
+               every session restart (too large to persist at full size).  Even with the
+               t_ft_session bc2 fix, the per-weight adaptive step sizes were noisier for
+               ~1000 Adam steps (4000 games) while v re-accumulated, causing a 10–20 Elo
+               dip that recovered over a few thousand games.
+               Fix 1 — sparse v_ft_w persistence (v8 format): v_ft_w rows for all dirty
+               feature indices (same set as FT weight rows) are saved/restored with max-
+               merge across training instances.  Restored rows set ft_v_warmed[fi]=true so
+               the RMSProp bc2 uses t_adam rather than t_ft_session (correct for warmed v).
+               Fix 2 — per-session FT LR warmup: ramp FT LR from 0→full over first
+               TDLEAF_FT_SESSION_WARMUP=100 Adam steps (400 games) of each session via
+               t_ft_session.  Damps FT updates during the v accumulation phase regardless
+               of whether v was loaded from disk.  Applies every restart, unlike the
+               existing TDLEAF_ADAM_WARMUP which fires only in the first session.
+               v7 files load correctly (no v8 FT v section → v_ft_w stays zero, all rows
+               cold → same behaviour as before, now with session warmup applied).
+
+2026_04_08 -- training: remove automatic +1 depth bonus for prev-checkpoint opponent
+               (scripts/training_run.py).  The bonus was intended to compensate for
+               the learner's mid-session weight updates but in practice biased match
+               results and was not clearly beneficial.  Both engines now use depth2.
+
+2026_04_08 -- TDLeaf: reduce sigmoid temperature K from 350 cp to 290 cp (src/tdleaf.h).
+               Empirically fitted from 968,453 self-play games (91M annotated positions)
+               via maximum-likelihood estimation: sigmoid(score/K) vs game result.
+               Optimal K ≈ 292 cp (NLL=0.5608 vs 0.5629 at K=350; Brier 0.14177 vs 0.14344).
+               K=350 was too soft — at ±200–400 cp the sigmoid underestimated win/loss
+               probability by 3–8%.  K=290 better matches the empirical sharpness of
+               Leaf's self-play results at moderate evaluations.  The NLL well is broad
+               (250–325 cp), so 290 is chosen as a round value near the optimum.
+
+2026_04_08 -- TDLeaf: fix FT RMSProp bc2 cold-start causing ~31× oversized FT updates
+               at every session restart (src/nnue.cpp).
+               Root cause: v_ft_w (FT per-weight second moment, ~92 MB) is zeroed at
+               startup because it is too large to persist.  The bc2 denominator for FT
+               was computed from the global t_adam (persisted), which is large after any
+               training — giving ft_bc2≈1.  With v=0 and bc2=1 the first FT step is
+               sv = sqrt(0/1+ε) = ε, so dw = LR/ε ≈ 31× the intended LR magnitude.
+               This caused FT weights to overshoot on every restart, degrading
+               previously learned positional knowledge and causing Elo loss that
+               persisted for thousands of games while v re-accumulated.
+               Fix: introduce a session-local counter t_ft_session (starts at 0 on every
+               process start, not persisted).  Compute ft_bc2 from
+               min(t_adam, t_ft_session) instead of t_adam alone.  When t_ft_session is
+               small (early in a session), this applies correct bias correction for the
+               freshly-zeroed v (standard Adam formula v/(1-β²^T_session)), limiting
+               the first step to the intended ±LR0.  As t_ft_session grows to match
+               t_adam the min saturates and behaviour reverts to the original formula.
+               Note: the existing LR warmup does NOT help this issue — warmup checks
+               t_adam (persisted and already large), so it never re-fires on restarts.
+
+2026_04_08 -- training_run.py: startup .tdleaf.bin backup and .games-before-names fix (scripts/).
+               Two improvements:
+               (1) When continuing from an existing .tdleaf.bin (not starting fresh),
+               a copy is saved as .tdleaf.bin.bak before any training begins.  This
+               allows recovery of the pre-run weights if a session produces bad results
+               or is interrupted at an inopportune moment.
+               (2) The .games sidecar is now written to current_games at the very start
+               of Step 6 (before any output filename is determined), so the sidecar
+               count and the game-count embedded in exported filenames are always
+               consistent on all exit paths (clean completion, rotation interruption,
+               Ctrl-C).  Previously .games could lag current_games on some interrupt
+               paths, causing exported files to carry game-count labels that did not
+               match the sidecar.
+
+2026_04_08 -- TDLeaf: persist Adam m (first moment) in .tdleaf.bin v7 (src/nnue.cpp).
+               Adds a new "Adam m" section to the binary file, upgrading the format from
+               v6 to v7.  Motivation: each training session previously cold-started m=0
+               while v (second moment) and t_adam were restored, causing the optimizer to
+               "rediscover" gradient directions for the first few thousand games — observed
+               as a slow or negative Elo trend at the start of every run.
+               What is persisted (same exclusions as v): FC m arrays (all 8 stacks,
+               ~563 KB), FT bias m (4 KB), piece_val m (192 B), sparse PSQT m (same
+               dirty rows as weights/v, ~720 KB max).  FT weight m is not applicable
+               (FT uses RMSProp, no m array).  Total new storage: ~1.5 MB.
+               Multi-writer merge: element-wise average (m_file + m_local) / 2.
+               Rationale: workers seeing the same gradient direction reinforce each other;
+               conflicting directions reduce toward zero (appropriate — uncertainty about
+               direction → smaller step, not a random-direction step).
+               Load: m is fully restored at session start; optimizer continues with
+               directional bias rather than rebuilding from zero.
+               Backward compatibility: v2–v6 files load normally and upgrade to v7 on
+               next save.  merge_tdleaf.py and compare_nnue_learning.py will need
+               updating for the new section (see scripts/).
+
+2026_04_08 -- match.py / training_run.py: --no-repeat flag for single-play-per-opening (scripts/).
+               match.py: new --no-repeat flag passes -rounds N to cutechess-cli without
+               -games 2 -repeat, so each opening position is played once rather than
+               twice (colors swapped).  Increases opening diversity per N games at the
+               cost of per-opening color balance.  Without the flag, even game counts
+               still use -games 2 -repeat as before.
+               training_run.py: self-play segments (both engines learn symmetrically)
+               now pass --no-repeat by default, maximising the variety of positions seen
+               during training.  Non-self-play segments (prev-checkpoint, external engine)
+               retain -games 2 -repeat for fairer W/L/D accounting.
+
+2026_04_08 -- training_run.py: fix interrupted-run filename collision; add .tdleaf.bin snapshots.
+               Two fixes:
+               (1) On premature termination (Ctrl-C), the final export now uses
+               *-<games>g-partial.nnue instead of *-<games>g.nnue, avoiding silent
+               overwrite of an existing game-count checkpoint.  (The .games sidecar is
+               not updated until a match completes, so current_games may equal prior_games
+               for a single interrupted match.)  If rotation completed some segments before
+               interruption, the completed game count is now banked to .games.
+               (2) At the end of every invocation (normal completion or interrupted), a copy
+               of the current .tdleaf.bin is saved as <net_base>.tdleaf.bin-<games>g for
+               archival and rollback.  The snapshot filename is shown in the export output
+               and the final summary.
+
+2026_04_08 -- match.py: remove automatic -noswap when using opening files (scripts/).
+               -noswap was previously added unconditionally whenever an EPD openings
+               file or Polyglot book was supplied.  With -games 2 -repeat -noswap,
+               cutechess-cli assigns engine1 as white for every game pair, so the
+               learner was always playing white.  The flag is now opt-in via --noswap
+               (default off), which is the correct default for symmetric training.
+
+2026_04_08 -- make_training_epd.py: fix eval worker deadlock and UCI detection (scripts/).
+               Two fixes to the --quiet-only eval filter:
+               (1) Python's file iterator (for line in proc.stdout) uses 8 KB read-ahead
+               buffering that deadlocks when alternating stdin writes and stdout reads on
+               a subprocess pipe.  All loops replaced with explicit proc.stdout.readline()
+               calls.
+               (2) Leaf auto-detects protocol from the first stdin command, but when stdin
+               is a pipe (not a terminal) it stays in interactive CLI mode and ignores
+               "uci".  The eval worker was rewritten to use the xboard protocol instead:
+               startup sequence xboard/force/post/sd N, then per-position setboard/go;
+               score is parsed from the post output line (depth score_cp time nodes pv).
+               Result: no stalls; ~75 positions/sec with 4 workers at depth 10.
+
+2026_04_07 -- make_training_epd.py: eval filter for --quiet-only (scripts/, docs/).
+               --quiet-only now also invokes a Leaf eval binary (default: Leaf_vclassic_eval)
+               to score each generated position and discard those with |score| > --eval-limit
+               cp (default: 50 cp = 0.5 pawns).  Uses --eval-workers parallel UCI engine
+               processes for speed.  Chess960 castling rights are stripped from the FEN
+               before evaluation to avoid Shredder notation parsing issues.  Forced-mate
+               positions are always discarded.  If the binary is not found a warning is
+               printed and eval filtering is skipped.  Compile eval binary with:
+               perl src/comp.pl classic_eval OVERWRITE
+               Also: --random-suffix K, --frc-replicates K, --total/--frc-fraction sizing.
+               SCRIPT_USE.md updated with new option table rows and eval-filter description.
+
+2026_04_07 -- make_training_epd.py: random suffix moves and FRC replication (scripts/, docs/).
+               --random-suffix K: play K random legal moves after each book/FRC position
+               before recording the EPD, exploding the unique position count (normbk02.bin
+               at ply 8 yields ~2500 unique positions; adding 2 suffix moves gives ~1M+).
+               --quiet-only: restrict suffix moves to non-captures (recommended; keeps
+               material balanced).  --frc-replicates K: with --random-suffix, generates K
+               unique suffix-varied samples per FRC position (up to 960×K unique EPDs);
+               without suffix, K identical copies for position weighting.  --total N
+               --frc-fraction F: fraction-based sizing auto-computes frc_replicates and
+               book_positions.  Global deduplication removed (book positions are still
+               deduplicated internally; FRC replication without suffix is intentional).
+               SCRIPT_USE.md updated with unique-count table and revised examples.
+
+2026_04_07 -- make_training_epd.py: FRC replication and fraction-based sizing (scripts/,
+               docs/).
+               Added --frc-replicates K: include each of the 960 FRC starting positions
+               K times in the output (for boosting FRC representation in large EPD files).
+               Added --total N --frc-fraction F: convenience mode that computes
+               frc_replicates and book_positions so that FRC entries are approximately
+               the requested fraction of the total.  Example: --total 100000
+               --frc-fraction 0.20 → frc_replicates=21 → 20160 FRC + 79840 book = 100000.
+               Global deduplication removed (was collapsing intentional replicates);
+               book positions are still deduplicated internally.  SCRIPT_USE.md updated.
+
+2026_04_06 -- make_training_epd.py: generate combined FRC+book opening EPD (scripts/,
+               learn/, docs/).
+               New script that produces training_openings.epd: all 960 Chess960 starting
+               positions + ~2000 positions sampled from normbk02.bin at 8 ply via weighted
+               random walks through the Polyglot book.  Output is deduplicated and shuffled.
+               training_run.py: auto-detects learn/training_openings.epd; when present, uses
+               it as default openings (EPD format + Fischer Random variant) for both training
+               and validation matches, bypassing the separate normbk02.bin / Fischer question.
+               Falls back to existing behaviour when not found.
+
 2026_04_04 -- Opponent roster with rotation in training_run.py (scripts/training_run.py,
                scripts/match.py, docs/).
                training_run.py now supports a roster of opponent types (self-play, previous
