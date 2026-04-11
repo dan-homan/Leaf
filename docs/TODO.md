@@ -6,6 +6,52 @@ Planned investigations, improvements, and open questions.
 
 ## TDLeaf(λ) Training
 
+### Training depth curriculum (active area — 2026-04-11)
+
+Empirical findings from nn-fresh-260410 training (~1.4M games total):
+
+**Phase 1 — pure self-play, timed, 500k games:**
+Elo vs classic_eval (timed, ~40 Elo speed penalty for NNUE):
+0g → -1000, 10k → -590, 50k → -380, 200k → -240, 500k → -170.
+Rapid early gain followed by strong diminishing returns.
+
+**Phase 2 — mixed self-play + vs classic_eval, depth=6 fixed, ~930k games:**
+Elo vs classic_eval at depth=6 (no speed offset):
+Start → -37, after 300k games → -18, then essentially flat through 930k games.
+The first 300k games gained ~19 Elo; the next 630k gained ~2-3 Elo total.
+Conclusion: training stalled at depth=6. The engine quickly exhausts the
+learnable signal at any fixed depth and reaches a local equilibrium.
+
+**Phase 3 — depth=8, 50k games:**
+Virtually all improvement occurred in the first 10k games, then flat again.
+Pattern: switching depth gives a one-time "calibration kick" as the network
+corrects its weights for the deeper signal, then stalls at the new equilibrium.
+
+**Key insight — Adam v is NOT the cause of plateaus:**
+After ~1.4M games, FC max v = 4.5e-6 → effective FC LR = 0.01/sqrt(4.5e-6) ≈ 4.7.
+Adam v is negligibly small; the FC plateau is caused by small TD errors
+(gradients are tiny when the engine is near its depth-equilibrium), not by
+accumulated v damping updates. Optimizer reset would give a brief burst but
+not sustained improvement.
+
+**Recommended strategy going forward:**
+Depth curriculum: spend ~10-15k games per depth step, then advance.
+e.g. d8 → d10 → d12 → d14. Each transition gives one calibration kick.
+Staying at any depth beyond ~10-15k games past the initial burst yields
+diminishing returns. The depth itself is the primary lever, not game volume.
+
+**Future experiments to try:**
+- Depth asymmetry: NNUE at d8, opponent at d10 (stronger signal without
+  proportionally more NNUE search cost).
+- Adam reset at depth transitions: zero v/m via `reset_adam.py` when
+  switching depth to allow full-sized steps into the new signal. Given
+  v is already near zero for FC, this matters most for FT v (sparse rows)
+  and piece_val v. Low priority given small FC v, but worth testing at d10+.
+- Increasing λ toward 1.0 at higher depths: longer-range credit assignment
+  helps with positional learning once tactical signal is cleaner.
+- Larger/more varied opening EPD set: position diversity creates fresh
+  gradients even at fixed depth, potentially slowing the plateau.
+
 ### Adam hyperparameter tuning
 
 The Adam optimizer uses five separate LRs tuned from 190k-game weight distribution
