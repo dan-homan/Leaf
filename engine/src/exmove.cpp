@@ -23,7 +23,8 @@ int position::exec_move(move emove, int ply)
   // basic sanity check for illegal moves that could
   //  cause problems.  Return 0 in these cases.
   if(mv.from > 63 || mv.to > 63 ||
-     PSIDE(sq[mv.from]) != wtm || PTYPE(sq[mv.to]) == KING) { 
+     PSIDE(sq[mv.from]) != wtm ||
+     (PTYPE(sq[mv.to]) == KING && !(mv.type&CASTLE))) {
     write_out("Illegal move detected!\n");
     return 0;
   }
