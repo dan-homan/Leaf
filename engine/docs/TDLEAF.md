@@ -20,8 +20,9 @@ All learning code is gated by `#if TDLEAF`; when `TDLEAF=0` (default) no overhea
 > from inside `make_move()`, which is part of the xboard game loop.  When Leaf runs
 > under the UCI protocol the GUI drives the game externally — `make_move()` is never
 > called — so **no weights are updated and no `.tdleaf.bin` is written**, even if the
-> binary was compiled with `TDLEAF=1`.  Always use xboard-protocol matches (via
-> `match.py` or direct xboard GUI invocation) for training.
+> binary was compiled with `TDLEAF=1`.  `training_run.py` handles this automatically
+> by passing `--proto1 xboard` for the learner.  For manual matches, use
+> `match.py --proto xboard` or `--proto1 xboard`.
 
 ---
 

@@ -126,15 +126,23 @@ cd engine/run/
 ./Leaf_v2026_03_09a
 ```
 
-Self-play matches between two Leaf versions (requires [cutechess-cli](https://github.com/cutechess/cutechess)):
+Matches between engines (requires [cutechess-cli](https://github.com/cutechess/cutechess)):
 
 ```sh
 cd engine/run/
-# Default: each opening played twice (both colors) for balance
+
+# Interactive mode — discovers Leaf binaries and external engines, prompts for options
+python3 match.py
+
+# CLI mode: head-to-head, 200 games
 python3 match.py Leaf_vA Leaf_vB -n 200 -c 4 -tc 10+0.1
+
 # --no-repeat: each opening played once, for maximum position diversity in self-play
 python3 match.py Leaf_vA Leaf_vB -n 200 -c 4 -tc 10+0.1 --no-repeat
 ```
+
+External UCI engines (e.g. Stockfish) can be placed in `engine/tools/engines/<name>/` and
+will be auto-discovered by `match.py` and `training_run.py`.
 
 ---
 

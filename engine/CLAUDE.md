@@ -133,7 +133,10 @@ All scripts live in `scripts/`; `run/` and `learn/` have symlinks for in-place i
 See `docs/SCRIPT_USE.md` for full option tables.
 
 ```sh
-# Run a match (from run/)
+# Run a match — interactive mode (discovers engines, prompts for everything)
+python3 scripts/match.py
+
+# Run a match — CLI mode (from run/)
 python3 scripts/match.py Leaf_vA Leaf_vB -n 200 -c 4 -tc 5+0.05
 
 # Interactive training run (from learn/)

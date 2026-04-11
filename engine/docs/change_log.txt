@@ -1,5 +1,14 @@
 Changes since 2017_12_24
 
+2026_04_11 -- scripts: match.py — add interactive mode (run with no args to discover engines
+               and configure match interactively), UCI protocol default (--proto uci, with
+               --proto1/--proto2 per-engine overrides), engine discovery from engine/run/ and
+               tools/engines/, per-engine working directory from binary location.
+             scripts: training_run.py — external engine [e] option now discovers engines from
+               tools/engines/ and shows a numbered selection list.  Training matches pass
+               --proto1 xboard (learner) and --proto2 uci (external) or xboard (Leaf opponents)
+               automatically.
+
 2026_04_10 -- tdleaf: reduce FC Adam LR from 0.1 to 0.01 to eliminate early-training Elo dip
                (src/tdleaf.h).  Root cause: Adam's adaptive LR amplifies gradient noise when FT
                weights are still random (first ~200 Adam steps / 800 games).  Unlike SGD, where

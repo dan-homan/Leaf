@@ -895,7 +895,8 @@ def main():
     current_games = prior_games
     cycle_log     = []   # list of (cycle, accepted, vw, vd, vl, los)
 
-    def build_match_cmd(opp_exe, num_games, pgn_path, no_repeat=False):
+    def build_match_cmd(opp_exe, num_games, pgn_path, no_repeat=False,
+                        opp_type="self-play"):
         cmd = [
             sys.executable, match_py,
             train_exe,
@@ -906,6 +907,14 @@ def main():
             "--wait", str(wait_ms),
             "--pgn-out", pgn_path,
         ]
+        # Learner (engine1) always uses xboard for TDLeaf hooks.
+        # Leaf opponents (self-play, checkpoint, readonly) also use xboard.
+        # External engines default to UCI.
+        cmd += ["--proto1", "xboard"]
+        if opp_type == "external":
+            cmd += ["--proto2", "uci"]
+        else:
+            cmd += ["--proto2", "xboard"]
         if tc2 != tc1:
             cmd += ["--tc2", tc2]
         if use_training_epd:
@@ -1058,7 +1067,8 @@ def main():
 
                     seg_pgn = pgn_path.replace(".pgn", f"_seg{seg_num:02d}.pgn")
                     cmd = build_match_cmd(entry["exe"], seg_games, seg_pgn,
-                                         no_repeat=(entry["type"] == "self-play"))
+                                         no_repeat=(entry["type"] == "self-play"),
+                                         opp_type=entry["type"])
                     # Extract learner binary name for PGN parsing.
                     train_basename = os.path.basename(train_exe)
                     result = subprocess.run(cmd, cwd=run_dir)
@@ -1130,7 +1140,8 @@ def main():
                 if is_prev:
                     prepare_prev_checkpoint_opponent()
                 cmd = build_match_cmd(opp_exe, n_games, pgn_path,
-                                     no_repeat=(roster[0]["type"] == "self-play"))
+                                     no_repeat=(roster[0]["type"] == "self-play"),
+                                     opp_type=roster[0]["type"])
                 result = subprocess.run(cmd, cwd=run_dir)
                 if result.returncode != 0:
                     print(f"\nMatch run failed (exit code {result.returncode}).",

@@ -8,9 +8,23 @@ since engines, `.nnue` files, and `.tdleaf.bin` files live there.
 
 ## match.py
 
-Run a head-to-head match or gauntlet between Leaf executables using
-cutechess-cli.  **Invoke from `run/`** (engines and `.nnue` files must be in the
-working directory).
+Run a head-to-head match or gauntlet between chess engines using cutechess-cli.
+Supports Leaf binaries and external UCI engines (e.g. Stockfish, placed in
+`tools/engines/<name>/`).  **Invoke from `run/`** (symlink) or `scripts/`.
+
+### Interactive mode
+
+Run with no arguments for a fully interactive session — the script discovers
+available engines from `engine/run/` (Leaf binaries) and `tools/engines/`
+(external engines), presents numbered menus, and prompts for all match options:
+
+```sh
+cd run/
+python3 match.py                    # fully interactive
+python3 match.py Leaf_vA            # interactive for opponent and options
+```
+
+### CLI mode
 
 ```sh
 cd run/
@@ -25,7 +39,23 @@ python3 match.py Leaf_vtrain_a Leaf_vtrain_b -n 500 -i 10 --wait 500
 # Gauntlet: probe engine vs multiple opponents; all games appended to one PGN
 python3 match.py Leaf_vnew Leaf_v1 Leaf_v2 Leaf_v3 \
     -n 100 --pgn results/gauntlet.pgn
+
+# External engine match (engine binary in tools/engines/stockfish/)
+python3 match.py Leaf_vA stockfish -n 100 -tc 10+0.1
 ```
+
+### Engine discovery
+
+When running interactively (or to resolve bare engine names), the script scans:
+
+- **`engine/run/Leaf_v*`** — Leaf binaries (executables matching the `Leaf_v` prefix)
+- **`tools/engines/<name>/`** — external engines; within each subdirectory the
+  script picks the executable whose filename best matches the directory name (or
+  the largest executable if none match)
+
+Each engine's **working directory** is automatically set to the directory
+containing its binary, so engines can find their data files (books, NNUE nets,
+etc.) without manual `dir=` configuration.
 
 ### Key options
 
@@ -35,6 +65,9 @@ python3 match.py Leaf_vnew Leaf_v1 Leaf_v2 Leaf_v3 \
 | `-i`, `--iterations` | 1 | Iterations per opponent; engines restart between each |
 | `-c`, `--concurrency` | cpu_count/2 | Simultaneous games |
 | `-tc`, `--time-control` | `10+0.1` | Time control (`moves/time+inc` or `time+inc`, seconds) |
+| `--proto` | `uci` | Protocol for both engines (`uci` or `xboard`) |
+| `--proto1` | (from `--proto`) | Override protocol for engine1 only |
+| `--proto2` | (from `--proto`) | Override protocol for engine2 only |
 | `--pgn FILE` | — | Persistent PGN; all games appended across opponents/iterations |
 | `--pgn-out FILE` | auto | Per-iteration PGN (default: `match_<e1>_vs_<e2>.pgn`) |
 | `--fischer-random` | off | Chess960 starting positions |
@@ -48,27 +81,21 @@ python3 match.py Leaf_vnew Leaf_v1 Leaf_v2 Leaf_v3 \
 When more than one opponent is supplied the script enters **gauntlet mode** and
 prints a summary table (Opponent, Games, W, D, L, Score%, Elo diff) at the end.
 
-### UCI vs xboard cross-protocol match
+### Protocol notes
 
-`match.py` always uses `proto=xboard`.  To run a cross-protocol parity test (UCI
-engine vs xboard engine, same binary) call `cutechess-cli` directly:
+The default protocol is **UCI**.  Leaf auto-detects UCI, so no special flags are
+needed.  Use `--proto xboard` (or `--proto1`/`--proto2` for per-engine overrides)
+when running xboard-only engines or TDLeaf training (which requires the xboard
+game loop).
+
+For a cross-protocol parity test (same Leaf binary, UCI vs xboard):
 
 ```sh
-cd run/
-../tools/cutechess-1.4.0/build/cutechess-cli \
-  -engine cmd=./Leaf_vX name=LeafUCI  proto=uci    dir=$(pwd) \
-  -engine cmd=./Leaf_vX name=LeafXB   proto=xboard dir=$(pwd) \
-  -each tc=10+0.1 \
-  -games 2 -rounds 100 -repeat \
-  -concurrency 4 \
-  -openings file=../testing/testsuites/wac.epd format=epd order=random \
-  -pgnout /tmp/uci_vs_xboard.pgn \
-  -resign movecount=5 score=800 \
-  -draw movenumber=40 movecount=8 score=20
+python3 match.py Leaf_vX Leaf_vX --proto1 uci --proto2 xboard -n 200
 ```
 
-Expected result: ~50% score, Elo difference within ±50 (same engine, different wire
-protocol).
+Expected result: ~50% score, Elo difference within ±50 (same engine, different
+wire protocol).
 
 ---
 
@@ -167,8 +194,9 @@ land in `learn/`.
 > **TDLeaf requires xboard protocol.**  Learning hooks are called from inside
 > `make_move()`, which is only reached in the xboard game loop.  Matches driven
 > through a UCI GUI will not update any weights even if the binary was compiled
-> with `TDLEAF=1`.  `training_run.py` and `match.py` both use `proto=xboard` and
-> are the correct tools for all training workflows.
+> with `TDLEAF=1`.  `training_run.py` automatically passes `--proto1 xboard`
+> for the learner and `--proto2 xboard` for Leaf opponents (self-play,
+> checkpoint, read-only) or `--proto2 uci` for external engines.
 
 ```sh
 cd learn/
@@ -182,7 +210,8 @@ python3 training_run.py
 2. **Opponent roster** — build a rotation of one or more opponent types:
    - `[s]` Self-play — both `_a` and `_b` instances learn (symmetric)
    - `[p]` Previous checkpoint — learner vs. its own recent snapshot (read-only)
-   - `[e]` External engine — learner vs. user-supplied executable
+   - `[e]` External engine — learner vs. external UCI engine; shows a numbered
+     list of engines discovered from `tools/engines/`, or enter a custom path
 
    When the roster has multiple entries (or includes `prev-checkpoint`), the user
    sets a **rotation interval** — games are split into segments of that many games,
