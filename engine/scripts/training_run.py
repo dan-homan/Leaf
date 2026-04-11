@@ -52,7 +52,7 @@ import time
 learn_dir = os.path.dirname(os.path.abspath(__file__))
 run_dir   = os.path.normpath(os.path.join(learn_dir, "../run"))
 src_dir   = os.path.normpath(os.path.join(learn_dir, "../src"))
-tools_dir = os.path.normpath(os.path.join(learn_dir, "../tools"))
+tools_dir = os.path.normpath(os.path.join(learn_dir, "../../tools"))
 
 
 # ---------------------------------------------------------------------------

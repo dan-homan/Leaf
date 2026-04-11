@@ -29,7 +29,7 @@ import sys
 
 script_dir    = os.path.dirname(os.path.abspath(__file__))
 run_dir       = os.path.normpath(os.path.join(script_dir, "../run"))
-tools_dir     = os.path.normpath(os.path.join(script_dir, "../tools"))
+tools_dir     = os.path.normpath(os.path.join(script_dir, "../../tools"))
 cutechess_cli = os.path.normpath(os.path.join(tools_dir, "cutechess-1.4.0/build/cutechess-cli"))
 
 
