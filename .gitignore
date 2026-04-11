@@ -4,15 +4,13 @@
 # tb_src/ is local only (tablebases source, not tracked)
 tb_src/
 
-# Except src/, docs/, scripts/, logos/, run/*.py, run/*.txt, learn/, and this file
+# Except engine/, gui/, logos/, run/*.py, run/*.txt, learn/, and this file
+!engine/
+!engine/**
+!gui/
+!gui/**
 !logos/
 !logos/**
-!src/
-!src/**
-!docs/
-!docs/**
-!scripts/
-!scripts/**
 !.gitignore
 !README.md
 !CLAUDE.md
@@ -27,15 +25,26 @@ learn/*
 !learn/*.txt
 !learn/training_openings.epd
 
-# Within src/, ignore OS/editor artifacts and binary/backup files
-src/.DS_Store
-src/**/.DS_Store
-src/*~
-src/**/*~
-src/#*#
-src/**/#*#
-src/*.cpp_*
-src/*.h_save
-src/main_bk.dat
-src/debug.txt
-scripts/__pycache__
+# Within engine/src/, ignore OS/editor artifacts and binary/backup files
+engine/src/.DS_Store
+engine/src/**/.DS_Store
+engine/src/*~
+engine/src/**/*~
+engine/src/#*#
+engine/src/**/#*#
+engine/src/*.cpp_*
+engine/src/*.h_save
+engine/src/main_bk.dat
+engine/src/debug.txt
+engine/scripts/__pycache__
+
+# Within gui/, ignore Flutter build artifacts and IDE files
+gui/build/
+gui/.dart_tool/
+gui/.idea/
+gui/.swiftpm/
+gui/*.iml
+gui/.packages
+gui/.flutter-plugins
+gui/.flutter-plugins-dependencies
+gui/assets/engines/
