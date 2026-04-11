@@ -11,6 +11,9 @@ tb_src/
 !gui/**
 !logos/
 !logos/**
+!scripts/
+scripts/*
+!scripts/build_release.sh
 !.gitignore
 !README.md
 !CLAUDE.md

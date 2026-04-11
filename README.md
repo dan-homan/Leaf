@@ -54,7 +54,7 @@ Leaf can generate a fresh `.nnue` with `--init-nnue --write-nnue <file>`.  A var
 | FC/FT biases | 0 (zero) | |
 | PSQT | Pure material (no PSQ bonuses) | Same value across all 8 buckets |
 
-All int8 weights use **rejection sampling** (truncated Gaussian): samples outside ±127 are discarded and redrawn rather than clipped, avoiding artificial density spikes at the int8 boundaries.  Biases are zero-initialised; PSQT uses pure classical material values (P=100, N=377, B=399, R=596, Q=1197 cp) with no piece-square bonuses — TDLeaf learns positional adjustments.  See [`docs/NNUE.md`](docs/NNUE.md) for details.
+All int8 weights use **rejection sampling** (truncated Gaussian): samples outside ±127 are discarded and redrawn rather than clipped, avoiding artificial density spikes at the int8 boundaries.  Biases are zero-initialised; PSQT uses pure classical material values (P=100, N=377, B=399, R=596, Q=1197 cp) with no piece-square bonuses — TDLeaf learns positional adjustments.  See [`engine/docs/NNUE.md`](engine/docs/NNUE.md) for details.
 
 The network file itself is not modified by Leaf.  All trained weights are stored in a companion **`.tdleaf.bin`** file and loaded on top of (or instead of) the base network at startup.
 
@@ -70,7 +70,7 @@ The network file itself is not modified by Leaf.  All trained weights are stored
 | FC2 | 32 → 1 (FC0 output-15 adds as passthrough) |
 | Score formula | `(psqt_diff/2 + positional) × 100 / 5776` (Stockfish 15.1 exact) |
 
-See [`docs/NNUE.md`](docs/NNUE.md) for full architecture notes, NEON optimizations, and benchmark results.
+See [`engine/docs/NNUE.md`](engine/docs/NNUE.md) for full architecture notes, NEON optimizations, and benchmark results.
 
 ### TDLeaf(λ) Online Learning
 
@@ -84,28 +84,28 @@ Leaf includes a complete **TDLeaf(λ)** reinforcement learning system (Baxter, T
 - **Concurrent multi-instance support:** multiple engine processes can share a single `.tdleaf.bin` via POSIX file locking and per-session delta accumulation with atomic rename
 - **Opponent rotation:** `scripts/training_run.py` manages multi-phase training with configurable opponent rosters (self-play, read-only reference, or external engines), automatic checkpointing, .tdleaf.bin snapshots, and startup backups
 
-Build with `NNUE=1 TDLEAF=1`.  The recommended training workflow is `scripts/training_run.py` (run from `learn/`).  See [`docs/TDLEAF.md`](docs/TDLEAF.md) for the full algorithm, gradient flow, file format, and hyperparameter reference.
+Build with `NNUE=1 TDLEAF=1`.  The recommended training workflow is `scripts/training_run.py` (run from `learn/`).  See [`engine/docs/TDLEAF.md`](engine/docs/TDLEAF.md) for the full algorithm, gradient flow, file format, and hyperparameter reference.
 
 ---
 
 ## Building
 
-Leaf uses a unity build — `src/Leaf.cc` includes all other `.cpp` files.
+Leaf uses a unity build — `engine/src/Leaf.cc` includes all other `.cpp` files.
 
 **Classical eval (no NNUE):**
 ```sh
-g++ -o Leaf src/Leaf.cc -O3 -D VERS="dev" -pthread
+g++ -o Leaf engine/src/Leaf.cc -O3 -D VERS="dev" -pthread
 ```
 
 **With NNUE evaluation:**
 ```sh
-perl src/comp.pl <version> NNUE=1
-# e.g.  perl src/comp.pl 2026_03_09a NNUE=1
+perl engine/src/comp.pl <version> NNUE=1
+# e.g.  perl engine/src/comp.pl 2026_03_09a NNUE=1
 ```
 
 **With NNUE + TDLeaf(λ) learning:**
 ```sh
-perl src/comp.pl <version> NNUE=1 TDLEAF=1
+perl engine/src/comp.pl <version> NNUE=1 TDLEAF=1
 ```
 
 The `perl comp.pl` build script handles include paths, optimization flags, and optional `OVERWRITE` to skip the interactive prompt.  Built binaries land in `run/` with the name `Leaf_v<version>`.
@@ -137,9 +137,27 @@ python3 match.py Leaf_vA Leaf_vB -n 200 -c 4 -tc 10+0.1 --no-repeat
 
 ---
 
+## LeafGUI
+
+**LeafGUI** is a cross-platform Flutter chess GUI included in the `gui/` directory.  It provides a graphical interface for playing against Leaf (or any UCI engine), watching engine-vs-engine matches, and analyzing positions.
+
+Key features: Chess960 support, engine registry with persistent storage, engine-vs-engine mode with dual output, multiple time controls, move list navigation, FEN copy/load, and per-engine skill level adjustment.
+
+**Building the GUI:**
+```sh
+cd gui/
+export PATH="$HOME/develop/flutter/bin:$PATH"
+flutter pub get
+flutter build macos --release
+```
+
+See [`gui/README.md`](gui/README.md) for full documentation.
+
+---
+
 ## License
 
-GNU General Public License.  See [`docs/license.txt`](docs/license.txt) for the full license text.
+GNU General Public License.  See [`engine/docs/license.txt`](engine/docs/license.txt) for the full license text.
 
 ---
 
