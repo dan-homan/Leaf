@@ -174,7 +174,7 @@ Subsequently disabled (TDLEAF_REPLAY_K=0) as benefit faded after first 5000 game
 ### ~~Init-nnue redesign~~ ✓ Implemented (2026-03-23)
 Weight initialization redesigned for TDLeaf training (decoupled from SF15.1 statistics).
 FT weights N(0,5), FC weights N(0,{1,3,2}), all means zero, PSQT pure material (no
-piece-square bonuses).  Separate `TDLEAF_ADAM_FT_LR0=0.2` for sparse FT weights.
+piece-square bonuses).  Separate `TDLEAF_ADAM_FT_LR0=1.0` for sparse FT weights.
 
 ### ~~Flavor A replay~~ ✓ Implemented (2026-03-21)
 Replay now rebuilds accumulators from stored leaf positions using current FT weights,
@@ -188,7 +188,7 @@ retains global bc2 (sparse features need growing global correction).
 
 ### ~~Per-weight LR decay removed~~ ✓ Removed (2026-03-22)
 Per-weight LR decay (`TDLEAF_ADAM_C`, `TDLEAF_ADAM_LR_FLOOR`) removed.  AdamW weight
-decay now handles regularization; LR0 tuned directly to the right value (0.13 FC, 1.6
+decay now handles regularization; LR0 tuned directly to the right value (0.01 FC, 1.6
 PSQT) instead of starting high and decaying.  `--set-cnt` and `_prompt_init_cnt` also
 removed as they existed only to prime the LR decay schedule.
 
@@ -207,8 +207,8 @@ Decisive games get longer eligibility traces; draws use shorter traces to reduce
 balanced-position noise.  Set both to the same value for symmetric behaviour.
 
 ### ~~Mini-batch gradient accumulation~~ ✓ Implemented (2026-03-19)
-Gradients accumulated across `TDLEAF_BATCH_SIZE=4` games before each Adam step.
-Reduces single-game gradient noise and file I/O by ~4×.  `tdleaf_flush_batch()`
+Gradients accumulated across `TDLEAF_BATCH_SIZE=16` games before each Adam step.
+Reduces single-game gradient noise and file I/O.  `tdleaf_flush_batch()`
 applies any pending partial batch at session end.  Set `TDLEAF_BATCH_SIZE=1` to restore
 per-game updates.
 
@@ -225,7 +225,7 @@ instability from cold-start v estimates.  Set `TDLEAF_ADAM_WARMUP=0` to disable.
 ### ~~Adam optimizer~~ ✓ Implemented (2026-03-15), LR decay removed (2026-03-22)
 Adam optimizer with fixed LR (constant after warmup).  Per-weight LR decay was removed
 in favour of direct LR tuning + AdamW weight decay.
-FC/FT: `TDLEAF_ADAM_LR0=0.13`; PSQT: `TDLEAF_ADAM_PSQT_LR0=1.6`.
+FC: `TDLEAF_ADAM_LR0=0.01`; FT: `TDLEAF_ADAM_FT_LR0=1.0`; PSQT: `TDLEAF_ADAM_PSQT_LR0=1.6`.
 FC0/FC1 float shadows clamped to ±127 to prevent zombie weights.  See `docs/TDLEAF.md`.
 
 ### ~~Epoch-based replay~~ ✓ Implemented (2026-03-11)

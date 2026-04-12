@@ -284,8 +284,8 @@ correction.
 
 | Layer | Update Rule | LR0 | Notes |
 |-------|-------------|-----|-------|
-| FC0/FC1/FC2 weights | Full Adam | `TDLEAF_ADAM_LR0 = 0.1` | Float shadow clamped to ±127 after each update |
-| FC0/FC1/FC2 biases  | Full Adam | `TDLEAF_ADAM_LR0 = 0.1` | |
+| FC0/FC1/FC2 weights | Full Adam | `TDLEAF_ADAM_LR0 = 0.01` | Float shadow clamped to ±127 after each update |
+| FC0/FC1/FC2 biases  | Full Adam | `TDLEAF_ADAM_LR0 = 0.01` | |
 | FT weights | RMSProp (per-weight v, no m) | `TDLEAF_ADAM_FT_LR0 = 1.0` | Sparse; higher LR than FC to compensate for fewer updates |
 | FT biases  | Full Adam | `TDLEAF_ADAM_FT_BIAS_LR0 = 0.01` | Reduced LR to prevent dying-ReLU — see below |
 | PSQT       | Full Adam | `TDLEAF_ADAM_PSQT_LR0 = 1.6` | Separate LR0 required — see below |
@@ -361,7 +361,7 @@ per-weight bias correction and monitoring.
 
 | Constant | Value | Notes |
 |----------|-------|-------|
-| `TDLEAF_ADAM_LR0` | 0.1 | Step size for FC layers (float weight units) |
+| `TDLEAF_ADAM_LR0` | 0.01 | Step size for FC layers (float weight units) |
 | `TDLEAF_ADAM_FT_LR0` | 1.0 | Step size for FT weights (sparse; need higher LR than dense FC) |
 | `TDLEAF_ADAM_FT_BIAS_LR0` | 0.01 | Step size for FT biases (10× slower than FC to prevent dying-ReLU) |
 | `TDLEAF_ADAM_PSQT_LR0` | 1.6 | Step size for PSQT (int32 scale; ~1000× FC) |
@@ -370,7 +370,7 @@ per-weight bias correction and monitoring.
 | `TDLEAF_ADAM_BETA2` | 0.999 | Second-moment decay (all layers) |
 | `TDLEAF_ADAM_EPS` | 1e-8 | Numerical floor in denominator |
 | `TDLEAF_ADAM_WARMUP` | 50 | Linear LR warmup: ramp from 0 to full LR over first N Adam steps (0 = disabled) |
-| `TDLEAF_BATCH_SIZE` | 4 | Mini-batch: accumulate gradients across N games before each Adam step |
+| `TDLEAF_BATCH_SIZE` | 16 | Mini-batch: accumulate gradients across N games before each Adam step |
 | `TDLEAF_WEIGHT_DECAY` | 1e-4 | AdamW decoupled weight decay coefficient (FC + FT weights only) |
 | `TDLEAF_GRAD_CLIP_NORM` | 1.0 | Global gradient L2 norm clip threshold; 0 = disabled |
 
@@ -383,7 +383,7 @@ Set `TDLEAF_GRAD_CLIP_NORM = 0.0` to disable gradient clipping.
 
 ## Mini-Batch Gradient Accumulation
 
-By default (`TDLEAF_BATCH_SIZE=4`), gradients are accumulated across 4 games before
+By default (`TDLEAF_BATCH_SIZE=16`), gradients are accumulated across 16 games before
 a single Adam step is applied.  This gives the optimizer a more reliable gradient signal
 per step, reducing single-game noise that otherwise causes Adam's first moment to chase
 stochastic fluctuations.
@@ -400,10 +400,10 @@ stochastic fluctuations.
 
 ### Trade-offs
 
-- **Pro:** each Adam step uses ~4× more gradient data, improving signal-to-noise ratio.
-- **Pro:** file I/O reduced by ~4× (one write per batch instead of per game).
+- **Pro:** each Adam step uses ~16× more gradient data, improving signal-to-noise ratio.
+- **Pro:** file I/O reduced by ~16× (one write per batch instead of per game).
 - **Con:** weight updates are delayed by up to `BATCH_SIZE-1` games (negligible in practice;
-  the delay is <1 second at typical game durations).
+  the delay is a few seconds at typical game durations).
 
 Set `TDLEAF_BATCH_SIZE = 1` to restore the original per-game update behaviour.
 

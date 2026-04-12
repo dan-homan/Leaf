@@ -109,9 +109,14 @@ perl comp.pl <version> NNUE=1
 perl comp.pl <version> NNUE=1 TDLEAF=1
 ```
 
+**With NNUE embedded in binary (self-contained, no external .nnue file needed):**
+```sh
+perl comp.pl <version> NNUE=1 NNUE_EMBED=1 NNUE_NET=nn-ad9b42354671.nnue
+```
+
 The `perl comp.pl` build script handles include paths, optimization flags, and optional `OVERWRITE` to skip the interactive prompt.  Built binaries land in `engine/run/` with the name `Leaf_v<version>`.
 
-The network file (default: `to-be-trained.nnue`) must be present in the same directory as the binary, or in the directory from which the engine is launched.  A fresh network can be generated with `--init-nnue --write-nnue <file>` before training.  Any Stockfish 15.1–era HalfKAv2_hm network is compatible and can be substituted at compile time with `NNUE_NET=<filename>`.
+The network file (default: `to-be-trained.nnue`) must be present in the same directory as the binary, or in the directory from which the engine is launched — unless `NNUE_EMBED=1` was used, in which case the net is baked into the binary.  A fresh network can be generated with `--init-nnue --write-nnue <file>` before training.  Any Stockfish 15.1–era HalfKAv2_hm network is compatible and can be substituted at compile time with `NNUE_NET=<filename>`.
 
 ---
 
@@ -141,7 +146,7 @@ python3 match.py Leaf_vA Leaf_vB -n 200 -c 4 -tc 10+0.1
 python3 match.py Leaf_vA Leaf_vB -n 200 -c 4 -tc 10+0.1 --no-repeat
 ```
 
-External UCI engines (e.g. Stockfish) can be placed in `engine/tools/engines/<name>/` and
+External UCI engines (e.g. Stockfish) can be placed in `tools/engines/<name>/` and
 will be auto-discovered by `match.py` and `training_run.py`.
 
 ---

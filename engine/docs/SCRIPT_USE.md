@@ -362,29 +362,29 @@ python3 verify_fc0.py
 
 ---
 
-## launch_epoch.py
+## launch_leaf.py
 
-Registers an Leaf binary in cutechess's `engines.json` and launches the
+Registers a Leaf binary in cutechess's `engines.json` and launches the
 cutechess GUI.  **Invoke from `run/`**.
 
 ```sh
 cd run/
-python3 launch_epoch.py Leaf_v2026_03_09a
+python3 launch_leaf.py Leaf_v2026_03_09a
 ```
 
 If no executable name is given, defaults to `Leaf`.
 
 ---
 
-## run_epoch.py
+## run_leaf.py
 
-Wrapper that launches an Leaf binary with `run/` as its working directory,
+Wrapper that launches a Leaf binary with `run/` as its working directory,
 ensuring it finds `search.par`, `main_bk.dat`, and the `.nnue` network file.
 Useful as the engine command inside cutechess or other GUIs.
 
 ```sh
 # As engine command in cutechess:
-python3 /path/to/run/run_epoch.py Leaf_v2026_03_09a
+python3 /path/to/run/run_leaf.py Leaf_v2026_03_09a
 ```
 
 ---
