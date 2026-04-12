@@ -116,7 +116,11 @@ Leaf supports three interface modes, selected at runtime by the first command re
 
 UCI pondering: `go ponder` sets `uci_in_ponder=1` + `analysis_mode=1` rather than `game.ts.ponder=1`, because the GUI has already applied the expected opponent move in the `position` command. `ponderhit` clears `uci_in_ponder` and switches to a time-limited search on the same position. `stop` terminates the ponder search and emits `bestmove`.
 
-UCI_Chess960: when `setoption name UCI_Chess960 value true` is sent, castling moves use king-captures-own-rook notation (e.g. `e1h1` instead of `e1g1` for standard kingside castling).  Output (`uci_move_str`) maps the internal king-destination to the rook's starting square via `Krook[side]`/`Qrook[side]`.  Input (`uci_parse_move`) detects king targeting its own rook square and maps back to the internal destination (g1/c1/g8/c8), with fallback to standard matching for non-castling king moves to those squares.
+UCI_Chess960: when `setoption name UCI_Chess960 value true` is sent, castling notation is handled by two boundary translation functions in `uci.cpp`, leaving `exec_move` and search untouched:
+- `uci_960_input(s, pos)` → translates incoming king-captures-own-rook to Leaf's internal king-to-destination format.  Returns `true` if translated (castling detected).  Uses `PSIDE(sq[from])` for side detection, not rank — prevents false translation when a king captures an opponent's rook.  Only translates when the target square has an own rook matching `Krook[side]` or `Qrook[side]`.
+- `uci_960_output(m, out, pos)` → translates outgoing castling moves (CASTLE flag) from king-destination to king-captures-rook via `Krook[side]`/`Qrook[side]`.
+- `uci_parse_move` accepts `require_castle` flag from `uci_960_input` to disambiguate castling from regular king moves that share the same from/to squares.
+- `exec_move` exempts CASTLE moves from the "can't capture own king" sanity check, handling from==to castling when king starts on the destination square.
 
 TDLeaf learning is inactive in UCI mode (the engine never calls `make_move()`, so the TDLeaf hooks in `make_move()` are never reached).
 

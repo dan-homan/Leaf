@@ -70,28 +70,11 @@ static std::string uci_dequeue_blocking()
 //----------------------------------------------------------------------
 
 // Convert a Leaf move to UCI string (e.g. "e2e4", "e7e8q")
-static void uci_move_str(move m, char out[6], const position *pos = nullptr)
+static void uci_move_str(move m, char out[6])
 {
     if (!m.t) { strcpy(out, "0000"); return; }
     int from = m.b.from;
     int to   = m.b.to;
-
-    // UCI_Chess960: castling is encoded as king-captures-own-rook
-    if (uci_chess960 && (m.b.type & CASTLE) && pos) {
-        // to is the king's destination (g1/c1/g8/c8 internally);
-        // output the rook's starting square instead.
-        int side = (from < 8) ? WHITE : BLACK;
-        int rook_sq;
-        if (to == 6 || to == 62)     // king-side
-            rook_sq = pos->Krook[side];
-        else                         // queen-side
-            rook_sq = pos->Qrook[side];
-        out[0] = 'a' + (from    & 7);  out[1] = '1' + (from    >> 3);
-        out[2] = 'a' + (rook_sq & 7);  out[3] = '1' + (rook_sq >> 3);
-        out[4] = '\0';
-        return;
-    }
-
     out[0] = 'a' + (from & 7);  out[1] = '1' + (from >> 3);
     out[2] = 'a' + (to   & 7);  out[3] = '1' + (to   >> 3);
     out[4] = '\0';
@@ -103,9 +86,57 @@ static void uci_move_str(move m, char out[6], const position *pos = nullptr)
     }
 }
 
+//----------------------------------------------------------------------
+// UCI_Chess960 boundary translation
+//
+// Leaf internally represents castling as king-to-destination (g1/c1/g8/c8).
+// UCI_Chess960 protocol encodes castling as king-captures-own-rook.
+// These two functions translate at the UCI boundary so the search and
+// exec_move never see Chess960 notation.
+//----------------------------------------------------------------------
+
+// Translate incoming UCI move string: king-captures-rook -> king-to-destination.
+// Modifies `s` in place (only the destination characters, positions 2-3).
+// Returns true if the move was translated (i.e., it's a castling move).
+static bool uci_960_input(char *s, const position &p)
+{
+    if (!uci_chess960 || !s || strlen(s) < 4) return false;
+    int fc = s[0] - 'a', fr = s[1] - '1';
+    int tc = s[2] - 'a', tr = s[3] - '1';
+    if (fc<0||fc>7||fr<0||fr>7||tc<0||tc>7||tr<0||tr>7) return false;
+    int from = fr*8 + fc;
+    int to   = tr*8 + tc;
+    if (PTYPE(p.sq[from]) != KING) return false;
+    int side = PSIDE(p.sq[from]);
+    // Only translate if target square actually has our rook (confirms castling)
+    if (PTYPE(p.sq[to]) != ROOK || PSIDE(p.sq[to]) != side) return false;
+    int dest = -1;
+    if (to == p.Krook[side])      dest = (side == WHITE) ? 6 : 62;
+    else if (to == p.Qrook[side]) dest = (side == WHITE) ? 2 : 58;
+    if (dest < 0) return false;
+    s[2] = 'a' + (dest & 7);
+    s[3] = '1' + (dest >> 3);
+    return true;
+}
+
+// Translate outgoing UCI move string: king-to-destination -> king-captures-rook.
+// Modifies `out` in place.
+static void uci_960_output(move m, char *out, const position &pos)
+{
+    if (!uci_chess960 || !(m.b.type & CASTLE)) return;
+    int from = m.b.from;
+    int to   = m.b.to;
+    int side = (from < 8) ? WHITE : BLACK;
+    int rook_sq = (to == 6 || to == 62) ? pos.Krook[side] : pos.Qrook[side];
+    out[2] = 'a' + (rook_sq & 7);
+    out[3] = '1' + (rook_sq >> 3);
+}
+
 // Parse a UCI move string and find the matching legal move.
 // Returns a move with t==0 if not found.
-static move uci_parse_move(const char *s, position &p, ts_thread_data *tdata_ptr)
+// If require_castle is true, only match moves with the CASTLE flag
+// (used when uci_960_input identified the move as castling).
+static move uci_parse_move(const char *s, position &p, ts_thread_data *tdata_ptr, bool require_castle = false)
 {
     move nomove; nomove.t = 0;
     if (!s || strlen(s) < 4) return nomove;
@@ -126,39 +157,12 @@ static move uci_parse_move(const char *s, position &p, ts_thread_data *tdata_ptr
         }
     }
 
-    // UCI_Chess960: castling is king-captures-own-rook.
-    // Detect king moving to own rook square and try as castling first.
-    int castle_to = -1;
-    if (uci_chess960) {
-        int piece = p.sq[from] & 7;  // strip color bits
-        if (piece == KING) {
-            int side = (fr == 0) ? WHITE : BLACK;
-            if (to == p.Krook[side]) {
-                castle_to = (side == WHITE) ? 6 : 62;   // g1 or g8
-            } else if (to == p.Qrook[side]) {
-                castle_to = (side == WHITE) ? 2 : 58;   // c1 or c8
-            }
-        }
-    }
-
     move_list ml;
     p.allmoves(&ml, tdata_ptr);
-
-    // If this could be castling, try that first.
-    if (castle_to >= 0) {
-        for (int i = 0; i < ml.count; i++) {
-            move m = ml.mv[i].m;
-            if (m.b.from != from || m.b.to != castle_to) continue;
-            if (!(m.b.type & CASTLE)) continue;
-            position tmp = p;
-            if (tmp.exec_move(m, 0)) return m;
-        }
-    }
-
-    // Standard move matching (also handles non-castling king moves to rook square).
     for (int i = 0; i < ml.count; i++) {
         move m = ml.mv[i].m;
         if (m.b.from != from || m.b.to != to) continue;
+        if (require_castle && !(m.b.type & CASTLE)) continue;
         if (promo && !(m.b.type & PROMOTE)) continue;
         if (promo && m.b.promote != promo) continue;
         if (!promo && (m.b.type & PROMOTE)) continue;
@@ -330,7 +334,10 @@ static void uci_set_position(const std::string &line)
     // Replay the move list after "moves" keyword
     while (iss >> tok) {
         if (tok == "moves") continue;
-        move m = uci_parse_move(tok.c_str(), game.pos, &game.ts.tdata[0]);
+        char mbuf[8];
+        strncpy(mbuf, tok.c_str(), sizeof(mbuf)-1); mbuf[sizeof(mbuf)-1] = '\0';
+        bool is_960_castle = uci_960_input(mbuf, game.pos);
+        move m = uci_parse_move(mbuf, game.pos, &game.ts.tdata[0], is_960_castle);
         if (!m.t) break;
         // Record hash in tdata position lists for all threads (for repetition detection)
         for (int ti = 0; ti < MAX_THREADS; ti++) {
@@ -480,7 +487,8 @@ static void uci_dispatch_go(const std::string &line)
     }
 
     char best_str[6] = "0000";
-    uci_move_str(game.best, best_str, &game.pos);
+    uci_move_str(game.best, best_str);
+    uci_960_output(game.best, best_str, game.pos);
 
     // Ponder move is PV[1] if ponder option is on
     move ponder_mv; ponder_mv.t = 0;
@@ -493,7 +501,8 @@ static void uci_dispatch_go(const std::string &line)
         position tmp = game.pos;
         if (tmp.exec_move(game.best, 0)) {
             char ponder_str[6] = "0000";
-            uci_move_str(ponder_mv, ponder_str, &tmp);
+            uci_move_str(ponder_mv, ponder_str);
+            uci_960_output(ponder_mv, ponder_str, tmp);
             printf("bestmove %s ponder %s\n", best_str, ponder_str);
         } else {
             printf("bestmove %s\n", best_str);
@@ -536,7 +545,8 @@ void uci_send_info(int score, int depth, int elapsed_cs, unsigned long long node
         move m = ts->tdata[0].pc[0][i];
         if (!m.t) break;
         char ms[6];
-        uci_move_str(m, ms, &p);
+        uci_move_str(m, ms);
+        uci_960_output(m, ms, p);
         printf(" %s", ms);
         if (!p.exec_move(m, 0)) break;
     }

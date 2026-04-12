@@ -1,11 +1,18 @@
 Changes since 2017_12_24
 
-2026_04_11 -- uci: add UCI_Chess960 support.  When enabled via setoption, castling moves use
-               king-captures-own-rook notation (e.g. e1h1 instead of e1g1) in bestmove, ponder,
-               and PV output.  Incoming castling moves are detected by king targeting its own rook
-               square and mapped to the internal king-destination representation.  Handles all
-               Chess960 edge cases including adjacent king-rook and king-on-destination positions.
-               Tested: 150 FRC games via cutechess-cli with zero errors.
+2026_04_11 -- uci: rewrite UCI_Chess960 castling as boundary translation.  Two small functions
+               at the UCI I/O layer handle all Chess960 notation:
+               - uci_960_input: translates incoming king-captures-rook to Leaf's internal
+                 king-to-destination format; returns a flag so uci_parse_move requires the
+                 CASTLE move type (prevents ambiguity when the destination square also admits
+                 a regular king move).
+               - uci_960_output: translates outgoing castling moves to king-captures-rook.
+               Side detection uses actual piece color (PSIDE), not rank — fixes false castling
+               translation when a king captures an opponent's rook on the back rank.
+             exmove: exempt castling from the "can't capture own king" sanity check
+               (mv.type&CASTLE), fixing from==to castling when king starts on the destination
+               square (e.g. king on g1 castling kingside).
+               Tested: 700 FRC games via cutechess-cli with zero illegal moves.
              scripts: match.py — add interactive mode (run with no args to discover engines
                and configure match interactively), UCI protocol default (--proto uci, with
                --proto1/--proto2 per-engine overrides), engine discovery from engine/run/ and
