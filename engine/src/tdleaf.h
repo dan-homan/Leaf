@@ -72,7 +72,7 @@ static const int   TDLEAF_ADAM_WARMUP        = 50;  // linear LR warmup over fir
 static const int   TDLEAF_FT_SESSION_WARMUP  = 100; // per-session FT LR ramp over first N Adam steps.
                                                      // Applied every restart via t_ft_session (not persisted).
                                                      // Damps FT updates during the v_ft_w accumulation phase.
-static const int   TDLEAF_BATCH_SIZE    = 4;       // accumulate gradients across N games before Adam step
+static const int   TDLEAF_BATCH_SIZE    = 16;       // accumulate gradients across N games before Adam step
 
 // ---------------------------------------------------------------------------
 // Per-ply record: accumulator snapshot + search score
