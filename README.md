@@ -13,7 +13,7 @@
 ```sh
 # Build with NNUE evaluation (from engine/run/)
 cd engine/run/
-perl comp.pl myversion NNUE=1 NNUE_NET=nn-ad9b42354671.nnue
+perl comp.pl myversion NNUE=1 NNUE_NET=nn-to-be-trained.nnue
 
 # Run (auto-detects UCI, xboard, or interactive CLI)
 ./Leaf_vmyversion
@@ -22,7 +22,7 @@ perl comp.pl myversion NNUE=1 NNUE_NET=nn-ad9b42354671.nnue
 The `.nnue` network file must be in the same directory as the binary.  To embed it directly into the binary (no external file needed):
 
 ```sh
-perl comp.pl myversion NNUE=1 NNUE_EMBED=1 NNUE_NET=nn-ad9b42354671.nnue
+perl comp.pl myversion NNUE=1 NNUE_EMBED=1 NNUE_NET=nn-to-be-trained.nnue
 ```
 
 See [Build Options](#build-options) for all compile flags.
@@ -104,10 +104,10 @@ perl comp.pl <version>
 perl comp.pl <version> NNUE=1
 
 # NNUE with a specific net file
-perl comp.pl <version> NNUE=1 NNUE_NET=nn-ad9b42354671.nnue
+perl comp.pl <version> NNUE=1 NNUE_NET=nn-to-be-trained.nnue
 
 # NNUE with net embedded in binary
-perl comp.pl <version> NNUE=1 NNUE_EMBED=1 NNUE_NET=nn-ad9b42354671.nnue
+perl comp.pl <version> NNUE=1 NNUE_EMBED=1 NNUE_NET=nn-to-be-trained.nnue
 
 # NNUE + TDLeaf(λ) training
 perl comp.pl <version> NNUE=1 TDLEAF=1

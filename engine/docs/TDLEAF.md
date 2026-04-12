@@ -17,7 +17,7 @@ Manual workflow:
 
 ```sh
 # 1. Build a training binary
-perl comp.pl train NNUE=1 NNUE_NET=nn-ad9b42354671.nnue TDLEAF=1 OVERWRITE
+perl comp.pl train NNUE=1 NNUE_NET=nn-to-be-trained.nnue TDLEAF=1 OVERWRITE
 
 # 2. Initialize a fresh random network (optional — or fine-tune an existing .nnue)
 ./Leaf_vtrain --init-nnue --write-nnue nn-fresh.nnue

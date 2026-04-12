@@ -13,10 +13,10 @@ Build with NNUE enabled (from `run/`):
 perl ../src/comp.pl <version> NNUE=1
 
 # With a specific net file
-perl ../src/comp.pl <version> NNUE=1 NNUE_NET=nn-ad9b42354671.nnue
+perl ../src/comp.pl <version> NNUE=1 NNUE_NET=nn-to-be-trained.nnue
 
 # Embed the .nnue file directly into the binary (no external file needed at runtime)
-perl ../src/comp.pl <version> NNUE=1 NNUE_EMBED=1 NNUE_NET=nn-ad9b42354671.nnue
+perl ../src/comp.pl <version> NNUE=1 NNUE_EMBED=1 NNUE_NET=nn-to-be-trained.nnue
 ```
 
 The network file defaults to `to-be-trained.nnue` and must be in the same directory as the binary,
