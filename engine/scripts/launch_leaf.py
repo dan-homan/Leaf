@@ -15,7 +15,7 @@ import os
 import sys
 
 run_dir  = os.path.dirname(os.path.abspath(__file__))
-cutechess = os.path.normpath(os.path.join(run_dir, "../tools/cutechess-1.4.0/build/cutechess"))
+cutechess = os.path.normpath(os.path.join(run_dir, "../../tools/cutechess-1.4.0/build/cutechess"))
 engines_json = os.path.expanduser("~/.config/cutechess.com/engines.json")
 
 exe_name = sys.argv[1] if len(sys.argv) > 1 else "Leaf"

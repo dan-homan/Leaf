@@ -26,7 +26,7 @@ import sys
 
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT  = os.path.dirname(SCRIPT_DIR)
+REPO_ROOT  = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 DEFAULT_BAYESELO = os.path.join(REPO_ROOT, "tools", "BayesElo", "bayeselo")
 
 
