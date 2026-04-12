@@ -1,5 +1,36 @@
 # TDLeaf(λ) NNUE Learning — Implementation Reference
 
+## Quick Start
+
+The easiest way to train is via the interactive training manager:
+
+```sh
+cd learn/
+python3 training_run.py
+```
+
+This handles network initialization, binary compilation, opponent rotation,
+checkpointing, and optional train-validate loops.  See
+[`SCRIPT_USE.md`](SCRIPT_USE.md) for full `training_run.py` option documentation.
+
+Manual workflow:
+
+```sh
+# 1. Build a training binary
+perl comp.pl train NNUE=1 NNUE_NET=nn-ad9b42354671.nnue TDLEAF=1 OVERWRITE
+
+# 2. Initialize a fresh random network (optional — or fine-tune an existing .nnue)
+./Leaf_vtrain --init-nnue --write-nnue nn-fresh.nnue
+
+# 3. Run self-play matches (from run/ or learn/)
+python3 match.py Leaf_vtrain_a Leaf_vtrain_b -n 500 --proto xboard -tc 0:03+0.05
+```
+
+See [Network Initialization](#network-initialization) and
+[Hooks in Existing Code](#hooks-in-existing-code) for details.
+
+---
+
 ## Overview
 
 TDLeaf(λ) is a temporal-difference reinforcement learning algorithm adapted for minimax
@@ -10,7 +41,7 @@ errors through the NNUE network to update weights.
 Build with:
 
 ```sh
-perl comp.pl 2026_03_09a NNUE=1 TDLEAF=1
+perl comp.pl <version> NNUE=1 TDLEAF=1
 ```
 
 All learning code is gated by `#if TDLEAF`; when `TDLEAF=0` (default) no overhead is added.

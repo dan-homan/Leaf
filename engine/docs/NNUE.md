@@ -126,204 +126,62 @@ conversion at store/retrieve: `score_w = wtm ? score : -score`.
 
 ---
 
-## Optimizations Applied
+## TDLeaf(λ) Online Training
 
-### 1. Score hash integration (+22% NPS, 528K → 646K)
-
-The NNUE branch in `score_pos` probes the existing `score_table` before calling
-`nnue_evaluate`, and stores results after.  About 26–38% of evaluation calls are served
-from the hash, avoiding both the forward pass and the dirty-accumulator refresh.
-
-### 2. FC0 vdotq reordering (+7% NPS, 646K → 692K)
-
-FC0 weights are reordered at load time to a "vdotq-friendly" layout:
-
-```
-l0_weights[s][ib*64 + ob*16 + k*4 + j]
-```
-
-where `ib = i/4`, `j = i%4`, `ob = o/4`, `k = o%4`.  The forward pass uses four
-`vdotq_s32` NEON calls per 4-input block, accumulating into all 16 output registers
-simultaneously (vs. 16 separate passes the compiler would generate).  Requires
-`-D __ARM_FEATURE_DOTPROD` (available automatically on Apple M1/M2/M3 with the system
-toolchain; no `-march=native` needed).
-
-### 3. NEON fused dual-activation + vdotq FC1 (+4% NPS, 692K → ~720K)
-
-**Dual activation (step 1):** The two scalar loops producing 3,072 int8 values from the
-int16 accumulator were replaced with a single fused NEON loop per perspective.  One pass
-reads `a[0..511]` and `a[512..1023]` together and writes all three output slices
-(SqrCReLU and both CReLU halves) in 64 `int16x8` iterations instead of 1,536 scalar
-iterations.
-
-**FC1 vdotq (step 4):** FC1 weights (32×32 int8) are reordered at load time using the
-same `ib*128 + ob*16 + k*4 + j` scheme.  The forward pass uses 8 `int32x4` accumulators
-and 8 iterations of 8 `vdotq_s32` calls, replacing the 32×32 scalar loop.
-
-### 4. Root-accumulator dirty fix (correctness, ~0% NPS)
-
-At both search-root initialisation sites in `search.cpp` the accumulator dirty flags are
-explicitly forced to `true` before calling `nnue_init_accumulator`.  Without this, if the
-engine searched a position and then the game advanced to a new position, the stale
-accumulator values from the previous position would be silently reused (dirty flags were
-still `false` from the previous search).
-
-### 5. Lazy accumulator evaluation (+17% NPS, ~720K → ~840K)
-
-`nnue_apply_delta` replaces the temporary full-refresh stub with true one-level-lazy
-incremental evaluation.  The search wiring was already in place (v2026_03_02b added
-`nnue_record_delta` calls at all `exec_move` sites and the `nnue_apply_delta` guard before
-`score_pos`); this optimization completes the implementation.
-
-**At every `exec_move`:** `nnue_record_delta` stores ≤4 feature-index integers per
-perspective into `acc.add/sub` arrays (no `ft_weights` access) and sets `acc.computed=false`.
-
-**At `score_pos` time only:** `nnue_apply_delta` copies the parent's accumulator (2KB per
-perspective) and applies the stored deltas via `add_feat`/`sub_feat`.  For king moves
-(`need_refresh[p]=true`), the king's own perspective is rebuilt from scratch; the opponent
-perspective is still incremental.
-
-Cut nodes — roughly 58% of all nodes — now pay only a handful of integer assignments
-instead of a 4KB copy plus 1K `add_feat`/`sub_feat` calls into the 46 MB `ft_weights`
-table.
-
-### 6. King-capture lazy accumulator fix (correctness, v2026_03_06z)
-
-When a king *captures* a piece (`Kxf7` etc.), `nnue_record_delta` was only recording the
-king's movement (sub from-square, add to-square) but omitting the subtraction of the
-captured piece from the opponent's incremental accumulator.  Fix: added `if (capt_pt)`
-capture subtraction in the king-move branch of both `nnue_record_delta` and
-`nnue_update_accumulator`.  Verified via `NNUE_CHECK_LAZY` across multiple positions
-including king-capture sequences.
-
-### 7. Own-king feature inclusion (correctness, v2026_03_07a)
-
-`halfkav2_feature()` was returning −1 (skip) for the own king, but Stockfish includes the
-own king as a feature in the PS_KING = 640 slot, the same as the enemy king.  Removing
-the exclusion gives correct feature indices and accumulator values for all positions.
-This was a major source of evaluation error.
-
-### 8. SqrCReLU: square raw value before clamping (correctness, v2026_03_07a)
-
-The dual-activation loop was computing `v = clamp(0,127, fc0>>6); sq = v²>>7` — clamping
-to `[0,127]` *before* squaring, which zeroed all negative fc0 values.  Stockfish's
-`SqrClippedReLU` squares the raw int32 value first:
-`output = clamp(0, 127, fc0_raw² >> 19)`.  Many fc0 outputs are strongly negative (e.g.
-−13,000 to −8,000 in typical middlegame positions); these now contribute 127 to FC1 input
-instead of 0, dramatically improving the positional component of the evaluation.
+All NNUE layers (FC0/FC1/FC2, FT biases, FT weights, PSQT, dense piece values) can be
+trained via TDLeaf(λ) self-play.  Build with `NNUE=1 TDLEAF=1`.
+See [`TDLEAF.md`](TDLEAF.md) for the full algorithm reference, hyperparameters, and
+training workflow.
 
 ---
 
-## NPS Benchmarks
+## Optimization & Development History
 
-8-second `analyze` from the starting position, Apple M1 (arm64), single thread:
+The following sections document the NNUE implementation history, including
+optimization work, correctness fixes, and early match results.
+
+### Optimizations Applied
+
+1. **Score hash integration** (+22% NPS, 528K → 646K) — `score_pos` probes `score_table`
+   before `nnue_evaluate`; ~26–38% of calls served from hash.
+2. **FC0 vdotq reordering** (+7% NPS, 646K → 692K) — weights reordered at load time
+   for NEON `vdotq_s32` dot-product instructions.
+3. **NEON fused dual-activation + vdotq FC1** (+4% NPS, 692K → ~720K) — single fused
+   loop for SqrCReLU + CReLU; FC1 uses same vdotq scheme.
+4. **Root-accumulator dirty fix** (correctness) — force `dirty=true` at search root to
+   prevent stale accumulator reuse across positions.
+5. **Lazy accumulator evaluation** (+17% NPS, ~720K → ~840K) — `nnue_record_delta` stores
+   feature-index deltas at `exec_move`; `nnue_apply_delta` materializes only when
+   `score_pos` is called.  Cut nodes (~58%) skip accumulator updates entirely.
+6. **King-capture lazy accumulator fix** (correctness) — captured piece subtraction was
+   missing from the opponent's incremental accumulator in king-capture moves.
+7. **Own-king feature inclusion** (correctness) — own king included as PS_KING=640
+   feature, matching Stockfish; was a major source of evaluation error.
+8. **SqrCReLU: square before clamp** (correctness) — `clamp(0, 127, raw² >> 19)` instead
+   of `clamp(0,127, raw>>6)²>>7`; negative pre-activations now contribute correctly.
+
+### NPS Benchmarks
+
+8-second `analyze` from starting position, Apple M1 (arm64), single thread:
 
 | Binary | NPS | Notes |
 |--------|-----|-------|
 | EXchess_classic (no NNUE) | 1,645,247 | baseline |
 | v2026_03_01b | 528,348 | NNUE, no optimizations |
 | v2026_03_01c | 645,539 | + score hash (+22%) |
-| v2026_03_01e | 691,200 | + score hash + vdotq FC0 (+31% total) |
-| v2026_03_02b | ~720,000 | + NEON dual-act + vdotq FC1 + root dirty fix (+36% total) |
-| v2026_03_02c | ~840,000 | + lazy accumulator (+59% vs baseline) |
-| v2026_03_02f | ~870,000 | + singular-extension accumulator fix (correctness) |
-| v2026_03_07a | ~870,000 | + own-king fix + SqrCReLU fix + unified scale (correctness) |
+| v2026_03_01e | 691,200 | + vdotq FC0 (+31% total) |
+| v2026_03_02b | ~720,000 | + NEON dual-act + vdotq FC1 (+36% total) |
+| v2026_03_02c | ~840,000 | + lazy accumulator (+59% total) |
+| v2026_03_07a | ~870,000 | + correctness fixes (own-king, SqrCReLU) |
 
-Remaining gap vs. classical: **~1.9×**.  At a 1-minute time control the NNUE version
-typically searches approximately 1–2 plies shallower than the classical version.
-
----
-
-## Match Results
+### Early Match Results
 
 Self-play matches at 1 min + 0.1 s/move, 100 games each:
 
 | Match-up | Score | Notes |
 |----------|-------|-------|
-| v2026_03_02g vs EXchess_classic | 10.0% (0W 2D 18L) | old code, broken scales |
-| v2026_03_06z vs EXchess_classic | 22.5% (4W 1D 15L) | fixed lazy acc, split scale |
-| v2026_03_07a vs v2026_03_06z | **98.0% (96W 4D 0L)** | own-king + SqrCReLU + unified scale |
-| **v2026_03_07a vs classical** | **96.0% (92W 8D 0L)** | current best |
-
----
-
-## TDLeaf(λ) Online Training
-
-All NNUE layers (FC0/FC1/FC2, FT biases, FT weights, PSQT, dense piece values) can be
-trained via TDLeaf(λ) self-play.  See `docs/TDLEAF.md` for the full reference.
-Build with `NNUE=1 TDLEAF=1`.
-
-The `scripts/training_run.py` interactive script manages a full training run: net
-selection or random init, building both a training and a read-only binary, running
-N iterations of M-game self-play matches via `scripts/match.py`, tracking cumulative game
-counts across sessions, and exporting the trained weights to a new `.nnue` file named
-`<net_base>-<total_games>g.nnue`.  Fischer Random (Chess960) is the default opening
-randomisation method.
-
-### Fresh network initialization (`--init-nnue`)
-
-When starting from scratch, run:
-```sh
-perl src/comp.pl init NNUE=1 TDLEAF=1 OVERWRITE
-./run/Leaf_vinit --init-nnue --write-nnue learn/nn-fresh.nnue
-```
-
-**FC / FT weights:** drawn from zero-mean Gaussian distributions with stds calibrated
-to keep the initial positional output near zero (classical material dominates early play).
-
-| Layer | Distribution | Notes |
-|-------|-------------|-------|
-| FT weights (int16) | N(0, 44) | acc std ≈ √30 × 44 ≈ 241; ~40% CReLU active |
-| FC0 weights (int8) | N(0, 4) | FC0 CReLU ≈ 3.8; keeps FC1→FC2 chain active |
-| FC1 weights (int8) | N(0, 3) | Moderate — fan-in 30, low saturation risk |
-| FC2 weights (int8) | N(0, 2) | Small — keeps initial positional output ≈ 0 cp |
-| All biases | 0 | Zero-init throughout |
-| PSQT | Pure material (no PSQ bonuses) | Same value across all 8 buckets |
-
-All int8 weights use **rejection sampling**: values outside ±127 are discarded and
-redrawn rather than clipped, avoiding density spikes at the int8 boundaries.
-
-**Design philosophy: start quiet, let TDLeaf build structure from signal.**  Initial NNUE
-positional output should be near zero so that classical material dominates early play
-(reasonable game quality from game 1).  The network gradually grows its influence as
-TDLeaf learns real patterns from self-play.  Zero means (He/Kaiming principle) are the
-correct starting point — non-zero means from a trained network are endpoints, not priors.
-
-**PSQT weights:** initialised with pure classical material values from `score.h`, with
-no piece-square bonuses.  All 8 buckets receive the same value.  Sign convention: own
-pieces (`pside == persp`) receive `+V`, opponent pieces receive `−V`.  TDLeaf learns
-positional adjustments on top of this material prior.
-
-Material values (same as classical `value[]` in score.h):
-
-| Piece  | Material (cp) | int32 units (`cp × 5776/100`) |
-|--------|--------------|-------------------------------|
-| Pawn   | 100          | 5,776                         |
-| Knight | 377          | 21,776                        |
-| Bishop | 399          | 23,046                        |
-| Rook   | 596          | 34,425                        |
-| Queen  | 1197         | 69,144                        |
-| King   | 0            | 0                             |
-
-Key hyperparameters (in `src/tdleaf.h`):
-
-| Constant | Value | Notes |
-|----------|-------|-------|
-| `TDLEAF_LAMBDA_DECISIVE` | 0.8 | Eligibility trace decay for wins/losses |
-| `TDLEAF_LAMBDA_DRAW` | 0.5 | Eligibility trace decay for draws |
-| `TDLEAF_K` | 290 | Sigmoid temperature (cp) |
-| `TDLEAF_ADAM_LR0` | 0.01 | Adam step size for FC layers |
-| `TDLEAF_ADAM_FT_LR0` | 1.0 | Adam step size for FT weights (sparse; higher LR) |
-| `TDLEAF_ADAM_FT_BIAS_LR0` | 0.01 | Adam step size for FT biases |
-| `TDLEAF_ADAM_PSQT_LR0` | 1.6 | Adam step size for PSQT (int32 scale) |
-| `TDLEAF_ADAM_PV_LR0` | 1.6 | Adam step size for dense piece values |
-| `TDLEAF_WEIGHT_DECAY` | 1e-4 | AdamW decoupled weight decay (FC + FT weights only) |
-| `TDLEAF_GRAD_CLIP_NORM` | 1.0 | Global gradient L2 norm clip threshold |
-| `TDLEAF_BATCH_SIZE` | 16 | Games per Adam step (mini-batch) |
-
-Adam normalises gradient magnitude — the per-step size in weight-space is governed by
-the LR constants, not raw gradient scale.
-See `docs/TDLEAF.md` for the full optimizer reference.
+| v2026_03_07a vs classical | **96.0% (92W 8D 0L)** | NNUE with SF15.1 net |
+| v2026_03_07a vs v2026_03_06z | 98.0% (96W 4D 0L) | own-king + SqrCReLU fix |
 
 ---
 

@@ -97,15 +97,23 @@ errors (unknown types, undeclared identifiers).  These are expected and can be i
 
 ### TDLeaf(λ) learning
 
-- After each search, `tdleaf_record_ply()` walks the PV to the leaf, snapshots the accumulator, active feature indices, and iterative-deepening score history.
-- After each game, `tdleaf_update_after_game()` computes backward TD errors (λ=0.8 decisive / 0.5 draw), applies score-change clipping (TDLEAF_SCORE_CLIP_CP=200 cp) and ID-stability weighting (TDLEAF_ID_VAR_SIGMA2=10,000 cp²), then backpropagates through FC/FT/PSQT/piece_val layers.  Five separate Adam LRs: FC (0.01), FT (1.0), FT bias (0.01), PSQT (1.6), piece_val (1.6).  Gradient clipping (L2 norm, threshold 1.0) and AdamW weight decay (1e-4, FC+FT weights only) are applied.  FT bias uses a reduced LR to prevent dying-ReLU from update frequency asymmetry.
-- `tdleaf_replay()` then runs `TDLEAF_REPLAY_K` (default 0, disabled) additional passes over the last `TDLEAF_REPLAY_BUF_N` (default 8) completed games stored in a ring buffer, refreshing scores from current weights before each pass.  Replay uses FC-only gradients (`fc_only=true`) to avoid FT feedback divergence.
-- Dense piece values (`piece_val[6][8]`, 48 floats) learn material corrections on top of PSQT via dense gradient updates (~200/game); added to eval as `nnue_dense_piece_val()`.  PSQT provides the base material prior and all positional knowledge; piece_val learns fast-converging corrections.  PSQT gradients are mean-centered per piece-type slot to prevent PSQT from absorbing material shifts already captured by piece_val.  piece_val is **clamped ≥ 0** after each Adam step: negative piece_val inverts material evaluation (engine plays to lose pieces), creating an unrecoverable death spiral.  For fresh networks (`--init-nnue`): PSQT initialized **symmetrically** with own-piece features = +V and enemy-piece features = -V, where V = cp × 5776/100 (e.g. queen: own=+69139, enemy=-69139).  Score contribution of one own piece: psqt[stm]+=V, psqt[opp]+=-V → psqt_diff=2V → score=2V/2×100/5776=cp ✓.  piece_val=0 (learns corrections).  CRITICAL: asymmetric init (own=+2V, enemy=0) produces the same score but causes FT biases to explode to int16 saturation (~+31000) during training — the positional path freezes constant and the engine cannot learn chess.  Symmetric init keeps FT biases near zero (≈-7 int16 at 10k games) and training succeeds.  For `--init-nnue-noprior`: PSQT=0, piece_val=0.
-- **FC0 passthrough initialization:** FC0 output 15 (`NNUE_L0_DIRECT`) bypasses FC1/FC2 and contributes `fc0_raw[15] × 9600/8128` directly to the positional score before the `×100/5776` conversion.  With random FC0 weights (std=4) this creates ≈81 cp score noise at initialization.  The passthrough row is zero-initialized; gradient still flows through it so it learns normally from game 1.
-- Weights persist to `<net>.tdleaf.bin` (v8 format); POSIX file locking + delta merging allows concurrent multi-instance training.  v6 adds persistent Adam second-moment (v) arrays and `t_adam`; multi-writer merge uses `max(v_file, v_local)`.  v7 adds persistent Adam first-moment (m) arrays; multi-writer merge uses element-wise average `(m_file + m_local) / 2`.  v8 adds sparse FT v persistence (same dirty-row set as FT weights); merge uses `max(v_file, v_local)`.  FT weight m not persisted (FT uses RMSProp, no m).
-- FT RMSProp uses a session-local counter `t_ft_session` (not persisted) for bc2 via `min(t_adam, t_ft_session)` for cold rows.  Rows whose `v_ft_w` was restored from disk (`ft_v_warmed[fi]==true`) use `t_adam` directly for bc2 since their saved v is already calibrated.  This prevents ~31× oversized FT updates on the first Adam step after restart.
-- `v_ft_w` (FT per-weight second moment, ~92 MB) is now sparsely persisted in .tdleaf.bin v8 for feature rows where v is **non-zero** (rows with zero v — e.g. first session from v7 — are explicitly excluded: saving a zero-v row as "warmed" causes bc2_warm≈1 with v=0, giving sv≈ε and ~10,000× oversized steps).  This eliminates the per-restart FT v cold-start that caused a 10–20 Elo dip for the first ~1000 Adam steps.  A per-session FT LR warmup (`TDLEAF_FT_SESSION_WARMUP=100` Adam steps) damps FT updates while v accumulates, covering both loaded (warmed) and fresh rows.
+See `docs/TDLEAF.md` for the full algorithm reference, hyperparameters, and gradient flow.
+
+**Call flow:**
+- After each search: `tdleaf_record_ply()` snapshots the PV leaf accumulator, feature indices, and ID score history.
+- After each game: `tdleaf_update_after_game()` computes backward TD errors, backpropagates through all layers, and applies Adam/RMSProp updates.
+- Optional replay: `tdleaf_replay()` runs additional passes over recent games (currently disabled, `TDLEAF_REPLAY_K=0`).
+
+**Five separate Adam LRs:** FC (0.01), FT (1.0), FT bias (0.01), PSQT (1.6), piece_val (1.6).  Gradient clipping (L2 norm, 1.0) and AdamW weight decay (1e-4, FC+FT weights only).
+
+**Critical gotchas for code changes:**
 - `material` in `score.cpp` is **already STM (side-to-move) POV** — do not flip it.
+- `piece_val` is **clamped ≥ 0** after each Adam step: negative piece_val inverts material evaluation, creating an unrecoverable death spiral.
+- PSQT must be initialized **symmetrically** (own=+V, enemy=-V).  Asymmetric init (own=+2V, enemy=0) produces the same score but causes FT biases to explode to int16 saturation during training.
+- FC0 passthrough row (output 15) is **zero-initialized**; gradient flows through it normally.
+- FT uses RMSProp (no m), not full Adam.  Session-local `t_ft_session` prevents oversized steps after restart.
+- Weights persist to `.tdleaf.bin` (v8 format); POSIX file locking + delta merging for concurrent training.
+- TDLeaf is inactive in UCI mode — hooks are in `make_move()` which UCI never calls.
 
 ### Protocol support
 
@@ -128,8 +136,6 @@ UCI_Chess960: when `setoption name UCI_Chess960 value true` is sent, castling no
 - `uci_960_output(m, out, pos)` → translates outgoing castling moves (CASTLE flag) from king-destination to king-captures-rook via `Krook[side]`/`Qrook[side]`.
 - `uci_parse_move` accepts `require_castle` flag from `uci_960_input` to disambiguate castling from regular king moves that share the same from/to squares.
 - `exec_move` exempts CASTLE moves from the "can't capture own king" sanity check, handling from==to castling when king starts on the destination square.
-
-TDLeaf learning is inactive in UCI mode (the engine never calls `make_move()`, so the TDLeaf hooks in `make_move()` are never reached).
 
 ### Important conventions
 
@@ -213,7 +219,7 @@ python3 match.py Leaf_vtrain_fresh_a Leaf_vtrain_fresh_b -c 5 -tc 0:03+0.05 --wa
 ```
 engine/
   src/          Source code (unity-built via Leaf.cc)
-  docs/         Documentation (NNUE.md, TDLEAF.md, TODO.md, TRAINING.md, SCRIPT_USE.md, change_log.txt)
+  docs/         Documentation (NNUE.md, TDLEAF.md, TODO.md, TRAINING_RUN1.md, SCRIPT_USE.md, change_log.txt)
   scripts/      Python automation scripts
   run/          Compiled binaries + runtime config (search.par, opening book)
   learn/        Training artifacts: .nnue, .tdleaf.bin, .games, pgn/

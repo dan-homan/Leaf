@@ -592,3 +592,60 @@ window, followed by totals and a summary that reports:
 - Peak win rate and which window it occurred in
 - First window where win rate drops below 5%
 - Whether/when the win rate recovers above 5% after a crash
+
+---
+
+## pgn_elo_progress.py
+
+Track Elo progress across training by splitting a PGN into fixed-size windows
+and running bayeselo on each window.  Useful for plotting strength over time
+during a long training run.
+
+```sh
+# Default: 10,000-game windows, auto-detect training engine
+python3 scripts/pgn_elo_progress.py learn/pgn/run1/combined.pgn
+
+# Custom window size and explicit player
+python3 scripts/pgn_elo_progress.py learn/pgn/run1/combined.pgn --window 5000 --player Leaf_vtrain_a
+
+# Cumulative (each window includes all prior games)
+python3 scripts/pgn_elo_progress.py learn/pgn/run1/combined.pgn --cumulative
+```
+
+### Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `pgn_file` (positional) | *(required)* | PGN file to analyse |
+| `--window N` | 10000 | Games per window |
+| `--player NAME` | auto-detect | Player name to track |
+| `--bayeselo PATH` | `tools/BayesElo/bayeselo` | Path to bayeselo binary |
+| `--cumulative` | off | Use cumulative windows instead of sliding |
+
+---
+
+## reset_adam.py
+
+Zero (or decay) the Adam optimizer state in a `.tdleaf.bin` file.  All weight
+data (FC, FT, PSQT, piece_val) is preserved exactly — only the first-moment (m)
+and second-moment (v) arrays are modified.  Useful when training has plateaued
+due to accumulated v values damping all updates.
+
+```sh
+# Full zero reset (backup kept as .bak)
+python3 scripts/reset_adam.py learn/nn-fresh.tdleaf.bin
+
+# Soft reset — keep 10% of accumulated v/m
+python3 scripts/reset_adam.py learn/nn-fresh.tdleaf.bin --decay 0.1
+
+# Write to a new file, leave original untouched
+python3 scripts/reset_adam.py learn/nn-fresh.tdleaf.bin --out learn/nn-fresh-reset.tdleaf.bin
+```
+
+### Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `file` (positional) | *(required)* | `.tdleaf.bin` file to modify |
+| `--decay F` | 0 (full zero) | Multiply v and m by F instead of zeroing (0 < F < 1) |
+| `--out PATH` | *(overwrite input)* | Write result to PATH instead of overwriting |

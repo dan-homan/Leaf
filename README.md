@@ -8,15 +8,34 @@
 
 ---
 
+## Quick Start
+
+```sh
+# Build with NNUE evaluation (from engine/run/)
+cd engine/run/
+perl comp.pl myversion NNUE=1 NNUE_NET=nn-ad9b42354671.nnue
+
+# Run (auto-detects UCI, xboard, or interactive CLI)
+./Leaf_vmyversion
+```
+
+The `.nnue` network file must be in the same directory as the binary.  To embed it directly into the binary (no external file needed):
+
+```sh
+perl comp.pl myversion NNUE=1 NNUE_EMBED=1 NNUE_NET=nn-ad9b42354671.nnue
+```
+
+See [Build Options](#build-options) for all compile flags.
+
+---
+
 ## History
 
 EXchess (now Leaf) first appeared around 1997–1998 and was one of a handful of serious open-source engines of that era.  Over two decades of on-and-off development produced a series of increasingly capable versions — from the early v2/v3 series through the v6 and v7 lines released in 2011–2017.
 
-The engine is written in C++, licensed under the GNU Public License, and communicates via the Chess Engine Communication Protocol (xboard/Winboard).  It includes a classical hand-crafted evaluation function, principal variation search (PVS), null-move pruning, late move reductions, static exchange evaluation, history heuristics, and a lazy SMP work-sharing implementation that achieves roughly 1.65× speedup on 2 threads and 2.5× on 4 threads.  An early form of Temporal Difference (TD-leaf) learning for evaluation tuning was present in older releases.
+The engine includes a classical hand-crafted evaluation function, principal variation search (PVS), null-move pruning, late move reductions, static exchange evaluation, history heuristics, and a lazy SMP implementation.  It communicates via UCI, xboard/CECP, and an interactive CLI, with protocol auto-detection.
 
-The final pre-hiatus release was **v7.97b** (February 2017), rated around **2,772 Elo** on CCRL 40/40.  After that, development went quiet for approximately eight years.
-
-More history and technical background can be found on the [Chessprogramming wiki](https://www.chessprogramming.org/EXchess) and the [Daniel Homan](https://www.chessprogramming.org/Daniel_Homan) author page.
+The final pre-hiatus release was **v7.97b** (February 2017), rated around **2,772 Elo** on CCRL 40/40.  More history can be found on the [Chessprogramming wiki](https://www.chessprogramming.org/EXchess).
 
 ---
 
@@ -28,156 +47,158 @@ This work was developed interactively with [Claude Code](https://claude.ai/claud
 
 ---
 
-## New Features
+## Features
 
 ### NNUE Evaluation
 
-Leaf supports **HalfKAv2_hm** NNUE evaluation compatible with Stockfish 15.1 era networks.  Build with `NNUE=1`.
+Leaf supports **HalfKAv2_hm** NNUE evaluation compatible with Stockfish 15.1 era networks (22,528 features, 1,024-unit accumulator, 8 layer stacks with FC0→FC1→FC2).  The forward pass matches Stockfish 15.1 evaluation exactly (within 1 cp rounding) on every tested position.  NEON (Apple M-series) and AVX2 (x86-64) SIMD acceleration is included.
 
-The default network file is **`to-be-trained.nnue`** — a placeholder name for a Leaf-trained network generated via `--init-nnue` (see Training below).  The Stockfish 15.1 release network **`nn-ad9b42354671.nnue`** serves as a reference for the project in three ways:
+Current result with the Stockfish 15.1 net: **92W–8D–0L (96.0%)** vs the classical Leaf eval at 10+0.1s.
 
-**1. Implementation correctness anchor.**
-Because this is the exact network shipped with Stockfish 15.1, Leaf's forward pass can be validated against the Stockfish 15.1 source line by line.  Any discrepancy in evaluation of a given position is a bug in Leaf, not an approximation.  This property was used extensively during development: several significant bugs were isolated and fixed by comparing Leaf evaluation against Stockfish on the same position, including an incorrect feature index for the own king, a wrong SqrCReLU formulation that zeroed all negative pre-activations, and an incorrect PSQT scale factor.  After all fixes, Leaf matches Stockfish 15.1 evaluation exactly (within 1 cp rounding) on every tested position.
-
-**2. Playing-strength baseline.**
-A network trained from scratch by Leaf itself (via TDLeaf(λ) self-play) will initially be weaker than `nn-ad9b42354671.nnue`, which represents years of Stockfish training data.  Match results against the Stockfish net provide the clearest measure of training progress: the goal is to close the gap, then surpass it with a network tuned to Leaf's own search characteristics.  Current result with the SF15.1 net: **92W–8D–0L (96.0%)** vs the classical Leaf eval at 10+0.1s/move.
-
-**3. Weight initialisation for fresh training.**
-Leaf can generate a fresh `.nnue` with `--init-nnue --write-nnue <file>`.  A variant `--init-nnue-noprior` uses uniform 100 cp piece values instead of classical material, forcing the network to learn material from scratch.  Design philosophy: start quiet — initial positional output near zero so classical material dominates early play; TDLeaf builds structure from signal.
-
-| Layer | Distribution | Notes |
-|-------|-------------|-------|
-| FT weights (int16) | N(0, 44) | acc std ≈ √30 × 44 ≈ 241; ~40% CReLU active |
-| FC0 weights (int8) | N(0, 4) | FC0 CReLU ≈ 3.8; keeps FC1→FC2 chain active |
-| FC1 weights (int8) | N(0, 3) | Moderate — fan-in 30, low saturation risk |
-| FC2 weights (int8) | N(0, 2) | Small — keeps initial positional ≈ 0 cp |
-| FC/FT biases | 0 (zero) | |
-| PSQT | Pure material (no PSQ bonuses) | Same value across all 8 buckets |
-
-All int8 weights use **rejection sampling** (truncated Gaussian): samples outside ±127 are discarded and redrawn rather than clipped, avoiding artificial density spikes at the int8 boundaries.  Biases are zero-initialised; PSQT uses pure classical material values (P=100, N=377, B=399, R=596, Q=1197 cp) with no piece-square bonuses — TDLeaf learns positional adjustments.  See [`engine/docs/NNUE.md`](engine/docs/NNUE.md) for details.
-
-The network file itself is not modified by Leaf.  All trained weights are stored in a companion **`.tdleaf.bin`** file and loaded on top of (or instead of) the base network at startup.
-
-**Architecture summary:**
-
-| Component | Detail |
-|-----------|--------|
-| Feature set | HalfKAv2_hm: 32 king-buckets × 704 piece-square indices = 22,528 features |
-| Feature transformer | 22,528 → 1,024 int16/perspective + 8 int32 PSQT/perspective |
-| Layer stacks | 8 stacks selected by `(piece_count − 1) / 4` |
-| FC0 | 1,024 → 16 (SqrCReLU input: 512/perspective × 2) |
-| FC1 | 30 → 32 (dual-activation of FC0 outputs 0–14) |
-| FC2 | 32 → 1 (FC0 output-15 adds as passthrough) |
-| Score formula | `(psqt_diff/2 + positional) × 100 / 5776` (Stockfish 15.1 exact) |
-
-See [`engine/docs/NNUE.md`](engine/docs/NNUE.md) for full architecture notes, NEON optimizations, and benchmark results.
+See [`engine/docs/NNUE.md`](engine/docs/NNUE.md) for full architecture notes, score formula, and optimization history.
 
 ### TDLeaf(λ) Online Learning
 
-Leaf includes a complete **TDLeaf(λ)** reinforcement learning system (Baxter, Tridgell & Weaver, 2000) that trains all NNUE layers from self-play games.  The long-term goal is for Leaf to develop its own network, tuned to its own search, entirely through self-play — experiments are already in progress.
+Leaf includes a complete **TDLeaf(λ)** reinforcement learning system that trains all NNUE layers from self-play games — FC weights, the 46 MB feature transformer, PSQT weights, and dense piece values.  The long-term goal is for Leaf to develop its own network, tuned to its own search, entirely through self-play.
 
-- Trains **all layers**: FC0, FC1, FC2, the 46 MB feature transformer, and PSQT weights
-- Uses PV leaf scores as the TD signal; gradients flow backward through the full NNUE forward pass
-- FT and PSQT are updated **sparsely** — only the ~30–60 active feature rows per position are touched
-- Weights are persisted to a companion `.tdleaf.bin` file after each game, supporting fine-tuning from a starting, pre-trained .nnue or training from a randomly initialised network
-- **Adam optimizer state persistence:** both the second-moment (`v`) and first-moment (`m`) arrays are saved in `.tdleaf.bin` (v6+ and v7+ respectively), so Adam's gradient scale and direction survive training session restarts — eliminating the slow/negative start that occurs when momentum cold-starts at zero
-- **Concurrent multi-instance support:** multiple engine processes can share a single `.tdleaf.bin` via POSIX file locking and per-session delta accumulation with atomic rename
-- **Opponent rotation:** `scripts/training_run.py` manages multi-phase training with configurable opponent rosters (self-play, read-only reference, or external engines), automatic checkpointing, .tdleaf.bin snapshots, and startup backups
+Key features:
+- PV leaf scores as the TD signal with full NNUE backpropagation
+- Sparse FT/PSQT updates (only active feature rows touched per position)
+- Adam optimizer with persistent momentum across training sessions (`.tdleaf.bin` v8 format)
+- Concurrent multi-instance training via POSIX file locking and delta merging
+- Automated training via `scripts/training_run.py` with opponent rotation, checkpointing, and train-validate loops
 
-Build with `NNUE=1 TDLEAF=1`.  The recommended training workflow is `scripts/training_run.py` (run from `learn/`).  See [`engine/docs/TDLEAF.md`](engine/docs/TDLEAF.md) for the full algorithm, gradient flow, file format, and hyperparameter reference.
+Build with `NNUE=1 TDLEAF=1`.  See [`engine/docs/TDLEAF.md`](engine/docs/TDLEAF.md) for the full algorithm, hyperparameter reference, and training workflow.
+
+### Chess960 / Fischer Random
+
+Full Chess960 support in both UCI and xboard protocols.  UCI_Chess960 castling notation is handled by boundary translation at the I/O layer, leaving the search and move execution untouched.
+
+### LeafGUI
+
+**LeafGUI** is a cross-platform Flutter chess GUI included in the `gui/` directory.  It provides a graphical interface for playing against Leaf (or any UCI engine), watching engine-vs-engine matches, and analyzing positions.
+
+Key features: Chess960 support with engine capability detection, engine registry with persistent storage, engine-vs-engine mode with dual output, multiple time controls, move list navigation, FEN copy/load, and per-engine skill level adjustment.
+
+```sh
+cd gui/
+export PATH="$HOME/develop/flutter/bin:$PATH"
+flutter pub get && flutter build macos --release
+```
+
+See [`gui/CLAUDE.md`](gui/CLAUDE.md) for full GUI documentation.
 
 ---
 
-## Building
+## Build Options
 
-Leaf uses a unity build — `engine/src/Leaf.cc` includes all other `.cpp` files.
+Compilation is managed by `comp.pl` (in both `engine/src/` and `engine/run/`).  Built binaries land in `engine/run/` as `Leaf_v<version>`.
 
-**Classical eval (no NNUE):**
-```sh
-g++ -o Leaf engine/src/Leaf.cc -O3 -D VERS="dev" -pthread
-```
-
-**With NNUE evaluation (from `engine/run/`):**
 ```sh
 cd engine/run/
+
+# Classical eval (no NNUE)
+perl comp.pl <version>
+
+# NNUE eval
 perl comp.pl <version> NNUE=1
-# e.g.  perl comp.pl 2026_03_09a NNUE=1
-```
 
-**With NNUE + TDLeaf(λ) learning:**
-```sh
-perl comp.pl <version> NNUE=1 TDLEAF=1
-```
+# NNUE with a specific net file
+perl comp.pl <version> NNUE=1 NNUE_NET=nn-ad9b42354671.nnue
 
-**With NNUE embedded in binary (self-contained, no external .nnue file needed):**
-```sh
+# NNUE with net embedded in binary
 perl comp.pl <version> NNUE=1 NNUE_EMBED=1 NNUE_NET=nn-ad9b42354671.nnue
+
+# NNUE + TDLeaf(λ) training
+perl comp.pl <version> NNUE=1 TDLEAF=1
+
+# Skip interactive overwrite prompt
+perl comp.pl <version> NNUE=1 OVERWRITE
 ```
 
-The `perl comp.pl` build script handles include paths, optimization flags, and optional `OVERWRITE` to skip the interactive prompt.  Built binaries land in `engine/run/` with the name `Leaf_v<version>`.
+| Flag | Effect |
+|------|--------|
+| `NNUE=1` | Enable NNUE evaluation |
+| `NNUE_NET=<file>` | Override default network file (`to-be-trained.nnue`) |
+| `NNUE_EMBED=1` | Embed `.nnue` into binary via incbin (requires `NNUE=1` + `NNUE_NET`) |
+| `TDLEAF=1` | Enable TDLeaf(λ) learning (requires `NNUE=1`) |
+| `TDLEAF_READONLY=1` | Load trained weights but skip updates |
+| `MATERIAL_ONLY=1` | `score_pos()` returns raw material balance only |
+| `OVERWRITE` | Skip overwrite prompt |
+| `NATIVE=1` | `-march=native` (max perf, non-portable) |
 
-The network file (default: `to-be-trained.nnue`) must be present in the same directory as the binary, or in the directory from which the engine is launched — unless `NNUE_EMBED=1` was used, in which case the net is baked into the binary.  A fresh network can be generated with `--init-nnue --write-nnue <file>` before training.  Any Stockfish 15.1–era HalfKAv2_hm network is compatible and can be substituted at compile time with `NNUE_NET=<filename>`.
+The network file must be in the same directory as the binary (unless `NNUE_EMBED=1`).  Runtime data files (`search.par`, `main_bk.dat`) must also be present.
 
 ---
 
 ## Running
 
-Leaf supports **UCI**, **xboard/CECP**, and an **interactive CLI**; the protocol is
-auto-detected from the first command received on stdin.  Point any xboard or UCI
-compatible GUI at the binary, or run it directly from the command line:
+Leaf auto-detects UCI, xboard/CECP, or interactive CLI from the first command on stdin.  Point any compatible GUI at the binary, or run directly:
 
 ```sh
 cd engine/run/
-./Leaf_v2026_03_09a
+./Leaf_v<version>
 ```
 
-Matches between engines (requires [cutechess-cli](https://github.com/cutechess/cutechess)):
+### Engine Matches
+
+Matches between engines require [cutechess-cli](https://github.com/cutechess/cutechess):
 
 ```sh
 cd engine/run/
 
-# Interactive mode — discovers Leaf binaries and external engines, prompts for options
+# Interactive mode — discovers engines, prompts for options
 python3 match.py
 
-# CLI mode: head-to-head, 200 games
+# CLI mode
 python3 match.py Leaf_vA Leaf_vB -n 200 -c 4 -tc 10+0.1
 
-# --no-repeat: each opening played once, for maximum position diversity in self-play
-python3 match.py Leaf_vA Leaf_vB -n 200 -c 4 -tc 10+0.1 --no-repeat
+# Chess960
+python3 match.py Leaf_vA Leaf_vB -n 200 --fischer-random
 ```
 
-External UCI engines (e.g. Stockfish) can be placed in `tools/engines/<name>/` and
-will be auto-discovered by `match.py` and `training_run.py`.
+External UCI engines (e.g. Stockfish) can be placed in `tools/engines/<name>/` and will be auto-discovered.  See [`engine/docs/SCRIPT_USE.md`](engine/docs/SCRIPT_USE.md) for full script documentation.
+
+### Training
+
+The recommended training workflow is `scripts/training_run.py` (run from `engine/learn/`):
+
+```sh
+cd engine/learn/
+python3 training_run.py
+```
+
+This handles network initialization, binary compilation, opponent rotation, checkpointing, and optional train-validate loops.  See [`engine/docs/TDLEAF.md`](engine/docs/TDLEAF.md) for details.
 
 ---
 
-## LeafGUI
+## Directory Layout
 
-**LeafGUI** is a cross-platform Flutter chess GUI included in the `gui/` directory.  It provides a graphical interface for playing against Leaf (or any UCI engine), watching engine-vs-engine matches, and analyzing positions.
-
-Key features: Chess960 support, engine registry with persistent storage, engine-vs-engine mode with dual output, multiple time controls, move list navigation, FEN copy/load, and per-engine skill level adjustment.
-
-**Building the GUI:**
-```sh
-cd gui/
-export PATH="$HOME/develop/flutter/bin:$PATH"
-flutter pub get
-flutter build macos --release
 ```
-
-See [`gui/README.md`](gui/README.md) for full documentation.
+engine/
+  src/          C++ source code (unity build via Leaf.cc)
+  docs/         Documentation (NNUE.md, TDLEAF.md, SCRIPT_USE.md, change_log.txt)
+  scripts/      Python automation scripts
+  run/          Compiled binaries + runtime data (search.par, opening book)
+  learn/        Training artifacts (.nnue, .tdleaf.bin, PGN)
+gui/            LeafGUI Flutter chess GUI
+logos/           Shared logo assets
+tools/           Third-party tools (cutechess, BayesElo, external engines)
+testing/         Test suites and opening books
+archives/        Historical EXchess source snapshots
+```
 
 ---
 
 ## License
 
-GNU General Public License.  See [`engine/docs/license.txt`](engine/docs/license.txt) for the full license text.
+GNU General Public License.  See [`engine/docs/license.txt`](engine/docs/license.txt).
 
 ---
 
 ## Acknowledgements
 
 - Classical search and evaluation by **Daniel C. Homan** (1997–2017, 2026–present)
-- NNUE architecture and network statistics from the [Stockfish](https://stockfishchess.org) project (GPL v3).  
+- NNUE architecture and network statistics from the [Stockfish](https://stockfishchess.org) project (GPL v3)
 - NNUE implementation, TDLeaf(λ) learning system, and 2026 restart developed in collaboration with **[Claude Code](https://claude.ai/claude-code)** (Anthropic)
 - [Chessprogramming wiki](https://www.chessprogramming.org) for algorithm references
