@@ -6,16 +6,17 @@ Leaf can use a Stockfish-compatible NNUE (Efficiently Updatable Neural Network) 
 position evaluation in place of its classical hand-crafted eval. The implementation
 supports the **HalfKAv2_hm** format used by Stockfish 15/16 era networks.
 
-Build with NNUE enabled:
+Build with NNUE enabled (from `run/`):
 
 ```sh
-g++ -o Leaf src/Leaf.cc -O3 -D VERS="dev" -D TABLEBASES=1 -D NNUE=1 -pthread
-```
+# Basic NNUE build (loads .nnue file from disk at runtime)
+perl ../src/comp.pl <version> NNUE=1
 
-or via the build script:
+# With a specific net file
+perl ../src/comp.pl <version> NNUE=1 NNUE_NET=nn-ad9b42354671.nnue
 
-```sh
-perl comp.pl 2026_03_07a NNUE=1 
+# Embed the .nnue file directly into the binary (no external file needed at runtime)
+perl ../src/comp.pl <version> NNUE=1 NNUE_EMBED=1 NNUE_NET=nn-ad9b42354671.nnue
 ```
 
 The network file defaults to `to-be-trained.nnue` and must be in the same directory as the binary,
@@ -26,8 +27,23 @@ was validated; any Stockfish 15.1–era HalfKAv2_hm network is compatible and ca
 at compile time with `NNUE_NET=filename`.
 
 When NNUE is not compiled in (`-D NNUE=0` or omitted), the classical eval is used
-unchanged.  When NNUE is compiled in but the network file is not found, the engine falls
-back to classical eval automatically.
+unchanged.  When NNUE is compiled in but the network file is not found (and not embedded),
+the engine falls back to classical eval automatically.
+
+### Embedded NNUE (`NNUE_EMBED=1`)
+
+When compiled with `NNUE_EMBED=1`, the `.nnue` file specified by `NNUE_NET` is embedded
+directly into the binary at compile time using [incbin](https://github.com/graphitemaster/incbin).
+The `comp.pl` script automatically resolves the net file's absolute path (searching the current
+directory and `../run/`) and passes it as `NNUE_NET_PATH` to the compiler.
+
+At runtime, the embedded binary loads the network from memory without needing any external
+`.nnue` file.  This is useful for distribution — a single self-contained binary with no
+data file dependencies (other than `search.par` and `main_bk.dat` for the opening book).
+
+The binary size increases by the size of the `.nnue` file (~26 MB for the default net).
+The `.tdleaf.bin` weights file is NOT embedded and must still be provided externally if
+TDLeaf training is used.
 
 ---
 
@@ -98,8 +114,10 @@ conversion at store/retrieve: `score_w = wtm ? score : -score`.
 | File | Change |
 |------|--------|
 | `src/nnue.h` | New: architecture constants, `NNUEAccumulator` struct, public interface |
-| `src/nnue.cpp` | New: FT load/update, FC0–FC2 forward pass, NEON optimizations |
-| `src/define.h` | Added `#ifndef NNUE / #define NNUE 0 / #endif` guard |
+| `src/nnue.cpp` | New: FT load/update, FC0–FC2 forward pass, NEON optimizations, MemStream abstraction for file/memory loading |
+| `src/nnue_embed.cpp` | New: incbin wrapper for embedding `.nnue` file into binary (compiled when `NNUE_EMBED=1`) |
+| `src/incbin.h` | New: public-domain header for cross-platform binary embedding (Dale Weiler) |
+| `src/define.h` | Added `#ifndef NNUE / #define NNUE 0 / #endif` guard, `NNUE_EMBED` default |
 | `src/chess.h` | Added `NNUE_ACC_PARAM/DEF/ARG/NULL` macros; `NNUEAccumulator acc` in `search_node`; updated `score_pos` declaration |
 | `src/score.cpp` | Added NNUE branch at top of `score_pos`: score-hash probe/store, dirty-accumulator refresh, `nnue_evaluate` call |
 | `src/search.cpp` | Added accumulator init at search root (with forced dirty=true), copy+update at all three `exec_move` sites, `NNUE_ACC_ARG` at `score_pos` call sites |

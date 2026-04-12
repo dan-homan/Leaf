@@ -17,6 +17,7 @@
 #define NNUE_H
 
 #include <cstdint>
+#include <cstddef>
 
 // ---------------------------------------------------------------------------
 // Architecture constants
@@ -84,6 +85,9 @@ void nnue_alloc_arrays();
 
 // Load a HalfKAv2_hm .nnue file. Returns true on success.
 bool nnue_load(const char *path);
+
+// Load from an in-memory buffer (for embedded nets via incbin).
+bool nnue_load_from_memory(const uint8_t *data, size_t size);
 
 // Write current FC weights into a complete .nnue file (FT copied verbatim from
 // the loaded source).  Useful for exporting TDLeaf-trained weights.

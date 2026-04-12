@@ -66,6 +66,12 @@
  #define NNUE_TDLEAF_BIN "to-be-trained.tdleaf.bin"
 #endif
 
+// Embed the .nnue file directly into the binary (via incbin).
+// Compile with -D NNUE_EMBED=1; also requires NNUE_NET_PATH to be set.
+#ifndef NNUE_EMBED
+ #define NNUE_EMBED 0
+#endif
+
 // Return material-only score from score_pos(), bypassing all positional eval.
 // Compile with -D MATERIAL_ONLY=1.
 #ifndef MATERIAL_ONLY

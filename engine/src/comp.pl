@@ -15,6 +15,7 @@ $filename = "Leaf_v" . $vers;
 
 $extra_arg = "";
 $overwrite = 0;
+$nnue_net_file = "";
 for my $i (1..$#ARGV) {
     my $arg = $ARGV[$i];
     # NNUE_NET=filename and NNUE_TDLEAF_BIN=filename need string-literal quoting.
@@ -26,6 +27,7 @@ for my $i (1..$#ARGV) {
         (my $tdleaf = $net) =~ s/\.nnue$/.tdleaf.bin/;
         $extra_arg .= " \"-D NNUE_NET=\\\"$net\\\"\"";
         $extra_arg .= " \"-D NNUE_TDLEAF_BIN=\\\"$tdleaf\\\"\"";
+        $nnue_net_file = $net;
     } elsif ($arg =~ /^NNUE_TDLEAF_BIN=(.+)$/) {
         my $val = $1;
         $extra_arg .= " \"-D NNUE_TDLEAF_BIN=\\\"$val\\\"\"";
@@ -46,6 +48,25 @@ if(-e "./$filename" && !$overwrite) {
 }
 
 $verstring = "\\" . "\"" . $vers . "\\" . "\"";
+
+# When NNUE_EMBED=1 is set, derive NNUE_NET_PATH for incbin from the net filename.
+# The .nnue file must exist next to the binary (in the run directory).
+if ($extra_arg =~ /NNUE_EMBED=1/) {
+    my $net = $nnue_net_file || "to-be-trained.nnue";
+    my $net_path = (-e $net) ? $net : "../run/$net";
+    if (!-e $net_path) {
+        use Cwd 'abs_path';
+        # Try resolving relative to run directory
+        $net_path = $net;
+    }
+    use Cwd 'abs_path';
+    $net_path = abs_path($net_path) if -e $net_path;
+    if (!-e $net_path) {
+        die "NNUE_EMBED=1 but net file '$net' not found (tried ./ and ../run/)\n";
+    }
+    $extra_arg .= " \"-D NNUE_NET_PATH=\\\"$net_path\\\"\"";
+    print "Embedding NNUE net: $net_path\n";
+}
 
 my $native = grep { $_ eq "NATIVE=1" } @ARGV;
 my $os   = `uname -s`; chomp $os;

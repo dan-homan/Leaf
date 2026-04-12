@@ -15,6 +15,9 @@
 #include "../src/score.cpp"
 #if NNUE
 #include "../src/nnue.cpp"
+#if NNUE_EMBED
+#include "../src/nnue_embed.cpp"
+#endif
 #endif
 #if TDLEAF
 #include "../src/tdleaf.cpp"

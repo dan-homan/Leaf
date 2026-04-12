@@ -1,5 +1,16 @@
 Changes since 2017_12_24
 
+2026_04_12 -- nnue: support embedding the .nnue net directly into the binary via incbin.
+               Compile with NNUE=1 NNUE_EMBED=1 NNUE_NET=<file>.  The MemStream abstraction
+               lets nnue_load_stream parse from both file and memory, shared by nnue_load()
+               and nnue_load_from_memory().  incbin.h (public domain, Dale Weiler) provides
+               cross-platform .incbin assembly directives.
+             tdleaf: increase TDLEAF_BATCH_SIZE from 4 to 16 to improve learning stability.
+               Testing coupled this with greater depth searches (fixed depth = 8) and a larger
+               number of games in each sub-iteration (for testing progress) = 5000.  The number
+               of games matters because the Adam warm-up period is scaled vs. TD step which
+               scales with the number of games in each batch.
+
 2026_04_11 -- uci: rewrite UCI_Chess960 castling as boundary translation.  Two small functions
                at the UCI I/O layer handle all Chess960 notation:
                - uci_960_input: translates incoming king-captures-rook to Leaf's internal

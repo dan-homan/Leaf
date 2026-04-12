@@ -25,6 +25,12 @@ perl src/comp.pl <version>
 # NNUE eval
 perl src/comp.pl <version> NNUE=1
 
+# NNUE with a specific net file
+perl src/comp.pl <version> NNUE=1 NNUE_NET=nn-ad9b42354671.nnue
+
+# NNUE with net embedded in binary (no external .nnue file needed at runtime)
+perl src/comp.pl <version> NNUE=1 NNUE_EMBED=1 NNUE_NET=nn-ad9b42354671.nnue
+
 # NNUE + TDLeaf(λ) training
 perl src/comp.pl <version> NNUE=1 TDLEAF=1
 
@@ -46,10 +52,11 @@ Binary naming: `run/Leaf_v<version>` — e.g. `Leaf_v2026_03_09a`, `Leaf_vtrain_
 | `TDLEAF_READONLY=1` | Load `.tdleaf.bin` weights but skip updates |
 | `MATERIAL_ONLY=1` | `score_pos()` returns raw material balance only |
 | `NNUE_NET=<file>` | Override default network file (`to-be-trained.nnue`) |
+| `NNUE_EMBED=1` | Embed the `.nnue` file into the binary via incbin (requires `NNUE=1` and `NNUE_NET=<file>`). The net file must exist in `run/` or the current directory at compile time. At runtime, no external `.nnue` file is needed. |
 | `OVERWRITE` | Skip overwrite prompt |
 | `NATIVE=1` | Compile with `-march=native -mtune=native` (max perf, non-portable). Default uses `-march=x86-64-v3` (AVX2, portable across Intel Haswell+ and AMD Zen 1+). |
 
-The `.nnue` network file and `.tdleaf.bin` weights file must reside in the same directory as the binary.
+The `.nnue` network file and `.tdleaf.bin` weights file must reside in the same directory as the binary (unless `NNUE_EMBED=1` was used, in which case no external `.nnue` file is needed).
 
 ---
 
@@ -59,7 +66,7 @@ The `.nnue` network file and `.tdleaf.bin` weights file must reside in the same 
 
 `main.cpp` → `uci.cpp` → `attacks.cpp` → `exmove.cpp` → `swap.cpp` → `moves.cpp` → `captures.cpp` →
 `captchecks.cpp` → `hash.cpp` → `smp.cpp` → `search.cpp` → `score.cpp` →
-`#if NNUE nnue.cpp` → `#if TDLEAF tdleaf.cpp` → `check.cpp` → `book.cpp` → `sort.cpp` →
+`#if NNUE nnue.cpp` → `#if NNUE_EMBED nnue_embed.cpp` → `#if TDLEAF tdleaf.cpp` → `check.cpp` → `book.cpp` → `sort.cpp` →
 `util.cpp` → `support.cpp` → `probe.cpp` → `setup.cpp` → `game_rec.cpp` →
 `tree_search_functions.cpp`
 

@@ -51,11 +51,16 @@
   #define BLACK 0
   #define WHITE 1
  #endif
-#else 
+#else
  #include <time.h>
  #include <unistd.h>
  #include <sys/types.h>
  #include <sys/time.h>
+#endif
+
+#if NNUE && NNUE_EMBED
+extern "C" const unsigned char gNnueNetData[];
+extern "C" const unsigned int  gNnueNetSize;
 #endif
 
 // Custom headers, defining external functions and struct types for
@@ -207,11 +212,15 @@ int main(int argc, char *argv[])
       return 0;
 #endif
     } else {
+#if NNUE_EMBED
+      nnue_load_from_memory(gNnueNetData, gNnueNetSize);
+#else
       char nnue_path[FILENAME_MAX];
       snprintf(nnue_path, sizeof(nnue_path), "%s%s", exec_path, NNUE_NET);
       if (!nnue_load(nnue_path)) {
         nnue_load(NNUE_NET);
       }
+#endif
       if (nnue_available) write_out("NNUE evaluation loaded.\n");
       else                write_out("NNUE file not found, using classical evaluation.\n");
 #if TDLEAF
