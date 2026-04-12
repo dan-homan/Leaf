@@ -362,33 +362,6 @@ python3 verify_fc0.py
 
 ---
 
-## launch_leaf.py
-
-Registers a Leaf binary in cutechess's `engines.json` and launches the
-cutechess GUI.  **Invoke from `run/`**.
-
-```sh
-cd run/
-python3 launch_leaf.py Leaf_v2026_03_09a
-```
-
-If no executable name is given, defaults to `Leaf`.
-
----
-
-## run_leaf.py
-
-Wrapper that launches a Leaf binary with `run/` as its working directory,
-ensuring it finds `search.par`, `main_bk.dat`, and the `.nnue` network file.
-Useful as the engine command inside cutechess or other GUIs.
-
-```sh
-# As engine command in cutechess:
-python3 /path/to/run/run_leaf.py Leaf_v2026_03_09a
-```
-
----
-
 ## bayeselo_ratings.py
 
 Compute a Bayesian Elo rating list for all players in a PGN file, using the
@@ -541,14 +514,6 @@ which are max-merged across inputs.
   contribution is proportional to how much training it performed.
 - **Averaging checkpoints** from different stages of a single training run
   (e.g., merging the 1000-game and 2000-game snapshots).
-
----
-
-## tdleaf_selfplay.py
-
-*(Not in active use.)*  Earlier self-play driver for TDLeaf training, predating
-`training_run.py`.  Kept in `scripts/` for reference; no symlinks are provided
-in `run/` or `learn/`.
 
 ---
 
