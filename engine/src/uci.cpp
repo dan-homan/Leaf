@@ -538,7 +538,7 @@ void uci_send_info(int score, int depth, int elapsed_cs, unsigned long long node
                depth, cp, elapsed_ms, nodes, nps);
     }
 
-    // PV
+    // PV — validate each move before printing to catch stale PV entries
     printf(" pv");
     position p = ts->tdata[0].n[0].pos;
     for (int i = 0; i < MAXD; i++) {
@@ -547,8 +547,8 @@ void uci_send_info(int score, int depth, int elapsed_cs, unsigned long long node
         char ms[6];
         uci_move_str(m, ms);
         uci_960_output(m, ms, p);
-        printf(" %s", ms);
         if (!p.exec_move(m, 0)) break;
+        printf(" %s", ms);
     }
     printf("\n");
     fflush(stdout);

@@ -466,7 +466,7 @@ void tree_search::search_display(int score)
  {
    if (!(tdata[0].pc[0][i].t)) break;
    p.print_move(tdata[0].pc[0][i], mstring, &(this->tdata[0]));
-   if(!p.exec_move(tdata[0].pc[0][i],0)) break;
+   if(!p.exec_move(tdata[0].pc[0][i],0)) break;  // stale/illegal PV entry
    if(!(j&1)) cout << " " << (j/2 + 1) << ".";
    cout << " " << mstring;
    // truncate long lines

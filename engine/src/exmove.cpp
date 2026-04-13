@@ -24,7 +24,8 @@ int position::exec_move(move emove, int ply)
   //  cause problems.  Return 0 in these cases.
   if(mv.from > 63 || mv.to > 63 ||
      PSIDE(sq[mv.from]) != wtm ||
-     (PTYPE(sq[mv.to]) == KING && !(mv.type&CASTLE))) {
+     (PTYPE(sq[mv.to]) == KING && !(mv.type&CASTLE)) ||
+     (sq[mv.to] && PSIDE(sq[mv.to]) == wtm && !(mv.type&CASTLE))) {
     write_out("Illegal move detected!\n");
     return 0;
   }
