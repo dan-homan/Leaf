@@ -58,6 +58,16 @@ Binary naming: `run/Leaf_v<version>` — e.g. `Leaf_v2026_03_09a`, `Leaf_vtrain_
 
 The `.nnue` network file and `.tdleaf.bin` weights file must reside in the same directory as the binary (unless `NNUE_EMBED=1` was used, in which case no external `.nnue` file is needed).
 
+### CLI flags
+
+| Flag | Effect |
+|------|--------|
+| `--uci` | Force UCI protocol mode |
+| `--xboard` | Force xboard/CECP protocol mode |
+| `--log` | Enable logging to `run.log` (default: off) |
+| `hash <MB>` | Set hash table size |
+| `cores <N>` | Set thread count |
+
 ---
 
 ## Architecture
@@ -67,7 +77,7 @@ The `.nnue` network file and `.tdleaf.bin` weights file must reside in the same 
 `main.cpp` → `uci.cpp` → `attacks.cpp` → `exmove.cpp` → `swap.cpp` → `moves.cpp` → `captures.cpp` →
 `captchecks.cpp` → `hash.cpp` → `smp.cpp` → `search.cpp` → `score.cpp` →
 `#if NNUE nnue.cpp` → `#if NNUE_EMBED nnue_embed.cpp` → `#if TDLEAF tdleaf.cpp` → `check.cpp` → `book.cpp` → `sort.cpp` →
-`util.cpp` → `support.cpp` → `probe.cpp` → `setup.cpp` → `game_rec.cpp` →
+`util.cpp` → `support.cpp` → `setup.cpp` → `game_rec.cpp` →
 `tree_search_functions.cpp`
 
 Because of the unity build, LSP tools that analyse files individually will emit many false-positive
@@ -221,7 +231,7 @@ engine/
   src/          Source code (unity-built via Leaf.cc)
   docs/         Documentation (NNUE.md, TDLEAF.md, TODO.md, TRAINING_RUN1.md, SCRIPT_USE.md, change_log.txt)
   scripts/      Python automation scripts
-  run/          Compiled binaries + runtime config (search.par, opening book)
+  run/          Compiled binaries + runtime config (opening book)
   learn/        Training artifacts: .nnue, .tdleaf.bin, .games, pgn/
 gui/            LeafGUI Flutter chess GUI (see gui/CLAUDE.md)
 logos/          Shared logo assets

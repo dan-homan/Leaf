@@ -135,15 +135,6 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
 	}
 #endif
       }
-      // check TB at root
-#if TABLEBASES
-      if(p.pieces[0] + p.pieces[1]
-	 + p.plist[0][PAWN][0] + p.plist[1][PAWN][0] <= EGTB) {
-	root_tb_score = probe_tb(&p, 0);
-      } else root_tb_score = -1;
-#else 
-      root_tb_score = -1;
-#endif  /* TABLEBASES */
       max_ply = MAX(last_depth-7,3); 
       last_depth = max_ply;
       int save_post = post; post = 0;
@@ -179,19 +170,7 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
     time_limit = max_limit/4;
   }
 
-  //---------------------------------------------  
-  // checking tablebases at root
-  //---------------------------------------------
-#if TABLEBASES
-  if(p.pieces[0] + p.pieces[1]
-      + p.plist[0][PAWN][0] + p.plist[1][PAWN][0] <= EGTB) {
-   root_tb_score = probe_tb(&p, 0);
-  } else root_tb_score = -1;
-#else 
-  root_tb_score = -1;
-#endif  /* TABLEBASES */
-
-  //-----------------------------  
+  //-----------------------------
   // checking book
   //-----------------------------  
   if(gr->book && !ponder && !uci_in_ponder && !analysis_mode) {
@@ -492,9 +471,6 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
     // break if we have a draw or a consistent mate score
     if((g == 0 && max_ply > MAXD-3) || (mate_iteration_count > 1)) break;
 
-    // if we have a root tb hit and a move, break after third iter.
-    if(root_tb_score > -1 && tdata[0].pc[0][0].t && max_ply > 2) break;
-
   }
 
   //------------------------------------------------------------------
@@ -510,7 +486,7 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
   // statistics and timing checks.
   unsigned __int64 node_count=0ULL, eval_count=0ULL, extensions=0ULL, qchecks=0ULL;
   unsigned __int64 phash_count=0ULL, hash_count=0ULL, hmove_count=0ULL, q_count=0ULL;
-  unsigned __int64 null_cutoff=0ULL, internal_iter=0ULL, egtb_probes=0ULL, egtb_hits=0ULL;
+  unsigned __int64 null_cutoff=0ULL, internal_iter=0ULL;
   unsigned __int64 failed_high=0ULL, first_fail_high=0ULL, shash_count=0ULL, sing_count = 0ULL;
 
   // sum values over all threads
@@ -525,8 +501,6 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
     q_count+=tdata[t].q_count;
     null_cutoff+=tdata[t].null_cutoff;
     internal_iter+=tdata[t].internal_iter;
-    egtb_probes+=tdata[t].egtb_probes;
-    egtb_hits+=tdata[t].egtb_hits;
     failed_high+=tdata[t].fail_high;
     first_fail_high+=tdata[t].first_fail_high;
     shash_count+=tdata[t].shash_count;
@@ -551,8 +525,6 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
         << " sing_ext = " << sing_count
         << " qchecks = " << qchecks << "\n";
    cout << "int_iter = " << internal_iter
-        << " egtb_probes = " << egtb_probes
-        << " egtb_hits = " << egtb_hits
         << " fail_high(%) = " << float(int(10000*(float(first_fail_high)/float(failed_high))))/100.0 << "\n";
 #if DEBUG_REDUCTION
    cout << " attempts = " << attempts << " successes = " << successes << "\n";
@@ -569,8 +541,8 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
 	  int(100.0*(float(node_count)/float(elapsed))), null_cutoff, extensions, qchecks,
 	  internal_iter);
   write_out(outstring);
-  snprintf(outstring, sizeof(outstring), "egtb_probes = %llu, egtb_hits = %llu, fail_high(pct) = %5.2f\n",
-	  egtb_probes, egtb_hits, 100.0*(float(first_fail_high)/float(failed_high)));
+  snprintf(outstring, sizeof(outstring), "fail_high(pct) = %5.2f\n",
+	  100.0*(float(first_fail_high)/float(failed_high)));
   write_out(outstring);
 
   p.print_move(tdata[0].pc[0][0], mstring, &(this->tdata[0]));
@@ -931,26 +903,18 @@ void search_node::root_pvs()
    }
 
    // -----------------------------------
-   // initialize tb_hit variable 
-   // -----------------------------------
-   tdata->tb_hit = 0;
-
-   // -----------------------------------
    //   Search the next node in the tree
    // -----------------------------------
    if(depth+depth_mod < 1) {
      score = -next->qsearch(-beta, -alpha, 0);
      if (score == TIME_FLAG) { tdata->g = -TIME_FLAG; return; }
-     if(tdata->tb_hit && ts->root_tb_score > (MATE/2) && score <= ts->root_tb_score) score = alpha;
    } else {
     if(first) {
       score = -next->pvs(-beta, -alpha, depth+depth_mod-1, 1, 0);
       if (score == TIME_FLAG) { tdata->g = -TIME_FLAG; return; }
-      if(tdata->tb_hit && ts->root_tb_score > (MATE/2) && score <= ts->root_tb_score) score = alpha;
     } else {
       score = -next->pvs(-alpha-1, -alpha, depth+depth_mod-1, 0, 0);
       if (score == TIME_FLAG) { tdata->g = -TIME_FLAG; return; }
-      if(tdata->tb_hit && ts->root_tb_score > (MATE/2) && score <= ts->root_tb_score) score = alpha;
       if (score > alpha && score < (MATE/2)) { 
 	if(depth_mod < 0) depth_mod = 0;  // for checking move reductions on re-search
 	score = -next->pvs(-beta, -alpha, depth+depth_mod-1, 1, 0);
@@ -1148,7 +1112,7 @@ int search_node::pvs(int alpha, int beta, int depth, int in_pv, int move_to_skip
  //       -- check for time interrupt of search
  //       -- test fifty move rule and 3-rep
  //       -- look in the hash table for a cut-off or a move
- //       -- look in the end-game-tablebases (egtb)
+ //       -- check for KK draw
  // ----------------------------------------------------------
 
  // initialize some variables
@@ -1212,7 +1176,7 @@ int search_node::pvs(int alpha, int beta, int depth, int in_pv, int move_to_skip
  */
 
  //-------------------
- //    Check EGTB
+ //    Check KK draw
  //-------------------
  if(ply == 1 || (pos.last.b.type&CAPTURE)) {
    int total_pieces = pos.pieces[0]+pos.pieces[1]
@@ -1223,24 +1187,8 @@ int search_node::pvs(int alpha, int beta, int depth, int in_pv, int move_to_skip
      if(ply > 1) return(MAX(MIN(0,beta),alpha));
      else return 0;
    }
-#if TABLEBASES
-   if((ply == 1 && total_pieces <= EGTB)
-      || total_pieces <= MIN(EGTB,4)) {
-     pthread_mutex_lock(&egtb_lock);
-     score = probe_tb(&pos, ply);
-     pthread_mutex_unlock(&egtb_lock);
-     tdata->egtb_probes++;
-     if(score != -1) {
-       if(ply == 1) tdata->tb_hit = 1;
-       tdata->egtb_hits++;
-       //return(score);
-       if(score == 0 && ply > 1) return(MAX(MIN(0,beta),alpha));
-       else return(score);
-     }
-   }
-#endif  /* TABLEBASES */
  }
- 
+
  //------------------------------------------
  //    Check hash table
  //     --> adjust pos.hcode if in PV
@@ -2101,7 +2049,7 @@ int search_node::qsearch(int alpha, int beta, int qply)
 #endif
 
   //-------------------
-  //    Check EGTB
+  //    Check KK draw
   //-------------------
   if(ply == 1 || (pos.last.b.type&CAPTURE)) {
     int total_pieces = pos.pieces[0]+pos.pieces[1]
@@ -2110,24 +2058,7 @@ int search_node::qsearch(int alpha, int beta, int qply)
     if(total_pieces == 2) {
       if(ply > 1) return(MAX(MIN(0,beta),alpha));
       else return 0;
-      //return 0;
     }
-#if TABLEBASES
-    if((ply == 1 && total_pieces <= EGTB)
-       || total_pieces <= MIN(EGTB,4)) {
-      pthread_mutex_lock(&egtb_lock);
-      score = probe_tb(&pos, ply);
-      pthread_mutex_unlock(&egtb_lock);
-      tdata->egtb_probes++;
-      if(score != -1) {
-	if(ply == 1) tdata->tb_hit = 1;
-	tdata->egtb_hits++;
-	if(score == 0 && ply > 1) return(MAX(MIN(0,beta),alpha));
-	else return(score);
-	//return(score);
-      }
-    }
-#endif  /* TABLEBASES */
   }
  
   //--------------------------------------------------------

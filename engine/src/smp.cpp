@@ -18,7 +18,6 @@
 // Global variables to control SMP search
 //-----------------------------------------------
 
-pthread_mutex_t egtb_lock;
 pthread_mutex_t log_lock;
 unsigned int THREADS = 1;
 
@@ -126,7 +125,6 @@ int tree_search::search_threads(int alpha, int beta, int depth, int threads) {
     tdata[ti].depth = depth;
     tdata[ti].quit_thread = 0;
     tdata[ti].fail = 0;
-    tdata[ti].tb_hit = 0;
     /*
     if(depth > 2 && threads > 2) { 
       if(ti > threads/3) tdata[ti].depth += 1; 

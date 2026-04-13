@@ -47,12 +47,6 @@ move opening_book(h_code hash_code, position p, game_rec *gr);
 /* util.cpp */
 int GetTime();
 
-/* probe.cpp */
-#if TABLEBASES
-int init_tb();
-int probe_tb(position *p, int ply);
-#endif
-
 /* uci.cpp */
 void uci_loop(game_rec *gr);
 void uci_send_info(int score, int depth, int elapsed_cs, unsigned long long nodes, tree_search *ts);

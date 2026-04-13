@@ -139,7 +139,7 @@ int put_move(h_code h_key, int putmove, int h_id);
 #define Or(A, B)   A ^= B;
 
 // total size of hash tables in MB
-int HASH_SIZE = 32;
+int HASH_SIZE = 128;
 
 /* hash table variables -- total as given is about 16 MB of hash */
 unsigned int TAB_SIZE  =  131072;   // hash table size (bucket entries) - override in search.par

@@ -127,7 +127,7 @@ perl comp.pl <version> NNUE=1 OVERWRITE
 | `OVERWRITE` | Skip overwrite prompt |
 | `NATIVE=1` | `-march=native` (max perf, non-portable) |
 
-The network file must be in the same directory as the binary (unless `NNUE_EMBED=1`).  Runtime data files (`search.par`, `main_bk.dat`) must also be present.
+The network file must be in the same directory as the binary (unless `NNUE_EMBED=1`).  The opening book (`main_bk.dat`) must also be present.
 
 ---
 
@@ -179,7 +179,7 @@ engine/
   src/          C++ source code (unity build via Leaf.cc)
   docs/         Documentation (NNUE.md, TDLEAF.md, SCRIPT_USE.md, change_log.txt)
   scripts/      Python automation scripts
-  run/          Compiled binaries + runtime data (search.par, opening book)
+  run/          Compiled binaries + runtime data (opening book)
   learn/        Training artifacts (.nnue, .tdleaf.bin, PGN)
 gui/            LeafGUI Flutter chess GUI
 logos/           Shared logo assets

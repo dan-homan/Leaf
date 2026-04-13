@@ -122,11 +122,6 @@ bypasses classical eval entirely, so `pawn hash hits` is always 0 in NNUE mode a
 pawn hash memory (≈19 MB) is wasted.  Disabling or shrinking it at build time when
 `NNUE=1` would recover that memory (no effect on playing strength).
 
-### search.par revision
-Review whether `search.par` is still the right mechanism for runtime configuration —
-consider what parameters are still relevant, whether the file format should be updated,
-and how it interacts with xboard/cutechess invocation.
-
 ### Multi-thread accumulator correctness
 The SMP search allocates one `ts_thread_data` per thread, each with its own
 `search_node n[MAXD+1]` stack including per-node accumulators.  Each thread's root

@@ -37,7 +37,6 @@ tree_search::tree_search() {
   ponder_time_double = 0;
   root_alpha = -MATE;
   root_beta = +MATE;
-  root_tb_score = -1;
   root_wtm = 0;
   start_depth = 1;
   last_depth = 1;
@@ -131,7 +130,6 @@ void tree_search::create_thread_data(game_rec *gr, int thread_count) {
   for(int t=0; t < thread_count; t++) {
     tdata[t].ID = t;
     tdata[t].fail = 0;
-    tdata[t].tb_hit = 0;
     if(!t) { tdata[0].running = 1; }  // main thread is always running
     else { tdata[t].running = 0; }
     tdata[t].quit_thread = 0;

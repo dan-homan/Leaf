@@ -318,8 +318,7 @@ struct ts_thread_data {
                            //    principle continuation
   h_code plist[MAX_GAME_PLY];   // hash codes of positions visited
 
-  int fail;                     // fail high(+1)/low(-1) flag  
-  int tb_hit;                   // was there a tablebase hit in search? 1/0 = y/n
+  int fail;                     // fail high(+1)/low(-1) flag
 
   int killer1[2], killer2[2], killer3[2]; // killer moves
 
@@ -331,7 +330,7 @@ struct ts_thread_data {
   // statistics and timing checks.
   unsigned __int64 node_count, eval_count, extensions, qchecks;
   unsigned __int64 phash_count, hash_count, hmove_count, q_count;
-  unsigned __int64 null_cutoff, internal_iter, egtb_probes, egtb_hits;
+  unsigned __int64 null_cutoff, internal_iter;
   unsigned __int64 fail_high, first_fail_high, shash_count, sing_count;
  
   // function to initialize data for this thread
@@ -340,7 +339,7 @@ struct ts_thread_data {
     node_count = 0ULL; eval_count = 0ULL; shash_count = 0ULL;
     phash_count = 0ULL; hash_count = 0ULL; hmove_count = 0ULL; q_count = 0ULL;
     null_cutoff = 0ULL; extensions = 0ULL; qchecks = 0ULL; internal_iter = 0ULL;
-    egtb_probes = 0ULL; egtb_hits = 0ULL; fail_high = 0ULL; first_fail_high = 0ULL;
+    fail_high = 0ULL; first_fail_high = 0ULL;
     sing_count = 0ULL;
 
     // if we are not pondering, age history and initialize reply table
@@ -403,7 +402,7 @@ struct tree_search {
   int wbest, wply;              // whisper variables for search summary
   int turn;                     // Current game turn
   int root_alpha, root_beta;    // values at the root of search 
-  int root_tb_score, root_wtm;
+  int root_wtm;
   int start_depth;              // start depth of search  
   int last_depth;               // depth of previous search
   int g_last;                   // last returned score of search

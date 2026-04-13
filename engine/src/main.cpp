@@ -133,11 +133,10 @@ int main(int argc, char *argv[])
   if(last_slash == 0) strcpy(exec_path, "./");
   else exec_path[last_slash+1] = '\0';
 
-  // initialize lock for logfile and egtb...
+  // initialize lock for logfile
   // -- must come before any function that might
   //    try to access these locks, even "write_out"
   pthread_mutex_init(&log_lock,NULL);
-  pthread_mutex_init(&egtb_lock,NULL);
 
   //---------------------------------
   // Initialize variables for 
@@ -145,7 +144,6 @@ int main(int argc, char *argv[])
   //  -- hash table
   //  -- check tables
   //  -- random number seeds
-  //  -- tablebases
   //  -- threads and locks
   //  -- board and game record
   //----------------------------------
@@ -153,10 +151,6 @@ int main(int argc, char *argv[])
   set_hash_size(HASH_SIZE);
   gen_check_table();
   srand(time(NULL));
-#if TABLEBASES
-  init_tb();
-#endif
-
 #if NNUE
   {
     // --init-nnue: create a fresh random-initialised .nnue without reading an existing one.
@@ -342,6 +336,11 @@ int main(int argc, char *argv[])
     if(!strcmp(argv[argi], "xb")) {
       xboard = 1;
       interface_mode = 1;
+      continue;
+    }
+    // enable logging
+    if(!strcmp(argv[argi], "--log")) {
+      logging = 1;
       continue;
     }
     // set the number of cores to use
@@ -1156,9 +1155,6 @@ void parse_command()
       game.p_side = game.pos.wtm; }
   else if(!xboard && !strcmp(response, "help")) { help(); }
   else if(!strcmp(response, "nopost")) { post = 0; }
-#if TABLEBASES
-  else if(!strcmp(response, "probe") && !xboard) { cout << probe_tb(&game.pos,0) << "\n"; }
-#endif
   else if((!strcmp(response, "save") || !strcmp(response, "SR")) && !xboard) { save_game(); }
   else if(!strcmp(response, "quit")) { game.over = 1; game.program_run = 0;  }
   else if(!strcmp(response, "result")) {

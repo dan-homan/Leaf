@@ -1,6 +1,14 @@
 Changes since 2017_12_24
 
-2026_04_12 -- nnue: support embedding the .nnue net directly into the binary via incbin.
+2026_04_12 -- cleanup: remove Nalimov tablebase (EGTB) support entirely.  The TABLEBASES
+               compile flag, probe.cpp, and all tablebase probing code in search.cpp are
+               removed.  The old Nalimov format provided minimal Elo gain; a modern format
+               (e.g. Syzygy) can be added later if needed.
+             cleanup: remove search.par parameter file.  All parameters now have sensible
+               compile-time defaults and can be changed via UCI options, xboard commands,
+               or CLI flags.  Default hash size increased from 32 MB to 128 MB.  Added
+               --log CLI flag to enable logging (replaces LOG setting in search.par).
+             nnue: support embedding the .nnue net directly into the binary via incbin.
                Compile with NNUE=1 NNUE_EMBED=1 NNUE_NET=<file>.  The MemStream abstraction
                lets nnue_load_stream parse from both file and memory, shared by nnue_load()
                and nnue_load_from_memory().  incbin.h (public domain, Dale Weiler) provides

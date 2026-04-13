@@ -39,7 +39,7 @@ directory and `../run/`) and passes it as `NNUE_NET_PATH` to the compiler.
 
 At runtime, the embedded binary loads the network from memory without needing any external
 `.nnue` file.  This is useful for distribution — a single self-contained binary with no
-data file dependencies (other than `search.par` and `main_bk.dat` for the opening book).
+data file dependencies (other than `main_bk.dat` for the opening book).
 
 The binary size increases by the size of the `.nnue` file (~26 MB for the default net).
 The `.tdleaf.bin` weights file is NOT embedded and must still be provided externally if

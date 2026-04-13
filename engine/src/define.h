@@ -125,13 +125,6 @@
 #define IOS_IN  ios::in | ios::binary
 
 // -------------------------------
-//  Tablebases
-// -------------------------------
-#ifndef TABLEBASES
- #define TABLEBASES   0  // Set to 1 to enable tablebase code, see
-#endif                   // the file 'probe.cpp' for more details
-
-// -------------------------------
 //  FLTK GUI switch
 // -------------------------------
 #if MAKE_GUI

@@ -47,13 +47,6 @@ void set_hash_size(unsigned int Mbytes)
 
   unsigned int Max_tab_size, Max_pawn_size, Max_score_size, Max_cmove_size;
 
-  /*   -- subtracting off cache_size creates a difference in 
-          node counts between TB and non-TB versions even in
-          non-TB positions, so commenting out.  
-#if TABLEBASES
-  Mbytes -= int(CACHE_SIZE);  // subtract off EGTB CACHE 
-#endif
-  */
   if(Mbytes < 16) {
     cout << "Minimum total hash size is 16 MB, using 16 MB\n";
     cout.flush();

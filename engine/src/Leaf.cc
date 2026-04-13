@@ -27,7 +27,6 @@
 #include "../src/sort.cpp"
 #include "../src/util.cpp"
 #include "../src/support.cpp"
-#include "../src/probe.cpp"
 #include "../src/setup.cpp"
 #include "../src/game_rec.cpp"
 #include "../src/tree_search_functions.cpp"

@@ -68,7 +68,6 @@ extern int learn_count;
 
 /* smp.cpp */
 extern pthread_mutex_t log_lock;
-extern pthread_mutex_t egtb_lock;
 
 /* fltk_gui.cpp */
 extern int FLTK_post;
@@ -78,11 +77,6 @@ extern int abortflag;
 #include <FL/Fl_Text_Display.H>
 extern Fl_Text_Buffer *searchout_buffer;
 extern Fl_Text_Display *searchout;
-#endif
-
-#if TABLEBASES
-extern char EGTB_PATH[FILENAME_MAX];
-extern float CACHE_SIZE;
 #endif
 
 

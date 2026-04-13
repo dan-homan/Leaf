@@ -8,8 +8,6 @@
 // Null move flags
 int NULL_MOVE = 1;
 
-int EGTB = 0;                       // maximum tablebase pieces
-
 int BOOK_LEARNING = 0;          // flag for book learning
 
 // Chess Skill

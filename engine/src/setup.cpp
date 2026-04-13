@@ -59,90 +59,13 @@ char piece_sq_save[4][7][64];
 
 void set_search_param()
 {
-
- char dummy[50], line[200], parameter_file[100];
-
- // look for the search parameter file in the
- // executable directory and in the current directory
-
- strcpy(parameter_file, exec_path);
- strcat(parameter_file, "search.par");
-
-/*
- // save piece-sq information
- for(int i = 0; i < 4; i++)
-   for(int j = 0; j < 7; j++)
-     for(int k = 0; k < 64; k++)  piece_sq_save[i][j][k] = piece_sq[i][j][k];
-
- fill_psq(PAWN);
- fill_psq(KNIGHT);
- fill_psq(BISHOP);
- fill_psq(ROOK);
- fill_psq(QUEEN);
- fill_psq(KING);
-*/
- 
- ifstream parfile(parameter_file, IOS_IN_TEXT);
- if(!parfile) parfile.open("search.par", IOS_IN_TEXT);
-
- if(parfile) {
-   // Read through search parameter file, setting
-   // values as appropriate.
-   
-   while(!parfile.eof()) {
-     parfile >> dummy;
-     if(dummy[0] == '#') {
-       parfile.getline(line, 199);
-       continue;
-     }
-     
-     if(!strcmp(dummy, "NULL_MOVE")) {
-       parfile >> NULL_MOVE;
-//     } else if(!strcmp(dummy, "NO_ROOT_LMR_SCORE")) {
-//       parfile >> NO_ROOT_LMR_SCORE;
-#if TABLEBASES     
-     } else if(!strcmp(dummy, "EGTB_PATH")) {
-       parfile >> EGTB_PATH;
-     } else if(!strcmp(dummy, "EGTB_CACHE_SIZE")) {
-       parfile >> CACHE_SIZE;
-#endif
-     } else if(!strcmp(dummy, "LOG")) {
-       parfile >> logging;
-     } else if(!strcmp(dummy, "MAX_LOGS")) {
-       parfile >> MAX_LOGS;
-     } else if(!strcmp(dummy, "BOOK_FILE")) {
-       parfile >> BOOK_FILE;
-     } else if(!strcmp(dummy, "START_BOOK")) {
-       parfile >> START_BOOK;
-     } else if(!strcmp(dummy, "HASH")) {
-       parfile >> HASH_SIZE;
-     } else if(!strcmp(dummy, "XBOARD")) {
-       parfile >> xboard; 
-     } else if(!strcmp(dummy, "THREADS")) {
-       parfile >> THREADS; 
-       if(THREADS > 0) { 
-	 THREADS = MIN(THREADS,MAX_THREADS);
-       } else {
-	 cout << "ERROR(parfile has invalid THREADS value)\n";
-       }
-     } else if(!strcmp(dummy, "CHESS_SKILL")) {
-       parfile >> CHESS_SKILL; 
-     } else parfile.getline(line, 199);
-     
-   }
-
- } else { cout << "Error(NoParFile--Using defaults)"; }
-
- //---------------------------- 
- // Apply some of these values 
- //---------------------------- 
- // Do we learn? 
+ // Apply defaults (search.par is no longer used; all parameters
+ // have sensible compile-time defaults and can be changed via
+ // UCI options, xboard commands, or CLI flags).
  game.learn_bk = BOOK_LEARNING;
- // Set chess skill
  game.knowledge_scale = CHESS_SKILL;
  if(game.knowledge_scale < 1) game.knowledge_scale = 1;
  if(game.knowledge_scale > 100) game.knowledge_scale = 100;
-
 }
 
 /* Function to generate check tables */
