@@ -404,6 +404,8 @@ per-weight bias correction and monitoring.
 | `TDLEAF_BATCH_SIZE` | 16 | Mini-batch: accumulate gradients across N games before each Adam step |
 | `TDLEAF_WEIGHT_DECAY` | 1e-4 | AdamW decoupled weight decay coefficient (FC + FT weights only) |
 | `TDLEAF_GRAD_CLIP_NORM` | 1.0 | Global gradient L2 norm clip threshold; 0 = disabled |
+| `TDLEAF_MIN_PLIES` | 8 | Skip games with fewer recorded TDLeaf plies than this |
+| `TDLEAF_MIN_PLIES_REP` | 40 | Skip 3-fold repetition draws with fewer plies than this |
 
 Set `TDLEAF_BATCH_SIZE = 1` to restore per-game Adam steps.
 Set `TDLEAF_ADAM_WARMUP = 0` to disable warmup.

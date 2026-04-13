@@ -322,7 +322,7 @@ static void uci_set_position(const std::string &line)
         game.T = (color_char == 'w') ? 1 : 2;
         // Set fifty-move counter from FEN half-move clock
         if (!halfmove.empty()) {
-            game.pos.fifty = atoi(halfmove.c_str()) * 2;
+            game.pos.fifty = atoi(halfmove.c_str());
         }
     } else {
         return; // unknown format
@@ -339,11 +339,16 @@ static void uci_set_position(const std::string &line)
         bool is_960_castle = uci_960_input(mbuf, game.pos);
         move m = uci_parse_move(mbuf, game.pos, &game.ts.tdata[0], is_960_castle);
         if (!m.t) break;
-        // Record hash in tdata position lists for all threads (for repetition detection)
+        if (!game.pos.exec_move(m, 0)) break;
+        // Record POST-move hash in tdata position lists for all threads.
+        // Must be after exec_move to match xboard's convention — the stride-2
+        // repetition check in search.cpp relies on plist parity being consistent
+        // (same-STM positions at stride 2).  PRE-move recording shifted the parity
+        // by 1 due to the duplicate startpos entry at plist[0]/plist[1], causing
+        // the rep check to compare opposite-STM hashes that can never match.
         for (int ti = 0; ti < MAX_THREADS; ti++) {
             game.ts.tdata[ti].plist[game.T] = game.pos.hcode;
         }
-        if (!game.pos.exec_move(m, 0)) break;
         game.T++;
     }
     // Sync p_side

@@ -30,6 +30,7 @@ static const float TDLEAF_K               = 290.0f; // sigmoid temperature (cent
                                                      // Empirically fitted from 968k self-play games
                                                      // (MLE over 91M positions): optimum ~292 cp.
 static const int   TDLEAF_MIN_PLIES       = 8;      // skip games shorter than this
+static const int   TDLEAF_MIN_PLIES_REP   = 40;     // skip 3-rep draws shorter than this
 // Approach 1 — TD error clipping.
 // When the white-POV score change between consecutive moves exceeds this
 // threshold (centipawns), the (d[t+1]−d[t]) contribution to the eligibility

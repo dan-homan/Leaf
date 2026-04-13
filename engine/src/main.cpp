@@ -759,14 +759,21 @@ void make_move()
 #if TDLEAF && NNUE && !TDLEAF_READONLY
    // If the game just ended via checkmate/stalemate/draw, trigger TDLeaf update.
    if (game.over && nnue_available && game.td_game.n_plies > 0) {
-     float td_result = 0.5f;
-     if (strstr(game.overstring, "1-0"))  td_result = 1.0f;
-     else if (strstr(game.overstring, "0-1")) td_result = 0.0f;
-     char tdleaf_save[FILENAME_MAX];
-     snprintf(tdleaf_save, sizeof(tdleaf_save), "%s%s", exec_path, NNUE_TDLEAF_BIN);
-     tdleaf_update_after_game(game.td_game, td_result, tdleaf_save);
-     tdleaf_replay(game.td_game, td_result, tdleaf_save);
-     game.td_game.n_plies = 0;  // prevent double-trigger
+     // Skip early 3-rep draws — degenerate repetition cycles provide noisy gradients
+     if (strstr(game.overstring, "3-rep") && game.td_game.n_plies < TDLEAF_MIN_PLIES_REP) {
+       fprintf(stderr, "[TDLeaf] Skipping early 3-rep draw (%d plies < %d)\n",
+               game.td_game.n_plies, TDLEAF_MIN_PLIES_REP);
+       game.td_game.n_plies = 0;
+     } else {
+       float td_result = 0.5f;
+       if (strstr(game.overstring, "1-0"))  td_result = 1.0f;
+       else if (strstr(game.overstring, "0-1")) td_result = 0.0f;
+       char tdleaf_save[FILENAME_MAX];
+       snprintf(tdleaf_save, sizeof(tdleaf_save), "%s%s", exec_path, NNUE_TDLEAF_BIN);
+       tdleaf_update_after_game(game.td_game, td_result, tdleaf_save);
+       tdleaf_replay(game.td_game, td_result, tdleaf_save);
+       game.td_game.n_plies = 0;  // prevent double-trigger
+     }
    }
 #endif
 

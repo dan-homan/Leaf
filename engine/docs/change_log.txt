@@ -1,6 +1,18 @@
 Changes since 2017_12_24
 
-2026_04_13 -- bugfix: add self-capture validation to exec_move() and reorder UCI PV
+2026_04_13 -- bugfix: fix UCI repetition detection.  uci_set_position() recorded position
+               hashes BEFORE exec_move (pre-move), while xboard's make_move() records them
+               AFTER (post-move).  The duplicate startpos entry at plist[0]/plist[1] shifted
+               parity so the stride-2 rep check in search compared opposite-STM hashes that
+               could never match — making repetition detection against game history completely
+               non-functional in UCI mode.  Fix: record post-move hashes, matching xboard.
+               Also fixed FEN fifty-move counter being doubled (fifty * 2 → fifty).
+               Before: 37% 3-fold rep rate (both-UCI), 30-50 Elo gap vs xboard.
+               After: ~12% 3-fold rep rate, ~0 Elo gap.
+             tdleaf: skip early 3-fold repetition draws from TDLeaf learning.  Games ending
+               in 3-rep with fewer than TDLEAF_MIN_PLIES_REP (40) recorded plies are excluded
+               — degenerate repetition cycles provide noisy gradients with little useful signal.
+             bugfix: add self-capture validation to exec_move() and reorder UCI PV
                output so exec_move validates before printf.  Fixes "Illegal PV move"
                warnings from cutechess-cli caused by stale triangular-PV entries where
                a move (e.g. Kd2-e2) was valid in the search context but illegal when
