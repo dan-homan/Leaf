@@ -9,6 +9,7 @@ Changes since 2017_12_24
                Also fixed FEN fifty-move counter being doubled (fifty * 2 → fifty).
                Before: 37% 3-fold rep rate (both-UCI), 30-50 Elo gap vs xboard.
                After: ~12% 3-fold rep rate, ~0 Elo gap.
+             tdleaf: reduce TDLEAF_BATCH_SIZE from 16 back to 4.
              tdleaf: skip early 3-fold repetition draws from TDLeaf learning.  Games ending
                in 3-rep with fewer than TDLEAF_MIN_PLIES_REP (40) recorded plies are excluded
                — degenerate repetition cycles provide noisy gradients with little useful signal.

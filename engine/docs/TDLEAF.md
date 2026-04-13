@@ -401,7 +401,7 @@ per-weight bias correction and monitoring.
 | `TDLEAF_ADAM_BETA2` | 0.999 | Second-moment decay (all layers) |
 | `TDLEAF_ADAM_EPS` | 1e-8 | Numerical floor in denominator |
 | `TDLEAF_ADAM_WARMUP` | 50 | Linear LR warmup: ramp from 0 to full LR over first N Adam steps (0 = disabled) |
-| `TDLEAF_BATCH_SIZE` | 16 | Mini-batch: accumulate gradients across N games before each Adam step |
+| `TDLEAF_BATCH_SIZE` | 4 | Mini-batch: accumulate gradients across N games before each Adam step |
 | `TDLEAF_WEIGHT_DECAY` | 1e-4 | AdamW decoupled weight decay coefficient (FC + FT weights only) |
 | `TDLEAF_GRAD_CLIP_NORM` | 1.0 | Global gradient L2 norm clip threshold; 0 = disabled |
 | `TDLEAF_MIN_PLIES` | 8 | Skip games with fewer recorded TDLeaf plies than this |
@@ -416,7 +416,7 @@ Set `TDLEAF_GRAD_CLIP_NORM = 0.0` to disable gradient clipping.
 
 ## Mini-Batch Gradient Accumulation
 
-By default (`TDLEAF_BATCH_SIZE=16`), gradients are accumulated across 16 games before
+By default (`TDLEAF_BATCH_SIZE=4`), gradients are accumulated across 4 games before
 a single Adam step is applied.  This gives the optimizer a more reliable gradient signal
 per step, reducing single-game noise that otherwise causes Adam's first moment to chase
 stochastic fluctuations.
@@ -433,8 +433,8 @@ stochastic fluctuations.
 
 ### Trade-offs
 
-- **Pro:** each Adam step uses ~16× more gradient data, improving signal-to-noise ratio.
-- **Pro:** file I/O reduced by ~16× (one write per batch instead of per game).
+- **Pro:** each Adam step uses ~4× more gradient data, improving signal-to-noise ratio.
+- **Pro:** file I/O reduced by ~4× (one write per batch instead of per game).
 - **Con:** weight updates are delayed by up to `BATCH_SIZE-1` games (negligible in practice;
   the delay is a few seconds at typical game durations).
 
