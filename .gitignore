@@ -18,11 +18,12 @@ scripts/*
 !README.md
 !CLAUDE.md
 
-# Within engine/run/, only track scripts and config (not binaries or data files)
+# Within engine/run/, only track scripts, config, and the opening book (not binaries)
 engine/run/*
 !engine/run/*.py
 !engine/run/*.pl
 !engine/run/*.txt
+!engine/run/main_bk.dat
 
 # Within engine/learn/, only track scripts and config
 engine/learn/*
