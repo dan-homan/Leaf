@@ -1,5 +1,11 @@
 Changes since 2017_12_24
 
+2026_04_13 -- bugfix: add self-capture validation to exec_move() and reorder UCI PV
+               output so exec_move validates before printf.  Fixes "Illegal PV move"
+               warnings from cutechess-cli caused by stale triangular-PV entries where
+               a move (e.g. Kd2-e2) was valid in the search context but illegal when
+               replayed from the root (own pawn on e2).  Observed in a FRC endgame.
+
 2026_04_12 -- cleanup: remove Nalimov tablebase (EGTB) support entirely.  The TABLEBASES
                compile flag, probe.cpp, and all tablebase probing code in search.cpp are
                removed.  The old Nalimov format provided minimal Elo gain; a modern format
