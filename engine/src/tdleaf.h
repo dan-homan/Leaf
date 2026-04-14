@@ -24,11 +24,15 @@
 // ---------------------------------------------------------------------------
 // Hyperparameters (can be overridden by setvalue/environment at runtime)
 // ---------------------------------------------------------------------------
-static const float TDLEAF_LAMBDA_DECISIVE  = 0.8f;   // eligibility trace decay for wins/losses
-static const float TDLEAF_LAMBDA_DRAW      = 0.5f;   // eligibility trace decay for draws
-static const float TDLEAF_K               = 290.0f; // sigmoid temperature (centipawns)
-                                                     // Empirically fitted from 968k self-play games
-                                                     // (MLE over 91M positions): optimum ~292 cp.
+static const float TDLEAF_LAMBDA           = 0.98f;  // eligibility trace decay (single value for
+                                                     // decisive and draw games — empirically fitted
+                                                     // from 1.6M self-play games; autocorrelation
+                                                     // and d_t-vs-result methods give ~0.97–0.99
+                                                     // for both game types)
+static const float TDLEAF_K               = 240.0f; // sigmoid temperature (centipawns)
+                                                     // MLE over 10M positions from stages 5–6:
+                                                     // optimum 239 cp (prev. 290 cp, fitted from
+                                                     // earlier training stage).
 static const int   TDLEAF_MIN_PLIES       = 8;      // skip games shorter than this
 static const int   TDLEAF_MIN_PLIES_REP   = 40;     // skip 3-rep draws shorter than this
 // Approach 1 — TD error clipping.

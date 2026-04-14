@@ -1,5 +1,16 @@
 Changes since 2017_12_24
 
+2026_04_14 -- tdleaf: update sigmoid temperature K from 290 to 240 cp and collapse
+               dual-lambda scheme (LAMBDA_DECISIVE=0.8, LAMBDA_DRAW=0.5) to a single
+               TDLEAF_LAMBDA=0.98.  Both changes are data-driven from 1.6M self-play games
+               (nn-fresh-260410, stages 5–6, ~10M positions):
+               K: MLE optimum is 239 cp (prev. 290 cp fitted from an earlier training stage;
+                  the trained network produces sharper, better-calibrated scores).
+               λ: even-lag autocorrelation of d_t gives λ≈0.985 for both decisive and draw
+                  games; d_t-vs-result decay gives λ≈0.970–0.986.  The decisive/draw split
+                  offers no empirical benefit — both game types have the same temporal
+                  correlation structure.  Rounded to λ=0.98.
+
 2026_04_13 -- bugfix: fix UCI repetition detection.  uci_set_position() recorded position
                hashes BEFORE exec_move (pre-move), while xboard's make_move() records them
                AFTER (post-move).  The duplicate startpos entry at plist[0]/plist[1] shifted

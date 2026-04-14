@@ -129,8 +129,8 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result,
         d[t] = 1.0f / (1.0f + expf(-score_w_cp[t] / TDLEAF_K));
     }
 
-    // 2. Compute TD errors backward (asymmetric lambda: decisive vs draw)
-    const float lambda = (result == 0.5f) ? TDLEAF_LAMBDA_DRAW : TDLEAF_LAMBDA_DECISIVE;
+    // 2. Compute TD errors backward
+    const float lambda = TDLEAF_LAMBDA;
 
     static float e[MAX_GAME_PLY];
     e[T - 1] = result - d[T - 1];
