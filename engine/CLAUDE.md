@@ -114,7 +114,7 @@ See `docs/TDLEAF.md` for the full algorithm reference, hyperparameters, and grad
 - After each game: `tdleaf_update_after_game()` computes backward TD errors, backpropagates through all layers, and applies Adam/RMSProp updates.
 - Optional replay: `tdleaf_replay()` runs additional passes over recent games (currently disabled, `TDLEAF_REPLAY_K=0`).
 
-**Five separate Adam LRs:** FC (0.01), FT (1.0), FT bias (0.01), PSQT (1.6), piece_val (1.6).  Gradient clipping (L2 norm, 1.0) and AdamW weight decay (1e-4, FC+FT weights only).
+**Key hyperparameters:** `TDLEAF_K = 240 cp` (sigmoid temperature), `TDLEAF_LAMBDA = 0.98` (single eligibility trace decay — decisive and draw games use the same value).  Five separate Adam LRs: FC (0.01), FT (1.0), FT bias (0.01), PSQT (1.6), piece_val (1.6).  Gradient clipping (L2 norm, 1.0) and AdamW weight decay (1e-4, FC+FT weights only).
 
 **Critical gotchas for code changes:**
 - `material` in `score.cpp` is **already STM (side-to-move) POV** — do not flip it.
@@ -193,6 +193,12 @@ python3 scripts/merge_tdleaf.py run1.tdleaf.bin run2.tdleaf.bin -o merged --base
 python3 scripts/pgn_winrate.py learn/pgn/run1/match_run1_0g.pgn
 python3 scripts/pgn_winrate.py learn/pgn/run1/match_run1_0g.pgn --player Leaf_vtrain_nn-fresh_a --window 200
 python3 scripts/pgn_winrate.py learn/pgn/run1/match_run1_0g.pgn --csv
+
+# Extract per-position dataset from PGN files (for K/λ calibration)
+python3 scripts/extract_positions.py --pgn-dir learn/pgn/nn-fresh-260410 --out learn/positions.parquet
+
+# Calibrate sigmoid temperature K and lambda decay from extracted data
+python3 scripts/analyze_calibration.py --input learn/positions.parquet --out-dir learn/calibration_plots --stage 5 6
 ```
 
 ### Training workflow summary

@@ -614,3 +614,97 @@ python3 scripts/reset_adam.py learn/nn-fresh.tdleaf.bin --out learn/nn-fresh-res
 | `file` (positional) | *(required)* | `.tdleaf.bin` file to modify |
 | `--decay F` | 0 (full zero) | Multiply v and m by F instead of zeroing (0 < F < 1) |
 | `--out PATH` | *(overwrite input)* | Write result to PATH instead of overwriting |
+
+---
+
+## extract_positions.py
+
+Stream Leaf self-play PGN files and emit a per-position parquet dataset for
+calibration analysis.  Scores are read from inline move comments (`{+1.23/6 0.01s}`),
+converted to centipawns from the White perspective, and written alongside the game
+outcome and ply metadata.  Mate scores are capped at ±2000 cp.
+
+The output parquet is the input for `analyze_calibration.py`.
+
+```sh
+# Default: sample ~200K games from learn/pgn/nn-fresh-260410/
+python3 scripts/extract_positions.py
+
+# Explicit paths and options
+python3 scripts/extract_positions.py \
+    --pgn-dir  learn/pgn/nn-fresh-260410 \
+    --out      learn/positions.parquet \
+    --max-games 200000 \
+    --min-plies 8 \
+    --seed 42
+```
+
+### Output columns
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `game_id` | int32 | Sequential game counter across all files |
+| `training_stage` | int8 | 0=untrained … 6=1.5M-game-trained (inferred from filename) |
+| `ply` | int16 | 0-based ply index (0 = White's first move) |
+| `white_score_cp` | int16 | Eval from White's POV, centipawns, capped ±2000 |
+| `result` | float32 | Game result from White's POV: 1.0 / 0.5 / 0.0 |
+| `n_plies` | int16 | Total plies in the game |
+
+### Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--pgn-dir PATH` | `learn/pgn/nn-fresh-260410` | Directory containing `.pgn` files |
+| `--out PATH` | `learn/positions.parquet` | Output parquet file |
+| `--max-games N` | 200000 | Approximate number of games to sample (0 = all ~1.6M) |
+| `--min-plies N` | 8 | Skip games shorter than this (matches `TDLEAF_MIN_PLIES`) |
+| `--seed N` | 42 | Random seed for game sampling |
+
+---
+
+## analyze_calibration.py
+
+Calibrate TDLeaf hyperparameters from the per-position parquet produced by
+`extract_positions.py`.  Implements two analyses:
+
+**Goal 1A — Sigmoid temperature K:** MLE search for the K that maximises
+log-likelihood of game outcomes under `P(White wins) = σ(score / K)`.  Produces
+an NLL-vs-K curve, a reliability diagram, and a sigmoid comparison plot.
+
+**Goal 2A — Lambda decay:** Autocorrelation of `d_t = σ(score / K)` vs lag,
+split by decisive/draw games.  Even-lag pairs (same side-to-move) remove the
+ply-alternation oscillation.  Also computes `corr(d_t, result)` vs distance to
+game end.  Fits `λ^k` to both curves.
+
+```sh
+# Default: stages 5–6, max-lag 60, output to learn/calibration_plots/
+python3 scripts/analyze_calibration.py
+
+# Explicit options
+python3 scripts/analyze_calibration.py \
+    --input   learn/positions.parquet \
+    --out-dir learn/calibration_plots \
+    --stage 5 6 \
+    --max-lag 60
+
+# Include all training stages (shows how K and λ evolve over training)
+python3 scripts/analyze_calibration.py --all-stages
+```
+
+### Output files
+
+| File | Contents |
+|------|----------|
+| `calibration_K.png` | NLL vs K, reliability diagram, sigmoid comparison |
+| `lambda_decay.png` | 4-panel: full/even-lag autocorr, full/even-parity d_t-vs-result |
+| `summary.txt` | K_opt, delta from current, Brier scores, fitted λ values (both methods) |
+
+### Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--input PATH` | `learn/positions.parquet` | Parquet file from `extract_positions.py` |
+| `--out-dir PATH` | `learn/calibration_plots` | Output directory for plots and summary |
+| `--stage N [N …]` | `5 6` | Training stage(s) to include in analysis |
+| `--all-stages` | off | Include all stages (overrides `--stage`) |
+| `--max-lag N` | 60 | Maximum lag for autocorrelation plots |

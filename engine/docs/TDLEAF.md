@@ -63,7 +63,7 @@ For a game of T half-moves:
 
 - `d_t` = sigmoid of the **NNUE static evaluation at the PV leaf position** at ply t,
   from White's perspective:
-  `d_t = 1 / (1 + exp(-score_white_t / K))`, K = 290 cp.
+  `d_t = 1 / (1 + exp(-score_white_t / K))`, K = 240 cp.
 - `z` = game result from White's perspective: 1.0 = White wins, 0.5 = draw, 0.0 = Black wins.
 
 **Temporal difference errors (backward view):**
@@ -85,7 +85,8 @@ change between consecutive moves exceeds `TDLEAF_SCORE_CLIP_CP` centipawns — s
 
 where `∇_w d_t = d_t * (1 - d_t) / K * ∇_w score_t`.
 
-Defaults: `λ_decisive = 0.8` (wins/losses), `λ_draw = 0.5` (draws), `K = 290` (empirically fitted from 968k self-play games).
+Defaults: `λ = 0.98`, `K = 240 cp` (both empirically calibrated from 1.6M self-play games — see
+[Hyperparameter Calibration](#hyperparameter-calibration)).
 Gradient updates use Adam with per-weight LR decay; see [Adam Optimizer](#adam-optimizer-with-per-weight-lr-decay) below.
 
 **Key design choice:** `d_t` is computed from `nnue_evaluate()` (direct static eval of the
@@ -763,6 +764,89 @@ showed no long-term benefit after the first ~5000 games, so replay is disabled b
 
 `scripts/compare_nnue_learning.py` compares a `.tdleaf.bin`
 file against the baseline `.nnue` and shows FC, FT, and PSQT weight statistics.
+
+---
+
+## Hyperparameter Calibration
+
+`K` and `λ` were calibrated empirically from 1.6M self-play games produced during
+training run `nn-fresh-260410` (stages 5–6, ~100K games, ~10M positions after sampling).
+The analysis scripts live in `scripts/`; the methodology is summarised below.
+
+### Sigmoid temperature K
+
+**Method:** Maximum-likelihood estimation over all (score, outcome) pairs.  For each
+candidate K, compute the log-likelihood of the observed game outcomes under the model
+`P(White wins | score) = σ(score / K)`, where the score is the white-POV PV leaf
+evaluation in centipawns.  Optimise with a grid search (50–800 cp) followed by Brent
+refinement.
+
+**Result (stages 5–6, 10M positions):**
+
+| | K (cp) | NLL/position | Brier score |
+|---|---|---|---|
+| Optimal (MLE) | **240** | 0.54037 | 0.12604 |
+| Previous value | 290 | 0.54296 | 0.12707 |
+
+The optimal K of ~239 cp was rounded to **240 cp**.  The earlier value of 290 cp was
+fitted from a different training stage; as the network improved its evaluations became
+sharper, narrowing the effective sigmoid.  The reliability diagram confirms K=240
+produces well-calibrated win probabilities across the full score range.
+
+### Eligibility trace decay λ
+
+**Method:** Two independent estimates were computed:
+
+1. **Even-lag autocorrelation** — compute `corr(d_t, d_{t+k})` for even lags k=2,4,…,60
+   (same side-to-move pairs, removing the ply-alternation oscillation caused by mover-
+   optimism bias).  Fit `λ^k` to the even-lag curve in log-space.
+
+2. **d_t-vs-result decay** — compute `corr(d_t, result)` as a function of plies-to-game-
+   end, restricted to even-parity (white-to-move) positions to remove parity mixing.
+   For decisive games this is Pearson r; for draw games, `mean|d_t − 0.5|` is used
+   instead (result is constant at 0.5, so correlation is undefined).  Fit `λ^n` to the
+   normalised decay envelope.
+
+**Result (stages 5–6):**
+
+| Method | λ decisive | λ draw |
+|---|---|---|
+| Even-lag autocorr | 0.985 | 0.989 |
+| d_t-vs-result decay | 0.970 | 0.986 |
+| Previous (separate) | 0.800 | 0.500 |
+
+Key findings:
+- Both methods agree: λ ≈ 0.97–0.99.  The previous values (0.8 / 0.5) were
+  substantially below the empirical decay rate — the engine's depth-6 evaluations are
+  far more temporally stable than those values assumed.
+- **Decisive and draw games have essentially the same temporal correlation structure.**
+  The two-lambda scheme offered no empirical benefit, so it was collapsed to a single
+  `TDLEAF_LAMBDA = 0.98`.
+- The ply-alternation oscillation in the raw autocorrelation (period-2 ripple caused by
+  white/black mover-optimism bias) is a real data feature, not an artifact.  Even-lag
+  analysis removes it cleanly; the odd-lag trough at lag 1 suggests adjacent-ply pairs
+  are weakly anticorrelated within a game.
+
+Rounded to **λ = 0.98** (splitting the difference between the two methods).
+
+### Reproducing the analysis
+
+```sh
+# 1. Extract per-position parquet from the PGN directory (≈3–5 min for 200K games)
+python3 scripts/extract_positions.py \
+    --pgn-dir learn/pgn/nn-fresh-260410 \
+    --out     learn/positions.parquet \
+    --max-games 200000
+
+# 2. Run calibration analysis and generate plots
+python3 scripts/analyze_calibration.py \
+    --input   learn/positions.parquet \
+    --out-dir learn/calibration_plots \
+    --stage 5 6
+```
+
+Output: `calibration_K.png` (NLL curve, reliability diagram, sigmoid comparison),
+`lambda_decay.png` (4-panel autocorrelation and predictiveness plots), `summary.txt`.
 
 ---
 
