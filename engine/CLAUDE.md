@@ -26,10 +26,10 @@ perl src/comp.pl <version>
 perl src/comp.pl <version> NNUE=1
 
 # NNUE with a specific net file
-perl src/comp.pl <version> NNUE=1 NNUE_NET=nn-to-be-trained.nnue
+perl src/comp.pl <version> NNUE=1 NNUE_NET=nn-leaf-260414.nnue
 
 # NNUE with net embedded in binary (no external .nnue file needed at runtime)
-perl src/comp.pl <version> NNUE=1 NNUE_EMBED=1 NNUE_NET=nn-to-be-trained.nnue
+perl src/comp.pl <version> NNUE=1 NNUE_EMBED=1 NNUE_NET=nn-leaf-260414.nnue
 
 # NNUE + TDLeaf(λ) training
 perl src/comp.pl <version> NNUE=1 TDLEAF=1
@@ -51,7 +51,7 @@ Binary naming: `run/Leaf_v<version>` — e.g. `Leaf_v2026_03_09a`, `Leaf_vtrain_
 | `TDLEAF=1` | Enable TDLeaf(λ) learning (requires NNUE=1) |
 | `TDLEAF_READONLY=1` | Load `.tdleaf.bin` weights but skip updates |
 | `MATERIAL_ONLY=1` | `score_pos()` returns raw material balance only |
-| `NNUE_NET=<file>` | Override default network file (`to-be-trained.nnue`) |
+| `NNUE_NET=<file>` | Override default network file (`nn-leaf-260414.nnue`) |
 | `NNUE_EMBED=1` | Embed the `.nnue` file into the binary via incbin (requires `NNUE=1` and `NNUE_NET=<file>`). The net file must exist in `run/` or the current directory at compile time. At runtime, no external `.nnue` file is needed. |
 | `OVERWRITE` | Skip overwrite prompt |
 | `NATIVE=1` | Compile with `-march=native -mtune=native` (max perf, non-portable). Default uses `-march=x86-64-v3` (AVX2, portable across Intel Haswell+ and AMD Zen 1+). |

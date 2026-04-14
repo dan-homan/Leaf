@@ -52,7 +52,7 @@ $verstring = "\\" . "\"" . $vers . "\\" . "\"";
 # When NNUE_EMBED=1 is set, derive NNUE_NET_PATH for incbin from the net filename.
 # The .nnue file must exist next to the binary (in the run directory).
 if ($extra_arg =~ /NNUE_EMBED=1/) {
-    my $net = $nnue_net_file || "to-be-trained.nnue";
+    my $net = $nnue_net_file || "nn-leaf-260414.nnue";
     my $net_path = (-e $net) ? $net : "../run/$net";
     if (!-e $net_path) {
         use Cwd 'abs_path';

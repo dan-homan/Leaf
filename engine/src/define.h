@@ -60,10 +60,10 @@
 //   perl comp.pl MYVER NNUE=1 NNUE_NET=nn-newnet.nnue
 // The companion .tdleaf.bin name is derived from NNUE_NET automatically.
 #ifndef NNUE_NET
- #define NNUE_NET "to-be-trained.nnue"
+ #define NNUE_NET "nn-leaf-260414.nnue"
 #endif
 #ifndef NNUE_TDLEAF_BIN
- #define NNUE_TDLEAF_BIN "to-be-trained.tdleaf.bin"
+ #define NNUE_TDLEAF_BIN "nn-leaf-260414.tdleaf.bin"
 #endif
 
 // Embed the .nnue file directly into the binary (via incbin).
