@@ -55,6 +55,13 @@ static int8_t  out_weights[NNUE_LAYER_STACKS][NNUE_L2_PADDED];
 static char    nnue_loaded_path[FILENAME_MAX] = "";
 static uint32_t nnue_stack_hashes[NNUE_LAYER_STACKS] = {};
 
+// Forward declarations for TDLeaf weight arrays defined later in this file
+// (referenced by nnue_write_nnue to bake piece_val into exported PSQT).
+// Defined as static at their declaration site ~1300 lines below.
+static float *psqt_weights_f32 = nullptr;
+static float  piece_val_f32[6][NNUE_PSQT_BKTS] = {};
+static bool   piece_val_active = false;
+
 // ---------------------------------------------------------------------------
 // HalfKAv2_hm lookup tables
 // ---------------------------------------------------------------------------
@@ -527,7 +534,9 @@ bool nnue_write_nnue(const char *dst_path)
     // Build new description.
     char new_desc[4096];
     if (nnue_zero_initialized || !orig_desc[0])
-        snprintf(new_desc, sizeof(new_desc), "Random init; PSQT=symmetric classical (own=+V,enemy=-V); piece_val=0");
+        snprintf(new_desc, sizeof(new_desc), "Random init; PSQT=symmetric classical (own=+V,enemy=-V); piece_val baked into PSQT");
+    else if (piece_val_active)
+        snprintf(new_desc, sizeof(new_desc), "%s Trained by Leaf TDLeaf; piece_val baked into PSQT", orig_desc);
     else
         snprintf(new_desc, sizeof(new_desc), "%s Trained by Leaf TDLeaf", orig_desc);
     uint32_t new_desc_size = (uint32_t)strlen(new_desc);
@@ -553,8 +562,43 @@ bool nnue_write_nnue(const char *dst_path)
     write_leb128_i16(dst, ft_biases, NNUE_HALF_DIMS);
     printf("NNUE: writing FT weights (23M values, may take a moment)...\n");
     write_leb128_i16(dst, ft_weights, (size_t)NNUE_FT_INPUTS * NNUE_HALF_DIMS);
-    printf("NNUE: writing PSQT weights...\n");
-    write_leb128_i32(dst, psqt_weights, (size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS);
+    // Bake piece_val into PSQT so the exported .nnue is self-contained.
+    // Without this, engines using the .nnue without the matching .tdleaf.bin
+    // would be missing all learned material corrections.
+    //
+    // Formula (matches nnue_dense_piece_val scoring):
+    //   ps_slot = (fi % PS_NB) / 128        — piece type 0-5
+    //   is_own  = (fi % PS_NB) % 128 < 64   — own vs. enemy perspective
+    //   own:   psqt_baked[fi][b] = psqt_weights_f32[fi][b] + piece_val_f32[ps_slot][b] / 2
+    //   enemy: psqt_baked[fi][b] = psqt_weights_f32[fi][b] - piece_val_f32[ps_slot][b] / 2
+    //
+    // WARNING: if the matching .tdleaf.bin is still active with these weights,
+    // piece_val will be double-counted (once baked, once from nnue_dense_piece_val).
+    // After exporting a baked .nnue, piece_val in .tdleaf.bin should be zeroed
+    // or the .tdleaf.bin should not be loaded alongside this .nnue.
+    printf("NNUE: writing PSQT weights (baking piece_val)...\n");
+    {
+        const size_t n_psqt = (size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS;
+        int32_t *psqt_baked = new int32_t[n_psqt];
+        const int PS_NB = 704;  // HalfKAv2_hm: 11 piece-square slots × 64 squares
+        for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
+            int fi_in_bkt = fi % PS_NB;
+            int ps_slot   = fi_in_bkt / 128;       // 0-5: pawn…king
+            bool is_own   = (fi_in_bkt % 128) < 64;
+            const float *pf = psqt_weights_f32 + (size_t)fi * NNUE_PSQT_BKTS;
+            int32_t     *pb = psqt_baked        + (size_t)fi * NNUE_PSQT_BKTS;
+            if (piece_val_active) {
+                float sign = is_own ? +1.0f : -1.0f;
+                for (int b = 0; b < NNUE_PSQT_BKTS; b++)
+                    pb[b] = (int32_t)roundf(pf[b] + sign * piece_val_f32[ps_slot][b] * 0.5f);
+            } else {
+                for (int b = 0; b < NNUE_PSQT_BKTS; b++)
+                    pb[b] = (int32_t)roundf(pf[b]);
+            }
+        }
+        write_leb128_i32(dst, psqt_baked, n_psqt);
+        delete[] psqt_baked;
+    }
 
     // Write each FC stack with current weights, reversing the vdotq reordering.
     const size_t fc0_w = (size_t)NNUE_L0_SIZE * NNUE_L0_INPUT;
@@ -1285,7 +1329,7 @@ static uint32_t *delta_psqt_cnt = nullptr;
 // ft_dirty: [FT_INPUTS] — which feature rows received gradient this game
 // ft_delta_f32 / psqt_delta_f32: accumulated FT/PSQT deltas since last file sync
 static float    *ft_weights_f32   = nullptr;
-static float    *psqt_weights_f32 = nullptr;
+// psqt_weights_f32 forward-declared near top of file (used in nnue_write_nnue)
 static uint32_t *ft_weights_cnt   = nullptr;  // update count per FT weight
 static uint32_t *psqt_weights_cnt = nullptr;  // update count per PSQT weight
 static float    *grad_ft_w        = nullptr;  // FT weight gradients
@@ -1307,13 +1351,13 @@ static float    ft_bias_delta [NNUE_HALF_DIMS] = {};
 // Receives dense gradient updates from every position in every game (unlike
 // per-feature PSQT which is sparse).  In NNUE internal units (cp × 5776/100).
 // ---------------------------------------------------------------------------
-static float    piece_val_f32   [6][NNUE_PSQT_BKTS] = {};
+// piece_val_f32 forward-declared near top of file (used in nnue_write_nnue)
 static float    grad_piece_val  [6][NNUE_PSQT_BKTS] = {};
 static float    m_piece_val     [6][NNUE_PSQT_BKTS] = {};
 static float    v_piece_val     [6][NNUE_PSQT_BKTS] = {};
 static uint32_t piece_val_cnt   [6][NNUE_PSQT_BKTS] = {};
 static float    delta_piece_val [6][NNUE_PSQT_BKTS] = {};
-static bool     piece_val_active = false;  // true after init_zero_weights or v5 load
+// piece_val_active forward-declared near top of file (used in nnue_write_nnue)
 
 // ---------------------------------------------------------------------------
 // Adam moment arrays — session-local (process memory only; not saved to .tdleaf.bin).

@@ -563,31 +563,55 @@ def print_summary(orig, upd, ft_data=None):
             ps_learned = upd['psqt_w']    # [n_ft_rows, PSQT_BKTS]  float at int32 scale
             ps_cnt     = upd['psqt_cnt']  # [n_ft_rows, PSQT_BKTS]
             fi_arr     = upd['ft_fi']     # [n_ft_rows]
-            # Compute delta vs baseline for the dirty rows
+            # Unit derivation:
+            #   PSQT score = (psqt_diff/2) × 100/5776 cp
+            #   piece_val score = (pv_diff/2) × 100/5776 cp,  pv_diff = piece_val × count_diff
+            # So 1 raw PSQT unit → 100/5776 cp (per piece, counting both perspectives).
+            #    1 raw piece_val unit → 0.5 × 100/5776 cp per unit material advantage.
+            # To put piece_val in PSQT-equivalent units: divide by 2.
+            # Feature layout: ps_slot = (fi % 704) // 128  → 0=pawn … 5=king
+            #                 is_own  = (fi % 704) % 128 < 64
+            PSQT_TO_CP = 100.0 / 5776.0
             baseline_dirty = pw_base[fi_arr]  # [n_ft_rows, PSQT_BKTS] — float32 from int32
-            delta = ps_learned - baseline_dirty.astype(np.float32)
+            fi_in_bkt = fi_arr % 704
+            ps_slot   = fi_in_bkt // 128     # [n_ft_rows], 0-5 (piece type)
+            is_own    = (fi_in_bkt % 128) < 64   # [n_ft_rows], bool
+            pv = upd.get('piece_val', None)   # [6, PSQT_BKTS] float (piece_val_f32 units), or None
+            if pv is not None:
+                # Convert piece_val to PSQT-equivalent units (÷2) and apply sign.
+                pv_psqt_equiv = np.zeros((n_ft_rows, PSQT_BKTS), dtype=np.float32)
+                pv_psqt_equiv[ is_own] = +pv[ps_slot[ is_own]] * 0.5
+                pv_psqt_equiv[~is_own] = -pv[ps_slot[~is_own]] * 0.5
+                effective_learned = ps_learned + pv_psqt_equiv
+                pv_note = " + piece_val"
+            else:
+                effective_learned = ps_learned
+                pv_note = ""
+            # All delta values are now in PSQT raw units; convert to cp for display.
+            delta_raw = effective_learned - baseline_dirty.astype(np.float32)
+            delta_cp  = delta_raw * PSQT_TO_CP
             cnt_flat = ps_cnt.ravel()
             nz_cnt   = cnt_flat[cnt_flat > 0]
             print(f"  PSQT learned          {n_ft_rows:>7,} rows × {PSQT_BKTS} buckets")
-            print(f"    Δ range  [{delta.min():+.1f}, {delta.max():+.1f}]  "
-                  f"mean Δ {delta.mean():+.3f} ± {delta.std():.3f}")
+            print(f"    Δ range  [{delta_cp.min():+.2f}, {delta_cp.max():+.2f}] cp (PSQT{pv_note})  "
+                  f"mean Δ {delta_cp.mean():+.3f} ± {delta_cp.std():.3f} cp")
             print(f"    update counts  max: {int(cnt_flat.max())}  "
                   f"mean(>0): {nz_cnt.mean():.1f}" if len(nz_cnt) else
                   f"    update counts  (none)")
 
-            # Per-bucket delta stats for learned rows
+            # Per-bucket delta stats for learned rows (all values in centipawns)
             print()
-            print(f"  PSQT Δ per-bucket (learned − baseline, dirty rows only):")
-            print(f"  {'Bucket':>8} {'Rows':>8} {'Δ min':>10} {'Δ max':>10} "
-                  f"{'mean Δ':>10} {'max cnt':>9} {'mean cnt(>0)':>14}")
+            print(f"  PSQT Δ per-bucket (centipawns, PSQT{pv_note} − baseline, dirty rows only):")
+            print(f"  {'Bucket':>8} {'Rows':>8} {'Δ min cp':>10} {'Δ max cp':>10} "
+                  f"{'mean Δ cp':>10} {'max cnt':>9} {'mean cnt(>0)':>14}")
             for b in range(PSQT_BKTS):
-                d_col = delta[:, b]
+                d_col = delta_cp[:, b]
                 c_col = ps_cnt[:, b]
                 nz_c  = c_col[c_col > 0]
-                print(f"  {b:>8} {n_ft_rows:>8,} {d_col.min():>10.1f} {d_col.max():>10.1f}"
+                print(f"  {b:>8} {n_ft_rows:>8,} {d_col.min():>10.2f} {d_col.max():>10.2f}"
                       f" {d_col.mean():>10.3f} {int(c_col.max()):>9}"
                       f" {nz_c.mean():>14.1f}" if len(nz_c) else
-                      f"  {b:>8} {n_ft_rows:>8,} {d_col.min():>10.1f} {d_col.max():>10.1f}"
+                      f"  {b:>8} {n_ft_rows:>8,} {d_col.min():>10.2f} {d_col.max():>10.2f}"
                       f" {d_col.mean():>10.3f} {int(c_col.max()):>9}         —")
         else:
             # No v3 learned data — show baseline per-bucket
@@ -1116,7 +1140,11 @@ def plot_psqt_overview(orig, upd, ft_data, save):
     has_v3    = n_ft_rows is not None and n_ft_rows > 0
 
     fig = plt.figure(figsize=(16, 6))
+    pv_avail = has_v3 and 'psqt_w' in upd and 'piece_val' in upd
     fig.suptitle(f'PSQT weight comparison\n'
+                 f'blue = {nnue_name}  red = {tdleaf_name}  '
+                 f'col 1–2 delta includes piece_val correction' if pv_avail else
+                 f'PSQT weight comparison\n'
                  f'blue = {nnue_name}   red = {tdleaf_name}   orange = delta',
                  fontsize=11)
 
@@ -1145,6 +1173,32 @@ def plot_psqt_overview(orig, upd, ft_data, save):
     ax_top.text(0.98, 0.90, nnue_name, transform=ax_top.transAxes,
                 fontsize=7, ha='right', va='top', color='steelblue')
 
+    # Compute piece_val contribution per dirty row in PSQT-equivalent units.
+    # Unit derivation:
+    #   PSQT score   = (psqt_diff/2) × 100/5776   → 1 PSQT raw unit = PSQT_TO_CP cp
+    #   piece_val score = (pv_diff/2) × 100/5776   → 1 pv raw unit  = 0.5×PSQT_TO_CP cp
+    #   ∴ pv_PSQT_equiv = piece_val_raw / 2  (then × PSQT_TO_CP gives correct cp)
+    # Feature layout: ps_slot = (fi % 704) // 128  (0=pawn … 5=king)
+    #                 is_own  = (fi % 704) % 128 < 64
+    pv_note = ""
+    pv_contrib_2d = None   # [n_ft_rows, PSQT_BKTS] in PSQT-equivalent units, or None
+    if has_v3 and 'psqt_w' in upd and 'piece_val' in upd:
+        fi_arr_pv  = upd['ft_fi']
+        pv         = upd['piece_val']   # [6, PSQT_BKTS] float (piece_val_f32 units)
+        fi_in_bkt  = fi_arr_pv % 704
+        ps_slot_pv = fi_in_bkt // 128   # 0-5 (piece type)
+        is_own_pv  = (fi_in_bkt % 128) < 64
+        pv_c = np.zeros((len(fi_arr_pv), PSQT_BKTS), dtype=np.float64)
+        # piece_val → PSQT-equivalent: divide by 2; sign: +own, -enemy
+        pv_c[ is_own_pv] = +pv[ps_slot_pv[ is_own_pv]].astype(np.float64) * 0.5
+        pv_c[~is_own_pv] = -pv[ps_slot_pv[~is_own_pv]].astype(np.float64) * 0.5
+        pv_contrib_2d = pv_c
+        pv_note = " + piece_val"
+
+    # Bottom panel: learned PSQT only (no piece_val added here).
+    # Reason: piece_val shifts own-pieces right and enemy-pieces left by up to 1000+ cp,
+    # extending well beyond the baseline range and making the shared x-axis misleading.
+    # The combined PSQT + piece_val delta is correctly shown in col 1 and col 2.
     ax_bot = fig.add_subplot(gs_inner[1], sharex=ax_top)
     if has_v3 and 'psqt_w' in upd:
         ps_flat_cp = upd['psqt_w'].ravel().astype(np.float64) * PSQT_TO_CP
@@ -1155,7 +1209,7 @@ def plot_psqt_overview(orig, upd, ft_data, save):
         ax_bot.text(0.5, 0.5, 'No PSQT training data', transform=ax_bot.transAxes,
                     fontsize=8, ha='center', va='center', color='gray', style='italic')
     ax_bot.set_ylabel('density', fontsize=8)
-    ax_bot.set_xlabel('centipawns per piece  (raw×100/5776)', fontsize=8)
+    ax_bot.set_xlabel('centipawns per piece  (PSQT only — piece_val delta in col 1)', fontsize=8)
     ax_bot.tick_params(labelsize=7)
 
     # --- col 1: delta distribution ---
@@ -1163,13 +1217,16 @@ def plot_psqt_overview(orig, upd, ft_data, save):
     if has_v3 and 'psqt_w' in upd:
         fi_arr     = upd['ft_fi']
         baseline_d = pw_base[fi_arr].astype(np.float64).ravel()
-        learned_d  = upd['psqt_w'].ravel().astype(np.float64)
-        delta_cp   = (learned_d - baseline_d) * PSQT_TO_CP
+        learned_d  = upd['psqt_w'].astype(np.float64)
+        if pv_contrib_2d is not None:
+            learned_d = learned_d + pv_contrib_2d
+        delta_cp   = (learned_d.ravel() - baseline_d) * PSQT_TO_CP
         dmax   = max(abs(float(delta_cp.min())), abs(float(delta_cp.max())), 0.1)
         d_bins = np.linspace(-dmax * 1.05, dmax * 1.05, 80)
         ax1.hist(delta_cp, bins=d_bins, color='coral', alpha=0.85)
-        n_nz = int(np.sum(np.abs(delta_cp) > 0.5 * PSQT_TO_CP))
-        ax1.set_title(f'PSQT weights\nΔ learned − baseline  ({n_nz:,} shifted)', fontsize=9)
+        n_nz = int(np.sum(np.abs(delta_cp) > 0.5))  # count features shifted by >0.5 cp
+        ax1.set_title(f'PSQT{pv_note}\nΔ effective − baseline  ({n_nz:,} shifted >0.5 cp)',
+                      fontsize=9)
         ax1.set_ylabel('count', fontsize=8)
         ax1.axvline(0, color='k', linewidth=0.9, linestyle='--')
     else:
@@ -1185,13 +1242,16 @@ def plot_psqt_overview(orig, upd, ft_data, save):
     if has_v3 and 'psqt_w' in upd:
         fi_arr     = upd['ft_fi']
         baseline_b = pw_base[fi_arr].astype(np.float64)    # [n_ft_rows, PSQT_BKTS]
-        delta_b_cp = (upd['psqt_w'].astype(np.float64) - baseline_b) * PSQT_TO_CP
+        learned_b  = upd['psqt_w'].astype(np.float64)
+        if pv_contrib_2d is not None:
+            learned_b = learned_b + pv_contrib_2d
+        delta_b_cp = (learned_b - baseline_b) * PSQT_TO_CP
         mean_delta = delta_b_cp.mean(axis=0)
         std_delta  = delta_b_cp.std(axis=0)
         ax2.bar(x, mean_delta, yerr=std_delta, color='mediumseagreen', alpha=0.80,
                 capsize=4, error_kw={'linewidth': 1})
         ax2.axhline(0, color='k', linewidth=0.7, linestyle='--')
-        ax2.set_title(f'PSQT weights\nMean Δ per bucket (±1σ)', fontsize=9)
+        ax2.set_title(f'PSQT + piece_val\nMean Δ per bucket (±1σ)', fontsize=9)
         ax2.set_ylabel('mean Δ (cp per piece)', fontsize=8)
     else:
         means_cp = pw_base.mean(axis=0) * PSQT_TO_CP
