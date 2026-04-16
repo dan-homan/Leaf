@@ -279,7 +279,7 @@ def read_tdleaf_fc(path):
         if magic != TDLEAF_MAGIC:
             sys.exit(f"Error: bad magic {magic:#010x} in {path}")
 
-        if version in (TDLEAF_VERSION2, TDLEAF_VERSION3, TDLEAF_VERSION4, TDLEAF_VERSION5, TDLEAF_VERSION6, TDLEAF_VERSION7, TDLEAF_VERSION8):
+        if version in (TDLEAF_VERSION2, TDLEAF_VERSION3, TDLEAF_VERSION4, TDLEAF_VERSION5, TDLEAF_VERSION6, TDLEAF_VERSION7, TDLEAF_VERSION8, TDLEAF_VERSION9):
             data['_has_counts'] = True
             for _ in range(N_STACKS):
                 def rf(n, fh=f):
