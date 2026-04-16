@@ -3166,7 +3166,7 @@ bool nnue_load_fc_weights(const char *path)
     }
 
     // ---- Version 2 / 3 / 4 / 5 / 6: float32 × TDLEAF_SCALE + uint32 counts ----
-    if (version != 2u && version != 3u && version != 4u && version != 5u && version != 6u && version != 7u && version != TDLEAF_VERSION) {
+    if (version != 2u && version != 3u && version != 4u && version != 5u && version != 6u && version != 7u && version != 8u && version != TDLEAF_VERSION) {
         fprintf(stderr, "TDLeaf: unsupported version %u in %s\n", version, path);
         fclose(f); tdleaf_release_lock(lock_fd); return false;
     }
@@ -3430,28 +3430,32 @@ bool nnue_load_fc_weights(const char *path)
     // For v2/v3 files, ft_biases_f32 was already initialised by nnue_init_fp32_weights.
     nnue_requantize_fc();
     if (version == TDLEAF_VERSION)
-        printf("TDLeaf: loaded v8 weights from %s (%d FT rows, %d FT-v rows, piece_val=%s, adam_v=%s, adam_m=%s, t_adam=%u)\n",
+        printf("TDLeaf: loaded v9 weights from %s (%d FT rows, %d FT-v rows, piece_val=%s, adam_v=%s, adam_m=%s, t_adam=%u)\n",
                path, n_ft_loaded, n_ft_v_loaded, piece_val_active ? "yes" : "no",
                adam_v_loaded ? "yes" : "no", adam_m_loaded ? "yes" : "no", t_adam);
+    else if (version == 8u)
+        printf("TDLeaf: loaded v8 weights from %s (%d FT rows, piece_val=%s, adam_v=%s, adam_m=%s, t_adam=%u, will upgrade to v9 on next save)\n",
+               path, n_ft_loaded, piece_val_active ? "yes" : "no",
+               adam_v_loaded ? "yes" : "no", adam_m_loaded ? "yes" : "no", t_adam);
     else if (version == 7u)
-        printf("TDLeaf: loaded v7 weights from %s (%d FT rows, piece_val=%s, adam_v=%s, adam_m=%s, t_adam=%u, will upgrade to v8 on next save)\n",
+        printf("TDLeaf: loaded v7 weights from %s (%d FT rows, piece_val=%s, adam_v=%s, adam_m=%s, t_adam=%u, will upgrade to v9 on next save)\n",
                path, n_ft_loaded, piece_val_active ? "yes" : "no",
                adam_v_loaded ? "yes" : "no", adam_m_loaded ? "yes" : "no", t_adam);
     else if (version == 6u)
-        printf("TDLeaf: loaded v6 weights from %s (%d FT rows, piece_val=%s, adam_v=%s, will upgrade to v8 on next save)\n",
+        printf("TDLeaf: loaded v6 weights from %s (%d FT rows, piece_val=%s, adam_v=%s, will upgrade to v9 on next save)\n",
                path, n_ft_loaded, piece_val_active ? "yes" : "no",
                adam_v_loaded ? "yes" : "no");
     else if (version == 5u)
-        printf("TDLeaf: loaded v5 weights from %s (%d FT rows, piece_val=%s, will upgrade to v8 on next save)\n",
+        printf("TDLeaf: loaded v5 weights from %s (%d FT rows, piece_val=%s, will upgrade to v9 on next save)\n",
                path, n_ft_loaded, piece_val_active ? "yes" : "no");
     else if (version == 4u)
-        printf("TDLeaf: loaded v4 weights from %s (%d FT rows, will upgrade to v8 on next save)\n",
+        printf("TDLeaf: loaded v4 weights from %s (%d FT rows, will upgrade to v9 on next save)\n",
                path, n_ft_loaded);
     else if (version == 3u)
-        printf("TDLeaf: loaded v3 weights from %s (%d FT rows, will upgrade to v8 on next save)\n",
+        printf("TDLeaf: loaded v3 weights from %s (%d FT rows, will upgrade to v9 on next save)\n",
                path, n_ft_loaded);
     else
-        printf("TDLeaf: loaded v2 FC weights from %s (will upgrade to v8 on next save)\n", path);
+        printf("TDLeaf: loaded v2 FC weights from %s (will upgrade to v9 on next save)\n", path);
     return true;
 }
 
