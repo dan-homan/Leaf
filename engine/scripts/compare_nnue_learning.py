@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """
-compare_fc_weights.py — compare FC layers from a .tdleaf.bin file against the
-original .nnue weights; also summarise FT and PSQT layers (now trainable by TDLeaf).
+compare_nnue_learning.py — compare FC, FT, PSQT, and piece_val layers from a
+.tdleaf.bin file against the original .nnue baseline weights.
 
-Usage (from run/ directory):
-    python3 compare_fc_weights.py nn-ad9b42354671.nnue nn-ad9b42354671.tdleaf.bin
-    python3 compare_fc_weights.py nn-ad9b42354671.nnue nn-ad9b42354671.tdleaf.bin --save
-    python3 compare_fc_weights.py nn-ad9b42354671.nnue nn-ad9b42354671.tdleaf.bin --ft-weights
+Usage (from learn/ or run/ directory):
+    python3 compare_nnue_learning.py nn-fresh.nnue nn-fresh.tdleaf.bin
+    python3 compare_nnue_learning.py nn-fresh.nnue nn-fresh.tdleaf.bin --save
+    python3 compare_nnue_learning.py nn-fresh.nnue nn-fresh.tdleaf.bin --ft-weights
+
+Supports .tdleaf.bin versions 2–9.  Version 9 changed piece_val from [6][8]
+(one per piece type × 8 PSQT buckets) to [6] (one per piece type); older files
+are transparently averaged on read.
 """
 
 import argparse

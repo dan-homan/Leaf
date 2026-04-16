@@ -1,5 +1,28 @@
 Changes since 2017_12_24
 
+2026_04_16 -- tdleaf: simplify piece_val from 6×8 floats (per piece × per PSQT bucket)
+               to 6 floats (one per piece type).  Bucket variation is encoded solely in
+               PSQT.  Reduces Adam state from 48 → 6 scalars; gradient signal per
+               parameter is 8× stronger; baking and extraction are simpler.
+               .tdleaf.bin bumped to v9.  Backward-compatible load of v5–v8:
+               old piece_val[6][8] is averaged to piece_val[6]; old Adam v[6][8] is
+               max-merged; old Adam m[6][8] is averaged.  v8 files were incorrectly
+               rejected as unsupported — fixed.
+             nnue: add nnue_extract_piece_values().  Called at startup (after .nnue and
+               .tdleaf.bin are loaded), reads PSQT weights, averages per piece type, and
+               overwrites value[1..5] in score.h with the result in centipawns.  Search
+               heuristics (SEE, MVV-LVA, LMR, futility pruning) now use the NNUE-derived
+               material values automatically — no search code changes needed.
+             nnue: nnue_write_nnue() now bakes piece_val into exported PSQT so checkpoint
+               .nnue files are self-contained.  Own-piece features receive +piece_val×0.5,
+               opponent features receive −piece_val×0.5 (the ÷2 matches the /2 in the
+               PSQT scoring formula).  Training continues against the un-baked original
+               .nnue + .tdleaf.bin; only the exported checkpoint is baked.
+             tdleaf: raise TDLEAF_ADAM_PV_LR0 from 1.6 to 100.0 and
+               TDLEAF_ADAM_PSQT_LR0 from 1.6 to 10.0.  Both parameters are at int32
+               scale (~36 000 std) not int8 scale; the higher LR0 values give comparable
+               effective centipawn step sizes to FC layers at int8 scale.
+
 2026_04_14 -- tdleaf: update sigmoid temperature K from 290 to 240 cp and collapse
                dual-lambda scheme (LAMBDA_DECISIVE=0.8, LAMBDA_DRAW=0.5) to a single
                TDLEAF_LAMBDA=0.98.  Both changes are data-driven from 1.6M self-play games

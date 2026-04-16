@@ -322,17 +322,28 @@ cd learn/
 python3 compare_nnue_learning.py nn-fresh-260309.nnue nn-fresh-260309.tdleaf.bin
 ```
 
-Produces a four-page matplotlib figure:
+Also prints a console summary of weight changes, then produces a four-page matplotlib figure:
 
+**Console output:**
+- FC layer change table (% changed, Δ range, mean ± std), per-stack FC1 breakdown,
+  update count summary
+- FT / PSQT statistics (rows trained, weight range, update counts, per-bucket Δ table)
+- Dense piece values table (centipawns per piece type, update counts)
+- Adam optimizer state (t_adam, v/m/FT-v loaded flags)
+
+**Matplotlib pages:**
 - **Page 1 — FC weights**: FC0/FC1/FC2 weight distributions (baseline vs learned),
   per-output delta histograms, per-stack % changed + max |Δ|
 - **Page 2 — FC biases**: FC0/FC1/FC2 bias distributions (baseline vs learned, int32),
   delta histograms, per-stack scatter of individual Δ values (every bias visible so
   no outlier can hide in an aggregate)
-- **Page 3 — Feature transformer**: FT bias distributions (baseline vs learned, v4
+- **Page 3 — Feature transformer**: FT bias distributions (baseline vs learned, v4+
   `.tdleaf.bin` only), FT weight distributions, delta and update counts
 - **Page 4 — PSQT**: baseline vs learned distributions, delta histogram,
   per-bucket mean delta bar chart ±1σ
+
+Supports `.tdleaf.bin` versions 2–9.  V9 stores `piece_val[6]` (one value per piece
+type); V5–V8 stored `piece_val[6][8]` (per bucket), which is averaged on read.
 
 Optional flags:
 
