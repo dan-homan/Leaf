@@ -2359,6 +2359,7 @@ void nnue_apply_gradients()
             float v_hat = v / (1.0f - powf(TDLEAF_ADAM_BETA2, (float)eff_t));
             return pv_lr * m_hat / (sqrtf(v_hat) + TDLEAF_ADAM_EPS);
         };
+        bool pv_changed = false;
         for (int pt = 0; pt < 6; pt++) {
             if (grad_piece_val[pt] == 0.0f) continue;
             float dw = do_step_pv(grad_piece_val[pt],
@@ -2375,7 +2376,10 @@ void nnue_apply_gradients()
             delta_piece_val[pt] += piece_val_f32[pt] - old_val;
             piece_val_cnt[pt]++;  delta_piece_val_cnt[pt]++;
             grad_piece_val[pt] = 0.0f;
+            pv_changed = true;
         }
+        if (pv_changed)
+            nnue_extract_piece_values(false); // silent — called every batch during training
     }
 }
 
@@ -3509,7 +3513,7 @@ int nnue_evaluate_acc_raw(const int16_t acc[2][NNUE_HALF_DIMS],
 //
 // value[0] is unused; value[6] (king sentinel = 10000) is not touched.
 // ---------------------------------------------------------------------------
-void nnue_extract_piece_values()
+void nnue_extract_piece_values(bool verbose)
 {
     // value[] is defined in score.h, included earlier in the unity build.
     extern int value[7];
@@ -3550,6 +3554,7 @@ void nnue_extract_piece_values()
         value[pt + 1] = cp;
     }
 
-    printf("NNUE: piece values from PSQT: P=%d N=%d B=%d R=%d Q=%d cp\n",
-           value[1], value[2], value[3], value[4], value[5]);
+    if (verbose)
+        printf("NNUE: piece values from PSQT: P=%d N=%d B=%d R=%d Q=%d cp\n",
+               value[1], value[2], value[3], value[4], value[5]);
 }

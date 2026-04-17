@@ -90,7 +90,9 @@ bool nnue_load(const char *path);
 // and overwrite value[1..5] in score.h with the result in centipawns.
 // Call after nnue_load() and, in TDLEAF builds, after nnue_load_fc_weights().
 // No-op if nnue_available is false.
-void nnue_extract_piece_values();
+// verbose=true (default) prints the extracted values; pass false to suppress
+// output when called automatically after each training batch.
+void nnue_extract_piece_values(bool verbose = true);
 
 // Load from an in-memory buffer (for embedded nets via incbin).
 bool nnue_load_from_memory(const uint8_t *data, size_t size);
