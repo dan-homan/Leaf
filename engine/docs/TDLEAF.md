@@ -193,7 +193,7 @@ g_pv[pt] += grad_scale × piece_count_diff[pt]
 
 ### Optimizer
 
-Full Adam with `TDLEAF_ADAM_PV_LR0 = 100.0`.  No weight decay is applied.
+Full Adam with `TDLEAF_ADAM_PV_LR0 = 50.0`.  No weight decay is applied.
 Dense piece value gradients are included in the global L2 norm for gradient clipping.
 The large LR0 is appropriate because `piece_val` units are at the same raw int32 scale
 as PSQT (~36 000 std), so the effective per-step size in centipawns is comparable to
@@ -356,7 +356,7 @@ correction.
 | FT weights | RMSProp (per-weight v, no m) | `TDLEAF_ADAM_FT_LR0 = 1.0` | Sparse; higher LR than FC to compensate for fewer updates |
 | FT biases  | Full Adam | `TDLEAF_ADAM_FT_BIAS_LR0 = 0.01` | Reduced LR to prevent dying-ReLU — see below |
 | PSQT       | Full Adam | `TDLEAF_ADAM_PSQT_LR0 = 10.0` | Separate LR0 required — see below |
-| Dense piece values | Full Adam | `TDLEAF_ADAM_PV_LR0 = 100.0` | Dense; no weight decay; high LR because int32 scale matches PSQT |
+| Dense piece values | Full Adam | `TDLEAF_ADAM_PV_LR0 = 50.0` | Dense; no weight decay; LR tuned for int32 scale matching PSQT |
 
 ### Why a Separate PSQT LR0?
 
@@ -432,7 +432,7 @@ per-weight bias correction and monitoring.
 | `TDLEAF_ADAM_FT_LR0` | 1.0 | Step size for FT weights (sparse; need higher LR than dense FC) |
 | `TDLEAF_ADAM_FT_BIAS_LR0` | 0.01 | Step size for FT biases (10× slower than FC to prevent dying-ReLU) |
 | `TDLEAF_ADAM_PSQT_LR0` | 10.0 | Step size for PSQT (int32 scale; ~1000× FC) |
-| `TDLEAF_ADAM_PV_LR0` | 100.0 | Step size for dense piece values (int32 scale; fast-converging dense channel) |
+| `TDLEAF_ADAM_PV_LR0` | 50.0 | Step size for dense piece values (int32 scale; fast-converging dense channel) |
 | `TDLEAF_ADAM_BETA1` | 0.9 | First-moment decay (FC weights/biases, FT biases, PSQT) |
 | `TDLEAF_ADAM_BETA2` | 0.999 | Second-moment decay (all layers) |
 | `TDLEAF_ADAM_EPS` | 1e-8 | Numerical floor in denominator |
