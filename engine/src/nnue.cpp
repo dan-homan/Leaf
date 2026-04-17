@@ -55,6 +55,46 @@ static int8_t  out_weights[NNUE_LAYER_STACKS][NNUE_L2_PADDED];
 static char    nnue_loaded_path[FILENAME_MAX] = "";
 static uint32_t nnue_stack_hashes[NNUE_LAYER_STACKS] = {};
 
+// Content fingerprint of the loaded .nnue, computed at load/init time over the
+// FT weight bytes (FNV-1a 64 → 32).  Stored in .tdleaf.bin v10+ header so that a
+// .tdleaf.bin can be rejected if it was trained against a different source .nnue.
+// Zero before any net is loaded.
+static uint32_t nnue_content_hash = 0;
+
+// Compute FNV-1a 64-bit hash over a byte buffer and fold to 32 bits.
+// Used to fingerprint the .nnue FT weights for .tdleaf.bin compatibility.
+static uint32_t nnue_fnv1a_u32(const void *data, size_t len)
+{
+    const uint64_t FNV_OFFSET = 0xcbf29ce484222325ull;
+    const uint64_t FNV_PRIME  = 0x100000001b3ull;
+    uint64_t h = FNV_OFFSET;
+    // Process 8 bytes at a time for speed; tail byte-by-byte.
+    const uint8_t *p = (const uint8_t*)data;
+    size_t n8 = len / 8;
+    for (size_t i = 0; i < n8; i++) {
+        uint64_t w;
+        memcpy(&w, p + i * 8, 8);
+        h ^= w;
+        h *= FNV_PRIME;
+    }
+    for (size_t i = n8 * 8; i < len; i++) {
+        h ^= p[i];
+        h *= FNV_PRIME;
+    }
+    return (uint32_t)((h >> 32) ^ (uint32_t)h);
+}
+
+// Recompute nnue_content_hash from the currently-allocated ft_weights buffer.
+// Call once at load/init time (after FT weights are populated); do NOT call
+// again after training modifies in-memory FT, since the stored hash must
+// continue to identify the original source .nnue.
+static void nnue_update_content_hash()
+{
+    if (!ft_weights) { nnue_content_hash = 0; return; }
+    size_t ft_bytes = (size_t)NNUE_FT_INPUTS * NNUE_HALF_DIMS * sizeof(int16_t);
+    nnue_content_hash = nnue_fnv1a_u32(ft_weights, ft_bytes);
+}
+
 // Forward declarations for TDLeaf weight arrays defined later in this file
 // (referenced by nnue_write_nnue to bake piece_val into exported PSQT).
 // Defined as static at their declaration site ~1300 lines below.
@@ -289,6 +329,10 @@ static bool nnue_load_stream(MemStream *s)
     if (!read_leb128_i16(s, ft_weights, ft_w)) {
         printf("NNUE: FT weight read failed\n"); ms_close(s); return false;
     }
+
+    // Fingerprint the loaded FT weights now, before any training modifies them.
+    nnue_update_content_hash();
+    printf("NNUE: content hash=0x%08X\n", nnue_content_hash);
 
     size_t psqt_w = (size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS;
     printf("NNUE: reading PSQT weights [%zu int32] ...\n", psqt_w);
@@ -1639,6 +1683,11 @@ void nnue_init_zero_weights(bool noprior)
 
     // Sync all int8/int16/int32 inference arrays from the zeroed float shadows.
     nnue_requantize_fc();
+
+    // Fingerprint the fresh FT weights so the companion .tdleaf.bin (written
+    // immediately after --init-nnue) carries the matching content hash.
+    nnue_update_content_hash();
+
     nnue_zero_initialized = true;
     printf("NNUE TDLeaf: FC weights=N(0,{%.0f,%.0f,%.0f}) passthrough[15]=0; "
            "FT weights=N(0,%.0f); biases=zero; "
@@ -2554,10 +2603,23 @@ void nnue_requantize_fc()
 // Version 3 (legacy): FC + sparse FT/PSQT, no FT bias section.
 // Version 2 (legacy): FC block only, no FT/PSQT section.
 // Version 1 (legacy): int32 biases + int8 weights, no counts.
+//
+// Version 10 additions (current):
+//   Source-.nnue content fingerprint — prevents accidentally pairing a
+//   .tdleaf.bin with a different .nnue than the one it was trained against.
+//   Layout: header is now
+//     magic(4) + version(4) + nnue_content_hash(4) + [rest unchanged]
+//   nnue_content_hash is FNV-1a over the .nnue's FT weight bytes, computed
+//   at load/init time (see nnue_update_content_hash() in nnue.cpp).
+//   On load: reject the file if the stored hash does not match the loaded .nnue.
+//   On save merge-read: abort the save rather than corrupting another worker's
+//   weights written against a different .nnue.
+//   v5–v9 files have no hash and are accepted without a check; saving promotes
+//   them to v10 with the current .nnue's hash.
 // ---------------------------------------------------------------------------
 static const float    TDLEAF_SCALE   = 128.0f;
 static const uint32_t TDLEAF_MAGIC   = 0x544D4C46u; // "TMLF"
-static const uint32_t TDLEAF_VERSION = 9u;
+static const uint32_t TDLEAF_VERSION = 10u;
 
 // ---------------------------------------------------------------------------
 // tdleaf_acquire_lock / tdleaf_release_lock
@@ -2621,7 +2683,25 @@ bool nnue_save_fc_weights(const char *path)
         bool ok = (fread(&magic, 4, 1, cur) == 1 &&
                    fread(&version, 4, 1, cur) == 1 &&
                    magic == TDLEAF_MAGIC &&
-                   (version == TDLEAF_VERSION || version == 8u || version == 7u || version == 6u || version == 5u || version == 4u || version == 3u || version == 2u));
+                   (version == TDLEAF_VERSION || version == 9u || version == 8u || version == 7u || version == 6u || version == 5u || version == 4u || version == 3u || version == 2u));
+        if (ok && version >= 10u) {
+            // v10+: header carries the source-.nnue content hash.  If another
+            // worker wrote the file against a different .nnue, abort the save
+            // rather than corrupt their weights with ours.
+            uint32_t file_content_hash = 0;
+            if (fread(&file_content_hash, 4, 1, cur) != 1) {
+                ok = false;
+            } else if (file_content_hash != nnue_content_hash) {
+                fprintf(stderr,
+                        "TDLeaf: %s was written against a different .nnue "
+                        "(file hash=0x%08X, loaded .nnue hash=0x%08X).\n"
+                        "        Aborting save to avoid corrupting the other worker's weights.\n",
+                        path, file_content_hash, nnue_content_hash);
+                fclose(cur);
+                tdleaf_release_lock(lock_fd);
+                return false;
+            }
+        }
         if (ok) {
             // FC section: float32 × TDLEAF_SCALE per weight, then uint32 counts.
             // Merge: shadow = file_value + our_delta; count = file_count + our_delta_count.
@@ -2928,6 +3008,8 @@ bool nnue_save_fc_weights(const char *path)
     }
     fwrite(&TDLEAF_MAGIC,   4, 1, f);
     fwrite(&TDLEAF_VERSION, 4, 1, f);
+    // v10+: content fingerprint of the source .nnue, for load-time pairing check.
+    fwrite(&nnue_content_hash, 4, 1, f);
     for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
         // FC0 biases
         for (int i = 0; i < NNUE_L0_SIZE; i++) {
@@ -3173,11 +3255,38 @@ bool nnue_load_fc_weights(const char *path)
         return true;
     }
 
-    // ---- Version 2 / 3 / 4 / 5 / 6: float32 × TDLEAF_SCALE + uint32 counts ----
-    if (version != 2u && version != 3u && version != 4u && version != 5u && version != 6u && version != 7u && version != 8u && version != TDLEAF_VERSION) {
+    // ---- Version 2 / 3 / 4 / 5 / 6 / 7 / 8 / 9 / 10: float32 × TDLEAF_SCALE + uint32 counts ----
+    if (version != 2u && version != 3u && version != 4u && version != 5u && version != 6u && version != 7u && version != 8u && version != 9u && version != TDLEAF_VERSION) {
         fprintf(stderr, "TDLeaf: unsupported version %u in %s\n", version, path);
         fclose(f); tdleaf_release_lock(lock_fd); return false;
     }
+
+    // ---- v10+: verify source-.nnue content fingerprint matches loaded .nnue ----
+    // Prevents silently pairing weight deltas with the wrong baseline network.
+    // v5–v9 files predate this header and are accepted without a check; they
+    // get promoted to v10 with the current .nnue's hash on the next save.
+    if (version >= 10u) {
+        uint32_t file_content_hash = 0;
+        if (fread(&file_content_hash, 4, 1, f) != 1) {
+            fprintf(stderr, "TDLeaf: short read on v%u content hash in %s\n", version, path);
+            fclose(f); tdleaf_release_lock(lock_fd); return false;
+        }
+        if (file_content_hash != nnue_content_hash) {
+            fprintf(stderr,
+                    "TDLeaf: %s was trained against a different .nnue "
+                    "(file hash=0x%08X, loaded .nnue hash=0x%08X).\n"
+                    "        Refusing to load — move or rename the .tdleaf.bin, "
+                    "or reload the matching .nnue.\n",
+                    path, file_content_hash, nnue_content_hash);
+            fclose(f); tdleaf_release_lock(lock_fd); return false;
+        }
+    } else {
+        fprintf(stderr,
+                "TDLeaf: %s is legacy v%u (no .nnue content hash); "
+                "accepting — will upgrade to v%u on next save.\n",
+                path, version, TDLEAF_VERSION);
+    }
+
     bool ok = true;
     for (int s = 0; s < NNUE_LAYER_STACKS && ok; s++) {
         auto rf = [&](float *dst, int n) -> bool {
@@ -3438,32 +3547,36 @@ bool nnue_load_fc_weights(const char *path)
     // For v2/v3 files, ft_biases_f32 was already initialised by nnue_init_fp32_weights.
     nnue_requantize_fc();
     if (version == TDLEAF_VERSION)
-        printf("TDLeaf: loaded v9 weights from %s (%d FT rows, %d FT-v rows, piece_val=%s, adam_v=%s, adam_m=%s, t_adam=%u)\n",
+        printf("TDLeaf: loaded v%u weights from %s (%d FT rows, %d FT-v rows, piece_val=%s, adam_v=%s, adam_m=%s, t_adam=%u, content_hash=0x%08X)\n",
+               TDLEAF_VERSION, path, n_ft_loaded, n_ft_v_loaded, piece_val_active ? "yes" : "no",
+               adam_v_loaded ? "yes" : "no", adam_m_loaded ? "yes" : "no", t_adam, nnue_content_hash);
+    else if (version == 9u)
+        printf("TDLeaf: loaded v9 weights from %s (%d FT rows, %d FT-v rows, piece_val=%s, adam_v=%s, adam_m=%s, t_adam=%u, will upgrade to v%u on next save)\n",
                path, n_ft_loaded, n_ft_v_loaded, piece_val_active ? "yes" : "no",
-               adam_v_loaded ? "yes" : "no", adam_m_loaded ? "yes" : "no", t_adam);
+               adam_v_loaded ? "yes" : "no", adam_m_loaded ? "yes" : "no", t_adam, TDLEAF_VERSION);
     else if (version == 8u)
-        printf("TDLeaf: loaded v8 weights from %s (%d FT rows, piece_val=%s, adam_v=%s, adam_m=%s, t_adam=%u, will upgrade to v9 on next save)\n",
+        printf("TDLeaf: loaded v8 weights from %s (%d FT rows, piece_val=%s, adam_v=%s, adam_m=%s, t_adam=%u, will upgrade to v%u on next save)\n",
                path, n_ft_loaded, piece_val_active ? "yes" : "no",
-               adam_v_loaded ? "yes" : "no", adam_m_loaded ? "yes" : "no", t_adam);
+               adam_v_loaded ? "yes" : "no", adam_m_loaded ? "yes" : "no", t_adam, TDLEAF_VERSION);
     else if (version == 7u)
-        printf("TDLeaf: loaded v7 weights from %s (%d FT rows, piece_val=%s, adam_v=%s, adam_m=%s, t_adam=%u, will upgrade to v9 on next save)\n",
+        printf("TDLeaf: loaded v7 weights from %s (%d FT rows, piece_val=%s, adam_v=%s, adam_m=%s, t_adam=%u, will upgrade to v%u on next save)\n",
                path, n_ft_loaded, piece_val_active ? "yes" : "no",
-               adam_v_loaded ? "yes" : "no", adam_m_loaded ? "yes" : "no", t_adam);
+               adam_v_loaded ? "yes" : "no", adam_m_loaded ? "yes" : "no", t_adam, TDLEAF_VERSION);
     else if (version == 6u)
-        printf("TDLeaf: loaded v6 weights from %s (%d FT rows, piece_val=%s, adam_v=%s, will upgrade to v9 on next save)\n",
+        printf("TDLeaf: loaded v6 weights from %s (%d FT rows, piece_val=%s, adam_v=%s, will upgrade to v%u on next save)\n",
                path, n_ft_loaded, piece_val_active ? "yes" : "no",
-               adam_v_loaded ? "yes" : "no");
+               adam_v_loaded ? "yes" : "no", TDLEAF_VERSION);
     else if (version == 5u)
-        printf("TDLeaf: loaded v5 weights from %s (%d FT rows, piece_val=%s, will upgrade to v9 on next save)\n",
-               path, n_ft_loaded, piece_val_active ? "yes" : "no");
+        printf("TDLeaf: loaded v5 weights from %s (%d FT rows, piece_val=%s, will upgrade to v%u on next save)\n",
+               path, n_ft_loaded, piece_val_active ? "yes" : "no", TDLEAF_VERSION);
     else if (version == 4u)
-        printf("TDLeaf: loaded v4 weights from %s (%d FT rows, will upgrade to v9 on next save)\n",
-               path, n_ft_loaded);
+        printf("TDLeaf: loaded v4 weights from %s (%d FT rows, will upgrade to v%u on next save)\n",
+               path, n_ft_loaded, TDLEAF_VERSION);
     else if (version == 3u)
-        printf("TDLeaf: loaded v3 weights from %s (%d FT rows, will upgrade to v9 on next save)\n",
-               path, n_ft_loaded);
+        printf("TDLeaf: loaded v3 weights from %s (%d FT rows, will upgrade to v%u on next save)\n",
+               path, n_ft_loaded, TDLEAF_VERSION);
     else
-        printf("TDLeaf: loaded v2 FC weights from %s (will upgrade to v9 on next save)\n", path);
+        printf("TDLeaf: loaded v2 FC weights from %s (will upgrade to v%u on next save)\n", path, TDLEAF_VERSION);
     return true;
 }
 

@@ -499,12 +499,14 @@ Set `TDLEAF_ADAM_WARMUP = 0` to disable warmup.
 
 ---
 
-## Weight Persistence — `.tdleaf.bin` (version 9)
+## Weight Persistence — `.tdleaf.bin` (version 10)
 
 Saved at `{exec_path}<network>.tdleaf.bin`.  Format:
 
 ```
-[version(9) + 8 FC stacks: per-layer float32×128 weights/biases + uint32 counts]
+[magic(4) + version(10)]
+[v10+: nnue_content_hash(4)  — FNV-1a over source .nnue FT weight bytes]
+[8 FC stacks: per-layer float32×128 weights/biases + uint32 counts]
 [n_ft_rows(4 bytes)]
 [per dirty row: fi(4) + ft_w[1024]×128 as float32[1024] + ft_cnt[1024] as uint32[1024]
                       + psqt_w[8]×128 as float32[8]    + psqt_cnt[8]  as uint32[8]]
@@ -542,10 +544,23 @@ the learned direction from the previous session — eliminating the slow/negativ
 trend at the start of each new training run.  FT weight v/m (~92 MB each) are NOT
 persisted — too large, and FT weights use RMSProp (no m array).
 
-Versions 2–8 are accepted on load with appropriate defaults; a notice is printed for
+Versions 2–9 are accepted on load with appropriate defaults; a notice is printed for
 any version upgrade.  V5–V8 `piece_val[6][8]` is averaged to `piece_val[6]` on load.
 V6–V8 `v_piece_val[6][8]` is max-merged to `v_piece_val[6]`; V7–V8 `m_piece_val[6][8]`
 is averaged to `m_piece_val[6]`.
+
+### Source-.nnue content hash (v10+)
+
+The v10 header stores an FNV-1a fingerprint of the source `.nnue` FT weight bytes,
+computed once at load/init time (see `nnue_update_content_hash()` in `nnue.cpp`).
+On load, if the stored hash does not match the hash of the currently-loaded `.nnue`,
+the file is refused — preventing accidental pairing of weight deltas with the wrong
+baseline network.  The same check guards the merge-read phase of every save, so a
+worker running against a different `.nnue` cannot corrupt the file.
+
+V5–V9 files have no hash and are accepted without a check; saving promotes them to
+v10 carrying the current `.nnue`'s content hash.  `--init-nnue` fingerprints the
+freshly-initialised FT weights so the companion `.tdleaf.bin` is born consistent.
 
 ---
 

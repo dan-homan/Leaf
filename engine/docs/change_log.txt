@@ -1,5 +1,19 @@
 Changes since 2017_12_24
 
+2026_04_17 -- tdleaf: add source-.nnue content-hash check to .tdleaf.bin (v10 format).
+               At .nnue load/init, FNV-1a is computed over the FT weight bytes and
+               stored in nnue_content_hash.  On .tdleaf.bin save the hash is written
+               into the header (magic + version + content_hash + rest); on load the
+               stored hash is compared against the currently-loaded .nnue's hash, and
+               the file is refused if they differ.  The same check guards the merge-
+               read phase of nnue_save_fc_weights(), so a concurrent worker running
+               against a different .nnue cannot stomp on another worker's weights.
+               v5-v9 files have no hash and are accepted without a check (legacy);
+               they are promoted to v10 on the next save.  --init-nnue fingerprints
+               the freshly-initialised FT weights so the companion .tdleaf.bin is
+               born consistent.  Fixes a silent-corruption class where the user
+               swapped the .nnue out from under an existing .tdleaf.bin.
+
 2026_04_16 -- tdleaf: simplify piece_val from 6×8 floats (per piece × per PSQT bucket)
                to 6 floats (one per piece type).  Bucket variation is encoded solely in
                PSQT.  Reduces Adam state from 48 → 6 scalars; gradient signal per
