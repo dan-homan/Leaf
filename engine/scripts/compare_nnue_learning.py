@@ -8,7 +8,10 @@ Usage (from learn/ or run/ directory):
     python3 compare_nnue_learning.py nn-fresh.nnue nn-fresh.tdleaf.bin --save
     python3 compare_nnue_learning.py nn-fresh.nnue nn-fresh.tdleaf.bin --ft-weights
 
-Supports .tdleaf.bin versions 2–9.  Version 9 changed piece_val from [6][8]
+Supports .tdleaf.bin versions 2–10.  Version 10 prepends a 4-byte FNV-1a
+hash of the source .nnue FT weights immediately after the version field
+(for load-time pairing checks in the engine; this script just skips it).
+Version 9 changed piece_val from [6][8]
 (one per piece type × 8 PSQT buckets) to [6] (one per piece type); older files
 are transparently averaged on read.
 """
@@ -54,6 +57,7 @@ TDLEAF_VERSION6 = 6            # adds Adam v (second moment) section
 TDLEAF_VERSION7 = 7            # adds Adam m (first moment) section
 TDLEAF_VERSION8 = 8            # adds sparse FT v (second moment) section
 TDLEAF_VERSION9 = 9            # piece_val simplified: [6][8] → [6] (one value per piece type)
+TDLEAF_VERSION10 = 10          # adds 4-byte source-.nnue content hash after magic+version
 TDLEAF_SCALE    = 128.0        # v2+: file stores w_f32 × TDLEAF_SCALE
 
 # ---------------------------------------------------------------------------
@@ -279,7 +283,11 @@ def read_tdleaf_fc(path):
         if magic != TDLEAF_MAGIC:
             sys.exit(f"Error: bad magic {magic:#010x} in {path}")
 
-        if version in (TDLEAF_VERSION2, TDLEAF_VERSION3, TDLEAF_VERSION4, TDLEAF_VERSION5, TDLEAF_VERSION6, TDLEAF_VERSION7, TDLEAF_VERSION8, TDLEAF_VERSION9):
+        # v10+: source-.nnue content hash — read and stash, not used here.
+        if version >= TDLEAF_VERSION10:
+            data['nnue_content_hash'] = struct.unpack('<I', f.read(4))[0]
+
+        if version in (TDLEAF_VERSION2, TDLEAF_VERSION3, TDLEAF_VERSION4, TDLEAF_VERSION5, TDLEAF_VERSION6, TDLEAF_VERSION7, TDLEAF_VERSION8, TDLEAF_VERSION9, TDLEAF_VERSION10):
             data['_has_counts'] = True
             for _ in range(N_STACKS):
                 def rf(n, fh=f):
@@ -325,10 +333,10 @@ def read_tdleaf_fc(path):
             # no counts for v1
         else:
             sys.exit(f"Error: unknown .tdleaf.bin version {version} in {path} "
-                     f"(supported: 1–9)")
+                     f"(supported: 1–10)")
 
         # v3/v4/v5: sparse FT/PSQT section after FC stacks
-        if version in (TDLEAF_VERSION3, TDLEAF_VERSION4, TDLEAF_VERSION5, TDLEAF_VERSION6, TDLEAF_VERSION7, TDLEAF_VERSION8, TDLEAF_VERSION9):
+        if version in (TDLEAF_VERSION3, TDLEAF_VERSION4, TDLEAF_VERSION5, TDLEAF_VERSION6, TDLEAF_VERSION7, TDLEAF_VERSION8, TDLEAF_VERSION9, TDLEAF_VERSION10):
             n_ft_rows = struct.unpack('<I', f.read(4))[0]
             if n_ft_rows > 0:
                 fi_arr   = np.empty(n_ft_rows, dtype=np.uint32)
@@ -352,7 +360,7 @@ def read_tdleaf_fc(path):
             data['n_ft_rows'] = n_ft_rows
 
             # v4/v5: FT bias section (appended after sparse FT/PSQT rows)
-            if version in (TDLEAF_VERSION4, TDLEAF_VERSION5, TDLEAF_VERSION6, TDLEAF_VERSION7, TDLEAF_VERSION8, TDLEAF_VERSION9):
+            if version in (TDLEAF_VERSION4, TDLEAF_VERSION5, TDLEAF_VERSION6, TDLEAF_VERSION7, TDLEAF_VERSION8, TDLEAF_VERSION9, TDLEAF_VERSION10):
                 ft_b_raw = np.frombuffer(f.read(HALF_DIMS * 4), dtype=np.float32).copy()
                 ft_b_cnt = np.frombuffer(f.read(HALF_DIMS * 4), dtype=np.uint32).copy()
                 if ft_b_raw.shape == (HALF_DIMS,) and ft_b_cnt.shape == (HALF_DIMS,):
@@ -362,7 +370,7 @@ def read_tdleaf_fc(path):
             # Dense piece value section:
             #   v9+: float32[6] + uint32[6]  (one value per piece type)
             #   v5-v8: float32[6][8] + uint32[6][8]  (per-bucket; collapse by averaging)
-            if version in (TDLEAF_VERSION5, TDLEAF_VERSION6, TDLEAF_VERSION7, TDLEAF_VERSION8, TDLEAF_VERSION9):
+            if version in (TDLEAF_VERSION5, TDLEAF_VERSION6, TDLEAF_VERSION7, TDLEAF_VERSION8, TDLEAF_VERSION9, TDLEAF_VERSION10):
                 N_PIECE_TYPES = 6
                 if version >= TDLEAF_VERSION9:
                     pv_raw = np.frombuffer(f.read(N_PIECE_TYPES * 4), dtype=np.float32).copy()
@@ -382,7 +390,7 @@ def read_tdleaf_fc(path):
                         data['piece_val_cnt'] = cnt2d.mean(axis=1).astype(np.uint32)
 
             # v6: Adam v (second moment) section — skip it (not displayed)
-            if version in (TDLEAF_VERSION6, TDLEAF_VERSION7, TDLEAF_VERSION8, TDLEAF_VERSION9):
+            if version in (TDLEAF_VERSION6, TDLEAF_VERSION7, TDLEAF_VERSION8, TDLEAF_VERSION9, TDLEAF_VERSION10):
                 t_adam = struct.unpack('<I', f.read(4))[0]
                 data['t_adam'] = t_adam
                 # Skip FC v arrays: 8 stacks × (L0_SIZE + L0_SIZE*L0_INPUT + L1_SIZE +
@@ -399,7 +407,7 @@ def read_tdleaf_fc(path):
                 f.read(n_pv_rows * (4 + PSQT_BKTS * 4))
 
             # v7+: Adam m (first moment) section — skip it (not displayed)
-            if version in (TDLEAF_VERSION7, TDLEAF_VERSION8, TDLEAF_VERSION9):
+            if version in (TDLEAF_VERSION7, TDLEAF_VERSION8, TDLEAF_VERSION9, TDLEAF_VERSION10):
                 # Skip FC m arrays: same layout as FC v
                 fc_m_floats = (L0_SIZE + L0_SIZE * L0_INPUT +
                                L1_SIZE + L1_SIZE * L1_PADDED +
@@ -414,7 +422,7 @@ def read_tdleaf_fc(path):
                 data['adam_m_loaded'] = True
 
             # v8+: sparse FT v section — skip (not displayed)
-            if version in (TDLEAF_VERSION8, TDLEAF_VERSION9):
+            if version in (TDLEAF_VERSION8, TDLEAF_VERSION9, TDLEAF_VERSION10):
                 n_ftv_rows = struct.unpack('<I', f.read(4))[0]
                 f.read(n_ftv_rows * (4 + HALF_DIMS * 4))
                 data['adam_ft_v_loaded'] = True
