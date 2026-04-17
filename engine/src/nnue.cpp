@@ -2913,6 +2913,10 @@ bool nnue_save_fc_weights(const char *path)
         memset(delta_piece_val, 0, sizeof(delta_piece_val));
     }
 
+    // Sync value[] with the (possibly co-worker-updated) piece_val.
+    if (piece_val_active)
+        nnue_extract_piece_values(false);
+
     // ---- Write merged content to a temp file, then atomically rename ----
     char tmp_path[FILENAME_MAX];
     snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
