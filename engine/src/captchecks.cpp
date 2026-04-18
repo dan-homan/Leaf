@@ -53,8 +53,8 @@ void position::add_cc(int fsq, int tsq, move_list *list, char type, int delta_sc
   {
     list->mv[i].m.b.type |= PROMOTE; 
     list->mv[i].m.b.promote = QUEEN;
-    //if(swap(tsq,(*this),wtm,fsq) >= 0) list->mv[i].score += 1000;
-    list->mv[i].score = delta_score+1000;
+    //if(swap(tsq,(*this),wtm,fsq) >= 0) list->mv[i].score += 10*value[PAWN];
+    list->mv[i].score = delta_score + 10*value[PAWN];
     list->count++;
     return;
   }
@@ -67,7 +67,7 @@ void position::add_cc(int fsq, int tsq, move_list *list, char type, int delta_sc
   // Give an initial score to the move below delta_score
   // so that by default it will not be put in the list 
   // unless a step below changes the score
-  list->mv[i].score = delta_score-123;  
+  list->mv[i].score = delta_score - (5*value[PAWN])/4;
   
   // if it is a capture, see if we capture enough material to stay in list
   if(type&CAPTURE) {
@@ -75,8 +75,8 @@ void position::add_cc(int fsq, int tsq, move_list *list, char type, int delta_sc
     //  give a bonus by the rank of the pawn
     if(PTYPE(sq[tsq]) == PAWN) {
       if(gstage > 9) { // bonus for pawns about to queen in end-game
-	if(wtm && RANK(tsq) == 1) pawn_bonus += 35*gstage;   
-	if(!wtm && RANK(tsq) == 6) pawn_bonus += 35*gstage;
+	if(wtm && RANK(tsq) == 1) pawn_bonus += ((value[QUEEN]-value[PAWN])*gstage)/32;
+	if(!wtm && RANK(tsq) == 6) pawn_bonus += ((value[QUEEN]-value[PAWN])*gstage)/32;
       }
     }
     // if it is an EP capture, include ptype value for the pawn captured

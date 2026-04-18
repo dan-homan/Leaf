@@ -50,15 +50,15 @@ int position::add_capt(int fsq, int tsq, move_list *list, char type, int delta_s
   // Give an initial score to the move below delta_score
   // so that by default it will not be put in the list 
   // unless a step below changes the score
-  list->mv[i].score = delta_score-100;  
+  list->mv[i].score = delta_score - value[PAWN];
 
   // give a score for a promotion + put in move list
   if((tsq > 55 || tsq < 8) && PTYPE(sq[fsq]) == PAWN) {
 
     list->mv[i].m.b.type |= PROMOTE;
     list->mv[i].m.b.promote = QUEEN;
-    if(swap(tsq,(*this),wtm,fsq) >= 0) list->mv[i].score += 1000;
-    //list->mv[i].score += 1000;
+    if(swap(tsq,(*this),wtm,fsq) >= 0) list->mv[i].score += 10*value[PAWN];
+    //list->mv[i].score += 10*value[PAWN];
 
   } else {   // score regular captures in the normal way
 
@@ -67,8 +67,8 @@ int position::add_capt(int fsq, int tsq, move_list *list, char type, int delta_s
     int pawn_bonus = 0;
     if(PTYPE(sq[tsq]) == PAWN) {
       if(gstage > 9) { // bonus for pawns about to queen in end-game
-	if(wtm && RANK(tsq) == 1) pawn_bonus += 35*gstage;   
-	if(!wtm && RANK(tsq) == 6) pawn_bonus += 35*gstage;
+	if(wtm && RANK(tsq) == 1) pawn_bonus += ((value[QUEEN]-value[PAWN])*gstage)/32;
+	if(!wtm && RANK(tsq) == 6) pawn_bonus += ((value[QUEEN]-value[PAWN])*gstage)/32;
       }
     }
 

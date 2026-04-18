@@ -1,5 +1,18 @@
 Changes since 2017_12_24
 
+2026_04_18 -- search/move-gen: scale hard-coded score margins to value[].
+               search.cpp aspiration window (500/5000), null-move reduction
+               thresholds (beta+100, beta+400), LMP factor (200), index scaler
+               (/100), LMR threshold (alpha-350), and rank-7 pawn bonus
+               (35*gstage) now scale with value[PAWN] or (value[QUEEN]-value[PAWN]).
+               search.h MARGIN(x) macro scales with value[PAWN].
+               moves.cpp minor-exchange tolerance (+50) replaced with
+               (value[ROOK]-value[BISHOP]).  captures.cpp placeholder (-100)
+               and promotion bonus (+1000), captchecks.cpp placeholder (-123)
+               and promotion score (+1000), and the 35*gstage rank-7 bonus in
+               all three files now scale to value[].  Keeps move ordering and
+               pruning heuristics consistent as piece values drift under TDLeaf.
+
 2026_04_17 -- tdleaf: add source-.nnue content-hash check to .tdleaf.bin (v10 format).
                At .nnue load/init, FNV-1a is computed over the FT weight bytes and
                stored in nnue_content_hash.  On .tdleaf.bin save the hash is written
