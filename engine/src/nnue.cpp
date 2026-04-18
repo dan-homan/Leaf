@@ -1441,6 +1441,37 @@ static float    *m_psqt_w  = nullptr;  // [NNUE_FT_INPUTS × PSQT_BKTS] — PSQT
 // bias correction survive session restarts.
 static uint32_t  t_adam    = 0;
 
+// ---------------------------------------------------------------------------
+// Adam step-clip telemetry — one line to stderr per batch, reset after log.
+// Tracks the max unit-less Adam step magnitude (|m_hat/sqrt(v_hat)| or, for
+// RMSProp FT, |g/sqrt(v_hat)|) and the number of parameters whose step was
+// clipped to TDLEAF_ADAM_STEP_CLIP.  Written as a single fprintf so
+// concurrent engines sharing a 2>> log produce intact lines.
+// ---------------------------------------------------------------------------
+static float step_max_fc      = 0.0f;
+static float step_max_ft      = 0.0f;
+static float step_max_ft_bias = 0.0f;
+static float step_max_psqt    = 0.0f;
+static float step_max_pv      = 0.0f;
+static uint64_t step_clips_fc      = 0;
+static uint64_t step_clips_ft      = 0;
+static uint64_t step_clips_ft_bias = 0;
+static uint64_t step_clips_psqt    = 0;
+static uint64_t step_clips_pv      = 0;
+
+// Clip the unit-less Adam step and update the per-category max / clip-count.
+// Returns the (possibly scaled-down) step.  Symmetric about zero.
+static inline float clip_adam_step(float step, float &max_track, uint64_t &clip_count)
+{
+    float a = fabsf(step);
+    if (a > max_track) max_track = a;
+    if (a > TDLEAF_ADAM_STEP_CLIP) {
+        clip_count++;
+        return (step > 0.0f ? TDLEAF_ADAM_STEP_CLIP : -TDLEAF_ADAM_STEP_CLIP);
+    }
+    return step;
+}
+
 // Session-local FT step counter — intentionally NOT persisted.  v_ft_w is zeroed
 // at every startup (too large to persist), so bc2 must be computed relative to the
 // current session's step count, not the global t_adam.  Using min(t_adam, t_ft_session)
@@ -1922,7 +1953,7 @@ void nnue_forward_fp32(const int16_t acc[2][NNUE_HALF_DIMS],
 // grad_scale = alpha * e_t * d_t * (1-d_t) / K * (100 / 5776)
 // ---------------------------------------------------------------------------
 void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
-                               bool fc_only)
+                               bool replay_mode)
 {
     int s = act.stack;
 
@@ -1987,11 +2018,26 @@ void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
         grad_l0_b[s][o] += g_fc0_raw[o];
     }
 
-    // FC-only mode: skip FT/PSQT/FT-bias/piece_val gradients.
-    // Used during replay to avoid the FT feedback loop (rebuilt accumulators
-    // reflect current FT weights, so FT gradients would reinforce live-pass
-    // updates and cause eval divergence).
-    if (fc_only) return;
+    // Dense piece value gradient:
+    //   piece_val_diff = Σ_pt piece_val[pt] × (stm_count[pt] − opp_count[pt])
+    //   ∂score/∂piece_val[pt] = count_diff[pt] × (100/5776) × 0.5
+    //   grad_scale already includes cp_factor = 100/5776.
+    // Runs in both live and replay paths: piece_val is an output-side additive
+    // term (see nnue_dense_piece_val) and does NOT feed into nnue_init_accumulator,
+    // so replay updates do not create the FT/PSQT/ft_bias feedback loop below.
+    if (piece_val_active) {
+        float g_pv = grad_scale * 0.5f;
+        for (int pt = 0; pt < 6; pt++) {
+            if (act.piece_count_diff[pt] != 0)
+                grad_piece_val[pt] += g_pv * (float)act.piece_count_diff[pt];
+        }
+    }
+
+    // Replay mode: skip FT weights, PSQT, and FT biases.  These three feed
+    // into nnue_init_accumulator (ft_biases directly, ft_weights/psqt via
+    // add_feat) — updating them during replay would change what the next
+    // tdleaf_refresh_scores() produces and drive a positive feedback loop.
+    if (replay_mode) return;
 
     // 1. Continue backward: FC0 inputs → accumulator → FT/PSQT weights
     // g_l0_in[i] = Σ_o g_fc0_raw[o] × l0_weights_f32[s][o×L0_INPUT+i]
@@ -2059,18 +2105,6 @@ void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
     // Both perspectives share the same bias vector, so gradients sum across them.
     for (int d = 0; d < NNUE_HALF_DIMS; d++)
         grad_ft_bias[d] += (g_acc[0][d] + g_acc[1][d]);
-
-    // Dense piece value gradient:
-    //   piece_val_diff = Σ_pt piece_val[pt] × (stm_count[pt] − opp_count[pt])
-    //   ∂score/∂piece_val[pt] = count_diff[pt] × (100/5776) × 0.5
-    //   grad_scale already includes cp_factor = 100/5776.
-    if (piece_val_active) {
-        float g_pv = grad_scale * 0.5f;
-        for (int pt = 0; pt < 6; pt++) {
-            if (act.piece_count_diff[pt] != 0)
-                grad_piece_val[pt] += g_pv * (float)act.piece_count_diff[pt];
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2210,6 +2244,8 @@ void nnue_apply_gradients()
     // Full Adam step for FC layers and FT biases — per-weight bias correction.
     // bc1 (beta1=0.9): skipped at cnt>=20 (0.9^20≈0.12 → bc1≈0.88, close to 1).
     // bc2 (beta2=0.999): ALWAYS applied (0.999^20≈0.98 → bc2=0.02; skipping gives ~7× oversized steps).
+    // The unit-less step m_hat/sqrt(v_hat) is clipped to TDLEAF_ADAM_STEP_CLIP
+    // before the LR multiply to bound the worst-case per-weight update.
     auto do_step = [&](float g, float &m, float &v, uint32_t cnt) -> float {
         m = TDLEAF_ADAM_BETA1 * m + (1.0f - TDLEAF_ADAM_BETA1) * g;
         v = TDLEAF_ADAM_BETA2 * v + (1.0f - TDLEAF_ADAM_BETA2) * g * g;
@@ -2217,7 +2253,9 @@ void nnue_apply_gradients()
         float m_hat = (eff_t >= 20) ? m
             : m / (1.0f - powf(TDLEAF_ADAM_BETA1, (float)eff_t));
         float v_hat = v / (1.0f - powf(TDLEAF_ADAM_BETA2, (float)eff_t));
-        return fc_lr * m_hat / (sqrtf(v_hat) + TDLEAF_ADAM_EPS);
+        float step  = m_hat / (sqrtf(v_hat) + TDLEAF_ADAM_EPS);
+        step = clip_adam_step(step, step_max_fc, step_clips_fc);
+        return fc_lr * step;
     };
     // PSQT Adam step — same per-weight BC but uses TDLEAF_ADAM_PSQT_LR0.
     auto do_step_psqt = [&](float g, float &m, float &v, uint32_t cnt) -> float {
@@ -2227,7 +2265,9 @@ void nnue_apply_gradients()
         float m_hat = (eff_t >= 20) ? m
             : m / (1.0f - powf(TDLEAF_ADAM_BETA1, (float)eff_t));
         float v_hat = v / (1.0f - powf(TDLEAF_ADAM_BETA2, (float)eff_t));
-        return psqt_lr * m_hat / (sqrtf(v_hat) + TDLEAF_ADAM_EPS);
+        float step  = m_hat / (sqrtf(v_hat) + TDLEAF_ADAM_EPS);
+        step = clip_adam_step(step, step_max_psqt, step_clips_psqt);
+        return psqt_lr * step;
     };
 
     for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
@@ -2342,8 +2382,10 @@ void nnue_apply_gradients()
                     if (gw[d] != 0.0f) {
                         vw[d] = TDLEAF_ADAM_BETA2 * vw[d]
                                + (1.0f - TDLEAF_ADAM_BETA2) * gw[d] * gw[d];
-                        float sv = sqrtf(vw[d] / ft_bc2) + TDLEAF_ADAM_EPS;
-                        float dw = ft_lr * gw[d] / sv;
+                        float sv   = sqrtf(vw[d] / ft_bc2) + TDLEAF_ADAM_EPS;
+                        float step = gw[d] / sv;
+                        step = clip_adam_step(step, step_max_ft, step_clips_ft);
+                        float dw = ft_lr * step;
                         // AdamW: decoupled weight decay (FT weights, not biases/PSQT)
                         float wd = TDLEAF_WEIGHT_DECAY * ft_lr * fw[d];
                         fw[d] -= dw + wd;  if (fd) fd[d] -= dw + wd;
@@ -2382,7 +2424,9 @@ void nnue_apply_gradients()
         float m_hat = (eff_t >= 20) ? m
             : m / (1.0f - powf(TDLEAF_ADAM_BETA1, (float)eff_t));
         float v_hat = v / (1.0f - powf(TDLEAF_ADAM_BETA2, (float)eff_t));
-        return ft_bias_lr * m_hat / (sqrtf(v_hat) + TDLEAF_ADAM_EPS);
+        float step  = m_hat / (sqrtf(v_hat) + TDLEAF_ADAM_EPS);
+        step = clip_adam_step(step, step_max_ft_bias, step_clips_ft_bias);
+        return ft_bias_lr * step;
     };
     for (int d = 0; d < NNUE_HALF_DIMS; d++) {
         if (grad_ft_bias[d] == 0.0f) continue;
@@ -2406,7 +2450,9 @@ void nnue_apply_gradients()
             float m_hat = (eff_t >= 20) ? m
                 : m / (1.0f - powf(TDLEAF_ADAM_BETA1, (float)eff_t));
             float v_hat = v / (1.0f - powf(TDLEAF_ADAM_BETA2, (float)eff_t));
-            return pv_lr * m_hat / (sqrtf(v_hat) + TDLEAF_ADAM_EPS);
+            float step  = m_hat / (sqrtf(v_hat) + TDLEAF_ADAM_EPS);
+            step = clip_adam_step(step, step_max_pv, step_clips_pv);
+            return pv_lr * step;
         };
         bool pv_changed = false;
         for (int pt = 0; pt < 6; pt++) {
@@ -2430,6 +2476,46 @@ void nnue_apply_gradients()
         if (pv_changed)
             nnue_extract_piece_values(false); // silent — called every batch during training
     }
+
+    // Step-clip telemetry — write one line per batch to <exec_path>tdleaf_telemetry.log.
+    // Written to a file (not stderr) because cutechess-cli captures engine stderr
+    // internally; our telemetry would otherwise be invisible.  Multiple concurrent
+    // training engines share the same file path: each opens it in append mode, and
+    // Linux guarantees atomic appends up to PIPE_BUF (4 KB), so line granularity
+    // is preserved across processes without explicit locking.
+    //
+    // Single fprintf + fflush per line = one write() syscall.  File handle is
+    // cached across calls (reopened lazily on first use).
+    // Disabled at compile time with -D TDLEAF_LOG_STEP_CLIPS=0.
+#if TDLEAF_LOG_STEP_CLIPS
+    {
+        extern char exec_path[FILENAME_MAX];
+        static FILE *tele_fp = nullptr;
+        if (tele_fp == nullptr) {
+            char path[FILENAME_MAX + 64];
+            snprintf(path, sizeof(path), "%stdleaf_telemetry.log", exec_path);
+            tele_fp = fopen(path, "a");
+            // If fopen failed (e.g., read-only dir), silently skip — telemetry
+            // is best-effort; the engine must not die over it.
+        }
+        if (tele_fp) {
+            fprintf(tele_fp,
+                    "[tdleaf step-clip] t_adam=%u  max|step| FC=%.2f FT=%.2f FTB=%.2f PSQT=%.2f PV=%.2f  "
+                    "clips FC=%llu FT=%llu FTB=%llu PSQT=%llu PV=%llu  (clip=%.1f)\n",
+                    (unsigned)t_adam,
+                    step_max_fc, step_max_ft, step_max_ft_bias, step_max_psqt, step_max_pv,
+                    (unsigned long long)step_clips_fc,
+                    (unsigned long long)step_clips_ft,
+                    (unsigned long long)step_clips_ft_bias,
+                    (unsigned long long)step_clips_psqt,
+                    (unsigned long long)step_clips_pv,
+                    (double)TDLEAF_ADAM_STEP_CLIP);
+            fflush(tele_fp);
+        }
+    }
+#endif
+    step_max_fc = step_max_ft = step_max_ft_bias = step_max_psqt = step_max_pv = 0.0f;
+    step_clips_fc = step_clips_ft = step_clips_ft_bias = step_clips_psqt = step_clips_pv = 0;
 }
 
 // ---------------------------------------------------------------------------

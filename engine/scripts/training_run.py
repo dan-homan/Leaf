@@ -803,6 +803,13 @@ def main():
     tc2         = tc2_raw if tc2_raw.strip() else tc1
     concurrency = int(ask( "  Concurrency         [-c]        ", default_concurrency))
     wait_ms     = int(ask("  Wait between games  [--wait ms] ", 500))
+    error_log   = ask("  Engine stderr log (blank=none) [--error-log FILE] ", "").strip()
+    if error_log:
+        # Resolve against the shell cwd at prompt time, not match.py's cwd
+        # (which will be run_dir).  Matches POSIX shell intuition: "write
+        # the file where I would write it from here."
+        error_log = os.path.abspath(os.path.expanduser(error_log))
+        print(f"    → resolved to {error_log}")
     if use_training_epd:
         print(f"  Opening EPD:      training_openings.epd detected — using FRC+book openings "
               f"(Fischer variant auto-enabled)")
@@ -882,6 +889,8 @@ def main():
               f"reject≤{seg_reject_los*100:.0f}%  "
               f"window={seg_window_frac:.0%} (min {seg_min_window})")
     print(f"  PGN directory:    {pgn_dir}/")
+    if error_log:
+        print(f"  Engine stderr:    {error_log}  (append)")
     print("=" * 62)
 
     if not ask_yes_no("Proceed?", default="y"):
@@ -929,6 +938,8 @@ def main():
             cmd += ["--depth2", str(depth2)]
         if no_repeat:
             cmd.append("--no-repeat")
+        if error_log:
+            cmd += ["--error-log", error_log]
         return cmd
 
     def export_nnue(exe, dest_path, label):
@@ -1201,6 +1212,8 @@ def main():
                     val_cmd.append("--fischer-random")
                 elif use_book:
                     val_cmd += ["--openings", book_path]
+                if error_log:
+                    val_cmd += ["--error-log", error_log]
 
                 vw, vd, vl, vrc = run_match_streaming(
                     val_cmd, los_stop_hi=los_stop_hi, los_stop_lo=los_stop_lo)

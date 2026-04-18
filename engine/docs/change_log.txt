@@ -1,5 +1,49 @@
 Changes since 2017_12_24
 
+2026_04_18 -- tdleaf: narrow fc_only → replay_mode; allow piece_val updates in replay.
+               In nnue_accumulate_gradients the replay-path early return used to
+               skip four gradient categories: FT weights, PSQT, FT biases, and
+               dense piece_val.  The first three must be skipped during replay
+               because tdleaf_refresh_scores() rebuilds accumulators from stored
+               positions against current FT weights (via nnue_init_accumulator),
+               so updating the accumulator-feeding parameters would create a
+               positive feedback loop.  piece_val, however, is an output-side
+               additive term (nnue_dense_piece_val is added to the NN output and
+               is NOT read by nnue_init_accumulator), so excluding it was
+               overly conservative and created a credit-attribution failure:
+               FC layers would absorb material-correlated error during replay
+               passes, shrinking the residual TD error that reached piece_val
+               on the live pass, so piece_val never converged to correct values.
+               User-observed symptom with TDLEAF_REPLAY_K=2: engine failed to
+               learn even basic piece values.
+               Fix: rename fc_only → replay_mode throughout; move piece_val
+               gradient accumulation above the early-return guard so it runs
+               in both live and replay paths.
+
+2026_04_18 -- tdleaf: mitigate occasional large-regression events during learning.
+               (1) Adam step clip: the unit-less Adam step m_hat/sqrt(v_hat) (or
+               g/sqrt(v_hat) for the RMSProp FT path) is now bounded by
+               TDLEAF_ADAM_STEP_CLIP (= 3.0) before the LR multiply.  Targets the
+               rare-feature pathology where a low running v makes a normal
+               gradient produce an oversized step.  Applied uniformly to FC,
+               FT weights, FT biases, PSQT, and piece_val because Adam's step
+               is scale-normalised by design.
+               (2) Step-clip telemetry: each call to nnue_apply_gradients()
+               appends one line to <exec_path>tdleaf_telemetry.log with per-
+               category max |step| and clip count for that batch, then
+               resets.  Writes to a file (not stderr) because cutechess-cli
+               captures engine stderr internally.  Single fprintf + fflush
+               per line; Linux guarantees atomic appends up to PIPE_BUF
+               (4 KB), so line granularity is preserved when multiple
+               training engines share the same log path.  Disabled by
+               default; compile with TDLEAF_LOG_STEP_CLIPS=1 to enable
+               (for diagnosing clip activity during training).
+               (3) Batch size bumped from 4 → 8 games to further dilute the
+               contribution of any single pathological game.
+               (4) TDLEAF_SCORE_CLIP_CP (200.0) renamed to TDLEAF_SCORE_CLIP_PAWNS
+               (2.0) and evaluated at the call site as PAWNS × value[PAWN], so
+               the TD-error score-change threshold tracks piece-value drift.
+
 2026_04_18 -- search/move-gen: scale hard-coded score margins to value[].
                search.cpp aspiration window (500/5000), null-move reduction
                thresholds (beta+100, beta+400), LMP factor (200), index scaler

@@ -77,6 +77,7 @@ etc.) without manual `dir=` configuration.
 | `--openings FILE` | — | Openings file: `.epd`, `.pgn`, or `.bin` (polyglot book) |
 | `--no-repeat` | off | Play each opening once (`-rounds N`, no `-games 2 -repeat`).  Increases position diversity; recommended for symmetric self-play. |
 | `--noswap` | off | Pass `-noswap` to cutechess-cli; engine1 always plays white.  Off by default (correct for training). |
+| `--error-log FILE` | — | Append cutechess-cli stderr (and inherited engine stderr) to FILE.  Captures per-batch `[tdleaf step-clip]` telemetry from all concurrent training engines in one file; lines are atomic per `fprintf` (<4KB), so interleaving is line-granular. |
 
 When more than one opponent is supplied the script enters **gauntlet mode** and
 prints a summary table (Opponent, Games, W, D, L, Score%, Elo diff) at the end.

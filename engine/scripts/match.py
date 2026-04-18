@@ -186,7 +186,7 @@ def elo_from_wdl(w, d, l):
     return elo, elo_err
 
 
-def run_match(cmd):
+def run_match(cmd, error_log=None):
     """
     Run cutechess-cli, stream its output to stdout line-by-line, and capture the
     final Score and Elo difference lines.
@@ -194,6 +194,10 @@ def run_match(cmd):
     cutechess-cli output format (engine1 perspective):
       Score of E1 vs E2: W - L - D  [pct]  N
       Elo difference: ELO +/- ERR, LOS: ...
+
+    If error_log is given, cutechess-cli's stderr is routed to that file in
+    append mode (child engines inherit the same fd).  Otherwise stderr is
+    merged into stdout as before.
 
     Returns (w, d, l, elo, elo_err, returncode).
     w/d/l are engine1 wins/draws/losses; elo/elo_err may be None.
@@ -208,21 +212,29 @@ def run_match(cmd):
     w = d = l = 0
     elo = elo_err = None
 
-    proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
-    )
-    for line in proc.stdout:
-        print(line, end="", flush=True)
-        m = score_re.search(line)
-        if m:
-            # cutechess: "W - L - D" from engine1 perspective
-            w, l, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        m = elo_re.search(line)
-        if m:
-            elo     = float(m.group(1))
-            elo_err = float(m.group(2))
+    err_fh = open(error_log, "a", buffering=1) if error_log else None
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=(err_fh if err_fh is not None else subprocess.STDOUT),
+            text=True, bufsize=1,
+        )
+        for line in proc.stdout:
+            print(line, end="", flush=True)
+            m = score_re.search(line)
+            if m:
+                # cutechess: "W - L - D" from engine1 perspective
+                w, l, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            m = elo_re.search(line)
+            if m:
+                elo     = float(m.group(1))
+                elo_err = float(m.group(2))
 
-    proc.wait()
+        proc.wait()
+    finally:
+        if err_fh is not None:
+            err_fh.close()
     return w, d, l, elo, elo_err, proc.returncode
 
 
@@ -288,6 +300,12 @@ def main():
                         help="Enable pondering (default: off)")
     parser.add_argument("--wait", type=int, default=0, metavar="MS",
                         help="Milliseconds to wait between games (default: 0)")
+    parser.add_argument("--error-log", default=None, metavar="FILE",
+                        help="Route cutechess-cli stderr (and inherited engine "
+                             "stderr) to FILE in append mode.  Engines log "
+                             "training telemetry via fprintf(stderr, ...), so "
+                             "this captures per-batch [tdleaf step-clip] lines "
+                             "from all concurrent engines into one file.")
     args = parser.parse_args()
 
     # -----------------------------------------------------------------------
@@ -496,7 +514,7 @@ def main():
 
             cmd = base_cmd + pgnout_args + openings_args
 
-            w, d, l, elo, elo_err, rc = run_match(cmd)
+            w, d, l, elo, elo_err, rc = run_match(cmd, error_log=args.error_log)
 
             if rc != 0:
                 print(f"\nError: cutechess-cli exited with code {rc} on iteration {it}.",

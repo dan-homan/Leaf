@@ -50,6 +50,7 @@ Binary naming: `run/Leaf_v<version>` — e.g. `Leaf_v2026_03_09a`, `Leaf_vtrain_
 | `NNUE=1` | Enable NNUE evaluation |
 | `TDLEAF=1` | Enable TDLeaf(λ) learning (requires NNUE=1) |
 | `TDLEAF_READONLY=1` | Load `.tdleaf.bin` weights but skip updates |
+| `TDLEAF_LOG_STEP_CLIPS=1` | Enable per-batch step-clip telemetry (writes `tdleaf_telemetry.log` next to the binary; default off) |
 | `MATERIAL_ONLY=1` | `score_pos()` returns raw material balance only |
 | `NNUE_NET=<file>` | Override default network file (`to-be-trained.nnue`) |
 | `NNUE_EMBED=1` | Embed the `.nnue` file into the binary via incbin (requires `NNUE=1` and `NNUE_NET=<file>`). The net file must exist in `run/` or the current directory at compile time. At runtime, no external `.nnue` file is needed. |
