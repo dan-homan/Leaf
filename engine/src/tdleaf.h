@@ -88,6 +88,12 @@ static const int   TDLEAF_FT_SESSION_WARMUP  = 100; // per-session FT LR ramp ov
                                                      // Damps FT updates during the v_ft_w accumulation phase.
 static const int   TDLEAF_BATCH_SIZE    = 8;        // accumulate gradients across N games before Adam step
 
+// Replay LR scale: multiplicative factor applied to all category LRs during
+// replay-pass Adam steps (1.0 = no softening, 0.0 = no-op replay).  Lower
+// values reduce overfitting to the small replay buffer (BUF_N games).
+// Adam is scale-invariant in the gradient, so LR is the only effective knob.
+static const float TDLEAF_REPLAY_LR_SCALE = 0.3f;
+
 // ---------------------------------------------------------------------------
 // Per-ply record: accumulator snapshot + search score
 // ---------------------------------------------------------------------------

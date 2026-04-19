@@ -321,8 +321,10 @@ void tdleaf_replay(TDGameRecord &rec, float result, const char *save_path)
         }
         // Apply the summed replay gradients, then requantize so the next
         // pass's tdleaf_refresh_scores() sees the updated weights.
+        // LR scaled down via TDLEAF_REPLAY_LR_SCALE to soften overfitting to
+        // the small replay buffer.
         nnue_clip_gradients(TDLEAF_GRAD_CLIP_NORM);
-        nnue_apply_gradients();
+        nnue_apply_gradients(TDLEAF_REPLAY_LR_SCALE);
         nnue_requantize_fc();
     }
 

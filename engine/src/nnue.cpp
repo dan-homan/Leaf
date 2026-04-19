@@ -2201,7 +2201,7 @@ float nnue_clip_gradients(float max_norm)
 //                        then zero the accumulators.
 // Only weights that received a non-zero gradient this game are updated / counted.
 // ---------------------------------------------------------------------------
-void nnue_apply_gradients()
+void nnue_apply_gradients(float lr_scale)
 {
     t_adam++;
     t_ft_session++;
@@ -2235,11 +2235,12 @@ void nnue_apply_gradients()
         ? (float)t_ft_session / (float)TDLEAF_FT_SESSION_WARMUP
         : 1.0f;
 
-    // Effective LRs.
-    const float fc_lr      = warmup_factor * TDLEAF_ADAM_LR0;
-    const float ft_lr      = warmup_factor * ft_session_factor * TDLEAF_ADAM_FT_LR0;
-    const float ft_bias_lr = warmup_factor * TDLEAF_ADAM_FT_BIAS_LR0;
-    const float psqt_lr    = warmup_factor * TDLEAF_ADAM_PSQT_LR0;
+    // Effective LRs.  lr_scale (<1.0 for replay) applied uniformly to all
+    // categories to soften replay-pass updates; live path passes 1.0.
+    const float fc_lr      = lr_scale * warmup_factor * TDLEAF_ADAM_LR0;
+    const float ft_lr      = lr_scale * warmup_factor * ft_session_factor * TDLEAF_ADAM_FT_LR0;
+    const float ft_bias_lr = lr_scale * warmup_factor * TDLEAF_ADAM_FT_BIAS_LR0;
+    const float psqt_lr    = lr_scale * warmup_factor * TDLEAF_ADAM_PSQT_LR0;
 
     // Full Adam step for FC layers and FT biases — per-weight bias correction.
     // bc1 (beta1=0.9): skipped at cnt>=20 (0.9^20≈0.12 → bc1≈0.88, close to 1).
@@ -2442,7 +2443,7 @@ void nnue_apply_gradients()
     // Dense piece value update — full Adam, no weight decay.
     // Uses TDLEAF_ADAM_PV_LR0 (same scale as PSQT).
     if (piece_val_active) {
-        const float pv_lr = warmup_factor * TDLEAF_ADAM_PV_LR0;
+        const float pv_lr = lr_scale * warmup_factor * TDLEAF_ADAM_PV_LR0;
         auto do_step_pv = [&](float g, float &m, float &v, uint32_t cnt) -> float {
             m = TDLEAF_ADAM_BETA1 * m + (1.0f - TDLEAF_ADAM_BETA1) * g;
             v = TDLEAF_ADAM_BETA2 * v + (1.0f - TDLEAF_ADAM_BETA2) * g * g;

@@ -1,5 +1,33 @@
 Changes since 2017_12_24
 
+2026_04_18 -- tdleaf: revert TDLEAF_REPLAY_K default to 0.
+               With the LR-scale 0.3 mitigation above, K=2 recovered roughly
+               100 Elo versus the earlier 350 Elo gap but still trails K=0 by
+               ~250 Elo.  Residual shortfall is structural: the 8-game ring
+               buffer is too small for epoch-style replay (FC overfits), and
+               FT/PSQT/ft_bias cannot participate in replay at all because
+               they feed into nnue_init_accumulator.  Proper fix is a larger
+               variable-length buffer with random sampling, which is future
+               work.  Shipping default flipped back to 0; replay infrastructure
+               (TDLEAF_REPLAY_K, TDLEAF_REPLAY_BUF_N, TDLEAF_REPLAY_LR_SCALE,
+               replay_mode gating) retained for that future exploration.
+
+2026_04_18 -- tdleaf: add replay LR scale to soften overfitting to the small buffer.
+               Observed: with the replay_mode fix (piece_val now updated in replay),
+               TDLEAF_REPLAY_K=2 still trails K=0 by ~350 Elo.  Likely cause: the
+               replay loop iterates all games in the ring buffer every pass, so
+               the same ≤8 games drive (1+K) FC Adam steps per live batch — plain
+               epoch training on a tiny dataset, which FC (~17k params) easily
+               overfits.  Additionally, FT/PSQT/ft_bias are fundamentally
+               excluded from replay (they feed into nnue_init_accumulator), so
+               FC drifts faster than its own feature backbone can support.
+               Mitigation: new TDLEAF_REPLAY_LR_SCALE (default 0.3) multiplies
+               all category LRs during replay-pass Adam steps via a new
+               lr_scale parameter on nnue_apply_gradients().  Adam is
+               scale-invariant in the gradient, so LR is the only effective
+               knob for softening replay updates.  Keeps replay as gentle
+               refinement rather than full-weight retraining on recent games.
+
 2026_04_18 -- tdleaf: narrow fc_only → replay_mode; allow piece_val updates in replay.
                In nnue_accumulate_gradients the replay-path early return used to
                skip four gradient categories: FT weights, PSQT, FT biases, and

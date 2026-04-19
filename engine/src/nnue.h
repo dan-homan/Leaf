@@ -192,7 +192,11 @@ void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
 float nnue_clip_gradients(float max_norm);
 
 // Apply accumulated gradients (zero them afterwards).
-void nnue_apply_gradients();
+// lr_scale multiplies all category LRs (fc/ft/ft_bias/psqt/piece_val) before
+// the Adam step.  Replay passes pass <1.0 to reduce overfitting to the small
+// replay buffer.  Adam is scale-invariant w.r.t. the gradient, so the LR is
+// the only effective knob for softening replay updates.
+void nnue_apply_gradients(float lr_scale = 1.0f);
 
 // Requantize FP32 weights → int8 arrays used by the live forward pass.
 // Must be called after nnue_apply_gradients().  Also clears the score hash.
