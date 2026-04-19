@@ -8,14 +8,16 @@
 # What this script does:
 #   1. Asks for a starting .nnue file or offers to initialise a fresh random one.
 #   2. Builds an opponent roster — one or more opponent types that rotate every
-#      N games.  Available types: self-play (symmetric), previous checkpoint
-#      (read-only .nnue), read-only mirror (frozen .tdleaf.bin during segment),
-#      or an external engine.  Builds the necessary binaries and moves them to
-#      learn/ so all training files live together.
+#      N games.  Available types:
+#        - self-play       (symmetric, both instances learn)
+#        - read-only mirror (current weights, frozen during segment)
+#        - fixed engine    (any Leaf binary or external executable; frozen)
+#      Builds the necessary binaries and moves them to learn/ so all training
+#      files live together.
 #   3. Checks for an existing .tdleaf.bin (continue or start fresh).
 #   4. Asks for match parameters, then runs match.py for N games.
-#      When the roster has multiple opponents (or prev-checkpoint), games are
-#      split into segments of `rotation_interval` games each, with a .nnue
+#      When the roster has multiple opponents (or a read-only mirror), games
+#      are split into segments of `rotation_interval` games each, with a .nnue
 #      checkpoint exported at every rotation boundary.
 #      PGN files land in  learn/pgn/<net_base>/  so all PGNs for a given net
 #      accumulate in one place across multiple training runs.
@@ -44,15 +46,45 @@ import psutil
 import re
 import shutil
 import signal
-import stat
 import subprocess
 import sys
 import time
+from dataclasses import dataclass, field
+from typing import List, Tuple
 
-learn_dir = os.path.dirname(os.path.abspath(__file__))
-run_dir   = os.path.normpath(os.path.join(learn_dir, "../run"))
-src_dir   = os.path.normpath(os.path.join(learn_dir, "../src"))
-tools_dir = os.path.normpath(os.path.join(learn_dir, "../../tools"))
+# Resolve symlinks so the script can import sibling modules from scripts/
+# when invoked via the learn/ symlink.
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
+from engine_discovery import (
+    discover_engines, pick_engine,
+    run_dir, tools_dir,
+)
+
+# training_run.py is conventionally invoked from learn/; working files live there.
+learn_dir = os.path.normpath(os.path.join(os.path.dirname(os.path.realpath(__file__)), "../learn"))
+src_dir   = os.path.normpath(os.path.join(os.path.dirname(os.path.realpath(__file__)), "../src"))
+
+
+# ---------------------------------------------------------------------------
+# Data types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Opponent:
+    """One entry in the training roster.
+
+    type     : "self-play" | "readonly" | "fixed"
+    label    : display name used in summaries and cutechess name= field
+    exe      : absolute path to the opponent binary (set after build step)
+    proto    : "xboard" (Leaf) or "uci" (external)
+    options  : list of (KEY, VALUE) UCI/xboard options to forward
+    """
+    type: str
+    label: str
+    exe: str = ""
+    proto: str = "xboard"
+    options: List[Tuple[str, str]] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -66,84 +98,48 @@ def ask(prompt, default=None):
     return val if val else (str(default) if default is not None else "")
 
 
+def pick_fixed_engine(label="fixed engine"):
+    """Interactive picker for a static opponent (Leaf binary or external).
+
+    Returns a dict:
+      {
+        "exe":     <absolute path>,
+        "display": <name used in cutechess and PGN; may be -elo<N>-suffixed>,
+        "options": [(KEY, VALUE), ...]   — UCI options to forward,
+        "proto":   "xboard" for Leaf binaries, "uci" otherwise,
+      }
+    """
+    leaf_engines, ext_engines = discover_engines()
+    name, path = pick_engine(f"    Select {label}:", leaf_engines, ext_engines)
+
+    # Leaf binaries speak xboard (for TDLeaf hooks in training builds; plain
+    # NNUE builds still support xboard).  External engines default to UCI.
+    is_leaf = os.path.basename(path).startswith("Leaf_v")
+    proto   = "xboard" if is_leaf else "uci"
+
+    options = []
+    elo_str = input("    Limit strength by Elo? (blank = full strength): ").strip()
+    if elo_str:
+        try:
+            elo = int(elo_str)
+        except ValueError:
+            print(f"    Invalid Elo '{elo_str}' — ignoring.")
+        else:
+            options = [("UCI_LimitStrength", "true"), ("UCI_Elo", str(elo))]
+            name = f"{name}-elo{elo}"
+            # UCI_Elo is a UCI standard; force UCI protocol so the option
+            # reaches the engine (xboard doesn't use this option name).
+            proto = "uci"
+
+    return {"exe": path, "display": name, "options": options, "proto": proto}
+
+
 def ask_yes_no(prompt, default="y"):
     hint = "Y/n" if default == "y" else "y/N"
     val = input(f"{prompt} [{hint}]: ").strip().lower()
     if not val:
         return default == "y"
     return val.startswith("y")
-
-
-def discover_external_engines():
-    """Scan tools/engines/ for available external engines.
-
-    Returns a list of (display_name, absolute_path) tuples.
-    """
-    engines = []
-    engines_dir = os.path.join(tools_dir, "engines")
-    if not os.path.isdir(engines_dir):
-        return engines
-    for d in sorted(os.listdir(engines_dir)):
-        dp = os.path.join(engines_dir, d)
-        if not os.path.isdir(dp):
-            continue
-        candidates = []
-        for f in os.listdir(dp):
-            fp = os.path.join(dp, f)
-            if not os.path.isfile(fp):
-                continue
-            try:
-                st = os.stat(fp)
-                if st.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
-                    candidates.append((f, fp, st.st_size))
-            except OSError:
-                pass
-        if not candidates:
-            continue
-        match = [c for c in candidates if d.lower() in c[0].lower()]
-        best = max(match, key=lambda c: c[2]) if match else max(candidates, key=lambda c: c[2])
-        engines.append((d, best[1]))
-    return engines
-
-
-def pick_external_engine():
-    """Interactive external engine selection. Returns absolute path or None."""
-    engines = discover_external_engines()
-    if not engines:
-        print("    No engines found in tools/engines/.")
-        while True:
-            opp_path = ask("    Path to opponent executable").strip()
-            if os.path.isfile(opp_path):
-                return os.path.abspath(opp_path)
-            if os.path.isfile(os.path.join(learn_dir, opp_path)):
-                return os.path.abspath(os.path.join(learn_dir, opp_path))
-            print(f"    File not found: {opp_path}")
-
-    print("    Available external engines:")
-    for i, (name, path) in enumerate(engines, 1):
-        print(f"      [{i}] {name}")
-    print(f"      [c] Custom path")
-    print()
-
-    while True:
-        choice = input("    Select: ").strip()
-        if not choice:
-            continue
-        if choice.lower() == "c":
-            while True:
-                opp_path = ask("    Path to opponent executable").strip()
-                if os.path.isfile(opp_path):
-                    return os.path.abspath(opp_path)
-                if os.path.isfile(os.path.join(learn_dir, opp_path)):
-                    return os.path.abspath(os.path.join(learn_dir, opp_path))
-                print(f"    File not found: {opp_path}")
-        try:
-            n = int(choice)
-            if 1 <= n <= len(engines):
-                return engines[n - 1][1]
-        except ValueError:
-            pass
-        print(f"    Invalid selection: {choice}")
 
 
 def read_game_count(sidecar_path):
@@ -473,7 +469,7 @@ def main():
     print("Starting network:")
     print("  [1] Use existing .nnue file")
     print("  [2] Initialise a fresh random network (classical material prior)")
-    print("  [3] Initialise a fresh random network (no prior — all pieces 100cp)")
+    print("  [3] Initialise a fresh random network (no prior, zeroed piece values)")
     choice = ask("Choice", "1")
 
     init_noprior = False
@@ -521,31 +517,22 @@ def main():
     # -----------------------------------------------------------------------
     # Step 1b — Opponent roster (rotation across multiple opponent types)
     # -----------------------------------------------------------------------
-    #
-    # Each roster entry is a dict with:
-    #   "type"  : "self-play" | "prev-checkpoint" | "readonly" | "external"
-    #   "label" : display name
-    #   "exe"   : path to opponent binary (set during build step)
-    #   "path"  : for external opponents, the user-supplied path
-    #
     # The learner binary (train_exe) is always engine 1.  Opponents rotate
     # every `rotation_interval` games.  A .nnue checkpoint is exported at
     # every rotation boundary.
-    #
     print()
     print("Opponent roster (opponents rotate every N games):")
     print("  Available opponent types:")
-    print("    [s] Self-play           — both instances learn (symmetric)")
-    print("    [p] Previous checkpoint — learner vs. own recent snapshot (read-only)")
-    print("    [r] Read-only mirror    — current weights, frozen during segment")
-    print("    [e] External engine     — learner vs. user-supplied executable")
+    print("    [s] Self-play        — both instances learn (symmetric)")
+    print("    [r] Read-only mirror — current weights, frozen during segment")
+    print("    [f] Fixed engine     — any Leaf binary or external executable")
     print()
 
-    roster = []
+    roster: List[Opponent] = []
     while True:
         default_type = "s" if not roster else ""
         choice_opp = ask(
-            f"  Add opponent #{len(roster)+1} (s/p/r/e, empty to finish)",
+            f"  Add opponent #{len(roster)+1} (s/r/f, empty to finish)",
             default_type if not roster else None
         ).strip().lower()
         if not choice_opp:
@@ -554,32 +541,30 @@ def main():
             print("  Roster must have at least one opponent.")
             continue
         if choice_opp == "s":
-            roster.append({"type": "self-play", "label": "self-play (symmetric)"})
-        elif choice_opp == "p":
-            roster.append({"type": "prev-checkpoint", "label": "previous checkpoint (read-only)"})
+            roster.append(Opponent(type="self-play", label="self-play (symmetric)"))
         elif choice_opp == "r":
-            roster.append({"type": "readonly", "label": "read-only mirror (frozen during segment)"})
-        elif choice_opp == "e":
-            opp_abs = pick_external_engine()
-            roster.append({
-                "type": "external", "label": os.path.basename(opp_abs),
-                "path": opp_abs,
-            })
+            roster.append(Opponent(type="readonly",
+                                   label="read-only mirror (frozen during segment)"))
+        elif choice_opp == "f":
+            fixed = pick_fixed_engine("fixed engine opponent")
+            roster.append(Opponent(
+                type="fixed", label=fixed["display"], exe=fixed["exe"],
+                proto=fixed["proto"], options=fixed["options"],
+            ))
         else:
-            print(f"  Unknown type '{choice_opp}' — use s, p, r, or e.")
+            print(f"  Unknown type '{choice_opp}' — use s, r, or f.")
             continue
-        print(f"    Added: {roster[-1]['label']}")
+        print(f"    Added: {roster[-1].label}")
 
     use_rotation = (len(roster) > 1
-                    or any(r["type"] in ("prev-checkpoint", "readonly") for r in roster))
+                    or any(r.type == "readonly" for r in roster))
     rotation_interval = 0
     if use_rotation:
         rotation_interval = int(ask("  Games per opponent before rotating", "2000"))
 
     # Derive which binary types we need to build.
-    need_self_play_exe = any(r["type"] == "self-play" for r in roster)
-    need_checkpoint_exe = any(r["type"] == "prev-checkpoint" for r in roster)
-    need_readonly_exe = any(r["type"] == "readonly" for r in roster)
+    need_self_play_exe = any(r.type == "self-play" for r in roster)
+    need_readonly_exe  = any(r.type == "readonly"  for r in roster)
 
     # -----------------------------------------------------------------------
     # Step 1c — Train-validate loop (optional)
@@ -592,11 +577,14 @@ def main():
     los_stop_hi    = 0.99   # early-stop if LOS rises above this
     los_stop_lo    = 0.01   # early-stop if LOS falls below this
     val_tc         = None   # set in Step 4 after tc1 is known
-    # Eval binary names (set in Step 2 if use_loop)
+    # Eval binary names (set in Step 2 if use_loop and val_ref_mode == "best")
     best_nnue_name = None
     cand_nnue_name = None
     eval_best_exe  = None
     eval_cand_exe  = None
+    # Validation reference: "best" (rolling candidate-vs-best) or "fixed".
+    val_ref_mode   = "best"
+    val_fixed      = None   # dict from pick_fixed_engine() when mode == "fixed"
 
     if use_loop:
         n_cycles       = int(ask("  Cycles (0 = run forever until Ctrl-C)", "0"))
@@ -605,19 +593,26 @@ def main():
         los_stop_hi    = float(ask("  Early-stop if LOS ≥ (%)            ", "99")) / 100.0
         los_stop_lo    = float(ask("  Early-stop if LOS ≤ (%)            ", "01")) / 100.0
         # val_tc is asked in Step 4 once tc1 is known
-        best_nnue_name = f"{net_base}-best.nnue"
+        print("  Validation reference:")
+        print("    [b] Rolling best      — candidate vs. the last accepted weights")
+        print("    [f] Fixed engine      — candidate vs. a chosen static opponent")
+        vchoice = ask("  Choice", "b").strip().lower()
+        if vchoice == "f":
+            val_ref_mode = "fixed"
+            val_fixed    = pick_fixed_engine("validation reference engine")
+        else:
+            val_ref_mode   = "best"
+            best_nnue_name = f"{net_base}-best.nnue"
         cand_nnue_name = f"{net_base}-cand.nnue"
 
     # -----------------------------------------------------------------------
     # Step 1d — Segment progress analysis (optional, rotation mode only)
     # -----------------------------------------------------------------------
-    # When playing static opponents (prev-checkpoint, external), compare the
-    # learner's score in the first N games vs the last N games of each segment
-    # to detect in-segment improvement.  If the learner is getting worse,
-    # revert the .tdleaf.bin to the pre-segment state.
-    has_static_opponents = any(
-        r["type"] in ("prev-checkpoint", "readonly", "external") for r in roster
-    )
+    # When playing non-learning opponents (readonly mirror, fixed engine),
+    # compare the learner's score in the first N games vs the last N games
+    # of each segment to detect in-segment improvement.  If the learner is
+    # getting worse, revert the .tdleaf.bin to the pre-segment state.
+    has_static_opponents = any(r.type in ("readonly", "fixed") for r in roster)
     use_seg_analysis    = False
     seg_accept_los      = 0.60
     seg_reject_los      = 0.40
@@ -653,39 +648,24 @@ def main():
     selfplay_ver = f"train_{net_base}_b"
     selfplay_exe = os.path.join(learn_dir, f"Leaf_v{selfplay_ver}")
 
-    # Prev-checkpoint opponent binary — uses a *separate* NNUE_NET so we can
-    # swap its .nnue file independently (for prev-checkpoint rotation).
-    checkpoint_opp_nnue = f"{net_base}-opponent.nnue"
-    checkpoint_ver = f"train_{net_base}_ro"
-    checkpoint_exe = os.path.join(learn_dir, f"Leaf_v{checkpoint_ver}")
-
     # Read-only mirror binary — same NNUE_NET as learner, loads .tdleaf.bin
     # at startup but does not write.  Frozen during a segment; refreshes
     # weights when cutechess-cli restarts it for the next segment.
     readonly_ver = f"train_{net_base}_rom"
     readonly_exe = os.path.join(learn_dir, f"Leaf_v{readonly_ver}")
 
-    # Wire up each roster entry's exe field.
+    # Wire up each roster entry's exe field.  "fixed" entries already have
+    # exe/options/proto set by pick_fixed_engine.
     for entry in roster:
-        if entry["type"] == "self-play":
-            entry["exe"] = selfplay_exe
-        elif entry["type"] == "prev-checkpoint":
-            entry["exe"] = checkpoint_exe
-        elif entry["type"] == "readonly":
-            entry["exe"] = readonly_exe
-        elif entry["type"] == "external":
-            entry["exe"] = entry["path"]
+        if entry.type == "self-play":
+            entry.exe = selfplay_exe
+        elif entry.type == "readonly":
+            entry.exe = readonly_exe
 
     # Determine which binaries need building.
     need_binaries = [("learner", train_ver, tdleaf_flags)]
     if need_self_play_exe:
         need_binaries.append(("self-play B", selfplay_ver, tdleaf_flags))
-    if need_checkpoint_exe:
-        # Pure inference binary — no TDLEAF, just loads the .nnue file.
-        # The exported .nnue already contains trained FC weights, so no
-        # .tdleaf.bin is needed.
-        ro_flags = ["NNUE=1", f"NNUE_NET={checkpoint_opp_nnue}"]
-        need_binaries.append(("checkpoint opponent", checkpoint_ver, ro_flags))
     if need_readonly_exe:
         # TDLEAF_READONLY: loads .tdleaf.bin at startup (current learner
         # weights) but skips all ply recording and weight updates.
@@ -711,27 +691,31 @@ def main():
     else:
         print("  Using existing binaries.")
 
-    # Eval-only binaries for train-validate loop
+    # Eval-only binaries for train-validate loop.  When validating against a
+    # fixed engine, we only need the candidate binary (the reference is the
+    # user-chosen static opponent).  When validating against rolling best, we
+    # need both eval-best and eval-cand.
     if use_loop:
-        eval_best_ver = f"train_{net_base}_eval_best"
         eval_cand_ver = f"train_{net_base}_eval_cand"
-        eval_best_exe = os.path.join(learn_dir, f"Leaf_v{eval_best_ver}")
         eval_cand_exe = os.path.join(learn_dir, f"Leaf_v{eval_cand_ver}")
 
-        eval_exist = os.path.isfile(eval_best_exe) and os.path.isfile(eval_cand_exe)
+        eval_binaries = [("eval-cand", eval_cand_ver, cand_nnue_name, eval_cand_exe)]
+        if val_ref_mode == "best":
+            eval_best_ver = f"train_{net_base}_eval_best"
+            eval_best_exe = os.path.join(learn_dir, f"Leaf_v{eval_best_ver}")
+            eval_binaries.append(("eval-best", eval_best_ver, best_nnue_name, eval_best_exe))
+
+        eval_exist = all(os.path.isfile(exe) for _, _, _, exe in eval_binaries)
         rebuild_eval = True
         if eval_exist:
             rebuild_eval = ask_yes_no(
                 "  Eval binaries already exist.  Rebuild?", default="n")
         if rebuild_eval:
-            print(f"  Building eval-best binary (loads {best_nnue_name}) ...")
-            if not build_binary(eval_best_ver, ["NNUE=1", f"NNUE_NET={best_nnue_name}"]):
-                print("  Eval-best build failed.", file=sys.stderr)
-                sys.exit(1)
-            print(f"  Building eval-cand binary (loads {cand_nnue_name}) ...")
-            if not build_binary(eval_cand_ver, ["NNUE=1", f"NNUE_NET={cand_nnue_name}"]):
-                print("  Eval-cand build failed.", file=sys.stderr)
-                sys.exit(1)
+            for label, ver, nnue_name, _exe in eval_binaries:
+                print(f"  Building {label} binary (loads {nnue_name}) ...")
+                if not build_binary(ver, ["NNUE=1", f"NNUE_NET={nnue_name}"]):
+                    print(f"  {label} build failed.", file=sys.stderr)
+                    sys.exit(1)
         else:
             print("  Using existing eval binaries.")
 
@@ -852,16 +836,17 @@ def main():
     print(f"  Net in:           {net_filename}")
     print(f"  Learner:          Leaf_v{train_ver}")
     if len(roster) == 1 and not use_rotation:
-        print(f"  Opponent:         {roster[0]['label']}")
+        print(f"  Opponent:         {roster[0].label}")
     else:
         print(f"  Opponent roster:  (rotate every {rotation_interval:,} games)")
         for i, entry in enumerate(roster):
-            print(f"    {i+1}. {entry['label']}")
+            print(f"    {i+1}. {entry.label}")
     if use_loop:
         cycle_label = str(n_cycles) if n_cycles > 0 else "∞"
         print(f"  Loop:             {cycle_label} cycles × {games_per_cycle:,} games/cycle")
+        ref_desc = "rolling best" if val_ref_mode == "best" else f"fixed: {val_fixed['display']}"
         print(f"  Validation:       {val_games} games @ {val_tc}  "
-              f" accept≥{los_thresh_pct:.0f}%  "
+              f"vs {ref_desc}  accept≥{los_thresh_pct:.0f}%  "
               f"early-stop ≥{los_stop_hi*100:.0f}% / ≤{los_stop_lo*100:.0f}%")
     else:
         print(f"  Games this run:   {n_games:,}")
@@ -904,34 +889,32 @@ def main():
     current_games = prior_games
     cycle_log     = []   # list of (cycle, accepted, vw, vd, vl, los)
 
-    def build_match_cmd(opp_exe, num_games, pgn_path, no_repeat=False,
-                        opp_type="self-play"):
+    def openings_args():
+        """cutechess openings arguments for both training and validation."""
+        if use_training_epd:
+            return ["--openings", training_epd_path, "--fischer-random"]
+        if fischer:
+            return ["--fischer-random"]
+        if use_book:
+            return ["--openings", book_path]
+        return []
+
+    def build_match_cmd(opp: Opponent, num_games, pgn_path, no_repeat=False):
         cmd = [
             sys.executable, match_py,
-            train_exe,
-            opp_exe,
+            train_exe, opp.exe,
             "-n", str(num_games),
             "-tc", tc1,
             "-c", str(concurrency),
             "--wait", str(wait_ms),
             "--pgn-out", pgn_path,
+            "--proto1", "xboard",
+            "--proto2", opp.proto,
+            "--name2", opp.label,
         ]
-        # Learner (engine1) always uses xboard for TDLeaf hooks.
-        # Leaf opponents (self-play, checkpoint, readonly) also use xboard.
-        # External engines default to UCI.
-        cmd += ["--proto1", "xboard"]
-        if opp_type == "external":
-            cmd += ["--proto2", "uci"]
-        else:
-            cmd += ["--proto2", "xboard"]
         if tc2 != tc1:
             cmd += ["--tc2", tc2]
-        if use_training_epd:
-            cmd += ["--openings", training_epd_path, "--fischer-random"]
-        elif fischer:
-            cmd.append("--fischer-random")
-        elif use_book:
-            cmd += ["--openings", book_path]
+        cmd += openings_args()
         if depth1:
             cmd += ["--depth1", str(depth1)]
         if depth2:
@@ -940,6 +923,8 @@ def main():
             cmd.append("--no-repeat")
         if error_log:
             cmd += ["--error-log", error_log]
+        for key, val in opp.options:
+            cmd += ["--option2", f"{key}={val}"]
         return cmd
 
     def export_nnue(exe, dest_path, label):
@@ -950,44 +935,12 @@ def main():
             print(f"  --write-nnue ({label}) failed.", file=sys.stderr)
             sys.exit(r.returncode)
 
-    # Path where the read-only opponent binary expects its .nnue.
-    checkpoint_opp_nnue_path = os.path.join(learn_dir, checkpoint_opp_nnue)
-    # Tracks the last exported checkpoint (for prev-checkpoint opponent).
-    # On resume, seed from the highest-numbered existing checkpoint on disk.
-    _ckpt_pattern = re.compile(rf"^{re.escape(net_base)}-(\d+)g\.nnue$")
-    _existing = []
-    for _f in os.listdir(learn_dir):
-        _m = _ckpt_pattern.match(_f)
-        if _m:
-            _existing.append((int(_m.group(1)), os.path.join(learn_dir, _f)))
-    if _existing:
-        last_checkpoint_nnue = max(_existing)[1]
-        if need_checkpoint_exe:
-            print(f"  Resuming: prev-checkpoint opponent will start from "
-                  f"{os.path.basename(last_checkpoint_nnue)}")
-    else:
-        last_checkpoint_nnue = None
-
-    def prepare_prev_checkpoint_opponent():
-        """Copy the latest checkpoint .nnue to the read-only opponent's expected path.
-
-        If no checkpoint has been exported yet (first segment), use the base net.
-        The opponent binary is pure NNUE (no TDLEAF), so only the .nnue is needed.
-        """
-        nonlocal last_checkpoint_nnue
-        src = last_checkpoint_nnue if last_checkpoint_nnue else net_file
-        label = os.path.basename(src)
-        print(f"  Setting prev-checkpoint opponent → {label}")
-        shutil.copy2(src, checkpoint_opp_nnue_path)
-
     def export_rotation_checkpoint():
         """Export current weights to a game-count-stamped checkpoint."""
-        nonlocal last_checkpoint_nnue
         wait_until_stable(tdleaf_bin)
         snap_name = f"{net_base}-{format_game_count(current_games)}g.nnue"
         snap_path = os.path.join(learn_dir, snap_name)
         export_nnue(train_exe, snap_path, f"checkpoint @ {format_game_count(current_games)}g")
-        last_checkpoint_nnue = snap_path
 
     # -----------------------------------------------------------------------
     # Step 5b-pre — Set up initial best.nnue baseline (loop mode only).
@@ -1003,17 +956,20 @@ def main():
     # -----------------------------------------------------------------------
     if use_loop:
         had_prior_tdleaf = os.path.isfile(tdleaf_bin)
-        best_nnue_path = os.path.join(learn_dir, best_nnue_name)
         cand_nnue_path = os.path.join(learn_dir, cand_nnue_name)
+        best_nnue_path = os.path.join(learn_dir, best_nnue_name) if best_nnue_name else None
         print()
-        if had_prior_tdleaf:
-            print("Setting up initial best baseline from existing .tdleaf.bin ...")
-            wait_until_stable(tdleaf_bin)
-            export_nnue(train_exe, best_nnue_path, "initial best")
+        if val_ref_mode == "best":
+            if had_prior_tdleaf:
+                print("Setting up initial best baseline from existing .tdleaf.bin ...")
+                wait_until_stable(tdleaf_bin)
+                export_nnue(train_exe, best_nnue_path, "initial best")
+            else:
+                shutil.copy2(net_file, best_nnue_path)
+                print(f"  Best baseline → {best_nnue_name}  (base net, no prior .tdleaf.bin)")
+                print("  Note: cycle 1 will be auto-accepted (no trained baseline to compare against).")
         else:
-            shutil.copy2(net_file, best_nnue_path)
-            print(f"  Best baseline → {best_nnue_name}  (base net, no prior .tdleaf.bin)")
-            print("  Note: cycle 1 will be auto-accepted (no trained baseline to compare against).")
+            print(f"Validation reference (fixed): {val_fixed['display']}")
 
     cycle_num = 0
     try:
@@ -1060,9 +1016,9 @@ def main():
                     seg_games = min(rotation_interval, games_remaining)
                     seg_num += 1
 
-                    print(f"  ── Segment {seg_num}: {seg_games} games vs {entry['label']} ──")
+                    print(f"  ── Segment {seg_num}: {seg_games} games vs {entry.label} ──")
 
-                    is_static = entry["type"] in ("prev-checkpoint", "readonly", "external")
+                    is_static = entry.type in ("readonly", "fixed")
 
                     # Save pre-segment .tdleaf.bin for potential revert.
                     seg_checkpoint = None
@@ -1071,15 +1027,9 @@ def main():
                         wait_until_stable(tdleaf_bin)
                         shutil.copy2(tdleaf_bin, seg_checkpoint)
 
-                    # Set up prev-checkpoint opponent if needed.
-                    is_prev = entry["type"] == "prev-checkpoint"
-                    if is_prev:
-                        prepare_prev_checkpoint_opponent()
-
                     seg_pgn = pgn_path.replace(".pgn", f"_seg{seg_num:02d}.pgn")
-                    cmd = build_match_cmd(entry["exe"], seg_games, seg_pgn,
-                                         no_repeat=(entry["type"] == "self-play"),
-                                         opp_type=entry["type"])
+                    cmd = build_match_cmd(entry, seg_games, seg_pgn,
+                                         no_repeat=(entry.type == "self-play"))
                     # Extract learner binary name for PGN parsing.
                     train_basename = os.path.basename(train_exe)
                     result = subprocess.run(cmd, cwd=run_dir)
@@ -1146,13 +1096,8 @@ def main():
                     print(f"\n  Segments reverted this run: {seg_reverts}")
             else:
                 # Single opponent — run all games at once.
-                opp_exe = roster[0]["exe"]
-                is_prev = roster[0]["type"] == "prev-checkpoint"
-                if is_prev:
-                    prepare_prev_checkpoint_opponent()
-                cmd = build_match_cmd(opp_exe, n_games, pgn_path,
-                                     no_repeat=(roster[0]["type"] == "self-play"),
-                                     opp_type=roster[0]["type"])
+                cmd = build_match_cmd(roster[0], n_games, pgn_path,
+                                     no_repeat=(roster[0].type == "self-play"))
                 result = subprocess.run(cmd, cwd=run_dir)
                 if result.returncode != 0:
                     print(f"\nMatch run failed (exit code {result.returncode}).",
@@ -1181,13 +1126,15 @@ def main():
             time.sleep(2)
 
             # --- Validation match ---
-            # Cycle 1 with no prior .tdleaf.bin: the "best" baseline is the
-            # raw base network (random weights), which is not a meaningful
-            # comparison target — TDLeaf training from a random init can
-            # legitimately produce weights that evaluate worse than random for
-            # the first several hundred games.  Auto-accept so this cycle
-            # establishes a trained baseline for all subsequent comparisons.
-            if not had_prior_tdleaf and cycle_num == 1:
+            # Rolling-best mode, cycle 1 with no prior .tdleaf.bin: the "best"
+            # baseline is the raw base network (random weights), which is not
+            # a meaningful comparison target — TDLeaf training from a random
+            # init can legitimately produce weights that evaluate worse than
+            # random for the first several hundred games.  Auto-accept so
+            # this cycle establishes a trained baseline for all subsequent
+            # comparisons.  Fixed-reference mode has a stable target from
+            # cycle 1, so no auto-accept is needed there.
+            if val_ref_mode == "best" and not had_prior_tdleaf and cycle_num == 1:
                 vw = vd = vl = 0
                 los = 1.0
                 accepted = True
@@ -1196,22 +1143,35 @@ def main():
             else:
                 val_pgn = os.path.join(
                     pgn_dir, f"val_{net_base}_{pgn_start_tag}_cycle{cycle_num:02d}.pgn")
+                if val_ref_mode == "best":
+                    ref_exe     = eval_best_exe
+                    ref_name    = f"{net_base}-best"
+                    ref_proto   = "xboard"
+                    ref_options = []
+                    ref_label   = "best"
+                else:
+                    ref_exe     = val_fixed["exe"]
+                    ref_name    = val_fixed["display"]
+                    ref_proto   = val_fixed["proto"]
+                    ref_options = val_fixed["options"]
+                    ref_label   = val_fixed["display"]
                 print(f"  Validation: {val_games} games @ {val_tc}"
-                      f"   (candidate vs best)")
+                      f"   (candidate vs {ref_label})")
                 val_cmd = [
                     sys.executable, match_py,
-                    eval_cand_exe, eval_best_exe,
+                    eval_cand_exe, ref_exe,
                     "-n", str(val_games),
                     "-tc", val_tc,
                     "-c", str(concurrency),
                     "--pgn-out", val_pgn,
+                    "--proto1", "xboard",
+                    "--proto2", ref_proto,
+                    "--name1", f"{net_base}-cand",
+                    "--name2", ref_name,
                 ]
-                if use_training_epd:
-                    val_cmd += ["--openings", training_epd_path, "--fischer-random"]
-                elif fischer:
-                    val_cmd.append("--fischer-random")
-                elif use_book:
-                    val_cmd += ["--openings", book_path]
+                for key, val in ref_options:
+                    val_cmd += ["--option2", f"{key}={val}"]
+                val_cmd += openings_args()
                 if error_log:
                     val_cmd += ["--error-log", error_log]
 
@@ -1236,18 +1196,15 @@ def main():
             if accepted:
                 # current_games already advanced during training segments.
                 write_game_count(sidecar_path, current_games)
-                # Advance the best baseline so the next cycle compares against
-                # the newly accepted weights (not the original session start).
-                export_nnue(train_exe, best_nnue_path, "new best (accepted)")
+                # Advance the rolling-best baseline so the next cycle compares
+                # against the newly accepted weights.  Fixed-reference mode
+                # has no rolling best to advance.
+                if val_ref_mode == "best":
+                    export_nnue(train_exe, best_nnue_path, "new best (accepted)")
                 # Save a game-count-stamped snapshot for later tournament use.
                 snapshot_name = f"{net_base}-{format_game_count(current_games)}g.nnue"
                 snapshot_path = os.path.join(learn_dir, snapshot_name)
                 export_nnue(train_exe, snapshot_path, f"snapshot @ {format_game_count(current_games)}g")
-                # Keep the prev-checkpoint opponent current: the next cycle's
-                # first prev-checkpoint segment should face the just-accepted
-                # weights, not a stale intra-cycle snapshot.
-                if need_checkpoint_exe:
-                    last_checkpoint_nnue = snapshot_path
                 print(f"  Banked games: {current_games:,}")
             else:
                 # Revert game count — rejected cycle's games don't count.
@@ -1256,13 +1213,6 @@ def main():
                 if has_checkpoint:
                     shutil.copy2(checkpoint_bin, tdleaf_bin)
                     print("  Reverted .tdleaf.bin to pre-cycle checkpoint.")
-                    # Also revert the prev-checkpoint opponent back to the last
-                    # accepted baseline.  The rejected cycle may have advanced
-                    # last_checkpoint_nnue to an intra-cycle snapshot that is
-                    # now ahead of the reverted .tdleaf.bin, which would make
-                    # the opponent artificially stronger than the learner.
-                    if need_checkpoint_exe:
-                        last_checkpoint_nnue = best_nnue_path
                 else:
                     # No prior checkpoint existed.  Leave the .tdleaf.bin in
                     # place so the next cycle can build on this cycle's
@@ -1344,9 +1294,9 @@ def main():
     print(f"  Net in:      {net_filename}")
     print(f"  Net out:     {output_net_name}  (learn/)")
     if len(roster) == 1:
-        print(f"  Mode:        {roster[0]['label']}")
+        print(f"  Mode:        {roster[0].label}")
     else:
-        opp_labels = " → ".join(r["label"] for r in roster)
+        opp_labels = " → ".join(r.label for r in roster)
         print(f"  Mode:        rotation ({opp_labels})")
     print(f"  Total games: {current_games:,}")
     print(f"  PGN files:   {pgn_dir}/")

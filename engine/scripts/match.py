@@ -23,134 +23,19 @@ import argparse
 import math
 import os
 import re
-import stat
 import subprocess
 import sys
 
-script_dir    = os.path.dirname(os.path.abspath(__file__))
-run_dir       = os.path.normpath(os.path.join(script_dir, "../run"))
-learn_dir     = os.path.normpath(os.path.join(script_dir, "../learn"))
-tools_dir     = os.path.normpath(os.path.join(script_dir, "../../tools"))
+# Resolve symlinks so scripts invoked via run/ or learn/ symlinks can import
+# sibling modules from scripts/.
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
+from engine_discovery import (
+    discover_engines, pick_engine, resolve_exe,
+    run_dir, learn_dir, tools_dir,
+)
+
 cutechess_cli = os.path.normpath(os.path.join(tools_dir, "cutechess-1.4.0/build/cutechess-cli"))
-
-
-def resolve_exe(name):
-    """Return absolute path: check cwd, run_dir, and learn_dir."""
-    if os.path.isabs(name):
-        return name
-    # Check current working directory first
-    if os.path.isfile(name):
-        return os.path.abspath(name)
-    # Then run/
-    p = os.path.join(run_dir, name)
-    if os.path.isfile(p):
-        return p
-    # Then learn/
-    p = os.path.join(learn_dir, name)
-    if os.path.isfile(p):
-        return p
-    # Fall back to run_dir (will fail at the existence check later)
-    return os.path.join(run_dir, name)
-
-
-def discover_engines():
-    """Scan for available engines.
-
-    Returns (leaf_engines, external_engines) where each is a list of
-    (display_name, absolute_path) tuples.
-    """
-    leaf_engines = []
-    if os.path.isdir(run_dir):
-        for f in sorted(os.listdir(run_dir)):
-            if not f.startswith("Leaf_v"):
-                continue
-            p = os.path.join(run_dir, f)
-            if os.path.isfile(p) and not f.endswith((".lock", ".py", ".pl", ".txt")):
-                # Check executable
-                try:
-                    if os.stat(p).st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
-                        leaf_engines.append((f, p))
-                except OSError:
-                    pass
-
-    external_engines = []
-    engines_dir = os.path.join(tools_dir, "engines")
-    if os.path.isdir(engines_dir):
-        for d in sorted(os.listdir(engines_dir)):
-            dp = os.path.join(engines_dir, d)
-            if not os.path.isdir(dp):
-                continue
-            # Find the main executable: prefer a file whose name contains
-            # the directory name, otherwise pick the largest executable.
-            candidates = []
-            for f in os.listdir(dp):
-                fp = os.path.join(dp, f)
-                if not os.path.isfile(fp):
-                    continue
-                try:
-                    st = os.stat(fp)
-                    if st.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
-                        candidates.append((f, fp, st.st_size))
-                except OSError:
-                    pass
-            if not candidates:
-                continue
-            # Prefer name match, then largest
-            match = [c for c in candidates if d.lower() in c[0].lower()]
-            if match:
-                best = max(match, key=lambda c: c[2])
-            else:
-                best = max(candidates, key=lambda c: c[2])
-            external_engines.append((d, best[1]))
-
-    return leaf_engines, external_engines
-
-
-def pick_engine(prompt, leaf_engines, external_engines):
-    """Interactive engine selection. Returns (name, absolute_path) or exits."""
-    print(f"\n{prompt}")
-    idx = 1
-    entries = []  # (display, name, path)
-    if leaf_engines:
-        print("  Leaf binaries (engine/run/):")
-        for name, path in leaf_engines:
-            print(f"    [{idx}] {name}")
-            entries.append((name, name, path))
-            idx += 1
-    if external_engines:
-        print("  External engines (tools/engines/):")
-        for name, path in external_engines:
-            print(f"    [{idx}] {name}")
-            entries.append((name, name, path))
-            idx += 1
-    print(f"  [c] Custom path")
-    print()
-
-    while True:
-        choice = input("  Select: ").strip()
-        if not choice:
-            continue
-        if choice.lower() == "c":
-            while True:
-                p = input("  Path to engine: ").strip()
-                if os.path.isfile(p):
-                    return (os.path.basename(p), os.path.abspath(p))
-                # Try relative to run_dir
-                rp = os.path.join(run_dir, p)
-                if os.path.isfile(rp):
-                    return (os.path.basename(p), os.path.abspath(rp))
-                print(f"  File not found: {p}")
-        try:
-            n = int(choice)
-            if 1 <= n <= len(entries):
-                _, name, path = entries[n - 1]
-                return (name, path)
-        except ValueError:
-            # Maybe they typed a name directly
-            p = resolve_exe(choice)
-            if os.path.isfile(p):
-                return (choice, p)
-        print(f"  Invalid selection: {choice}")
 
 
 def ask(prompt, default=None):
@@ -306,7 +191,24 @@ def main():
                              "training telemetry via fprintf(stderr, ...), so "
                              "this captures per-batch [tdleaf step-clip] lines "
                              "from all concurrent engines into one file.")
+    parser.add_argument("--option1", action="append", default=[], metavar="KEY=VALUE",
+                        help="Pass a UCI/xboard option to engine1 (repeatable). "
+                             "Forwarded as cutechess option.KEY=VALUE.  "
+                             "Example: --option1 'UCI_Elo=2000'")
+    parser.add_argument("--option2", action="append", default=[], metavar="KEY=VALUE",
+                        help="Pass a UCI/xboard option to engine2 (repeatable).")
+    parser.add_argument("--name1", default=None, metavar="NAME",
+                        help="Override display name for engine1 (appears in PGN "
+                             "and cutechess output).  Default: basename of engine1.")
+    parser.add_argument("--name2", default=None, metavar="NAME",
+                        help="Override display name for engine2.")
     args = parser.parse_args()
+
+    # Validate --option* format: each entry must contain '='.
+    for label, opts in (("option1", args.option1), ("option2", args.option2)):
+        for o in opts:
+            if "=" not in o:
+                parser.error(f"--{label} expects KEY=VALUE, got: {o!r}")
 
     # -----------------------------------------------------------------------
     # Interactive mode: fill in missing engines and options
@@ -402,9 +304,14 @@ def main():
             fmt = "epd" if args.openings.lower().endswith(".epd") else "pgn"
             openings_args = ["-openings", f"file={args.openings}", f"format={fmt}", "order=random"]
 
-    name1    = os.path.basename(args.engine1)
+    name1    = args.name1 or os.path.basename(args.engine1)
     gauntlet = len(args.opponents) > 1
     multi    = args.iterations > 1
+
+    if gauntlet and args.name2:
+        print("Warning: --name2 ignored in gauntlet mode (more than one opponent).",
+              file=sys.stderr)
+        args.name2 = None
 
     # Header
     print(f"\nProbe engine: {name1}")
@@ -431,7 +338,8 @@ def main():
     grand_w = grand_d = grand_l = 0
 
     for opp_exe, opp_arg in zip(opponent_exes, args.opponents):
-        name2    = os.path.basename(opp_arg)
+        name2    = (args.name2 or os.path.basename(opp_arg)) if not gauntlet \
+                   else os.path.basename(opp_arg)
         pgn_base = args.pgn_out or f"match_{name1}_vs_{name2}.pgn"
 
         # rounds/games setup
@@ -462,6 +370,12 @@ def main():
             eng1_spec.append(f"depth={args.depth1}")
         if args.depth2 is not None:
             eng2_spec.append(f"depth={args.depth2}")
+        # Forward --option1/--option2 as cutechess option.KEY=VALUE (quoted
+        # keys support spaces, e.g. "Skill Level").
+        for o in args.option1:
+            eng1_spec.append(f"option.{o}")
+        for o in args.option2:
+            eng2_spec.append(f"option.{o}")
 
         # Per-engine TC: use -each when identical, per-engine spec when different.
         if tc1 == tc2:
