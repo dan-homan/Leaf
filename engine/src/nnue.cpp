@@ -2315,6 +2315,9 @@ void nnue_apply_gradients(float lr_scale)
                 float dw = do_step(grad_l2_w[s][i], m_l2_w[s][i], v_l2_w[s][i], l2_weights_cnt[s][i]);
                 float wd = TDLEAF_WEIGHT_DECAY * fc_lr * l2_weights_f32[s][i];
                 l2_weights_f32[s][i] -= dw + wd;  delta_l2_w[s][i] -= dw + wd;
+                // Clamp float shadow to int8 range (same reason as FC0/FC1).
+                if (l2_weights_f32[s][i] >  127.0f) l2_weights_f32[s][i] =  127.0f;
+                if (l2_weights_f32[s][i] < -127.0f) l2_weights_f32[s][i] = -127.0f;
                 l2_weights_cnt[s][i]++;  delta_l2_w_cnt[s][i]++;
             }
         }
@@ -2455,6 +2458,13 @@ void nnue_apply_gradients(float lr_scale)
             step = clip_adam_step(step, step_max_pv, step_clips_pv);
             return pv_lr * step;
         };
+        // PAWN piece_val is pinned as the centipawn unit anchor: value[PAWN]=100
+        // by construction at init, and PSQT slot-mean centering already prevents
+        // the PSQT pawn row from drifting, so freezing piece_val[0] keeps the
+        // entire evaluation gauge fixed in standard cp units.  (KING grad is
+        // always zero anyway — both sides have one king — so that index is a
+        // no-op.)
+        grad_piece_val[0] = 0.0f;
         bool pv_changed = false;
         for (int pt = 0; pt < 6; pt++) {
             if (grad_piece_val[pt] == 0.0f) continue;
@@ -2912,6 +2922,9 @@ bool nnue_save_fc_weights(const char *path)
                             piece_val_active = true;
                         }
                     }
+                    // PAWN pinned: discard any drift inherited from a sibling worker's
+                    // file written before the pin (or with a pre-pin binary).
+                    piece_val_f32[0] = 0.0f;
                 }
                 // Adam v section (v6+): max-merge per element.
                 if (version >= 6u) {
@@ -3478,6 +3491,11 @@ bool nnue_load_fc_weights(const char *path)
                 piece_val_active = true;
             } else { ok = false; }
         }
+        // PAWN piece_val is pinned as the cp unit anchor — reset any drift from
+        // pre-pin .tdleaf.bin files so value[PAWN]=100 holds after load.
+        piece_val_f32[0] = 0.0f;
+        m_piece_val[0]   = 0.0f;
+        v_piece_val[0]   = 0.0f;
     }
 
     // Adam v section (v6+): restore gradient scale from file.

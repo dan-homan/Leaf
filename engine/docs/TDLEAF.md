@@ -199,6 +199,23 @@ The large LR0 is appropriate because `piece_val` units are at the same raw int32
 as PSQT (~36 000 std), so the effective per-step size in centipawns is comparable to
 PSQT despite the higher LR0 number.
 
+### PAWN pinned as cp unit anchor
+
+`piece_val[0]` (PAWN) is frozen at 0.  Its gradient is zeroed in
+`nnue_apply_gradients` before the Adam loop, and the `.tdleaf.bin` load paths
+reset `piece_val_f32[0]` (and its Adam m/v) to 0 so pre-pin files clean up
+cleanly on first touch.
+
+Rationale: the TDLeaf sigmoid is invariant under uniform cp rescaling, so the
+overall evaluation scale is a pure gauge degree of freedom.  Combined with the
+PSQT slot-mean centering (which already prevents the PSQT pawn row from
+shifting the material scale), freezing `piece_val[0]` pins the entire cp scale
+to standard units.  This keeps `TDLEAF_K = 240` interpretable, makes cp output
+comparable across sessions and against other engines (bayeselo, side-by-side
+matches, GUI eval bars), and simplifies reasoning about telemetry — without
+costing anything in expressiveness, since the ratios N/B/R/Q relative to PAWN
+are still learned freely.
+
 ### PSQT gradient mean-centering
 
 Because both PSQT and `piece_val` can learn material-scale corrections, and Adam's

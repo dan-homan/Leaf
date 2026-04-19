@@ -1,5 +1,30 @@
 Changes since 2017_12_24
 
+2026_04_19 -- tdleaf: pin PAWN piece_val as the cp unit anchor; clamp FC2 float shadow.
+               Two small correctness/hygiene fixes identified during a code review
+               of the NNUE forward/backward path.
+
+               1. FC2 float-shadow clamp.  FC0 and FC1 already clamp their fp32
+                  weight shadows to [-127, 127] after each Adam step (nnue.cpp:2283,
+                  2301) to prevent "zombie weights" where the int8 requantised value
+                  saturates while the float keeps drifting.  FC2 had AdamW weight
+                  decay but no hard clamp — same zombie scenario was possible.
+                  Added the matching 2-line clamp (nnue.cpp:2320-2321).
+
+               2. Pin PAWN piece_val at 0 (value[PAWN] = 100 gauge).  The effective
+                  pawn cp value is derived from PSQT pawn-slot mean + piece_val[0]/2.
+                  PSQT mean-centering (nnue.cpp:2346-2365) already prevents the PSQT
+                  pawn row from drifting the material scale; piece_val[0] was the
+                  remaining free channel.  Because the TDLeaf sigmoid is invariant
+                  under uniform cp rescaling, this degree of freedom is pure gauge
+                  — fixing it costs nothing in expressiveness and anchors the cp
+                  unit so TDLEAF_K=240 calibration, bayeselo comparisons vs other
+                  engines, and GUI eval displays all remain meaningful.
+                  Implementation: grad_piece_val[0] = 0 before the piece_val Adam
+                  loop (nnue.cpp); load paths force piece_val_f32[0] = 0 (plus
+                  m/v moments in the simple loader) so pre-pin .tdleaf.bin files
+                  reset cleanly on first touch.
+
 2026_04_18 -- tdleaf: revert TDLEAF_REPLAY_K default to 0.
                With the LR-scale 0.3 mitigation above, K=2 recovered roughly
                100 Elo versus the earlier 350 Elo gap but still trails K=0 by
