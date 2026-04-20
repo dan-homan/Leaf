@@ -757,7 +757,18 @@ causing FT bias drift and mode collapse.
 **FC0 weights (σ=4):** each CReLU layer divides by 64 (>>6 shift), so FC0 raw output must
 be large enough that FC0_CReLU = FC0_raw/64 gives useful FC1 inputs.  With σ=4 and ~400
 active CReLU inputs of mean ~3: FC0 raw std ≈ 240, CReLU ≈ 3.8 — healthy FC1 input.
-The passthrough (fwdOut) std ≈ 283 internal units ≈ 5 cp — still quiet.
+
+**FC0 passthrough row (output `NNUE_L0_DIRECT = 15`) is permanently frozen at zero.**
+fc0_raw[15] bypasses FC1/FC2 and feeds the score directly as `fwdOut = fc0_raw[15] × 9600/8128`.
+Because it is a single scalar output with no downstream nonlinearity, it receives a clean
+high-quality gradient every ply and empirically absorbs systematic STM-side bias — a net
+trained for 300k games of self-play accumulated fwd ≈ 21 800 internal units (+378 cp to
+whoever is to move, at the color-symmetric startpos).  Under the current gauge material
+lives on dense `piece_val` + PSQT, so the passthrough has no legitimate job; freezing it
+(zeroed weights + bias at init, skip in `nnue_accumulate_gradients`, re-zero on every
+`.nnue` / `.tdleaf.bin` / merge-read load) removes the drift sink at no cost to eval
+fidelity.  Pre-freeze `.nnue` / `.tdleaf.bin` files load cleanly because
+`nnue_freeze_passthrough()` wipes row 15 out of both fp32 shadow and int8 inference arrays.
 
 **PSQT initialisation:** all 8 buckets receive identical pure material values from score.h
 (P=5776, N=21776, B=23046, R=34425, Q=69144 internal units; scale = cp × 5776/100).
