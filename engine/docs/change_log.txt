@@ -1,35 +1,5 @@
 Changes since 2017_12_24
 
-2026_04_20 -- tdleaf: freeze FC0 passthrough row (output NNUE_L0_DIRECT = 15).
-               fc0_raw[15] bypasses FC1/FC2 and feeds the score directly via
-               fwdOut = fc0_raw[15] × 9600/8128.  Because it is a scalar output
-               with no downstream nonlinearity, it receives a clean
-               high-quality gradient every ply and empirically absorbs
-               systematic STM-side bias.  A net trained for 300k games of
-               self-play accumulated fwd ≈ 21 800 internal units at the
-               color-symmetric startpos — +378 cp to whoever is to move, with
-               material = 0 and psqt_diff = 0.
-
-               Under the current gauge (material carried by dense piece_val +
-               PSQT) the passthrough has no legitimate role, so it is now
-               permanently zeroed.  Implementation:
-                 - nnue_accumulate_gradients skips o == NNUE_L0_DIRECT in the
-                   FC0 backward pass, preventing any new gradient accumulation.
-                 - New helper nnue_freeze_passthrough() zeros row 15 across
-                   l0_weights_f32 / l0_biases_f32 / l0_weights (int8) /
-                   l0_biases (int32) / Adam m & v / counts.
-                 - Called after nnue_init_fp32_weights (post .nnue dequantize),
-                   after nnue_load_fc_weights (.tdleaf.bin load), and after
-                   the merge-read in nnue_save_fc_weights (defense against a
-                   legacy peer writing non-zero row 15).
-                 - Init comment updated in nnue_init_zero_weights.
-
-               Pre-freeze .nnue and .tdleaf.bin files load cleanly: the baked
-               passthrough in .nnue is wiped at dequantize, and any stale row
-               15 in .tdleaf.bin is wiped before requantize, so fwdOut = 0
-               from the first ply of the new binary onward.  FT, PSQT, and
-               FC1/FC2 learning from pre-freeze runs is preserved.
-
 2026_04_19 -- tdleaf: pin PAWN piece_val as the cp unit anchor; clamp FC2 float shadow.
                Two small correctness/hygiene fixes identified during a code review
                of the NNUE forward/backward path.

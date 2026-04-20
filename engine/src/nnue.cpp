@@ -1545,17 +1545,13 @@ void nnue_init_zero_weights(bool noprior)
     for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
         for (int i = 0; i < NNUE_L0_SIZE * NNUE_L0_INPUT; i++)
             l0_weights_f32[s][i] = rnd_w(INIT_FC0_W_STD);
-        // Zero the passthrough row (output NNUE_L0_DIRECT) and freeze it.
-        // fc0_raw[L0_DIRECT] feeds directly to the final score as
-        // fwdOut = fc0_raw[15] × 9600/8128, bypassing FC1/FC2 and any CReLU gating.
-        // Because it is a single scalar output with no downstream nonlinearity,
-        // it receives a clean high-quality gradient every ply and empirically
-        // absorbs systematic STM-side bias (~378 cp after 300k games of training),
-        // since material signal is carried by piece_val + PSQT under the current
-        // gauge design.  Freezing row 15 at zero eliminates that drift sink at no
-        // cost to eval fidelity: gradient no longer flows through the passthrough
-        // weights, and fwdOut is permanently 0.  See nnue_accumulate_gradients
-        // (row-15 skip) and the `l0_weights_f32[s][15*…] = 0` enforcement at load.
+        // Zero the passthrough row (output NNUE_L0_DIRECT): fc0_raw[L0_DIRECT] feeds
+        // directly to the final score as fwdOut = fc0_raw[15] * 9600/8128.  With random
+        // weights this creates ~81 cp score noise at init (std 4 × √1024 inputs ×
+        // SqrCReLU mean ≈ 20 → fc0_raw std ≈ 4 000; scaled: ≈ 81 cp), overwhelming the
+        // 100 cp/pawn piece_val signal and preventing material-aware play from game 1.
+        // Starting at zero eliminates this noise; gradient still flows through the
+        // passthrough (g_fc0_raw[15] += g_pos × 9600/8128) so it learns normally.
         for (int i = 0; i < NNUE_L0_INPUT; i++)
             l0_weights_f32[s][NNUE_L0_DIRECT * NNUE_L0_INPUT + i] = 0.0f;
         for (int i = 0; i < NNUE_L0_SIZE; i++)
@@ -1739,8 +1735,6 @@ void nnue_init_zero_weights(bool noprior)
            TDLEAF_PIECE_VAL_PAWN_PIN);
 }
 
-static void nnue_freeze_passthrough();   // forward declaration (defined after nnue_requantize_fc)
-
 // ---------------------------------------------------------------------------
 // nnue_init_fp32_weights — dequantize int8 → float after nnue_load()
 // ---------------------------------------------------------------------------
@@ -1789,12 +1783,6 @@ void nnue_init_fp32_weights()
     memset(grad_l1_b, 0, sizeof(grad_l1_b));
     memset(grad_l2_w, 0, sizeof(grad_l2_w));
     memset(grad_l2_b, 0, sizeof(grad_l2_b));
-
-    // Enforce the FC0 passthrough-row freeze invariant immediately after
-    // dequantising from int8.  If the loaded .nnue was baked with a trained
-    // passthrough row (as can happen with pre-freeze binaries), this wipes it
-    // out of both the fp32 shadow and the int8 inference array so fwdOut ≡ 0.
-    nnue_freeze_passthrough();
 
     // FT/PSQT float shadows — heap allocated; OS lazy-pages them.
     size_t ft_sz   = (size_t)NNUE_FT_INPUTS * NNUE_HALF_DIMS;
@@ -2030,15 +2018,9 @@ void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
     // Passthrough output[15]: ∂fwdOut/∂fc0_raw[15] = 9600/8128
     g_fc0_raw[NNUE_L0_DIRECT] += g_pos * (9600.0f / 8128.0f);
 
-    // 2. FC0 backward — weights and biases.
-    // Passthrough row (o == NNUE_L0_DIRECT) is frozen at zero: it has no
-    // legitimate job under the current gauge (material is on piece_val + PSQT)
-    // and empirically absorbs systematic STM-side bias without any CReLU gating.
-    // Skipping gradient accumulation here, combined with the zero invariant
-    // enforced at load time, keeps the row permanently zero so fwdOut ≡ 0.
+    // 2. FC0 backward — weights and biases
     for (int o = 0; o < NNUE_L0_SIZE; o++) {
         if (g_fc0_raw[o] == 0.0f) continue;
-        if (o == NNUE_L0_DIRECT) continue;
         for (int i = 0; i < NNUE_L0_INPUT; i++)
             grad_l0_w[s][o * NNUE_L0_INPUT + i] += g_fc0_raw[o] * act.l0_in[i];
         grad_l0_b[s][o] += g_fc0_raw[o];
@@ -2553,37 +2535,6 @@ void nnue_apply_gradients(float lr_scale)
 #endif
     step_max_fc = step_max_ft = step_max_ft_bias = step_max_psqt = step_max_pv = 0.0f;
     step_clips_fc = step_clips_ft = step_clips_ft_bias = step_clips_psqt = step_clips_pv = 0;
-}
-
-// ---------------------------------------------------------------------------
-// nnue_freeze_passthrough — zero FC0 row NNUE_L0_DIRECT in every array.
-// Call after any weight load (.nnue or .tdleaf.bin) to enforce the invariant
-// that the passthrough is permanently frozen at zero.  See the comment in
-// nnue_init_zero_weights and the row-15 skip in nnue_accumulate_gradients.
-// ---------------------------------------------------------------------------
-static void nnue_freeze_passthrough()
-{
-    const int o  = NNUE_L0_DIRECT;
-    const int ob = o / 4;
-    const int k  = o % 4;
-    for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
-        // fp32 shadow weights + bias + Adam moments + counts
-        for (int i = 0; i < NNUE_L0_INPUT; i++) {
-            size_t idx = (size_t)o * NNUE_L0_INPUT + i;
-            l0_weights_f32[s][idx] = 0.0f;
-            m_l0_w[s][idx] = 0.0f;
-            v_l0_w[s][idx] = 0.0f;
-            l0_weights_cnt[s][idx] = 0;
-            // int8 inference weights in vdotq layout
-            int ib = i / 4, j = i % 4;
-            l0_weights[s][ib * 64 + ob * 16 + k * 4 + j] = 0;
-        }
-        l0_biases_f32[s][o] = 0.0f;
-        m_l0_b[s][o]        = 0.0f;
-        v_l0_b[s][o]        = 0.0f;
-        l0_biases_cnt[s][o] = 0;
-        l0_biases[s][o]     = 0;
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3148,10 +3099,6 @@ bool nnue_save_fc_weights(const char *path)
         memset(ft_bias_delta,   0, sizeof(ft_bias_delta));
         memset(delta_piece_val, 0, sizeof(delta_piece_val));
     }
-
-    // Enforce FC0 passthrough-row freeze after the merge-read: a legacy peer
-    // may have written a non-zero row 15 that just got merged into the shadow.
-    nnue_freeze_passthrough();
 
     // Sync value[] with the (possibly co-worker-updated) piece_val.
     if (piece_val_active)
@@ -3744,10 +3691,6 @@ bool nnue_load_fc_weights(const char *path)
     memset(delta_piece_val, 0, sizeof(delta_piece_val));
     // ft_bias_cnt and ft_biases_f32 are populated from file in v4+; leave them.
     // For v2/v3 files, ft_biases_f32 was already initialised by nnue_init_fp32_weights.
-    // Enforce the FC0 passthrough-row freeze invariant: any pre-freeze
-    // .tdleaf.bin will have trained row-15 weights that must be wiped before
-    // the first requantisation.
-    nnue_freeze_passthrough();
     nnue_requantize_fc();
     if (version == TDLEAF_VERSION)
         printf("TDLeaf: loaded v%u weights from %s (%d FT rows, %d FT-v rows, piece_val=%s, adam_v=%s, adam_m=%s, t_adam=%u, content_hash=0x%08X)\n",
