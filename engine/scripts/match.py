@@ -145,9 +145,9 @@ def main():
                              "picks up the latest weights each time")
     parser.add_argument("-c", "--concurrency", type=int, default=default_concurrency,
                         help=f"Simultaneous games (default: {default_concurrency})")
-    parser.add_argument("-tc", "--time-control", default="10+0.1",
+    parser.add_argument("-tc", "--time-control", default="3+0.05",
                         help="Time control for both engines: 'moves/time+inc' or 'time+inc' "
-                             "in seconds (default: 10+0.1)")
+                             "in seconds (default: 3+0.05)")
     parser.add_argument("--tc1", default=None, metavar="TC",
                         help="Override time control for engine1 only (default: same as -tc)")
     parser.add_argument("--tc2", default=None, metavar="TC",

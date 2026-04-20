@@ -201,10 +201,41 @@ PSQT despite the higher LR0 number.
 
 ### PAWN pinned as cp unit anchor
 
-`piece_val[0]` (PAWN) is frozen at 0.  Its gradient is zeroed in
-`nnue_apply_gradients` before the Adam loop, and the `.tdleaf.bin` load paths
-reset `piece_val_f32[0]` (and its Adam m/v) to 0 so pre-pin files clean up
-cleanly on first touch.
+`piece_val[0]` (PAWN) is pinned at `TDLEAF_PIECE_VAL_PAWN_PIN = 11552` (raw
+units), which contributes exactly 100 cp per own-pawn diff (`11552 × 0.5 ×
+100/5776 = 100`).  Pawn material is carried entirely by this dense channel;
+PSQT pawn rows are initialized to **0** and drift purely positionally during
+training.
+
+The pin is enforced in two places:
+
+- `grad_piece_val[0] = 0` before the piece_val Adam loop in
+  `nnue_apply_gradients`, so no gradient can move it.
+- Both `.tdleaf.bin` load paths (`nnue_load_fc_weights` and the merge-read in
+  `nnue_save_fc_weights`) clamp `piece_val_f32[0]` back to the pin value
+  after reading.  Adam moments `m_piece_val[0]` and `v_piece_val[0]` are also
+  reset to zero in the simple loader.
+
+Pre-pin `.tdleaf.bin` files load with a one-time gauge shift (whatever drift
+they accumulated in `piece_val[0]` is discarded).  Effective `value[PAWN]`
+will jump on first load of an old file and recover during continued training;
+fresh runs (`--init-nnue`) start cleanly anchored at `value[PAWN] = 100`.
+
+#### PSQT un-baking on load
+
+`nnue_write_nnue()` bakes `piece_val` into PSQT (`baked = raw ± piece_val ×
+0.5`) so the exported `.nnue` is self-contained for inference.  When the
+matching `.tdleaf.bin` is also loaded for continued training, the dense
+`piece_val` correction is restored — so the baked PSQT would double-count
+the material contribution.
+
+To prevent this, `nnue_load_fc_weights()` un-bakes PSQT after loading
+`piece_val`: for each FT row that was **not** overwritten by the `.tdleaf.bin`
+sparse PSQT section (those rows already arrive un-baked from the file), it
+subtracts `±piece_val[ps_slot] × 0.5` from `psqt_weights_f32[fi][:]` (and
+re-quantizes the int32 mirror).  After un-baking, `psqt_weights_f32` holds
+the raw training-state PSQT, and the dense `piece_val` correction in
+`nnue_dense_piece_val()` provides the material contribution exactly once.
 
 Rationale: the TDLeaf sigmoid is invariant under uniform cp rescaling, so the
 overall evaluation scale is a pure gauge degree of freedom.  Combined with the
