@@ -81,12 +81,6 @@ static const float TDLEAF_ADAM_EPS      = 1e-8f;   // numerical floor
 // Applied to FC weights and FT weights only (not biases, not PSQT).
 // Set to 0.0 to disable.
 static const float TDLEAF_WEIGHT_DECAY  = 1e-4f;   // decoupled weight decay coefficient
-
-// PAWN piece_val pin: piece_val_f32[0] is frozen at this raw value, which
-// contributes exactly 100 cp per own-pawn diff (11552 × 0.5 × 100/5776 = 100).
-// This pins the cp unit and lets PSQT pawn rows drift purely positionally
-// (init to 0, no material role).  See docs/TDLEAF.md for the gauge rationale.
-static const float TDLEAF_PIECE_VAL_PAWN_PIN = 11552.0f;
 static const int   TDLEAF_ADAM_WARMUP        = 50;  // linear LR warmup over first N Adam steps (0 = disabled)
                                                      // Keyed on t_adam (persisted) so only fires in first session.
 static const int   TDLEAF_FT_SESSION_WARMUP  = 100; // per-session FT LR ramp over first N Adam steps.

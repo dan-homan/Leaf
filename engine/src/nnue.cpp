@@ -1659,12 +1659,8 @@ void nnue_init_zero_weights(bool noprior)
         //   ps_slot = (fi % PS_NB) / 128 → 0=pawn, 1=knight, 2=bishop, 3=rook, 4=queen, 5=king
         //   is_own  = (fi % PS_NB) % 128 < 64  (own-piece squares are [0,63], enemy are [64,127])
         if (!noprior) {
-            // PAWN PSQT init = 0: pawn material is carried entirely by the
-            // pinned dense piece_val[0] = TDLEAF_PIECE_VAL_PAWN_PIN (= 11552,
-            // contributes 100 cp per pawn diff).  PSQT pawn rows stay purely
-            // positional, free to drift around 0 without affecting the cp gauge.
             static const float PSQT_CLASSICAL[6] = {
-                0.f,                             // ps_slot 0: PAWN   = 0   (anchored by piece_val[0])
+                1.f * 100.f  * 5776.f / 100.f,  // ps_slot 0: PAWN   = 5776.0
                 1.f * 377.f  * 5776.f / 100.f,  // ps_slot 1: KNIGHT = 21775.5
                 1.f * 399.f  * 5776.f / 100.f,  // ps_slot 2: BISHOP = 23046.2
                 1.f * 596.f  * 5776.f / 100.f,  // ps_slot 3: ROOK   = 34425.0
@@ -1708,15 +1704,12 @@ void nnue_init_zero_weights(bool noprior)
     // piece_val handles fast-converging material corrections via dense updates (~200/game);
     // PSQT provides the base material prior and all positional knowledge.
     // Clamped >= 0 in nnue_apply_gradients to prevent anti-material death spiral.
-    // PAWN exception: piece_val_f32[0] is pinned at TDLEAF_PIECE_VAL_PAWN_PIN
-    // (11552 raw, = 100 cp per pawn diff) as the cp gauge anchor.
     memset(piece_val_f32,   0, sizeof(piece_val_f32));
     memset(grad_piece_val,  0, sizeof(grad_piece_val));
     memset(m_piece_val,     0, sizeof(m_piece_val));
     memset(v_piece_val,     0, sizeof(v_piece_val));
     memset(piece_val_cnt,   0, sizeof(piece_val_cnt));
     memset(delta_piece_val, 0, sizeof(delta_piece_val));
-    piece_val_f32[0] = TDLEAF_PIECE_VAL_PAWN_PIN;
     piece_val_active = true;
 
     // Sync all int8/int16/int32 inference arrays from the zeroed float shadows.
@@ -1729,10 +1722,9 @@ void nnue_init_zero_weights(bool noprior)
     nnue_zero_initialized = true;
     printf("NNUE TDLeaf: FC weights=N(0,{%.0f,%.0f,%.0f}) passthrough[15]=0; "
            "FT weights=N(0,%.0f); biases=zero; "
-           "PSQT=%s; piece_val=zero except PAWN pinned at %.0f (=100 cp anchor)\n",
+           "PSQT=%s; piece_val=zero (learns corrections)\n",
            INIT_FC0_W_STD, INIT_FC1_W_STD, INIT_FC2_W_STD, INIT_FT_W_STD,
-           noprior ? "zero (noprior)" : "symmetric classical (own=+V,enemy=-V; P=0 (anchored by piece_val[0]) N=377 B=399 R=596 Q=1197 cp)",
-           TDLEAF_PIECE_VAL_PAWN_PIN);
+           noprior ? "zero (noprior)" : "symmetric classical (own=+V,enemy=-V; P=100 N=377 B=399 R=596 Q=1197 cp)");
 }
 
 // ---------------------------------------------------------------------------
@@ -2323,9 +2315,6 @@ void nnue_apply_gradients(float lr_scale)
                 float dw = do_step(grad_l2_w[s][i], m_l2_w[s][i], v_l2_w[s][i], l2_weights_cnt[s][i]);
                 float wd = TDLEAF_WEIGHT_DECAY * fc_lr * l2_weights_f32[s][i];
                 l2_weights_f32[s][i] -= dw + wd;  delta_l2_w[s][i] -= dw + wd;
-                // Clamp float shadow to int8 range (same reason as FC0/FC1).
-                if (l2_weights_f32[s][i] >  127.0f) l2_weights_f32[s][i] =  127.0f;
-                if (l2_weights_f32[s][i] < -127.0f) l2_weights_f32[s][i] = -127.0f;
                 l2_weights_cnt[s][i]++;  delta_l2_w_cnt[s][i]++;
             }
         }
@@ -2466,13 +2455,6 @@ void nnue_apply_gradients(float lr_scale)
             step = clip_adam_step(step, step_max_pv, step_clips_pv);
             return pv_lr * step;
         };
-        // PAWN piece_val is pinned at TDLEAF_PIECE_VAL_PAWN_PIN as the cp gauge
-        // anchor: piece_val[0] alone contributes 100 cp per pawn diff, and PSQT
-        // pawn rows carry no material (init = 0).  Freezing piece_val[0] fixes
-        // the cp scale; PSQT pawn drifts purely positionally.  (KING grad is
-        // always zero anyway — both sides have one king — so that index is a
-        // no-op.)
-        grad_piece_val[0] = 0.0f;
         bool pv_changed = false;
         for (int pt = 0; pt < 6; pt++) {
             if (grad_piece_val[pt] == 0.0f) continue;
@@ -2930,8 +2912,6 @@ bool nnue_save_fc_weights(const char *path)
                             piece_val_active = true;
                         }
                     }
-                    // PAWN piece_val pinned as cp gauge anchor — clamp to pin.
-                    piece_val_f32[0] = TDLEAF_PIECE_VAL_PAWN_PIN;
                 }
                 // Adam v section (v6+): max-merge per element.
                 if (version >= 6u) {
@@ -3422,10 +3402,6 @@ bool nnue_load_fc_weights(const char *path)
     }
 
     // Sparse FT/PSQT section (v3+).
-    // Track which FT rows had their PSQT loaded from .tdleaf.bin (un-baked).
-    // The remaining rows still hold the baked PSQT from .nnue and need
-    // un-baking after piece_val is loaded (see end of this function).
-    bool psqt_sparse_loaded[NNUE_FT_INPUTS] = {};
     int n_ft_loaded = 0;
     if (ok && (version >= 3u) && ft_weights_f32) {
         uint32_t n_ft_rows = 0;
@@ -3454,7 +3430,6 @@ bool nnue_load_fc_weights(const char *path)
             if (fread(pc, sizeof(uint32_t), NNUE_PSQT_BKTS, f) != (size_t)NNUE_PSQT_BKTS)
                 { ok = false; break; }
 
-            psqt_sparse_loaded[fi] = true;
             n_ft_loaded++;
         }
     }
@@ -3502,40 +3477,6 @@ bool nnue_load_fc_weights(const char *path)
                 }
                 piece_val_active = true;
             } else { ok = false; }
-        }
-        // PAWN piece_val is pinned at TDLEAF_PIECE_VAL_PAWN_PIN as the cp
-        // gauge anchor.  Clamp the loaded value to the pin (older .tdleaf.bin
-        // files written with a different pin or no pin will see a one-time
-        // gauge shift; effective value[PAWN] may drift on first load and
-        // recover during continued training).
-        piece_val_f32[0] = TDLEAF_PIECE_VAL_PAWN_PIN;
-        m_piece_val[0]   = 0.0f;
-        v_piece_val[0]   = 0.0f;
-
-        // Un-bake PSQT for any FT row that was NOT overwritten by the
-        // .tdleaf.bin sparse PSQT section.  nnue_write_nnue() bakes piece_val
-        // into PSQT (psqt_baked = raw ± piece_val × 0.5) so the .nnue is
-        // self-contained for inference; for continued training we restore the
-        // raw psqt_weights_f32 by subtracting the same correction.  Trained
-        // rows already came in un-baked from the sparse section, so we skip
-        // those here.  Without this step, untrained rows would double-count
-        // piece_val (once via the baked PSQT in .nnue, once via the dense
-        // piece_val correction in nnue_dense_piece_val).
-        const int PS_NB = 704;
-        for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
-            if (psqt_sparse_loaded[fi]) continue;
-            int fi_in_bkt = fi % PS_NB;
-            int ps_slot   = fi_in_bkt / 128;
-            if (ps_slot >= 6) continue;
-            bool is_own   = (fi_in_bkt % 128) < 64;
-            float pv_sub  = (is_own ? +1.0f : -1.0f) * piece_val_f32[ps_slot] * 0.5f;
-            if (pv_sub == 0.0f) continue;
-            float   *pf = psqt_weights_f32 + (size_t)fi * NNUE_PSQT_BKTS;
-            int32_t *pi = psqt_weights     + (size_t)fi * NNUE_PSQT_BKTS;
-            for (int b = 0; b < NNUE_PSQT_BKTS; b++) {
-                pf[b] -= pv_sub;
-                pi[b]  = (int32_t)roundf(pf[b]);
-            }
         }
     }
 
