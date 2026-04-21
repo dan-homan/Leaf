@@ -2315,6 +2315,9 @@ void nnue_apply_gradients(float lr_scale)
                 float dw = do_step(grad_l2_w[s][i], m_l2_w[s][i], v_l2_w[s][i], l2_weights_cnt[s][i]);
                 float wd = TDLEAF_WEIGHT_DECAY * fc_lr * l2_weights_f32[s][i];
                 l2_weights_f32[s][i] -= dw + wd;  delta_l2_w[s][i] -= dw + wd;
+                // Clamp float shadow to int8 range (same reason as FC0/FC1).
+                if (l2_weights_f32[s][i] >  127.0f) l2_weights_f32[s][i] =  127.0f;
+                if (l2_weights_f32[s][i] < -127.0f) l2_weights_f32[s][i] = -127.0f;
                 l2_weights_cnt[s][i]++;  delta_l2_w_cnt[s][i]++;
             }
         }
