@@ -1,5 +1,22 @@
 Changes since 2017_12_24
 
+2026_05_01 -- search/move-gen: revert the 2026_04_18 value[] scaling of hard-coded
+               score margins.  Rolled back search.cpp, search.h, moves.cpp,
+               captures.cpp, and captchecks.cpp to the pre-bda3876 constants
+               (aspiration window 500/5000, null-move thresholds beta+100/+400,
+               LMP factor 200, index scaler /100, LMR threshold alpha-350,
+               MARGIN(x)=50+100x^2, minor-exchange tolerance +50, capture
+               placeholder -100, captcheck placeholder -123, promotion bonus
+               +1000, rank-7 pawn bonus 35*gstage).  Reason: the value[]
+               scaling appeared to cause a play-strength regression.  The FC
+               LR change and probe.cpp removal from that commit are retained.
+
+2026_05_01 -- tdleaf: raise sigmoid temperature TDLEAF_K from 240 to 400 cp
+               to mitigate piece-value drift observed in recent training.
+               Bump TDLEAF_ADAM_LR0 (FC layers) from 0.05 to 0.10.  Reduce
+               TDLEAF_BATCH_SIZE from 8 to 4 (more frequent Adam steps per
+               game count).
+
 2026_04_18 -- tdleaf: revert TDLEAF_REPLAY_K default to 0.
                With the LR-scale 0.3 mitigation above, K=2 recovered roughly
                100 Elo versus the earlier 350 Elo gap but still trails K=0 by

@@ -147,8 +147,8 @@ void position::add_move(int fsq, int tsq, move_list *list, char type, ts_thread_
     int pawn_bonus = 0;
     if(PTYPE(sq[tsq]) == PAWN) {
       if(gstage > 9) { // bonus for pawns about to queen in end-game
-	if(wtm && RANK(tsq) == 1) pawn_bonus += ((value[QUEEN]-value[PAWN])*gstage)/32;
-	if(!wtm && RANK(tsq) == 6) pawn_bonus += ((value[QUEEN]-value[PAWN])*gstage)/32;
+	if(wtm && RANK(tsq) == 1) pawn_bonus += 35*gstage;   
+	if(!wtm && RANK(tsq) == 6) pawn_bonus += 35*gstage;
       }
     }
     // if it is an EP capture, include ptype value for the pawn captured
@@ -156,9 +156,9 @@ void position::add_move(int fsq, int tsq, move_list *list, char type, ts_thread_
     // adjust pawn bonus for bishop capture
     if(PTYPE(sq[tsq]) == BISHOP && plist[wtm^1][BISHOP][0] == 2) pawn_bonus += BISHOP_PAIR;
     // now score the move
-    if(value[PTYPE(sq[tsq])]+pawn_bonus+(value[ROOK]-value[BISHOP]) >= value[PTYPE(sq[fsq])]) {  // tolerance for minor exchanges
+    if(value[PTYPE(sq[tsq])]+pawn_bonus+50 >= value[PTYPE(sq[fsq])]) {  // +50 allows minor exchanges
       list->mv[i].score = 10000000 + 1000*PTYPE(sq[tsq])+pawn_bonus - PTYPE(sq[fsq]);
-    } else if(swap(tsq,(*this),wtm,fsq)+pawn_bonus+(value[ROOK]-value[BISHOP]) >= 0) {           // tolerance for minor exchanges
+    } else if(swap(tsq,(*this),wtm,fsq)+pawn_bonus+50 >= 0) {           // +50 allows minor exchanges
       list->mv[i].score = 10000000 + 1000*PTYPE(sq[tsq])+pawn_bonus - PTYPE(sq[fsq]);
     // looking for a revealed check if score isn't high enough
     } else if(slide_check_table[fsq]&(1ULL<<plist[wtm^1][KING][1]))  {

@@ -51,8 +51,8 @@ float VAR4 = 2.685;
 // the following are divided by 1000 in calculation
 int abort_search_fraction[8] = { 0, 128, 406, 625, 717, 808, 900, 1100 };
 
-// Pruning score margins (scales with value[PAWN])
-#define MARGIN(x)  (value[PAWN]/2 + value[PAWN]*(x)*(x))
+// Pruning score margins
+#define MARGIN(x)  (50+100*(x)*(x))
 
 #if DEBUG_SEARCH
  ofstream search_outfile;

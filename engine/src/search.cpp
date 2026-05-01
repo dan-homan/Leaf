@@ -415,8 +415,8 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
 	}
 	root_beta = MIN(+MATE,g+1.5*(root_beta-g_last));
       } else break;
-      if(root_alpha < MAX(-50*value[PAWN], g_last - 5*value[PAWN])) root_alpha = -MATE;
-      if(root_beta > MIN(50*value[PAWN], g_last + 5*value[PAWN])) root_beta = +MATE;
+      if(root_alpha < MAX(-5000,g_last-500)) root_alpha = -MATE;
+      if(root_beta > MIN(5000,g_last+500)) root_beta = +MATE;
     }
 #endif
 
@@ -1288,8 +1288,8 @@ int search_node::pvs(int alpha, int beta, int depth, int in_pv, int move_to_skip
      // set reduction depth depending on premove score
      //------------------------------------------------
      int R = 3;
-     if(premove_score > beta + 4*value[PAWN] && depth >= 6) { R = 5; }
-     else if(premove_score > beta + value[PAWN] && depth >= 5) { R = 4; }
+     if(premove_score > beta+400 && depth >= 6) { R = 5; }
+     else if(premove_score > beta+100 && depth >= 5) { R = 4; }
      //----------------------
      // do the search
      //----------------------
@@ -1693,7 +1693,7 @@ int search_node::pvs(int alpha, int beta, int depth, int in_pv, int move_to_skip
    // ---------------------------------------------------
    else if(!depth_mod && !first && !pos.check && !next->pos.check 
 	   && (!in_pv || pos.hmove.t != tdata->pc[0][ply].t || best >= alpha)
-	   && (premove_score < alpha + mcount*mcount*2*value[PAWN])
+	   && (premove_score < alpha+mcount*mcount*200)
 	   && best > -(MATE/2)) {                                // best > -(MATE/2) important!
 
      //----------------------------------------------------------------------
@@ -1711,7 +1711,7 @@ int search_node::pvs(int alpha, int beta, int depth, int in_pv, int move_to_skip
        //      Need to try that as an alternative at some point
        // -----------------------------------------------------------------
        if(depth < 7 && skipped == 0 && !move_to_skip) {        
-	 int index = depth + (premove_score - beta) / value[PAWN];
+	 int index = depth+(premove_score-beta)/100;
 	 if(index < 0) index = 0;
 	 else if(index > 7) index = 7;
 	 if(mcount > (abort_search_fraction[index]*moves.count)/1000) {
@@ -1738,7 +1738,7 @@ int search_node::pvs(int alpha, int beta, int depth, int in_pv, int move_to_skip
 	 depth_mod -= 1;
 	 if(depth < 5) depth_mod -= lmr_mi8[mi];
 	 else {
-	   if(premove_score < alpha - (7*value[PAWN])/2) depth_mod -= lmr_d5[depth];
+	   if(premove_score < alpha-350) depth_mod -= lmr_d5[depth];
 	   //------------------------------------------------------------------
 	   // make another reduction decision based on history or position in move list
 	   // --> reduce if this move loses historically (~ 90% fail low history)
@@ -1760,7 +1760,7 @@ int search_node::pvs(int alpha, int beta, int depth, int in_pv, int move_to_skip
      int pawn_bonus = 0;
      if(PTYPE(pos.sq[smove.b.to]) == PAWN 
 	&& (RANK(smove.b.to) == 6 || RANK(smove.b.to) == 1)) {
-       pawn_bonus = ((value[QUEEN]-value[PAWN])*pos.gstage)/32;
+       pawn_bonus = 35*pos.gstage;
      } 
      if(!in_pv && !prev->pv_node &&
 	depth+depth_mod < 4 && premove_score+MARGIN(MAX(0,(depth+depth_mod)))

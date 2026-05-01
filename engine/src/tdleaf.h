@@ -29,7 +29,7 @@ static const float TDLEAF_LAMBDA           = 0.98f;  // eligibility trace decay 
                                                      // from 1.6M self-play games; autocorrelation
                                                      // and d_t-vs-result methods give ~0.97–0.99
                                                      // for both game types)
-static const float TDLEAF_K               = 240.0f; // sigmoid temperature (centipawns)
+static const float TDLEAF_K               = 400.0f; // sigmoid temperature (centipawns)
                                                      // MLE over 10M positions from stages 5–6:
                                                      // optimum 239 cp (prev. 290 cp, fitted from
                                                      // earlier training stage).
@@ -69,8 +69,8 @@ static const float TDLEAF_ADAM_STEP_CLIP = 30.0f;
 // LR warmup: ramps from 0 to full LR over first WARMUP Adam steps.
 // Mini-batch: gradients accumulated across BATCH_SIZE games before each Adam step.
 // ---------------------------------------------------------------------------
-static const float TDLEAF_ADAM_LR0         = 0.05f;  // step size for FC layers (float weight units)
-static const float TDLEAF_ADAM_FT_LR0      = 1.0f;    // step size for FT weights (sparse; need higher LR than dense FC)
+static const float TDLEAF_ADAM_LR0         = 0.10f;  // step size for FC layers (float weight units)
+static const float TDLEAF_ADAM_FT_LR0      = 1.0f;   // step size for FT weights (sparse; need higher LR than dense FC)
 static const float TDLEAF_ADAM_FT_BIAS_LR0 = 0.01f;  // step size for FT biases (10× slower than FC to prevent dying-ReLU)
 static const float TDLEAF_ADAM_PSQT_LR0 =    10.0f;    // step size for PSQT (int32 scale ~36k std; needs larger LR)
 static const float TDLEAF_ADAM_PV_LR0     =  50.0f;    // step size for dense piece values (same scale as PSQT)
@@ -86,7 +86,7 @@ static const int   TDLEAF_ADAM_WARMUP        = 50;  // linear LR warmup over fir
 static const int   TDLEAF_FT_SESSION_WARMUP  = 100; // per-session FT LR ramp over first N Adam steps.
                                                      // Applied every restart via t_ft_session (not persisted).
                                                      // Damps FT updates during the v_ft_w accumulation phase.
-static const int   TDLEAF_BATCH_SIZE    = 8;        // accumulate gradients across N games before Adam step
+static const int   TDLEAF_BATCH_SIZE    = 4;        // accumulate gradients across N games before Adam step
 
 // Replay LR scale: multiplicative factor applied to all category LRs during
 // replay-pass Adam steps (1.0 = no softening, 0.0 = no-op replay).  Lower
