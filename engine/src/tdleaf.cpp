@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstring>
 #include <cstdio>
+#include <algorithm>
 #include "chess.h"
 #include "nnue.h"
 #include "tdleaf.h"
@@ -136,7 +137,11 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result,
 
     // 2. Compute TD errors backward
     const float lambda = TDLEAF_LAMBDA;
-    const float score_clip_cp = TDLEAF_SCORE_CLIP_PAWNS * (float)value[PAWN];
+    // Floor at 200 cp so --init-nnue-noprior bootstrap (where value[PAWN] gets
+    // clamped to 1 by nnue_extract_piece_values when PSQT and piece_val are
+    // both zeroed) doesn't collapse the threshold to ~2 cp and gut the TD signal.
+    const float score_clip_cp = std::max(
+        TDLEAF_SCORE_CLIP_PAWNS * (float)value[PAWN], 200.0f);
 
     static float e[MAX_GAME_PLY];
     e[T - 1] = result - d[T - 1];

@@ -196,8 +196,8 @@ land in `learn/`.
 > `make_move()`, which is only reached in the xboard game loop.  Matches driven
 > through a UCI GUI will not update any weights even if the binary was compiled
 > with `TDLEAF=1`.  `training_run.py` automatically passes `--proto1 xboard`
-> for the learner and `--proto2 xboard` for Leaf opponents (self-play,
-> checkpoint, read-only) or `--proto2 uci` for external engines.
+> for the learner and selects the opponent protocol per fixed engine (xboard
+> for Leaf binaries, the engine's own protocol for external executables).
 
 ```sh
 cd learn/
@@ -210,21 +210,23 @@ python3 training_run.py
    (classical material prior or uniform 100cp via `--init-nnue-noprior`)
 2. **Opponent roster** — build a rotation of one or more opponent types:
    - `[s]` Self-play — both `_a` and `_b` instances learn (symmetric)
-   - `[p]` Previous checkpoint — learner vs. its own recent snapshot (read-only)
-   - `[e]` External engine — learner vs. external UCI engine; shows a numbered
-     list of engines discovered from `tools/engines/`, or enter a custom path
+   - `[r]` Read-only mirror — learner vs. a TDLEAF_READONLY copy of itself,
+     frozen at the start of each rotation segment
+   - `[f]` Fixed engine — any Leaf binary or external executable; presents a
+     numbered list of engines discovered under `tools/engines/`, plus the
+     option to enter a custom path
 
-   When the roster has multiple entries (or includes `prev-checkpoint`), the user
-   sets a **rotation interval** — games are split into segments of that many games,
-   cycling through the roster.  A `.nnue` checkpoint is exported at every rotation
-   boundary.  The `prev-checkpoint` opponent always loads the most recently exported
-   checkpoint (or the base net for the first segment).
+   When the roster has multiple entries (or includes a read-only mirror), the
+   user sets a **rotation interval** — games are split into segments of that
+   many games, cycling through the roster.  A `.nnue` checkpoint is exported at
+   every rotation boundary.  The read-only mirror loads the most recently
+   exported checkpoint (or the base net for the first segment).
 3. **Train-validate loop** — optional; see below
 4. **Build** — compiles only the binaries the roster requires:
    - Learner (`_a`, TDLEAF=1) — always built
    - Self-play partner (`_b`, TDLEAF=1) — built if roster includes self-play
-   - Checkpoint opponent (`_ro`, NNUE-only, no TDLEAF) — built with a separate
-     `NNUE_NET` so its `.nnue` can be swapped at rotation boundaries
+   - Read-only mirror (`_ro`, TDLEAF_READONLY=1) — built if roster includes
+     a read-only mirror; loads weights but skips updates
 5. **Continuity** — continue from existing `.tdleaf.bin` or start fresh
 6. **Match parameters** — TC, concurrency, wait, opening selection, per-engine
    depth limits; per-engine TCs (`--tc1` / `--tc2`) when the opponent runs at a
@@ -260,7 +262,7 @@ automatically on the first save.
 **Self-play opening diversity:** when the current opponent segment is symmetric
 self-play (both engines learn), `training_run.py` automatically passes `--no-repeat`
 to `match.py` so each opening is played once rather than twice, maximising the variety
-of positions seen per N games.  Non-self-play segments (prev-checkpoint, external
+of positions seen per N games.  Non-self-play segments (read-only mirror, fixed
 engine) retain `-games 2 -repeat` for fairer W/L/D statistics.
 
 ### Train-validate loop

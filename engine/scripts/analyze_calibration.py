@@ -130,7 +130,7 @@ def reliability_diagram(scores: np.ndarray, results: np.ndarray,
 
 
 def plot_calibration(fit: dict, rel_opt: dict, rel_cur: dict,
-                     K_opt: float, out_path: Path):
+                     K_opt: float, stages: list, out_path: Path):
     """Three-panel calibration figure."""
     fig = plt.figure(figsize=(14, 5))
     gs = gridspec.GridSpec(1, 3, figure=fig, wspace=0.35)
@@ -182,7 +182,7 @@ def plot_calibration(fit: dict, rel_opt: dict, rel_cur: dict,
 
     fig.suptitle(
         f'Sigmoid Temperature Calibration  '
-        f'(n={fit["n_pos"]:,} positions,  stages {DEFAULT_STAGES})',
+        f'(n={fit["n_pos"]:,} positions,  stages {stages})',
         fontsize=11, y=1.01)
     fig.savefig(out_path, dpi=150, bbox_inches='tight')
     plt.close(fig)
@@ -595,7 +595,7 @@ def main():
     print(f'  Brier (opt)    = {rel_opt["brier"]:.5f}')
     print(f'  Brier (cur)    = {rel_cur["brier"]:.5f}')
 
-    plot_calibration(fit, rel_opt, rel_cur, K_opt,
+    plot_calibration(fit, rel_opt, rel_cur, K_opt, stages,
                      args.out_dir / 'calibration_K.png')
 
     # ------------------------------------------------------------------

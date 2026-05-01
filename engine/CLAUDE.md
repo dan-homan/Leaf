@@ -115,7 +115,7 @@ See `docs/TDLEAF.md` for the full algorithm reference, hyperparameters, and grad
 - After each game: `tdleaf_update_after_game()` computes backward TD errors, backpropagates through all layers, and applies Adam/RMSProp updates.
 - Optional replay: `tdleaf_replay()` runs additional passes over recent games (currently disabled, `TDLEAF_REPLAY_K=0`).
 
-**Key hyperparameters:** `TDLEAF_K = 240 cp` (sigmoid temperature), `TDLEAF_LAMBDA = 0.98` (single eligibility trace decay — decisive and draw games use the same value).  Five separate Adam LRs: FC (0.01), FT (1.0), FT bias (0.01), PSQT (10.0), piece_val (50.0).  Gradient clipping (L2 norm, 1.0) and AdamW weight decay (1e-4, FC+FT weights only).
+**Key hyperparameters:** `TDLEAF_K = 400 cp` (sigmoid temperature), `TDLEAF_LAMBDA = 0.98` (single eligibility trace decay — decisive and draw games use the same value).  Five separate Adam LRs: FC (0.10), FT (1.0), FT bias (0.01), PSQT (10.0), piece_val (50.0).  Gradient clipping (L2 norm, 1.0) and AdamW weight decay (1e-4, FC+FT weights only).
 
 **Critical gotchas for code changes:**
 - `material` in `score.cpp` is **already STM (side-to-move) POV** — do not flip it.

@@ -63,7 +63,7 @@ For a game of T half-moves:
 
 - `d_t` = sigmoid of the **NNUE static evaluation at the PV leaf position** at ply t,
   from White's perspective:
-  `d_t = 1 / (1 + exp(-score_white_t / K))`, K = 240 cp.
+  `d_t = 1 / (1 + exp(-score_white_t / K))`, K = 400 cp.
 - `z` = game result from White's perspective: 1.0 = White wins, 0.5 = draw, 0.0 = Black wins.
 
 **Temporal difference errors (backward view):**
@@ -74,8 +74,8 @@ e_t     = clip(d_{t+1} - d_t) + λ * e_{t+1}     for t = T-2 … 0
 ```
 
 where `clip(d_{t+1} - d_t)` applies proportional scaling when the white-POV score
-change between consecutive moves exceeds `TDLEAF_SCORE_CLIP_CP` centipawns — see
-[Horizon Noise Mitigation](#horizon-noise-mitigation) below.
+change between consecutive moves exceeds `TDLEAF_SCORE_CLIP_PAWNS × value[PAWN]`
+centipawns — see [Horizon Noise Mitigation](#horizon-noise-mitigation) below.
 
 **Weight update (gradient ascent on prediction accuracy):**
 
@@ -85,7 +85,8 @@ change between consecutive moves exceeds `TDLEAF_SCORE_CLIP_CP` centipawns — s
 
 where `∇_w d_t = d_t * (1 - d_t) / K * ∇_w score_t`.
 
-Defaults: `λ = 0.98`, `K = 240 cp` (both empirically calibrated from 1.6M self-play games — see
+Defaults: `λ = 0.98`, `K = 400 cp` (λ empirically calibrated from 1.6M self-play games;
+K raised from the calibrated 240 cp value to mitigate piece-value drift — see
 [Hyperparameter Calibration](#hyperparameter-calibration)).
 Gradient updates use Adam with per-weight LR decay; see [Adam Optimizer](#adam-optimizer-with-per-weight-lr-decay) below.
 
@@ -351,8 +352,8 @@ correction.
 
 | Layer | Update Rule | LR0 | Notes |
 |-------|-------------|-----|-------|
-| FC0/FC1/FC2 weights | Full Adam | `TDLEAF_ADAM_LR0 = 0.01` | Float shadow clamped to ±127 after each update |
-| FC0/FC1/FC2 biases  | Full Adam | `TDLEAF_ADAM_LR0 = 0.01` | |
+| FC0/FC1/FC2 weights | Full Adam | `TDLEAF_ADAM_LR0 = 0.10` | Float shadow clamped to ±127 after each update |
+| FC0/FC1/FC2 biases  | Full Adam | `TDLEAF_ADAM_LR0 = 0.10` | |
 | FT weights | RMSProp (per-weight v, no m) | `TDLEAF_ADAM_FT_LR0 = 1.0` | Sparse; higher LR than FC to compensate for fewer updates |
 | FT biases  | Full Adam | `TDLEAF_ADAM_FT_BIAS_LR0 = 0.01` | Reduced LR to prevent dying-ReLU — see below |
 | PSQT       | Full Adam | `TDLEAF_ADAM_PSQT_LR0 = 10.0` | Separate LR0 required — see below |
@@ -376,14 +377,15 @@ games with the FC LR, FT bias mean drifted to -291 with 100% of biases negative.
 `TDLEAF_ADAM_FT_BIAS_LR0 = 0.01` (10× slower than FC) limits drift to ~-30 over
 190k games — enough adaptation without racing ahead of FT weight convergence.
 
-### Why Float-Shadow Clamping for FC0/FC1?
+### Why Float-Shadow Clamping for FC0/FC1/FC2?
 
-FC0 and FC1 use int8 quantized inference weights clamped to ±127 on requantization.
-Without a matching clamp on the float shadow, Adam can push `w_f32` arbitrarily beyond
-±127 while the inference weight is stuck at the boundary.  These "zombie weights"
-accumulate gradient updates with zero effect on the network.  After each weight update,
-`w_f32 = clamp(w_f32, −127, 127)` keeps the float shadow aligned with the int8 inference
-space.  Not applied to FC2 (output layer, no activation clamping required).
+FC0, FC1, and FC2 all use int8 quantized inference weights clamped to ±127 on
+requantization.  Without a matching clamp on the float shadow, Adam can push
+`w_f32` arbitrarily beyond ±127 while the inference weight is stuck at the boundary.
+These "zombie weights" accumulate gradient updates with zero effect on the network.
+After each weight update, `w_f32 = clamp(w_f32, −127, 127)` keeps the float shadow
+aligned with the int8 inference space.  Originally not applied to FC2 (output layer);
+the FC2 clamp was added after the same shadow-drift behaviour was observed there.
 
 ### Persistent v and m
 
@@ -428,7 +430,7 @@ per-weight bias correction and monitoring.
 
 | Constant | Value | Notes |
 |----------|-------|-------|
-| `TDLEAF_ADAM_LR0` | 0.01 | Step size for FC layers (float weight units) |
+| `TDLEAF_ADAM_LR0` | 0.10 | Step size for FC layers (float weight units) |
 | `TDLEAF_ADAM_FT_LR0` | 1.0 | Step size for FT weights (sparse; need higher LR than dense FC) |
 | `TDLEAF_ADAM_FT_BIAS_LR0` | 0.01 | Step size for FT biases (10× slower than FC to prevent dying-ReLU) |
 | `TDLEAF_ADAM_PSQT_LR0` | 10.0 | Step size for PSQT (int32 scale; ~1000× FC) |
@@ -917,24 +919,27 @@ horizon — a tactic the current position's evaluator cannot see.  Treating that
 large score jump as a genuine evaluation signal distorts the gradient: the network
 is penalised for correctly evaluating a position it cannot see past.
 
-### Approach 1 — Score-change clipping (TDLEAF_SCORE_CLIP_CP)
+### Approach 1 — Score-change clipping (TDLEAF_SCORE_CLIP_PAWNS)
 
-When the white-POV score change between consecutive moves exceeds
-`TDLEAF_SCORE_CLIP_CP` (default 200 cp), the `d[t+1] - d[t]` contribution to the
-eligibility trace is scaled down *proportionally* so the effective change is capped
-at 200 cp-equivalent:
+The threshold is computed dynamically as
+`score_clip_cp = max(TDLEAF_SCORE_CLIP_PAWNS × value[PAWN], 200 cp)`
+(default `TDLEAF_SCORE_CLIP_PAWNS = 2.0`, so ~200 cp at the classical pawn value
+and tracking piece-value drift upward as `value[PAWN]` grows).  When the white-POV
+score change between consecutive moves exceeds `score_clip_cp`, the
+`d[t+1] - d[t]` contribution to the eligibility trace is scaled down
+*proportionally* so the effective change is capped at the threshold:
 
 ```
 delta_d  = d[t+1] - d[t]
 delta_cp = |score_white[t+1] - score_white[t]|
-if delta_cp > TDLEAF_SCORE_CLIP_CP:
-    delta_d *= TDLEAF_SCORE_CLIP_CP / delta_cp
+if delta_cp > score_clip_cp:
+    delta_d *= score_clip_cp / delta_cp
 e[t] = delta_d + λ * e[t+1]
 ```
 
 This preserves the *direction* of the update while reducing its magnitude when the
-score swing is large.  Set `TDLEAF_SCORE_CLIP_CP` to a very large value (e.g., 1e6)
-to disable this approach.
+score swing is large.  Set `TDLEAF_SCORE_CLIP_PAWNS` to a very large value (e.g.,
+1e4) to effectively disable this approach.
 
 ### Approach 2 — Iterative-deepening stability weighting (TDLEAF_ID_VAR_SIGMA2)
 
@@ -958,7 +963,7 @@ large value to disable this approach.
 
 | Hyperparameter | Default | Effect of increasing | Effect of decreasing |
 |----------------|---------|---------------------|---------------------|
-| `TDLEAF_SCORE_CLIP_CP` | 200 cp | Less clipping; more sensitive to large swings | More aggressive attenuation of large score changes |
+| `TDLEAF_SCORE_CLIP_PAWNS` | 2.0 (≥ 200 cp floor) | Less clipping; more sensitive to large swings | More aggressive attenuation of large score changes |
 | `TDLEAF_ID_VAR_SIGMA2` | 10 000 cp² | More tolerant of unstable ID scores | Stronger down-weighting of ID-unstable positions |
 
 Both approaches are active simultaneously by default.  Use the ablation plan in

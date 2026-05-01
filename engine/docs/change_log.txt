@@ -1,5 +1,34 @@
 Changes since 2017_12_24
 
+2026_05_01 -- code review fixes (5 issues from ultrareview):
+               * nnue.cpp nnue_write_nnue: null-check psqt_weights_f32 before
+                 baking piece_val into PSQT.  In a NNUE=1-only (non-TDLEAF)
+                 build the float shadow is never allocated, so --write-nnue
+                 segfaulted.  Falls back to writing the always-allocated int32
+                 psqt_weights array directly.
+               * nnue.cpp piece_val merge (nnue_save_fc_weights) and load
+                 (nnue_load_fc_weights): clamp piece_val_f32[pt] >= 0 after
+                 file merge / read.  The apply-step clamp could record a
+                 negative delta_piece_val[pt] that, under concurrent saves,
+                 produced a negative persisted value -- inverting material
+                 evaluation on every subsequent load (especially fatal for
+                 TDLEAF_READONLY validators that never re-clamp).
+               * tdleaf.cpp: floor score_clip_cp at 200 cp.  On
+                 --init-nnue-noprior bootstrap, value[PAWN] gets clamped to 1
+                 by nnue_extract_piece_values (zero PSQT, zero piece_val), so
+                 TDLEAF_SCORE_CLIP_PAWNS * value[PAWN] collapsed to 2 cp and
+                 attenuated the very TD signal noprior is meant to bootstrap
+                 piece values from.  Floor preserves pre-rename behaviour.
+               * scripts/analyze_calibration.py: pass active stages list to
+                 plot_calibration so the figure suptitle reflects --stage /
+                 --all-stages instead of the module-level DEFAULT_STAGES.
+               * docs: bring CLAUDE.md, TDLEAF.md, and SCRIPT_USE.md in line
+                 with current code -- TDLEAF_K=400, TDLEAF_ADAM_LR0=0.10,
+                 FC2 float-shadow clamping (no longer "not applied to FC2"),
+                 TDLEAF_SCORE_CLIP_CP -> TDLEAF_SCORE_CLIP_PAWNS rename plus
+                 the new dynamic threshold, and the s/r/f opponent menu
+                 (replacing stale [p] previous-checkpoint and [e] external).
+
 2026_05_01 -- search/move-gen: revert the 2026_04_18 value[] scaling of hard-coded
                score margins.  Rolled back search.cpp, search.h, moves.cpp,
                captures.cpp, and captchecks.cpp to the pre-bda3876 constants

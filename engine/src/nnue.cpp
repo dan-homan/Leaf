@@ -621,7 +621,11 @@ bool nnue_write_nnue(const char *dst_path)
     // After exporting a baked .nnue, piece_val in .tdleaf.bin should be zeroed
     // or the .tdleaf.bin should not be loaded alongside this .nnue.
     printf("NNUE: writing PSQT weights (baking piece_val)...\n");
-    {
+    if (psqt_weights_f32 == nullptr) {
+        // Non-TDLEAF build: float shadow never allocated.  Write the int32
+        // PSQT array directly (always allocated by nnue_alloc_arrays).
+        write_leb128_i32(dst, psqt_weights, (size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS);
+    } else {
         const size_t n_psqt = (size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS;
         int32_t *psqt_baked = new int32_t[n_psqt];
         const int PS_NB = 704;  // HalfKAv2_hm: 11 piece-square slots × 64 squares
@@ -2892,7 +2896,10 @@ bool nnue_save_fc_weights(const char *path)
                         if (fread(tmp_pv,  sizeof(float),    6, cur) == 6 &&
                             fread(tmp_pvc, sizeof(uint32_t), 6, cur) == 6) {
                             for (int pt = 0; pt < 6; pt++) {
-                                piece_val_f32[pt] = tmp_pv[pt] / TDLEAF_SCALE + delta_piece_val[pt];
+                                // Clamp ≥ 0: a negative merge result inverts material
+                                // evaluation (death spiral); see nnue_apply_gradients.
+                                piece_val_f32[pt] = std::max(0.0f,
+                                    tmp_pv[pt] / TDLEAF_SCALE + delta_piece_val[pt]);
                                 delta_piece_val[pt] = 0.0f;
                                 piece_val_cnt[pt] = tmp_pvc[pt] + delta_piece_val_cnt[pt];
                                 delta_piece_val_cnt[pt] = 0;
@@ -2907,7 +2914,8 @@ bool nnue_save_fc_weights(const char *path)
                             for (int pt = 0; pt < 6; pt++) {
                                 float sum = 0.0f; uint32_t cnt_sum = 0;
                                 for (int b = 0; b < NNUE_PSQT_BKTS; b++) { sum += tmp_pv[pt][b]; cnt_sum += tmp_pvc[pt][b]; }
-                                piece_val_f32[pt] = sum / NNUE_PSQT_BKTS / TDLEAF_SCALE + delta_piece_val[pt];
+                                piece_val_f32[pt] = std::max(0.0f,
+                                    sum / NNUE_PSQT_BKTS / TDLEAF_SCALE + delta_piece_val[pt]);
                                 delta_piece_val[pt] = 0.0f;
                                 piece_val_cnt[pt] = cnt_sum / NNUE_PSQT_BKTS + delta_piece_val_cnt[pt];
                                 delta_piece_val_cnt[pt] = 0;
@@ -3462,7 +3470,9 @@ bool nnue_load_fc_weights(const char *path)
             if (fread(tmp_pv,  sizeof(float),    6, f) == 6 &&
                 fread(tmp_pvc, sizeof(uint32_t), 6, f) == 6) {
                 for (int pt = 0; pt < 6; pt++) {
-                    piece_val_f32[pt] = tmp_pv[pt] / TDLEAF_SCALE;
+                    // Clamp ≥ 0: defensive against a corrupted file written
+                    // before the merge-side clamp existed.
+                    piece_val_f32[pt] = std::max(0.0f, tmp_pv[pt] / TDLEAF_SCALE);
                     piece_val_cnt[pt] = tmp_pvc[pt];
                 }
                 piece_val_active = true;
@@ -3475,7 +3485,7 @@ bool nnue_load_fc_weights(const char *path)
                 for (int pt = 0; pt < 6; pt++) {
                     float sum = 0.0f; uint32_t cnt_sum = 0;
                     for (int b = 0; b < NNUE_PSQT_BKTS; b++) { sum += tmp_pv[pt][b]; cnt_sum += tmp_pvc[pt][b]; }
-                    piece_val_f32[pt] = sum / NNUE_PSQT_BKTS / TDLEAF_SCALE;
+                    piece_val_f32[pt] = std::max(0.0f, sum / NNUE_PSQT_BKTS / TDLEAF_SCALE);
                     piece_val_cnt[pt] = cnt_sum / NNUE_PSQT_BKTS;
                 }
                 piece_val_active = true;
