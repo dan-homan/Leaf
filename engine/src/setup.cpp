@@ -27,8 +27,7 @@ uint64_t bishop_check_table[64];
 uint64_t knight_check_table[64];
 uint64_t slide_check_table[64];
 
-/* flag for logging */
-int logging = 0;
+// proto.logging is in ProtocolState proto (engine_globals.h / main.cpp)
 
 /* taxi-cab distance between squares */
 int taxi_cab[64][64];
@@ -62,8 +61,10 @@ void set_search_param()
  // Apply defaults (search.par is no longer used; all parameters
  // have sensible compile-time defaults and can be changed via
  // UCI options, xboard commands, or CLI flags).
- game.learn_bk = BOOK_LEARNING;
- game.knowledge_scale = CHESS_SKILL;
+ if (engine_cfg.book_file[0] == '\0')  strcpy(engine_cfg.book_file,  "main_bk.dat");
+ if (engine_cfg.start_book[0] == '\0') strcpy(engine_cfg.start_book, "start_bk.dat");
+ game.learn_bk = engine_cfg.book_learning;
+ game.knowledge_scale = engine_cfg.chess_skill;
  if(game.knowledge_scale < 1) game.knowledge_scale = 1;
  if(game.knowledge_scale > 100) game.knowledge_scale = 100;
 }
@@ -133,19 +134,19 @@ void set_score_value(char dummy[50], float val)
 {
 
    if(!strcmp(dummy, "NO_ROOT_LMR_SCORE")) {
-     NO_ROOT_LMR_SCORE = int(val);
+     search_cfg.no_root_lmr_score = int(val);
    } else if(!strcmp(dummy, "DRAW_SCORE")) {
-     DRAW_SCORE = val;
+     search_cfg.draw_score = val;
    } else if(!strcmp(dummy, "VAR1")) {
-     VAR1 = val;
+     search_cfg.var1 = val;
    } else if(!strcmp(dummy, "VAR2")) {
-     VAR2 = val;
+     search_cfg.var2 = val;
    } else if(!strcmp(dummy, "VAR3")) {
-     VAR3 = val;
+     search_cfg.var3 = val;
    } else if(!strcmp(dummy, "VAR4")) {
-     VAR4 = val;
+     search_cfg.var4 = val;
    } else if(!strcmp(dummy, "VERIFY_MARGIN")) {
-     VERIFY_MARGIN = int(val);
+     search_cfg.verify_margin = int(val);
    } else if(!strcmp(dummy, "PAWN_VALUE")) {
      value[PAWN] = int(val);
    } else if(!strcmp(dummy, "KING_VALUE")) {
@@ -249,19 +250,19 @@ void modify_score_value(char dummy[50], float val)
 {
 
    if(!strcmp(dummy, "NO_ROOT_LMR_SCORE")) {
-     NO_ROOT_LMR_SCORE += int(val);
+     search_cfg.no_root_lmr_score += int(val);
    } else if(!strcmp(dummy, "DRAW_SCORE")) {
-     DRAW_SCORE += val;
+     search_cfg.draw_score += val;
    } else if(!strcmp(dummy, "VAR1")) {
-     VAR1 += val;
+     search_cfg.var1 += val;
    } else if(!strcmp(dummy, "VAR2")) {
-     VAR2 += val;
+     search_cfg.var2 += val;
    } else if(!strcmp(dummy, "VAR3")) {
-     VAR3 += val;
+     search_cfg.var3 += val;
    } else if(!strcmp(dummy, "VAR4")) {
-     VAR4 += val;
+     search_cfg.var4 += val;
    } else if(!strcmp(dummy, "VERIFY_MARGIN")) {
-     VERIFY_MARGIN += int(val);
+     search_cfg.verify_margin += int(val);
    } else if(!strcmp(dummy, "PAWN_VALUE")) {
      value[PAWN] += int(val);
    } else if(!strcmp(dummy, "KING_VALUE")) {
@@ -439,19 +440,19 @@ float get_score_value(char dummy[50])
 {
 
    if(!strcmp(dummy, "NO_ROOT_LMR_SCORE")) {
-     return(NO_ROOT_LMR_SCORE);
+     return(search_cfg.no_root_lmr_score);
    } else if(!strcmp(dummy, "DRAW_SCORE")) {
-     return(DRAW_SCORE);
+     return(search_cfg.draw_score);
    } else if(!strcmp(dummy, "VAR1")) {
-     return(VAR1);
+     return(search_cfg.var1);
    } else if(!strcmp(dummy, "VAR2")) {
-     return(VAR2);
+     return(search_cfg.var2);
    } else if(!strcmp(dummy, "VAR3")) {
-     return(VAR3);
+     return(search_cfg.var3);
    } else if(!strcmp(dummy, "VAR4")) {
-     return(VAR4);
+     return(search_cfg.var4);
    } else if(!strcmp(dummy, "VERIFY_MARGIN")) {
-     return(VERIFY_MARGIN);
+     return(search_cfg.verify_margin);
    } else if(!strcmp(dummy, "NO_QCHECKS")) {
      return(NO_QCHECKS);
    } else if(!strcmp(dummy, "PAWN_VALUE")) {

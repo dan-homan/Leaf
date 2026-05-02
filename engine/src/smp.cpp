@@ -15,11 +15,9 @@
 #include "search.h"
 
 //-----------------------------------------------
-// Global variables to control SMP search
+// SMP search uses thread_cfg.threads and thread_cfg.log_lock
+// (defined in main.cpp as part of ThreadConfig thread_cfg)
 //-----------------------------------------------
-
-pthread_mutex_t log_lock;
-unsigned int THREADS = 1;
 
 //----------------------------------------------
 // Function to run daughter threads and call 
@@ -63,7 +61,7 @@ void *daughter_thread_search(void *id) {
   game.ts.tdata[tid].running = 1;
   game.ts.tdata[tid].quit_thread = 0;
 
-  // Write out a logfile string to indicate that
+  // Write out a proto.logfile string to indicate that
   //  this thread was created
   char wstring[50];
   snprintf(wstring, sizeof(wstring), "Creating Extra Thread tid=%d\n", int(tid));
@@ -189,7 +187,7 @@ int tree_search::search_threads(int alpha, int beta, int depth, int threads) {
       // display the results of switch
       if(tdata[0].g <= alpha) tdata[0].fail = -1;
       if(tdata[0].g >= beta) tdata[0].fail = 1;
-      if(post && !xboard) search_display(tdata[0].g);
+      if(proto.post && !proto.xboard) search_display(tdata[0].g);
       write_out("Replacing main thread with alternate thread\n");
       // only log fail highs or lows because exact scores will
       //  be displayed after the iteration (and this is the end
@@ -229,7 +227,7 @@ int tree_search::search_threads(int alpha, int beta, int depth, int threads) {
 	}
 	tdata[0].pc[0][pi].t = NOMOVE;
 	// display the results of switch
-	if(post && !xboard) search_display(tdata[0].n[0].best);
+	if(proto.post && !proto.xboard) search_display(tdata[0].n[0].best);
 	write_out("Replacing main thread with alternate thread at timeout\n");
 	log_search(tdata[0].n[0].best);
       }

@@ -1,4 +1,5 @@
 #include "../src/main.cpp"
+#include "../src/protocol.cpp"
 #include "../src/uci.cpp"
 #ifdef MAKE_GUI
 #include "../src/fltk_gui.cpp"
@@ -15,11 +16,13 @@
 #include "../src/score.cpp"
 #if NNUE
 #include "../src/nnue.cpp"
+#include "../src/nnue_io.cpp"
 #if NNUE_EMBED
 #include "../src/nnue_embed.cpp"
 #endif
 #endif
 #if TDLEAF
+#include "../src/nnue_training.cpp"
 #include "../src/tdleaf.cpp"
 #endif
 #include "../src/check.cpp"

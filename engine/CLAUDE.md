@@ -75,9 +75,10 @@ The `.nnue` network file and `.tdleaf.bin` weights file must reside in the same 
 
 ### Unity build (`src/Leaf.cc` include order)
 
-`main.cpp` → `uci.cpp` → `attacks.cpp` → `exmove.cpp` → `swap.cpp` → `moves.cpp` → `captures.cpp` →
+`main.cpp` → `protocol.cpp` → `uci.cpp` → `attacks.cpp` → `exmove.cpp` → `swap.cpp` → `moves.cpp` → `captures.cpp` →
 `captchecks.cpp` → `hash.cpp` → `smp.cpp` → `search.cpp` → `score.cpp` →
-`#if NNUE nnue.cpp` → `#if NNUE_EMBED nnue_embed.cpp` → `#if TDLEAF tdleaf.cpp` → `check.cpp` → `book.cpp` → `sort.cpp` →
+`#if NNUE nnue.cpp` → `#if NNUE nnue_io.cpp` → `#if NNUE_EMBED nnue_embed.cpp` →
+`#if TDLEAF nnue_training.cpp` → `#if TDLEAF tdleaf.cpp` → `check.cpp` → `book.cpp` → `sort.cpp` →
 `util.cpp` → `support.cpp` → `setup.cpp` → `game_rec.cpp` →
 `tree_search_functions.cpp`
 
@@ -88,11 +89,15 @@ errors (unknown types, undeclared identifiers).  These are expected and can be i
 
 | File | Role |
 |------|------|
-| `src/main.cpp` | Protocol detection, xboard/CECP loop, CLI loop, game loop, TDLeaf hooks (`tdleaf_record_ply`, `tdleaf_update_after_game`, `tdleaf_replay`) |
+| `src/main.cpp` | Protocol detection, xboard/CECP loop, CLI loop, game loop, TDLeaf hooks; defines grouped global state (`proto`, `engine_cfg`, `search_cfg`, `thread_cfg`) |
+| `src/protocol.cpp` | xboard/CECP and interactive CLI command dispatch (`parse_command`), interrupt polling (`inter`) |
 | `src/uci.cpp` | Full UCI implementation: I/O reader thread, command queue, `uci_loop()`, `uci_dispatch_go()`, `uci_set_position()`, `uci_check_interrupt()`, `uci_send_info()` |
+| `src/engine_globals.h` | Grouped global state structs: `ProtocolState proto`, `EngineConfig engine_cfg`, `SearchConfig search_cfg`, `ThreadConfig thread_cfg` |
 | `src/search.cpp` | PVS alpha-beta, null-move pruning, LMR, lazy SMP, iterative deepening; tracks `id_scores[]` for TDLeaf |
 | `src/score.cpp` | Classical hand-crafted eval + NNUE dispatch; NNUE/pawn/score hash probe/store |
-| `src/nnue.cpp` | NNUE forward pass (int8 inference + NEON), FP32 shadow weights, gradient accumulation, `.tdleaf.bin` I/O |
+| `src/nnue.cpp` | NNUE runtime: weight arrays, accumulator init/update/delta, int8 forward pass (SIMD) |
+| `src/nnue_io.cpp` | NNUE file I/O: `.nnue` load (file + embedded), LEB128, `nnue_write_nnue` |
+| `src/nnue_training.cpp` | TDLeaf training: FP32 shadow weights, gradients, Adam optimizer, `.tdleaf.bin` I/O (TDLEAF=1 only) |
 | `src/tdleaf.cpp` | PV walking, TD error computation (with score-change clipping + ID-stability weighting), gradient backprop |
 | `src/chess.h` | All major structs: `position`, `move`, `move_list`, `tree_search`, `game_rec` |
 | `src/define.h` | Compile-time constants and flag defaults (`NNUE`, `TDLEAF`, `MATERIAL_ONLY`, piece encodings, `MAXD`, `MAX_GAME_PLY`) |
