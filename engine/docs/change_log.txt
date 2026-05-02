@@ -1,5 +1,14 @@
 Changes since 2017_12_24
 
+2026_05_02 -- tdleaf: lower TDLEAF_K from 400 back down to 200 cp.  After
+               200k+ training games at K=400, piece values had converged to
+               roughly 2x their intended magnitude -- the larger sigmoid
+               temperature underweighted material differences in the gradient
+               signal, letting piece_val drift upward without the usual
+               feedback pressure.  Halving K (slightly below the MLE-fitted
+               240 cp optimum from stages 5-6) restored a balanced piece-value
+               spectrum while preserving probability calibration adequately.
+
 2026_05_01 -- code review fixes (5 issues from ultrareview):
                * nnue.cpp nnue_write_nnue: null-check psqt_weights_f32 before
                  baking piece_val into PSQT.  In a NNUE=1-only (non-TDLEAF)

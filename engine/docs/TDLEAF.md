@@ -63,7 +63,7 @@ For a game of T half-moves:
 
 - `d_t` = sigmoid of the **NNUE static evaluation at the PV leaf position** at ply t,
   from White's perspective:
-  `d_t = 1 / (1 + exp(-score_white_t / K))`, K = 400 cp.
+  `d_t = 1 / (1 + exp(-score_white_t / K))`, K = 200 cp.
 - `z` = game result from White's perspective: 1.0 = White wins, 0.5 = draw, 0.0 = Black wins.
 
 **Temporal difference errors (backward view):**
@@ -85,8 +85,9 @@ centipawns — see [Horizon Noise Mitigation](#horizon-noise-mitigation) below.
 
 where `∇_w d_t = d_t * (1 - d_t) / K * ∇_w score_t`.
 
-Defaults: `λ = 0.98`, `K = 400 cp` (λ empirically calibrated from 1.6M self-play games;
-K raised from the calibrated 240 cp value to mitigate piece-value drift — see
+Defaults: `λ = 0.98`, `K = 200 cp` (λ empirically calibrated from 1.6M self-play games;
+K lowered from the calibrated 240 cp value after 200k+ training games showed piece
+values converging ~2× too high at K = 400 cp — see
 [Hyperparameter Calibration](#hyperparameter-calibration)).
 Gradient updates use Adam with per-weight LR decay; see [Adam Optimizer](#adam-optimizer-with-per-weight-lr-decay) below.
 
@@ -850,6 +851,14 @@ The optimal K of ~239 cp was rounded to **240 cp**.  The earlier value of 290 cp
 fitted from a different training stage; as the network improved its evaluations became
 sharper, narrowing the effective sigmoid.  The reliability diagram confirms K=240
 produces well-calibrated win probabilities across the full score range.
+
+**Operational value (post-2026-05-02): `K = 200 cp`.** The MLE-optimal K=240 is a
+sigmoid-fit objective; it does not directly optimise piece-value stability under TDLeaf.
+After raising K to 400 cp briefly to fight piece-value drift, 200k+ training games
+showed piece values had converged ~2× too high, indicating the larger K underweighted
+material differences in the gradient signal.  Halving to K=200 (slightly below the MLE
+optimum) restored a balanced piece-value spectrum while preserving probability
+calibration adequately.
 
 ### Eligibility trace decay λ
 
