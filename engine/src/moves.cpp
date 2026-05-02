@@ -175,12 +175,10 @@ void position::add_move(int fsq, int tsq, move_list *list, char type, ts_thread_
   else { 
     if(rmove.t == list->mv[i].m.t) {                   // reply/counter move
       list->mv[i].score = 8000000;
-    } else if(tdata->killer1[wtm] == list->mv[i].m.t) { // killer 1
+    } else if(tdata->killer[tdata->current_ply][0] == list->mv[i].m.t) { // killer 1
       list->mv[i].score = 6000000;
-    } else if(tdata->killer2[wtm] == list->mv[i].m.t) { // killer 2
+    } else if(tdata->killer[tdata->current_ply][1] == list->mv[i].m.t) { // killer 2
       list->mv[i].score = 4000000;
-    } else if(tdata->killer3[wtm] == list->mv[i].m.t) {  // killer 3
-      list->mv[i].score = 2000000;
     } else {
       // give it a history score
       list->mv[i].score = tdata->history[sq[fsq]][tsq];
