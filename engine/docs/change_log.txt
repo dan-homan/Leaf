@@ -1,5 +1,196 @@
 Changes since 2017_12_24
 
+2026_05_02 -- tdleaf: lower TDLEAF_K from 400 back down to 200 cp.  After
+               200k+ training games at K=400, piece values had converged to
+               roughly 2x their intended magnitude -- the larger sigmoid
+               temperature underweighted material differences in the gradient
+               signal, letting piece_val drift upward without the usual
+               feedback pressure.  Halving K (slightly below the MLE-fitted
+               240 cp optimum from stages 5-6) restored a balanced piece-value
+               spectrum while preserving probability calibration adequately.
+
+2026_05_01 -- code review fixes (5 issues from ultrareview):
+               * nnue.cpp nnue_write_nnue: null-check psqt_weights_f32 before
+                 baking piece_val into PSQT.  In a NNUE=1-only (non-TDLEAF)
+                 build the float shadow is never allocated, so --write-nnue
+                 segfaulted.  Falls back to writing the always-allocated int32
+                 psqt_weights array directly.
+               * nnue.cpp piece_val merge (nnue_save_fc_weights) and load
+                 (nnue_load_fc_weights): clamp piece_val_f32[pt] >= 0 after
+                 file merge / read.  The apply-step clamp could record a
+                 negative delta_piece_val[pt] that, under concurrent saves,
+                 produced a negative persisted value -- inverting material
+                 evaluation on every subsequent load (especially fatal for
+                 TDLEAF_READONLY validators that never re-clamp).
+               * tdleaf.cpp: floor score_clip_cp at 200 cp.  On
+                 --init-nnue-noprior bootstrap, value[PAWN] gets clamped to 1
+                 by nnue_extract_piece_values (zero PSQT, zero piece_val), so
+                 TDLEAF_SCORE_CLIP_PAWNS * value[PAWN] collapsed to 2 cp and
+                 attenuated the very TD signal noprior is meant to bootstrap
+                 piece values from.  Floor preserves pre-rename behaviour.
+               * scripts/analyze_calibration.py: pass active stages list to
+                 plot_calibration so the figure suptitle reflects --stage /
+                 --all-stages instead of the module-level DEFAULT_STAGES.
+               * docs: bring CLAUDE.md, TDLEAF.md, and SCRIPT_USE.md in line
+                 with current code -- TDLEAF_K=400, TDLEAF_ADAM_LR0=0.10,
+                 FC2 float-shadow clamping (no longer "not applied to FC2"),
+                 TDLEAF_SCORE_CLIP_CP -> TDLEAF_SCORE_CLIP_PAWNS rename plus
+                 the new dynamic threshold, and the s/r/f opponent menu
+                 (replacing stale [p] previous-checkpoint and [e] external).
+
+2026_05_01 -- search/move-gen: revert the 2026_04_18 value[] scaling of hard-coded
+               score margins.  Rolled back search.cpp, search.h, moves.cpp,
+               captures.cpp, and captchecks.cpp to the pre-bda3876 constants
+               (aspiration window 500/5000, null-move thresholds beta+100/+400,
+               LMP factor 200, index scaler /100, LMR threshold alpha-350,
+               MARGIN(x)=50+100x^2, minor-exchange tolerance +50, capture
+               placeholder -100, captcheck placeholder -123, promotion bonus
+               +1000, rank-7 pawn bonus 35*gstage).  Reason: the value[]
+               scaling appeared to cause a play-strength regression.  The FC
+               LR change and probe.cpp removal from that commit are retained.
+
+2026_05_01 -- tdleaf: raise sigmoid temperature TDLEAF_K from 240 to 400 cp
+               to mitigate piece-value drift observed in recent training.
+               Bump TDLEAF_ADAM_LR0 (FC layers) from 0.05 to 0.10.  Reduce
+               TDLEAF_BATCH_SIZE from 8 to 4 (more frequent Adam steps per
+               game count).
+
+2026_04_18 -- tdleaf: revert TDLEAF_REPLAY_K default to 0.
+               With the LR-scale 0.3 mitigation above, K=2 recovered roughly
+               100 Elo versus the earlier 350 Elo gap but still trails K=0 by
+               ~250 Elo.  Residual shortfall is structural: the 8-game ring
+               buffer is too small for epoch-style replay (FC overfits), and
+               FT/PSQT/ft_bias cannot participate in replay at all because
+               they feed into nnue_init_accumulator.  Proper fix is a larger
+               variable-length buffer with random sampling, which is future
+               work.  Shipping default flipped back to 0; replay infrastructure
+               (TDLEAF_REPLAY_K, TDLEAF_REPLAY_BUF_N, TDLEAF_REPLAY_LR_SCALE,
+               replay_mode gating) retained for that future exploration.
+
+2026_04_18 -- tdleaf: add replay LR scale to soften overfitting to the small buffer.
+               Observed: with the replay_mode fix (piece_val now updated in replay),
+               TDLEAF_REPLAY_K=2 still trails K=0 by ~350 Elo.  Likely cause: the
+               replay loop iterates all games in the ring buffer every pass, so
+               the same ≤8 games drive (1+K) FC Adam steps per live batch — plain
+               epoch training on a tiny dataset, which FC (~17k params) easily
+               overfits.  Additionally, FT/PSQT/ft_bias are fundamentally
+               excluded from replay (they feed into nnue_init_accumulator), so
+               FC drifts faster than its own feature backbone can support.
+               Mitigation: new TDLEAF_REPLAY_LR_SCALE (default 0.3) multiplies
+               all category LRs during replay-pass Adam steps via a new
+               lr_scale parameter on nnue_apply_gradients().  Adam is
+               scale-invariant in the gradient, so LR is the only effective
+               knob for softening replay updates.  Keeps replay as gentle
+               refinement rather than full-weight retraining on recent games.
+
+2026_04_18 -- tdleaf: narrow fc_only → replay_mode; allow piece_val updates in replay.
+               In nnue_accumulate_gradients the replay-path early return used to
+               skip four gradient categories: FT weights, PSQT, FT biases, and
+               dense piece_val.  The first three must be skipped during replay
+               because tdleaf_refresh_scores() rebuilds accumulators from stored
+               positions against current FT weights (via nnue_init_accumulator),
+               so updating the accumulator-feeding parameters would create a
+               positive feedback loop.  piece_val, however, is an output-side
+               additive term (nnue_dense_piece_val is added to the NN output and
+               is NOT read by nnue_init_accumulator), so excluding it was
+               overly conservative and created a credit-attribution failure:
+               FC layers would absorb material-correlated error during replay
+               passes, shrinking the residual TD error that reached piece_val
+               on the live pass, so piece_val never converged to correct values.
+               User-observed symptom with TDLEAF_REPLAY_K=2: engine failed to
+               learn even basic piece values.
+               Fix: rename fc_only → replay_mode throughout; move piece_val
+               gradient accumulation above the early-return guard so it runs
+               in both live and replay paths.
+
+2026_04_18 -- tdleaf: mitigate occasional large-regression events during learning.
+               (1) Adam step clip: the unit-less Adam step m_hat/sqrt(v_hat) (or
+               g/sqrt(v_hat) for the RMSProp FT path) is now bounded by
+               TDLEAF_ADAM_STEP_CLIP (= 3.0) before the LR multiply.  Targets the
+               rare-feature pathology where a low running v makes a normal
+               gradient produce an oversized step.  Applied uniformly to FC,
+               FT weights, FT biases, PSQT, and piece_val because Adam's step
+               is scale-normalised by design.
+               (2) Step-clip telemetry: each call to nnue_apply_gradients()
+               appends one line to <exec_path>tdleaf_telemetry.log with per-
+               category max |step| and clip count for that batch, then
+               resets.  Writes to a file (not stderr) because cutechess-cli
+               captures engine stderr internally.  Single fprintf + fflush
+               per line; Linux guarantees atomic appends up to PIPE_BUF
+               (4 KB), so line granularity is preserved when multiple
+               training engines share the same log path.  Disabled by
+               default; compile with TDLEAF_LOG_STEP_CLIPS=1 to enable
+               (for diagnosing clip activity during training).
+               (3) Batch size bumped from 4 → 8 games to further dilute the
+               contribution of any single pathological game.
+               (4) TDLEAF_SCORE_CLIP_CP (200.0) renamed to TDLEAF_SCORE_CLIP_PAWNS
+               (2.0) and evaluated at the call site as PAWNS × value[PAWN], so
+               the TD-error score-change threshold tracks piece-value drift.
+
+2026_04_18 -- search/move-gen: scale hard-coded score margins to value[].
+               search.cpp aspiration window (500/5000), null-move reduction
+               thresholds (beta+100, beta+400), LMP factor (200), index scaler
+               (/100), LMR threshold (alpha-350), and rank-7 pawn bonus
+               (35*gstage) now scale with value[PAWN] or (value[QUEEN]-value[PAWN]).
+               search.h MARGIN(x) macro scales with value[PAWN].
+               moves.cpp minor-exchange tolerance (+50) replaced with
+               (value[ROOK]-value[BISHOP]).  captures.cpp placeholder (-100)
+               and promotion bonus (+1000), captchecks.cpp placeholder (-123)
+               and promotion score (+1000), and the 35*gstage rank-7 bonus in
+               all three files now scale to value[].  Keeps move ordering and
+               pruning heuristics consistent as piece values drift under TDLeaf.
+
+2026_04_17 -- tdleaf: add source-.nnue content-hash check to .tdleaf.bin (v10 format).
+               At .nnue load/init, FNV-1a is computed over the FT weight bytes and
+               stored in nnue_content_hash.  On .tdleaf.bin save the hash is written
+               into the header (magic + version + content_hash + rest); on load the
+               stored hash is compared against the currently-loaded .nnue's hash, and
+               the file is refused if they differ.  The same check guards the merge-
+               read phase of nnue_save_fc_weights(), so a concurrent worker running
+               against a different .nnue cannot stomp on another worker's weights.
+               v5-v9 files have no hash and are accepted without a check (legacy);
+               they are promoted to v10 on the next save.  --init-nnue fingerprints
+               the freshly-initialised FT weights so the companion .tdleaf.bin is
+               born consistent.  Fixes a silent-corruption class where the user
+               swapped the .nnue out from under an existing .tdleaf.bin.
+
+2026_04_16 -- tdleaf: simplify piece_val from 6×8 floats (per piece × per PSQT bucket)
+               to 6 floats (one per piece type).  Bucket variation is encoded solely in
+               PSQT.  Reduces Adam state from 48 → 6 scalars; gradient signal per
+               parameter is 8× stronger; baking and extraction are simpler.
+               .tdleaf.bin bumped to v9.  Backward-compatible load of v5–v8:
+               old piece_val[6][8] is averaged to piece_val[6]; old Adam v[6][8] is
+               max-merged; old Adam m[6][8] is averaged.  v8 files were incorrectly
+               rejected as unsupported — fixed.
+             nnue: add nnue_extract_piece_values().  Called at startup (after .nnue and
+               .tdleaf.bin are loaded), reads PSQT weights + piece_val, averages per
+               piece type, and overwrites value[1..5] in score.h with the result in
+               centipawns.  Also called (silently) after every piece_val Adam step so
+               that value[] stays current throughout a training session without requiring
+               a restart.  Search heuristics (SEE, MVV-LVA, LMR, futility pruning) now
+               always use NNUE-derived material values — no search code changes needed.
+             nnue: nnue_write_nnue() now bakes piece_val into exported PSQT so checkpoint
+               .nnue files are self-contained.  Own-piece features receive +piece_val×0.5,
+               opponent features receive −piece_val×0.5 (the ÷2 matches the /2 in the
+               PSQT scoring formula).  Training continues against the un-baked original
+               .nnue + .tdleaf.bin; only the exported checkpoint is baked.
+             tdleaf: raise TDLEAF_ADAM_PSQT_LR0 from 1.6 to 10.0 and set
+               TDLEAF_ADAM_PV_LR0 to 50.0 (was 1.6; briefly 100.0 during initial
+               convergence testing).  Both parameters are at int32 scale (~36 000 std)
+               not int8 scale; the higher LR0 values give comparable effective centipawn
+               step sizes to FC layers at int8 scale.
+
+2026_04_14 -- tdleaf: update sigmoid temperature K from 290 to 240 cp and collapse
+               dual-lambda scheme (LAMBDA_DECISIVE=0.8, LAMBDA_DRAW=0.5) to a single
+               TDLEAF_LAMBDA=0.98.  Both changes are data-driven from 1.6M self-play games
+               (nn-fresh-260410, stages 5–6, ~10M positions):
+               K: MLE optimum is 239 cp (prev. 290 cp fitted from an earlier training stage;
+                  the trained network produces sharper, better-calibrated scores).
+               λ: even-lag autocorrelation of d_t gives λ≈0.985 for both decisive and draw
+                  games; d_t-vs-result decay gives λ≈0.970–0.986.  The decisive/draw split
+                  offers no empirical benefit — both game types have the same temporal
+                  correlation structure.  Rounded to λ=0.98.
+
 2026_04_13 -- bugfix: fix UCI repetition detection.  uci_set_position() recorded position
                hashes BEFORE exec_move (pre-move), while xboard's make_move() records them
                AFTER (post-move).  The duplicate startpos entry at plist[0]/plist[1] shifted

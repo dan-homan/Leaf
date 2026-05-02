@@ -86,6 +86,14 @@ void nnue_alloc_arrays();
 // Load a HalfKAv2_hm .nnue file. Returns true on success.
 bool nnue_load(const char *path);
 
+// Extract average piece values from loaded PSQT (+ piece_val correction if TDLEAF)
+// and overwrite value[1..5] in score.h with the result in centipawns.
+// Call after nnue_load() and, in TDLEAF builds, after nnue_load_fc_weights().
+// No-op if nnue_available is false.
+// verbose=true (default) prints the extracted values; pass false to suppress
+// output when called automatically after each training batch.
+void nnue_extract_piece_values(bool verbose = true);
+
 // Load from an in-memory buffer (for embedded nets via incbin).
 bool nnue_load_from_memory(const uint8_t *data, size_t size);
 
@@ -173,14 +181,22 @@ void nnue_forward_fp32(const int16_t acc[2][NNUE_HALF_DIMS],
 
 // Accumulate per-weight gradients for one position into the static grad arrays.
 // grad_scale = alpha * e_t * sigmoid_gradient — applied inside.
+// replay_mode: skip parameters that feed back into nnue_init_accumulator
+// (FT weights, PSQT, FT biases).  FC weights and piece_val are still updated
+// because they do not feed into accumulator rebuilds.  Used by replay passes
+// where accumulators are re-derived from stored positions against current FT.
 void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
-                               bool fc_only = false);
+                               bool replay_mode = false);
 
 // Clip gradients by global L2 norm.  Returns pre-clip norm (0 if disabled).
 float nnue_clip_gradients(float max_norm);
 
 // Apply accumulated gradients (zero them afterwards).
-void nnue_apply_gradients();
+// lr_scale multiplies all category LRs (fc/ft/ft_bias/psqt/piece_val) before
+// the Adam step.  Replay passes pass <1.0 to reduce overfitting to the small
+// replay buffer.  Adam is scale-invariant w.r.t. the gradient, so the LR is
+// the only effective knob for softening replay updates.
+void nnue_apply_gradients(float lr_scale = 1.0f);
 
 // Requantize FP32 weights → int8 arrays used by the live forward pass.
 // Must be called after nnue_apply_gradients().  Also clears the score hash.

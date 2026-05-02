@@ -77,6 +77,7 @@ etc.) without manual `dir=` configuration.
 | `--openings FILE` | — | Openings file: `.epd`, `.pgn`, or `.bin` (polyglot book) |
 | `--no-repeat` | off | Play each opening once (`-rounds N`, no `-games 2 -repeat`).  Increases position diversity; recommended for symmetric self-play. |
 | `--noswap` | off | Pass `-noswap` to cutechess-cli; engine1 always plays white.  Off by default (correct for training). |
+| `--error-log FILE` | — | Append cutechess-cli stderr (and inherited engine stderr) to FILE.  Captures per-batch `[tdleaf step-clip]` telemetry from all concurrent training engines in one file; lines are atomic per `fprintf` (<4KB), so interleaving is line-granular. |
 
 When more than one opponent is supplied the script enters **gauntlet mode** and
 prints a summary table (Opponent, Games, W, D, L, Score%, Elo diff) at the end.
@@ -195,8 +196,8 @@ land in `learn/`.
 > `make_move()`, which is only reached in the xboard game loop.  Matches driven
 > through a UCI GUI will not update any weights even if the binary was compiled
 > with `TDLEAF=1`.  `training_run.py` automatically passes `--proto1 xboard`
-> for the learner and `--proto2 xboard` for Leaf opponents (self-play,
-> checkpoint, read-only) or `--proto2 uci` for external engines.
+> for the learner and selects the opponent protocol per fixed engine (xboard
+> for Leaf binaries, the engine's own protocol for external executables).
 
 ```sh
 cd learn/
@@ -209,21 +210,23 @@ python3 training_run.py
    (classical material prior or uniform 100cp via `--init-nnue-noprior`)
 2. **Opponent roster** — build a rotation of one or more opponent types:
    - `[s]` Self-play — both `_a` and `_b` instances learn (symmetric)
-   - `[p]` Previous checkpoint — learner vs. its own recent snapshot (read-only)
-   - `[e]` External engine — learner vs. external UCI engine; shows a numbered
-     list of engines discovered from `tools/engines/`, or enter a custom path
+   - `[r]` Read-only mirror — learner vs. a TDLEAF_READONLY copy of itself,
+     frozen at the start of each rotation segment
+   - `[f]` Fixed engine — any Leaf binary or external executable; presents a
+     numbered list of engines discovered under `tools/engines/`, plus the
+     option to enter a custom path
 
-   When the roster has multiple entries (or includes `prev-checkpoint`), the user
-   sets a **rotation interval** — games are split into segments of that many games,
-   cycling through the roster.  A `.nnue` checkpoint is exported at every rotation
-   boundary.  The `prev-checkpoint` opponent always loads the most recently exported
-   checkpoint (or the base net for the first segment).
+   When the roster has multiple entries (or includes a read-only mirror), the
+   user sets a **rotation interval** — games are split into segments of that
+   many games, cycling through the roster.  A `.nnue` checkpoint is exported at
+   every rotation boundary.  The read-only mirror loads the most recently
+   exported checkpoint (or the base net for the first segment).
 3. **Train-validate loop** — optional; see below
 4. **Build** — compiles only the binaries the roster requires:
    - Learner (`_a`, TDLEAF=1) — always built
    - Self-play partner (`_b`, TDLEAF=1) — built if roster includes self-play
-   - Checkpoint opponent (`_ro`, NNUE-only, no TDLEAF) — built with a separate
-     `NNUE_NET` so its `.nnue` can be swapped at rotation boundaries
+   - Read-only mirror (`_ro`, TDLEAF_READONLY=1) — built if roster includes
+     a read-only mirror; loads weights but skips updates
 5. **Continuity** — continue from existing `.tdleaf.bin` or start fresh
 6. **Match parameters** — TC, concurrency, wait, opening selection, per-engine
    depth limits; per-engine TCs (`--tc1` / `--tc2`) when the opponent runs at a
@@ -259,7 +262,7 @@ automatically on the first save.
 **Self-play opening diversity:** when the current opponent segment is symmetric
 self-play (both engines learn), `training_run.py` automatically passes `--no-repeat`
 to `match.py` so each opening is played once rather than twice, maximising the variety
-of positions seen per N games.  Non-self-play segments (prev-checkpoint, external
+of positions seen per N games.  Non-self-play segments (read-only mirror, fixed
 engine) retain `-games 2 -repeat` for fairer W/L/D statistics.
 
 ### Train-validate loop
@@ -322,17 +325,28 @@ cd learn/
 python3 compare_nnue_learning.py nn-fresh-260309.nnue nn-fresh-260309.tdleaf.bin
 ```
 
-Produces a four-page matplotlib figure:
+Also prints a console summary of weight changes, then produces a four-page matplotlib figure:
 
+**Console output:**
+- FC layer change table (% changed, Δ range, mean ± std), per-stack FC1 breakdown,
+  update count summary
+- FT / PSQT statistics (rows trained, weight range, update counts, per-bucket Δ table)
+- Dense piece values table (centipawns per piece type, update counts)
+- Adam optimizer state (t_adam, v/m/FT-v loaded flags)
+
+**Matplotlib pages:**
 - **Page 1 — FC weights**: FC0/FC1/FC2 weight distributions (baseline vs learned),
   per-output delta histograms, per-stack % changed + max |Δ|
 - **Page 2 — FC biases**: FC0/FC1/FC2 bias distributions (baseline vs learned, int32),
   delta histograms, per-stack scatter of individual Δ values (every bias visible so
   no outlier can hide in an aggregate)
-- **Page 3 — Feature transformer**: FT bias distributions (baseline vs learned, v4
+- **Page 3 — Feature transformer**: FT bias distributions (baseline vs learned, v4+
   `.tdleaf.bin` only), FT weight distributions, delta and update counts
 - **Page 4 — PSQT**: baseline vs learned distributions, delta histogram,
   per-bucket mean delta bar chart ±1σ
+
+Supports `.tdleaf.bin` versions 2–9.  V9 stores `piece_val[6]` (one value per piece
+type); V5–V8 stored `piece_val[6][8]` (per bucket), which is averaged on read.
 
 Optional flags:
 
@@ -614,3 +628,97 @@ python3 scripts/reset_adam.py learn/nn-fresh.tdleaf.bin --out learn/nn-fresh-res
 | `file` (positional) | *(required)* | `.tdleaf.bin` file to modify |
 | `--decay F` | 0 (full zero) | Multiply v and m by F instead of zeroing (0 < F < 1) |
 | `--out PATH` | *(overwrite input)* | Write result to PATH instead of overwriting |
+
+---
+
+## extract_positions.py
+
+Stream Leaf self-play PGN files and emit a per-position parquet dataset for
+calibration analysis.  Scores are read from inline move comments (`{+1.23/6 0.01s}`),
+converted to centipawns from the White perspective, and written alongside the game
+outcome and ply metadata.  Mate scores are capped at ±2000 cp.
+
+The output parquet is the input for `analyze_calibration.py`.
+
+```sh
+# Default: sample ~200K games from learn/pgn/nn-fresh-260410/
+python3 scripts/extract_positions.py
+
+# Explicit paths and options
+python3 scripts/extract_positions.py \
+    --pgn-dir  learn/pgn/nn-fresh-260410 \
+    --out      learn/positions.parquet \
+    --max-games 200000 \
+    --min-plies 8 \
+    --seed 42
+```
+
+### Output columns
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `game_id` | int32 | Sequential game counter across all files |
+| `training_stage` | int8 | 0=untrained … 6=1.5M-game-trained (inferred from filename) |
+| `ply` | int16 | 0-based ply index (0 = White's first move) |
+| `white_score_cp` | int16 | Eval from White's POV, centipawns, capped ±2000 |
+| `result` | float32 | Game result from White's POV: 1.0 / 0.5 / 0.0 |
+| `n_plies` | int16 | Total plies in the game |
+
+### Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--pgn-dir PATH` | `learn/pgn/nn-fresh-260410` | Directory containing `.pgn` files |
+| `--out PATH` | `learn/positions.parquet` | Output parquet file |
+| `--max-games N` | 200000 | Approximate number of games to sample (0 = all ~1.6M) |
+| `--min-plies N` | 8 | Skip games shorter than this (matches `TDLEAF_MIN_PLIES`) |
+| `--seed N` | 42 | Random seed for game sampling |
+
+---
+
+## analyze_calibration.py
+
+Calibrate TDLeaf hyperparameters from the per-position parquet produced by
+`extract_positions.py`.  Implements two analyses:
+
+**Goal 1A — Sigmoid temperature K:** MLE search for the K that maximises
+log-likelihood of game outcomes under `P(White wins) = σ(score / K)`.  Produces
+an NLL-vs-K curve, a reliability diagram, and a sigmoid comparison plot.
+
+**Goal 2A — Lambda decay:** Autocorrelation of `d_t = σ(score / K)` vs lag,
+split by decisive/draw games.  Even-lag pairs (same side-to-move) remove the
+ply-alternation oscillation.  Also computes `corr(d_t, result)` vs distance to
+game end.  Fits `λ^k` to both curves.
+
+```sh
+# Default: stages 5–6, max-lag 60, output to learn/calibration_plots/
+python3 scripts/analyze_calibration.py
+
+# Explicit options
+python3 scripts/analyze_calibration.py \
+    --input   learn/positions.parquet \
+    --out-dir learn/calibration_plots \
+    --stage 5 6 \
+    --max-lag 60
+
+# Include all training stages (shows how K and λ evolve over training)
+python3 scripts/analyze_calibration.py --all-stages
+```
+
+### Output files
+
+| File | Contents |
+|------|----------|
+| `calibration_K.png` | NLL vs K, reliability diagram, sigmoid comparison |
+| `lambda_decay.png` | 4-panel: full/even-lag autocorr, full/even-parity d_t-vs-result |
+| `summary.txt` | K_opt, delta from current, Brier scores, fitted λ values (both methods) |
+
+### Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--input PATH` | `learn/positions.parquet` | Parquet file from `extract_positions.py` |
+| `--out-dir PATH` | `learn/calibration_plots` | Output directory for plots and summary |
+| `--stage N [N …]` | `5 6` | Training stage(s) to include in analysis |
+| `--all-stages` | off | Include all stages (overrides `--stage`) |
+| `--max-lag N` | 60 | Maximum lag for autocorrelation plots |

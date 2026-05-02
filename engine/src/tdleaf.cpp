@@ -8,9 +8,15 @@
 #include <cmath>
 #include <cstring>
 #include <cstdio>
+#include <algorithm>
 #include "chess.h"
 #include "nnue.h"
 #include "tdleaf.h"
+
+// value[] lives in score.h (included earlier in the unity build).  Declared
+// extern here so TDLEAF_SCORE_CLIP_PAWNS × value[PAWN] can be evaluated at
+// runtime — the threshold tracks piece-value drift under TDLeaf.
+extern int value[7];
 
 // ---------------------------------------------------------------------------
 // tdleaf_record_ply — walk the PV to the leaf, then snapshot its accumulator
@@ -115,7 +121,7 @@ void tdleaf_record_ply(TDGameRecord &rec,
 // Does NOT apply or save.  Called by both tdleaf_update_after_game and replay.
 // ---------------------------------------------------------------------------
 static void tdleaf_accumulate_game(TDGameRecord &rec, float result,
-                                   bool fc_only = false)
+                                   bool replay_mode = false)
 {
     int T = rec.n_plies;
 
@@ -129,8 +135,13 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result,
         d[t] = 1.0f / (1.0f + expf(-score_w_cp[t] / TDLEAF_K));
     }
 
-    // 2. Compute TD errors backward (asymmetric lambda: decisive vs draw)
-    const float lambda = (result == 0.5f) ? TDLEAF_LAMBDA_DRAW : TDLEAF_LAMBDA_DECISIVE;
+    // 2. Compute TD errors backward
+    const float lambda = TDLEAF_LAMBDA;
+    // Floor at 200 cp so --init-nnue-noprior bootstrap (where value[PAWN] gets
+    // clamped to 1 by nnue_extract_piece_values when PSQT and piece_val are
+    // both zeroed) doesn't collapse the threshold to ~2 cp and gut the TD signal.
+    const float score_clip_cp = std::max(
+        TDLEAF_SCORE_CLIP_PAWNS * (float)value[PAWN], 200.0f);
 
     static float e[MAX_GAME_PLY];
     e[T - 1] = result - d[T - 1];
@@ -138,8 +149,8 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result,
         float delta_d  = d[t + 1] - d[t];
 
         float delta_cp = fabsf(score_w_cp[t + 1] - score_w_cp[t]);
-        if (delta_cp > TDLEAF_SCORE_CLIP_CP && delta_cp > 0.0f)
-            delta_d *= TDLEAF_SCORE_CLIP_CP / delta_cp;
+        if (delta_cp > score_clip_cp && delta_cp > 0.0f)
+            delta_d *= score_clip_cp / delta_cp;
         e[t] = delta_d + lambda * e[t + 1];
     }
 
@@ -171,7 +182,7 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result,
             act.piece_count_diff[pt - 1] = (int8_t)(rec.plies[t].pos.plist[stm_p][pt][0]
                                                    - rec.plies[t].pos.plist[stm_p ^ 1][pt][0]);
 
-        nnue_accumulate_gradients(act, grad_scale, fc_only);
+        nnue_accumulate_gradients(act, grad_scale, replay_mode);
     }
 }
 
@@ -307,14 +318,18 @@ void tdleaf_replay(TDGameRecord &rec, float result, const char *save_path)
 
             // Refresh scores from current weights before forming d[t].
             tdleaf_refresh_scores(entry.rec);
-            // FC-only: suppress FT/PSQT/piece_val gradients during replay to
-            // avoid feedback loop (rebuilt accumulators reflect current FT weights).
-            tdleaf_accumulate_game(entry.rec, entry.result, /*fc_only=*/true);
+            // replay_mode: suppress FT/PSQT/FT-bias gradients (those feed into
+            // nnue_init_accumulator so updating them would race the next
+            // refresh).  FC weights and piece_val are still updated because
+            // they do not feed into the accumulator rebuild.
+            tdleaf_accumulate_game(entry.rec, entry.result, /*replay_mode=*/true);
         }
         // Apply the summed replay gradients, then requantize so the next
         // pass's tdleaf_refresh_scores() sees the updated weights.
+        // LR scaled down via TDLEAF_REPLAY_LR_SCALE to soften overfitting to
+        // the small replay buffer.
         nnue_clip_gradients(TDLEAF_GRAD_CLIP_NORM);
-        nnue_apply_gradients();
+        nnue_apply_gradients(TDLEAF_REPLAY_LR_SCALE);
         nnue_requantize_fc();
     }
 

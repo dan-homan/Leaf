@@ -91,6 +91,15 @@
  #define TDLEAF_READONLY 0
 #endif
 
+// TDLEAF_LOG_STEP_CLIPS: append one line per Adam batch to
+// <exec_path>tdleaf_telemetry.log recording per-category max |step| and clip
+// counts.  Disabled by default; set to 1 to enable (for diagnosing clip
+// activity during training).
+// Compile with -D TDLEAF_LOG_STEP_CLIPS=1 to enable.
+#ifndef TDLEAF_LOG_STEP_CLIPS
+ #define TDLEAF_LOG_STEP_CLIPS 0
+#endif
+
 // epoch-based replay: after each game, run TDLEAF_REPLAY_K additional passes
 // over the last TDLEAF_REPLAY_BUF_N completed games (ring buffer).
 // Score_stm is refreshed from stored accumulators against current weights each

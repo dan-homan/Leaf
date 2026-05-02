@@ -233,6 +233,12 @@ int main(int argc, char *argv[])
 #endif
     }
   }
+#if NNUE
+  // Extract PSQT-derived piece values and update the search's value[] array.
+  // Must be called after both nnue_load() and nnue_load_fc_weights() complete
+  // so that any piece_val correction from .tdleaf.bin is included.
+  if (nnue_available) nnue_extract_piece_values();
+#endif
 #endif
 
 #if NNUE

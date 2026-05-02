@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
 """
-compare_fc_weights.py — compare FC layers from a .tdleaf.bin file against the
-original .nnue weights; also summarise FT and PSQT layers (now trainable by TDLeaf).
+compare_nnue_learning.py — compare FC, FT, PSQT, and piece_val layers from a
+.tdleaf.bin file against the original .nnue baseline weights.
 
-Usage (from run/ directory):
-    python3 compare_fc_weights.py nn-ad9b42354671.nnue nn-ad9b42354671.tdleaf.bin
-    python3 compare_fc_weights.py nn-ad9b42354671.nnue nn-ad9b42354671.tdleaf.bin --save
-    python3 compare_fc_weights.py nn-ad9b42354671.nnue nn-ad9b42354671.tdleaf.bin --ft-weights
+Usage (from learn/ or run/ directory):
+    python3 compare_nnue_learning.py nn-fresh.nnue nn-fresh.tdleaf.bin
+    python3 compare_nnue_learning.py nn-fresh.nnue nn-fresh.tdleaf.bin --save
+    python3 compare_nnue_learning.py nn-fresh.nnue nn-fresh.tdleaf.bin --ft-weights
+
+Supports .tdleaf.bin versions 2–10.  Version 10 prepends a 4-byte FNV-1a
+hash of the source .nnue FT weights immediately after the version field
+(for load-time pairing checks in the engine; this script just skips it).
+Version 9 changed piece_val from [6][8]
+(one per piece type × 8 PSQT buckets) to [6] (one per piece type); older files
+are transparently averaged on read.
 """
 
 import argparse
@@ -49,6 +56,8 @@ TDLEAF_VERSION5 = 5            # adds dense piece value section
 TDLEAF_VERSION6 = 6            # adds Adam v (second moment) section
 TDLEAF_VERSION7 = 7            # adds Adam m (first moment) section
 TDLEAF_VERSION8 = 8            # adds sparse FT v (second moment) section
+TDLEAF_VERSION9 = 9            # piece_val simplified: [6][8] → [6] (one value per piece type)
+TDLEAF_VERSION10 = 10          # adds 4-byte source-.nnue content hash after magic+version
 TDLEAF_SCALE    = 128.0        # v2+: file stores w_f32 × TDLEAF_SCALE
 
 # ---------------------------------------------------------------------------
@@ -274,7 +283,11 @@ def read_tdleaf_fc(path):
         if magic != TDLEAF_MAGIC:
             sys.exit(f"Error: bad magic {magic:#010x} in {path}")
 
-        if version in (TDLEAF_VERSION2, TDLEAF_VERSION3, TDLEAF_VERSION4, TDLEAF_VERSION5, TDLEAF_VERSION6, TDLEAF_VERSION7, TDLEAF_VERSION8):
+        # v10+: source-.nnue content hash — read and stash, not used here.
+        if version >= TDLEAF_VERSION10:
+            data['nnue_content_hash'] = struct.unpack('<I', f.read(4))[0]
+
+        if version in (TDLEAF_VERSION2, TDLEAF_VERSION3, TDLEAF_VERSION4, TDLEAF_VERSION5, TDLEAF_VERSION6, TDLEAF_VERSION7, TDLEAF_VERSION8, TDLEAF_VERSION9, TDLEAF_VERSION10):
             data['_has_counts'] = True
             for _ in range(N_STACKS):
                 def rf(n, fh=f):
@@ -320,10 +333,10 @@ def read_tdleaf_fc(path):
             # no counts for v1
         else:
             sys.exit(f"Error: unknown .tdleaf.bin version {version} in {path} "
-                     f"(supported: 1–8)")
+                     f"(supported: 1–10)")
 
         # v3/v4/v5: sparse FT/PSQT section after FC stacks
-        if version in (TDLEAF_VERSION3, TDLEAF_VERSION4, TDLEAF_VERSION5, TDLEAF_VERSION6, TDLEAF_VERSION7, TDLEAF_VERSION8):
+        if version in (TDLEAF_VERSION3, TDLEAF_VERSION4, TDLEAF_VERSION5, TDLEAF_VERSION6, TDLEAF_VERSION7, TDLEAF_VERSION8, TDLEAF_VERSION9, TDLEAF_VERSION10):
             n_ft_rows = struct.unpack('<I', f.read(4))[0]
             if n_ft_rows > 0:
                 fi_arr   = np.empty(n_ft_rows, dtype=np.uint32)
@@ -347,25 +360,37 @@ def read_tdleaf_fc(path):
             data['n_ft_rows'] = n_ft_rows
 
             # v4/v5: FT bias section (appended after sparse FT/PSQT rows)
-            if version in (TDLEAF_VERSION4, TDLEAF_VERSION5, TDLEAF_VERSION6, TDLEAF_VERSION7, TDLEAF_VERSION8):
+            if version in (TDLEAF_VERSION4, TDLEAF_VERSION5, TDLEAF_VERSION6, TDLEAF_VERSION7, TDLEAF_VERSION8, TDLEAF_VERSION9, TDLEAF_VERSION10):
                 ft_b_raw = np.frombuffer(f.read(HALF_DIMS * 4), dtype=np.float32).copy()
                 ft_b_cnt = np.frombuffer(f.read(HALF_DIMS * 4), dtype=np.uint32).copy()
                 if ft_b_raw.shape == (HALF_DIMS,) and ft_b_cnt.shape == (HALF_DIMS,):
                     data['ft_bias_learned']     = ft_b_raw / TDLEAF_SCALE
                     data['ft_bias_learned_cnt'] = ft_b_cnt
 
-            # v5: dense piece value section (6 piece types × 8 PSQT buckets = 48 values)
-            if version in (TDLEAF_VERSION5, TDLEAF_VERSION6, TDLEAF_VERSION7, TDLEAF_VERSION8):
+            # Dense piece value section:
+            #   v9+: float32[6] + uint32[6]  (one value per piece type)
+            #   v5-v8: float32[6][8] + uint32[6][8]  (per-bucket; collapse by averaging)
+            if version in (TDLEAF_VERSION5, TDLEAF_VERSION6, TDLEAF_VERSION7, TDLEAF_VERSION8, TDLEAF_VERSION9, TDLEAF_VERSION10):
                 N_PIECE_TYPES = 6
-                n_pv = N_PIECE_TYPES * PSQT_BKTS   # 48
-                pv_raw = np.frombuffer(f.read(n_pv * 4), dtype=np.float32).copy()
-                pv_cnt = np.frombuffer(f.read(n_pv * 4), dtype=np.uint32).copy()
-                if pv_raw.shape == (n_pv,) and pv_cnt.shape == (n_pv,):
-                    data['piece_val']     = (pv_raw / TDLEAF_SCALE).reshape(N_PIECE_TYPES, PSQT_BKTS)
-                    data['piece_val_cnt'] = pv_cnt.reshape(N_PIECE_TYPES, PSQT_BKTS)
+                if version >= TDLEAF_VERSION9:
+                    pv_raw = np.frombuffer(f.read(N_PIECE_TYPES * 4), dtype=np.float32).copy()
+                    pv_cnt = np.frombuffer(f.read(N_PIECE_TYPES * 4), dtype=np.uint32).copy()
+                    if pv_raw.shape == (N_PIECE_TYPES,):
+                        data['piece_val']     = pv_raw / TDLEAF_SCALE          # [6] float
+                        data['piece_val_cnt'] = pv_cnt                         # [6] uint32
+                else:
+                    n_pv = N_PIECE_TYPES * PSQT_BKTS  # 48
+                    pv_raw = np.frombuffer(f.read(n_pv * 4), dtype=np.float32).copy()
+                    pv_cnt = np.frombuffer(f.read(n_pv * 4), dtype=np.uint32).copy()
+                    if pv_raw.shape == (n_pv,):
+                        pv2d = (pv_raw / TDLEAF_SCALE).reshape(N_PIECE_TYPES, PSQT_BKTS)
+                        cnt2d = pv_cnt.reshape(N_PIECE_TYPES, PSQT_BKTS)
+                        # Collapse to [6] by averaging across buckets.
+                        data['piece_val']     = pv2d.mean(axis=1)
+                        data['piece_val_cnt'] = cnt2d.mean(axis=1).astype(np.uint32)
 
             # v6: Adam v (second moment) section — skip it (not displayed)
-            if version in (TDLEAF_VERSION6, TDLEAF_VERSION7, TDLEAF_VERSION8):
+            if version in (TDLEAF_VERSION6, TDLEAF_VERSION7, TDLEAF_VERSION8, TDLEAF_VERSION9, TDLEAF_VERSION10):
                 t_adam = struct.unpack('<I', f.read(4))[0]
                 data['t_adam'] = t_adam
                 # Skip FC v arrays: 8 stacks × (L0_SIZE + L0_SIZE*L0_INPUT + L1_SIZE +
@@ -374,30 +399,30 @@ def read_tdleaf_fc(path):
                                L1_SIZE + L1_SIZE * L1_PADDED +
                                1 + L2_PADDED)
                 f.read(N_STACKS * fc_v_floats * 4)
-                # Skip FT bias v and piece_val v
-                f.read(HALF_DIMS * 4)          # v_ft_bias
-                f.read(6 * PSQT_BKTS * 4)     # v_piece_val
+                # Skip FT bias v and piece_val v (v9: 6 floats; v6-v8: 48 floats)
+                f.read(HALF_DIMS * 4)                                          # v_ft_bias
+                f.read((6 if version >= TDLEAF_VERSION9 else 6 * PSQT_BKTS) * 4)  # v_piece_val
                 # Skip sparse PSQT v rows
                 n_pv_rows = struct.unpack('<I', f.read(4))[0]
                 f.read(n_pv_rows * (4 + PSQT_BKTS * 4))
 
             # v7+: Adam m (first moment) section — skip it (not displayed)
-            if version in (TDLEAF_VERSION7, TDLEAF_VERSION8):
+            if version in (TDLEAF_VERSION7, TDLEAF_VERSION8, TDLEAF_VERSION9, TDLEAF_VERSION10):
                 # Skip FC m arrays: same layout as FC v
                 fc_m_floats = (L0_SIZE + L0_SIZE * L0_INPUT +
                                L1_SIZE + L1_SIZE * L1_PADDED +
                                1 + L2_PADDED)
                 f.read(N_STACKS * fc_m_floats * 4)
-                # Skip m_ft_bias and m_piece_val
-                f.read(HALF_DIMS * 4)          # m_ft_bias
-                f.read(6 * PSQT_BKTS * 4)     # m_piece_val
+                # Skip m_ft_bias and m_piece_val (v9: 6 floats; v7-v8: 48 floats)
+                f.read(HALF_DIMS * 4)                                          # m_ft_bias
+                f.read((6 if version >= TDLEAF_VERSION9 else 6 * PSQT_BKTS) * 4)  # m_piece_val
                 # Skip sparse PSQT m rows
                 n_pm_rows = struct.unpack('<I', f.read(4))[0]
                 f.read(n_pm_rows * (4 + PSQT_BKTS * 4))
                 data['adam_m_loaded'] = True
 
-            # v8: sparse FT v section — skip (not displayed)
-            if version == TDLEAF_VERSION8:
+            # v8+: sparse FT v section — skip (not displayed)
+            if version in (TDLEAF_VERSION8, TDLEAF_VERSION9, TDLEAF_VERSION10):
                 n_ftv_rows = struct.unpack('<I', f.read(4))[0]
                 f.read(n_ftv_rows * (4 + HALF_DIMS * 4))
                 data['adam_ft_v_loaded'] = True
@@ -563,31 +588,56 @@ def print_summary(orig, upd, ft_data=None):
             ps_learned = upd['psqt_w']    # [n_ft_rows, PSQT_BKTS]  float at int32 scale
             ps_cnt     = upd['psqt_cnt']  # [n_ft_rows, PSQT_BKTS]
             fi_arr     = upd['ft_fi']     # [n_ft_rows]
-            # Compute delta vs baseline for the dirty rows
+            # Unit derivation:
+            #   PSQT score = (psqt_diff/2) × 100/5776 cp
+            #   piece_val score = (pv_diff/2) × 100/5776 cp,  pv_diff = piece_val × count_diff
+            # So 1 raw PSQT unit → 100/5776 cp (per piece, counting both perspectives).
+            #    1 raw piece_val unit → 0.5 × 100/5776 cp per unit material advantage.
+            # To put piece_val in PSQT-equivalent units: divide by 2.
+            # Feature layout: ps_slot = (fi % 704) // 128  → 0=pawn … 5=king
+            #                 is_own  = (fi % 704) % 128 < 64
+            PSQT_TO_CP = 100.0 / 5776.0
             baseline_dirty = pw_base[fi_arr]  # [n_ft_rows, PSQT_BKTS] — float32 from int32
-            delta = ps_learned - baseline_dirty.astype(np.float32)
+            fi_in_bkt = fi_arr % 704
+            ps_slot   = fi_in_bkt // 128     # [n_ft_rows], 0-5 (piece type)
+            is_own    = (fi_in_bkt % 128) < 64   # [n_ft_rows], bool
+            pv = upd.get('piece_val', None)   # [6] float (piece_val_f32 units, v9+), or None
+            if pv is not None:
+                # Convert piece_val to PSQT-equivalent units (÷2) and apply sign.
+                # pv is [6] (1D); index by ps_slot and broadcast to [n_rows, PSQT_BKTS].
+                pv_psqt_equiv = np.zeros((n_ft_rows, PSQT_BKTS), dtype=np.float32)
+                pv_psqt_equiv[ is_own] = +pv[ps_slot[ is_own]][:, np.newaxis] * 0.5
+                pv_psqt_equiv[~is_own] = -pv[ps_slot[~is_own]][:, np.newaxis] * 0.5
+                effective_learned = ps_learned + pv_psqt_equiv
+                pv_note = " + piece_val"
+            else:
+                effective_learned = ps_learned
+                pv_note = ""
+            # All delta values are now in PSQT raw units; convert to cp for display.
+            delta_raw = effective_learned - baseline_dirty.astype(np.float32)
+            delta_cp  = delta_raw * PSQT_TO_CP
             cnt_flat = ps_cnt.ravel()
             nz_cnt   = cnt_flat[cnt_flat > 0]
             print(f"  PSQT learned          {n_ft_rows:>7,} rows × {PSQT_BKTS} buckets")
-            print(f"    Δ range  [{delta.min():+.1f}, {delta.max():+.1f}]  "
-                  f"mean Δ {delta.mean():+.3f} ± {delta.std():.3f}")
+            print(f"    Δ range  [{delta_cp.min():+.2f}, {delta_cp.max():+.2f}] cp (PSQT{pv_note})  "
+                  f"mean Δ {delta_cp.mean():+.3f} ± {delta_cp.std():.3f} cp")
             print(f"    update counts  max: {int(cnt_flat.max())}  "
                   f"mean(>0): {nz_cnt.mean():.1f}" if len(nz_cnt) else
                   f"    update counts  (none)")
 
-            # Per-bucket delta stats for learned rows
+            # Per-bucket delta stats for learned rows (all values in centipawns)
             print()
-            print(f"  PSQT Δ per-bucket (learned − baseline, dirty rows only):")
-            print(f"  {'Bucket':>8} {'Rows':>8} {'Δ min':>10} {'Δ max':>10} "
-                  f"{'mean Δ':>10} {'max cnt':>9} {'mean cnt(>0)':>14}")
+            print(f"  PSQT Δ per-bucket (centipawns, PSQT{pv_note} − baseline, dirty rows only):")
+            print(f"  {'Bucket':>8} {'Rows':>8} {'Δ min cp':>10} {'Δ max cp':>10} "
+                  f"{'mean Δ cp':>10} {'max cnt':>9} {'mean cnt(>0)':>14}")
             for b in range(PSQT_BKTS):
-                d_col = delta[:, b]
+                d_col = delta_cp[:, b]
                 c_col = ps_cnt[:, b]
                 nz_c  = c_col[c_col > 0]
-                print(f"  {b:>8} {n_ft_rows:>8,} {d_col.min():>10.1f} {d_col.max():>10.1f}"
+                print(f"  {b:>8} {n_ft_rows:>8,} {d_col.min():>10.2f} {d_col.max():>10.2f}"
                       f" {d_col.mean():>10.3f} {int(c_col.max()):>9}"
                       f" {nz_c.mean():>14.1f}" if len(nz_c) else
-                      f"  {b:>8} {n_ft_rows:>8,} {d_col.min():>10.1f} {d_col.max():>10.1f}"
+                      f"  {b:>8} {n_ft_rows:>8,} {d_col.min():>10.2f} {d_col.max():>10.2f}"
                       f" {d_col.mean():>10.3f} {int(c_col.max()):>9}         —")
         else:
             # No v3 learned data — show baseline per-bucket
@@ -606,36 +656,22 @@ def print_summary(orig, upd, ft_data=None):
     # -----------------------------------------------------------------------
     print()
     if 'piece_val' in upd:
-        pv = upd['piece_val']       # [6, 8] float (NNUE internal units)
-        pv_cnt = upd['piece_val_cnt']  # [6, 8] uint32
+        pv     = upd['piece_val']       # [6] float (NNUE internal units, v9+)
+        pv_cnt = upd['piece_val_cnt']   # [6] uint32
         piece_names = ['Pawn', 'Knight', 'Bishop', 'Rook', 'Queen', 'King']
         print(f"━━━━  Dense piece values (centipawns per unit material advantage)  ━━━━")
         print()
-        # Convert to centipawns for display.
-        # Score formula: (pv_diff/2) × 100/5776 cp, where pv_diff = piece_val × count_diff.
-        # So 1 unit piece_val contributes (1/2) × 100/5776 cp per piece.
-        # Display shows cp per unit piece advantage (e.g. +100 = 100 cp per pawn, as expected).
+        # Score formula: (pv_diff/2) × 100/5776 cp.  Display as cp per unit advantage.
         pv_cp = pv * 0.5 * 100.0 / 5776.0
-        print(f"  {'Piece':<8}", end="")
-        for b in range(PSQT_BKTS):
-            print(f" {'B'+str(b):>8}", end="")
-        print(f"  {'max cnt':>9}")
-        print(f"  {'─'*8}", end="")
-        for _ in range(PSQT_BKTS):
-            print(f" {'─'*8}", end="")
-        print(f"  {'─'*9}")
+        print(f"  {'Piece':<8}  {'cp':>8}  {'count':>9}")
+        print(f"  {'─'*8}  {'─'*8}  {'─'*9}")
         for pt in range(6):
-            print(f"  {piece_names[pt]:<8}", end="")
-            for b in range(PSQT_BKTS):
-                cp = pv_cp[pt, b]
-                print(f" {cp:>+8.2f}", end="")
-            mx = int(pv_cnt[pt].max())
-            print(f"  {mx:>9}")
+            print(f"  {piece_names[pt]:<8}  {pv_cp[pt]:>+8.2f}  {int(pv_cnt[pt]):>9}")
         print()
         total_updates = int(pv_cnt.sum())
         ever_updated  = int(np.sum(pv_cnt > 0))
         print(f"  Total updates: {total_updates:,}  "
-              f"Slots ever updated: {ever_updated}/48  "
+              f"Pieces ever updated: {ever_updated}/6  "
               f"Max count: {int(pv_cnt.max())}")
     else:
         print(f"━━━━  Dense piece values (not present — v4 or older .tdleaf.bin)  ━━━━")
@@ -1116,7 +1152,11 @@ def plot_psqt_overview(orig, upd, ft_data, save):
     has_v3    = n_ft_rows is not None and n_ft_rows > 0
 
     fig = plt.figure(figsize=(16, 6))
+    pv_avail = has_v3 and 'psqt_w' in upd and 'piece_val' in upd
     fig.suptitle(f'PSQT weight comparison\n'
+                 f'blue = {nnue_name}  red = {tdleaf_name}  '
+                 f'col 1–2 delta includes piece_val correction' if pv_avail else
+                 f'PSQT weight comparison\n'
                  f'blue = {nnue_name}   red = {tdleaf_name}   orange = delta',
                  fontsize=11)
 
@@ -1145,6 +1185,33 @@ def plot_psqt_overview(orig, upd, ft_data, save):
     ax_top.text(0.98, 0.90, nnue_name, transform=ax_top.transAxes,
                 fontsize=7, ha='right', va='top', color='steelblue')
 
+    # Compute piece_val contribution per dirty row in PSQT-equivalent units.
+    # Unit derivation:
+    #   PSQT score   = (psqt_diff/2) × 100/5776   → 1 PSQT raw unit = PSQT_TO_CP cp
+    #   piece_val score = (pv_diff/2) × 100/5776   → 1 pv raw unit  = 0.5×PSQT_TO_CP cp
+    #   ∴ pv_PSQT_equiv = piece_val_raw / 2  (then × PSQT_TO_CP gives correct cp)
+    # Feature layout: ps_slot = (fi % 704) // 128  (0=pawn … 5=king)
+    #                 is_own  = (fi % 704) % 128 < 64
+    pv_note = ""
+    pv_contrib_2d = None   # [n_ft_rows, PSQT_BKTS] in PSQT-equivalent units, or None
+    if has_v3 and 'psqt_w' in upd and 'piece_val' in upd:
+        fi_arr_pv  = upd['ft_fi']
+        pv         = upd['piece_val']   # [6] float (piece_val_f32 units, v9+)
+        fi_in_bkt  = fi_arr_pv % 704
+        ps_slot_pv = fi_in_bkt // 128   # 0-5 (piece type)
+        is_own_pv  = (fi_in_bkt % 128) < 64
+        pv_c = np.zeros((len(fi_arr_pv), PSQT_BKTS), dtype=np.float64)
+        # piece_val → PSQT-equivalent: divide by 2; sign: +own, -enemy.
+        # pv is [6] (1D); broadcast to [n_rows, PSQT_BKTS] via newaxis.
+        pv_c[ is_own_pv] = +pv[ps_slot_pv[ is_own_pv]][:, np.newaxis].astype(np.float64) * 0.5
+        pv_c[~is_own_pv] = -pv[ps_slot_pv[~is_own_pv]][:, np.newaxis].astype(np.float64) * 0.5
+        pv_contrib_2d = pv_c
+        pv_note = " + piece_val"
+
+    # Bottom panel: learned PSQT only (no piece_val added here).
+    # Reason: piece_val shifts own-pieces right and enemy-pieces left by up to 1000+ cp,
+    # extending well beyond the baseline range and making the shared x-axis misleading.
+    # The combined PSQT + piece_val delta is correctly shown in col 1 and col 2.
     ax_bot = fig.add_subplot(gs_inner[1], sharex=ax_top)
     if has_v3 and 'psqt_w' in upd:
         ps_flat_cp = upd['psqt_w'].ravel().astype(np.float64) * PSQT_TO_CP
@@ -1155,7 +1222,7 @@ def plot_psqt_overview(orig, upd, ft_data, save):
         ax_bot.text(0.5, 0.5, 'No PSQT training data', transform=ax_bot.transAxes,
                     fontsize=8, ha='center', va='center', color='gray', style='italic')
     ax_bot.set_ylabel('density', fontsize=8)
-    ax_bot.set_xlabel('centipawns per piece  (raw×100/5776)', fontsize=8)
+    ax_bot.set_xlabel('centipawns per piece  (PSQT only — piece_val delta in col 1)', fontsize=8)
     ax_bot.tick_params(labelsize=7)
 
     # --- col 1: delta distribution ---
@@ -1163,13 +1230,16 @@ def plot_psqt_overview(orig, upd, ft_data, save):
     if has_v3 and 'psqt_w' in upd:
         fi_arr     = upd['ft_fi']
         baseline_d = pw_base[fi_arr].astype(np.float64).ravel()
-        learned_d  = upd['psqt_w'].ravel().astype(np.float64)
-        delta_cp   = (learned_d - baseline_d) * PSQT_TO_CP
+        learned_d  = upd['psqt_w'].astype(np.float64)
+        if pv_contrib_2d is not None:
+            learned_d = learned_d + pv_contrib_2d
+        delta_cp   = (learned_d.ravel() - baseline_d) * PSQT_TO_CP
         dmax   = max(abs(float(delta_cp.min())), abs(float(delta_cp.max())), 0.1)
         d_bins = np.linspace(-dmax * 1.05, dmax * 1.05, 80)
         ax1.hist(delta_cp, bins=d_bins, color='coral', alpha=0.85)
-        n_nz = int(np.sum(np.abs(delta_cp) > 0.5 * PSQT_TO_CP))
-        ax1.set_title(f'PSQT weights\nΔ learned − baseline  ({n_nz:,} shifted)', fontsize=9)
+        n_nz = int(np.sum(np.abs(delta_cp) > 0.5))  # count features shifted by >0.5 cp
+        ax1.set_title(f'PSQT{pv_note}\nΔ effective − baseline  ({n_nz:,} shifted >0.5 cp)',
+                      fontsize=9)
         ax1.set_ylabel('count', fontsize=8)
         ax1.axvline(0, color='k', linewidth=0.9, linestyle='--')
     else:
@@ -1185,13 +1255,16 @@ def plot_psqt_overview(orig, upd, ft_data, save):
     if has_v3 and 'psqt_w' in upd:
         fi_arr     = upd['ft_fi']
         baseline_b = pw_base[fi_arr].astype(np.float64)    # [n_ft_rows, PSQT_BKTS]
-        delta_b_cp = (upd['psqt_w'].astype(np.float64) - baseline_b) * PSQT_TO_CP
+        learned_b  = upd['psqt_w'].astype(np.float64)
+        if pv_contrib_2d is not None:
+            learned_b = learned_b + pv_contrib_2d
+        delta_b_cp = (learned_b - baseline_b) * PSQT_TO_CP
         mean_delta = delta_b_cp.mean(axis=0)
         std_delta  = delta_b_cp.std(axis=0)
         ax2.bar(x, mean_delta, yerr=std_delta, color='mediumseagreen', alpha=0.80,
                 capsize=4, error_kw={'linewidth': 1})
         ax2.axhline(0, color='k', linewidth=0.7, linestyle='--')
-        ax2.set_title(f'PSQT weights\nMean Δ per bucket (±1σ)', fontsize=9)
+        ax2.set_title(f'PSQT + piece_val\nMean Δ per bucket (±1σ)', fontsize=9)
         ax2.set_ylabel('mean Δ (cp per piece)', fontsize=8)
     else:
         means_cp = pw_base.mean(axis=0) * PSQT_TO_CP

@@ -24,18 +24,24 @@
 // ---------------------------------------------------------------------------
 // Hyperparameters (can be overridden by setvalue/environment at runtime)
 // ---------------------------------------------------------------------------
-static const float TDLEAF_LAMBDA_DECISIVE  = 0.8f;   // eligibility trace decay for wins/losses
-static const float TDLEAF_LAMBDA_DRAW      = 0.5f;   // eligibility trace decay for draws
-static const float TDLEAF_K               = 290.0f; // sigmoid temperature (centipawns)
-                                                     // Empirically fitted from 968k self-play games
-                                                     // (MLE over 91M positions): optimum ~292 cp.
+static const float TDLEAF_LAMBDA           = 0.98f;  // eligibility trace decay (single value for
+                                                     // decisive and draw games — empirically fitted
+                                                     // from 1.6M self-play games; autocorrelation
+                                                     // and d_t-vs-result methods give ~0.97–0.99
+                                                     // for both game types)
+static const float TDLEAF_K               = 200.0f; // sigmoid temperature (centipawns)
+                                                     // MLE over 10M positions from stages 5–6:
+                                                     // optimum 239 cp (prev. 290 cp, fitted from
+                                                     // earlier training stage).
 static const int   TDLEAF_MIN_PLIES       = 8;      // skip games shorter than this
 static const int   TDLEAF_MIN_PLIES_REP   = 40;     // skip 3-rep draws shorter than this
 // Approach 1 — TD error clipping.
-// When the white-POV score change between consecutive moves exceeds this
-// threshold (centipawns), the (d[t+1]−d[t]) contribution to the eligibility
-// trace is scaled down proportionally.  Set to a large value to disable.
-static const float TDLEAF_SCORE_CLIP_CP  = 200.0f;
+// When the white-POV score change between consecutive moves exceeds
+// TDLEAF_SCORE_CLIP_PAWNS × value[PAWN] (centipawns), the (d[t+1]−d[t])
+// contribution to the eligibility trace is scaled down proportionally.
+// Expressed as a multiple of the current pawn value so the threshold tracks
+// piece-value drift under TDLeaf.  Set to a large value to disable.
+static const float TDLEAF_SCORE_CLIP_PAWNS = 2.0f;
 // Approach 2 — iterative-deepening score stability weight.
 // w_t = 1 / (1 + id_score_variance / TDLEAF_ID_VAR_SIGMA2)
 // Expressed in cp²: 10000 corresponds to a 100 cp std-dev reference.
@@ -44,6 +50,13 @@ static const float TDLEAF_ID_VAR_SIGMA2  = 10000.0f;
 // Gradient clipping: if global L2 norm of all gradients exceeds this threshold,
 // scale all gradients by max_norm/norm.  Set to 0 to disable.
 static const float TDLEAF_GRAD_CLIP_NORM = 1.0f;
+// Adam step clipping: bound the unit-less Adam step |m_hat / sqrt(v_hat)| (or
+// |g / sqrt(v_hat)| for the RMSProp FT path) to this value before multiplying
+// by the category LR.  Targets the rare-feature pathology where a low running
+// v makes a normal gradient produce an oversized parameter change.  Uniform
+// across FC / FT / FT-bias / PSQT / piece_val because the Adam step is scale-
+// normalised by design.  Set to a large value to disable.
+static const float TDLEAF_ADAM_STEP_CLIP = 30.0f;
 
 // ---------------------------------------------------------------------------
 // Adam hyperparameters
@@ -56,11 +69,11 @@ static const float TDLEAF_GRAD_CLIP_NORM = 1.0f;
 // LR warmup: ramps from 0 to full LR over first WARMUP Adam steps.
 // Mini-batch: gradients accumulated across BATCH_SIZE games before each Adam step.
 // ---------------------------------------------------------------------------
-static const float TDLEAF_ADAM_LR0         = 0.01f;  // step size for FC layers (float weight units)
-static const float TDLEAF_ADAM_FT_LR0      = 1.0f;    // step size for FT weights (sparse; need higher LR than dense FC)
+static const float TDLEAF_ADAM_LR0         = 0.10f;  // step size for FC layers (float weight units)
+static const float TDLEAF_ADAM_FT_LR0      = 1.0f;   // step size for FT weights (sparse; need higher LR than dense FC)
 static const float TDLEAF_ADAM_FT_BIAS_LR0 = 0.01f;  // step size for FT biases (10× slower than FC to prevent dying-ReLU)
-static const float TDLEAF_ADAM_PSQT_LR0    = 1.6f;    // step size for PSQT (int32 scale ~36k std; needs larger LR)
-static const float TDLEAF_ADAM_PV_LR0      = 1.6f;    // step size for dense piece values (same scale as PSQT)
+static const float TDLEAF_ADAM_PSQT_LR0 =    10.0f;    // step size for PSQT (int32 scale ~36k std; needs larger LR)
+static const float TDLEAF_ADAM_PV_LR0     =  50.0f;    // step size for dense piece values (same scale as PSQT)
 static const float TDLEAF_ADAM_BETA1    = 0.9f;    // first-moment decay  (FC + FT bias + PSQT)
 static const float TDLEAF_ADAM_BETA2    = 0.999f;  // second-moment decay (all layers)
 static const float TDLEAF_ADAM_EPS      = 1e-8f;   // numerical floor
@@ -74,6 +87,12 @@ static const int   TDLEAF_FT_SESSION_WARMUP  = 100; // per-session FT LR ramp ov
                                                      // Applied every restart via t_ft_session (not persisted).
                                                      // Damps FT updates during the v_ft_w accumulation phase.
 static const int   TDLEAF_BATCH_SIZE    = 4;        // accumulate gradients across N games before Adam step
+
+// Replay LR scale: multiplicative factor applied to all category LRs during
+// replay-pass Adam steps (1.0 = no softening, 0.0 = no-op replay).  Lower
+// values reduce overfitting to the small replay buffer (BUF_N games).
+// Adam is scale-invariant in the gradient, so LR is the only effective knob.
+static const float TDLEAF_REPLAY_LR_SCALE = 0.3f;
 
 // ---------------------------------------------------------------------------
 // Per-ply record: accumulator snapshot + search score

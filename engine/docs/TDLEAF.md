@@ -63,7 +63,7 @@ For a game of T half-moves:
 
 - `d_t` = sigmoid of the **NNUE static evaluation at the PV leaf position** at ply t,
   from White's perspective:
-  `d_t = 1 / (1 + exp(-score_white_t / K))`, K = 290 cp.
+  `d_t = 1 / (1 + exp(-score_white_t / K))`, K = 200 cp.
 - `z` = game result from White's perspective: 1.0 = White wins, 0.5 = draw, 0.0 = Black wins.
 
 **Temporal difference errors (backward view):**
@@ -74,8 +74,8 @@ e_t     = clip(d_{t+1} - d_t) + λ * e_{t+1}     for t = T-2 … 0
 ```
 
 where `clip(d_{t+1} - d_t)` applies proportional scaling when the white-POV score
-change between consecutive moves exceeds `TDLEAF_SCORE_CLIP_CP` centipawns — see
-[Horizon Noise Mitigation](#horizon-noise-mitigation) below.
+change between consecutive moves exceeds `TDLEAF_SCORE_CLIP_PAWNS × value[PAWN]`
+centipawns — see [Horizon Noise Mitigation](#horizon-noise-mitigation) below.
 
 **Weight update (gradient ascent on prediction accuracy):**
 
@@ -85,7 +85,10 @@ change between consecutive moves exceeds `TDLEAF_SCORE_CLIP_CP` centipawns — s
 
 where `∇_w d_t = d_t * (1 - d_t) / K * ∇_w score_t`.
 
-Defaults: `λ_decisive = 0.8` (wins/losses), `λ_draw = 0.5` (draws), `K = 290` (empirically fitted from 968k self-play games).
+Defaults: `λ = 0.98`, `K = 200 cp` (λ empirically calibrated from 1.6M self-play games;
+K lowered from the calibrated 240 cp value after 200k+ training games showed piece
+values converging ~2× too high at K = 400 cp — see
+[Hyperparameter Calibration](#hyperparameter-calibration)).
 Gradient updates use Adam with per-weight LR decay; see [Adam Optimizer](#adam-optimizer-with-per-weight-lr-decay) below.
 
 **Key design choice:** `d_t` is computed from `nnue_evaluate()` (direct static eval of the
@@ -105,7 +108,7 @@ position, making the gradient self-consistent.
 | FT biases          | 1,024 int16 | Dense update; static float shadow (4 KB) |
 | FT weights         | 22,528×1,024 int16 | Sparse update; float shadow on heap (~92 MB) |
 | PSQT weights       | 22,528×8 int32 | Sparse update; float shadow (~720 KB) |
-| Dense piece values | 6×8 float      | Dense update; 48 parameters in `piece_val[6][8]` |
+| Dense piece values | 6 float        | Dense update; one value per piece type in `piece_val[6]`; bucket variation encoded in PSQT |
 
 FT weights and PSQT are updated sparsely: only the ~30–60 feature rows active at each
 leaf position are touched.  `ft_dirty[FT_INPUTS]` tracks which rows received gradient
@@ -114,7 +117,7 @@ during the game; only dirty rows are scanned in `nnue_apply_gradients`.
 FT biases are updated densely every game (all 1,024 values): the gradient is the sum of
 `g_acc[persp][d]` across both perspectives.
 
-Dense piece values (`piece_val[6][8]`) are updated densely every game.  Every position
+Dense piece values (`piece_val[6]`) are updated densely every game.  Every position
 contributes gradient for all piece types present on the board, giving ~200 updates per
 game vs ~8 per 5000 games for sparse PSQT features.  See
 [Dense Piece Values](#dense-piece-values) below.
@@ -131,8 +134,8 @@ appears infrequently, so material-scale corrections via PSQT converge very slowl
 (~8 updates per 5000 games for a typical feature row).
 
 Dense piece values provide a fast-converging material correction channel.  The
-`piece_val[6][8]` array (6 piece types PAWN..KING × 8 PSQT buckets = 48 floats) is
-initialized to zero; the per-feature PSQT retains the classical material values.
+`piece_val[6]` array (one float per piece type PAWN..KING = 6 floats) is initialized
+to zero; all per-bucket and per-square variation of material value is encoded in PSQT.
 Every position contributes gradient for every piece type present on the board, giving
 ~200 gradient updates per game — orders of magnitude more than sparse PSQT.
 
@@ -141,28 +144,62 @@ Every position contributes gradient for every piece type present on the board, g
 `nnue_dense_piece_val(pos, stm, pc)` computes the piece value correction in centipawns:
 
 ```
-piece_count_diff[pt] = count(stm, pt) - count(opp, pt)    for pt in PAWN..KING
-pv_score = Σ_pt  piece_count_diff[pt] × piece_val[pt][bucket]
+piece_count_diff[pt] = count(stm, pt) - count(opp, pt)    for pt in PAWN..QUEEN
+pv_raw = Σ_pt  piece_count_diff[pt] × piece_val[pt]
+pv_score = (pv_raw / 2) × 100 / 5776                       (same scale as PSQT scoring)
 ```
 
-where `bucket = (pc - 1) / 4` (same PSQT bucket index used by the FC layer stacks).
 The result is added to `nnue_evaluate()` in `score.cpp`.
+
+### Startup Piece Value Extraction
+
+At startup, after the `.nnue` and `.tdleaf.bin` are loaded, `nnue_extract_piece_values()`
+reads the PSQT weights to compute an average material value per piece type and overwrites
+`value[1..5]` in `score.h` with those values in centipawns.  In TDLEAF builds,
+`piece_val[pt] × 0.5` is added to the PSQT average before conversion (since both
+encode the same material correction in different channels).
+
+This ensures that search heuristics (SEE, MVV-LVA, LMR, futility pruning) use the
+NNUE-derived material values rather than the hard-coded classical defaults.
+
+### NNUE Export (Baking piece_val into PSQT)
+
+When `nnue_write_nnue()` exports a checkpoint `.nnue` file, it bakes the current
+`piece_val[pt]` correction into the PSQT weights so the exported file is self-contained
+(no `.tdleaf.bin` required at runtime):
+
+```
+baked[fi][b] = psqt_weights_f32[fi][b] ± piece_val[ps_slot] × 0.5
+```
+
+where `+` applies to own-piece features (`fi % 704 % 128 < 64`) and `−` to opponent
+features.  The ÷2 mirrors the `/2` in the scoring formula to preserve the centipawn
+scale.  After baking, `piece_val` and `nnue_evaluate()` together produce the same score
+as `piece_val=0` would with the baked PSQT.
+
+> **Warning:** loading a baked `.nnue` alongside a `.tdleaf.bin` that still contains a
+> non-zero `piece_val` double-counts the correction.  Baked exports are intended for
+> read-only opponent/validator binaries; training always continues against the original
+> `.nnue` + `.tdleaf.bin`.
 
 ### Gradient
 
 The gradient follows the same path as PSQT but is dense: for each position in the TD
 update, every piece type present contributes.  `piece_count_diff[6]` is stored in
 `NNUEActivations` alongside the accumulator snapshot.  During backprop, the gradient
-for `piece_val[pt][bucket]` is:
+for `piece_val[pt]` is:
 
 ```
-g_pv[pt][bucket] += grad_scale × piece_count_diff[pt]
+g_pv[pt] += grad_scale × piece_count_diff[pt]
 ```
 
 ### Optimizer
 
-Full Adam with `TDLEAF_ADAM_PV_LR0 = 1.6` (same as PSQT).  No weight decay is applied.
+Full Adam with `TDLEAF_ADAM_PV_LR0 = 50.0`.  No weight decay is applied.
 Dense piece value gradients are included in the global L2 norm for gradient clipping.
+The large LR0 is appropriate because `piece_val` units are at the same raw int32 scale
+as PSQT (~36 000 std), so the effective per-step size in centipawns is comparable to
+PSQT despite the higher LR0 number.
 
 ### PSQT gradient mean-centering
 
@@ -183,9 +220,10 @@ and should not be mean-centered.
 
 ### Persistence
 
-Stored in `.tdleaf.bin` v5 format as 48 float32 values (at 128× resolution) plus 48
-uint32 update counts, appended after the FT bias section.  V4 files are accepted on
-load; piece values start from zero.
+Stored in `.tdleaf.bin` v9 format as 6 float32 values (at 128× resolution) plus 6
+uint32 update counts, appended after the FT bias section.  V4–V8 files are accepted on
+load; V5–V8 files contain the old `piece_val[6][8]` (48 floats) which are averaged
+per piece type on load.  V4 files have no piece values; they start from zero.
 
 ---
 
@@ -315,12 +353,12 @@ correction.
 
 | Layer | Update Rule | LR0 | Notes |
 |-------|-------------|-----|-------|
-| FC0/FC1/FC2 weights | Full Adam | `TDLEAF_ADAM_LR0 = 0.01` | Float shadow clamped to ±127 after each update |
-| FC0/FC1/FC2 biases  | Full Adam | `TDLEAF_ADAM_LR0 = 0.01` | |
+| FC0/FC1/FC2 weights | Full Adam | `TDLEAF_ADAM_LR0 = 0.10` | Float shadow clamped to ±127 after each update |
+| FC0/FC1/FC2 biases  | Full Adam | `TDLEAF_ADAM_LR0 = 0.10` | |
 | FT weights | RMSProp (per-weight v, no m) | `TDLEAF_ADAM_FT_LR0 = 1.0` | Sparse; higher LR than FC to compensate for fewer updates |
 | FT biases  | Full Adam | `TDLEAF_ADAM_FT_BIAS_LR0 = 0.01` | Reduced LR to prevent dying-ReLU — see below |
-| PSQT       | Full Adam | `TDLEAF_ADAM_PSQT_LR0 = 1.6` | Separate LR0 required — see below |
-| Dense piece values | Full Adam | `TDLEAF_ADAM_PV_LR0 = 1.6` | Dense; same LR as PSQT, no weight decay |
+| PSQT       | Full Adam | `TDLEAF_ADAM_PSQT_LR0 = 10.0` | Separate LR0 required — see below |
+| Dense piece values | Full Adam | `TDLEAF_ADAM_PV_LR0 = 50.0` | Dense; no weight decay; LR tuned for int32 scale matching PSQT |
 
 ### Why a Separate PSQT LR0?
 
@@ -340,14 +378,15 @@ games with the FC LR, FT bias mean drifted to -291 with 100% of biases negative.
 `TDLEAF_ADAM_FT_BIAS_LR0 = 0.01` (10× slower than FC) limits drift to ~-30 over
 190k games — enough adaptation without racing ahead of FT weight convergence.
 
-### Why Float-Shadow Clamping for FC0/FC1?
+### Why Float-Shadow Clamping for FC0/FC1/FC2?
 
-FC0 and FC1 use int8 quantized inference weights clamped to ±127 on requantization.
-Without a matching clamp on the float shadow, Adam can push `w_f32` arbitrarily beyond
-±127 while the inference weight is stuck at the boundary.  These "zombie weights"
-accumulate gradient updates with zero effect on the network.  After each weight update,
-`w_f32 = clamp(w_f32, −127, 127)` keeps the float shadow aligned with the int8 inference
-space.  Not applied to FC2 (output layer, no activation clamping required).
+FC0, FC1, and FC2 all use int8 quantized inference weights clamped to ±127 on
+requantization.  Without a matching clamp on the float shadow, Adam can push
+`w_f32` arbitrarily beyond ±127 while the inference weight is stuck at the boundary.
+These "zombie weights" accumulate gradient updates with zero effect on the network.
+After each weight update, `w_f32 = clamp(w_f32, −127, 127)` keeps the float shadow
+aligned with the int8 inference space.  Originally not applied to FC2 (output layer);
+the FC2 clamp was added after the same shadow-drift behaviour was observed there.
 
 ### Persistent v and m
 
@@ -392,11 +431,11 @@ per-weight bias correction and monitoring.
 
 | Constant | Value | Notes |
 |----------|-------|-------|
-| `TDLEAF_ADAM_LR0` | 0.01 | Step size for FC layers (float weight units) |
+| `TDLEAF_ADAM_LR0` | 0.10 | Step size for FC layers (float weight units) |
 | `TDLEAF_ADAM_FT_LR0` | 1.0 | Step size for FT weights (sparse; need higher LR than dense FC) |
 | `TDLEAF_ADAM_FT_BIAS_LR0` | 0.01 | Step size for FT biases (10× slower than FC to prevent dying-ReLU) |
-| `TDLEAF_ADAM_PSQT_LR0` | 1.6 | Step size for PSQT (int32 scale; ~1000× FC) |
-| `TDLEAF_ADAM_PV_LR0` | 1.6 | Step size for dense piece values (same scale as PSQT) |
+| `TDLEAF_ADAM_PSQT_LR0` | 10.0 | Step size for PSQT (int32 scale; ~1000× FC) |
+| `TDLEAF_ADAM_PV_LR0` | 50.0 | Step size for dense piece values (int32 scale; fast-converging dense channel) |
 | `TDLEAF_ADAM_BETA1` | 0.9 | First-moment decay (FC weights/biases, FT biases, PSQT) |
 | `TDLEAF_ADAM_BETA2` | 0.999 | Second-moment decay (all layers) |
 | `TDLEAF_ADAM_EPS` | 1e-8 | Numerical floor in denominator |
@@ -463,29 +502,36 @@ Set `TDLEAF_ADAM_WARMUP = 0` to disable warmup.
 
 ---
 
-## Weight Persistence — `.tdleaf.bin` (version 7)
+## Weight Persistence — `.tdleaf.bin` (version 10)
 
 Saved at `{exec_path}<network>.tdleaf.bin`.  Format:
 
 ```
-[version(7) + 8 FC stacks: per-layer float32×128 weights/biases + uint32 counts]
+[magic(4) + version(10)]
+[v10+: nnue_content_hash(4)  — FNV-1a over source .nnue FT weight bytes]
+[8 FC stacks: per-layer float32×128 weights/biases + uint32 counts]
 [n_ft_rows(4 bytes)]
 [per dirty row: fi(4) + ft_w[1024]×128 as float32[1024] + ft_cnt[1024] as uint32[1024]
                       + psqt_w[8]×128 as float32[8]    + psqt_cnt[8]  as uint32[8]]
 [FT bias section (v4+): ft_bias[1024]×128 as float32[1024] + ft_bias_cnt[1024] as uint32[1024]]
-[Dense piece values (v5+): piece_val[6][8] as float32[48] + piece_val_cnt[6][8] as uint32[48]]
+[Dense piece values (v5+):
+  v9: piece_val[6]   as float32[6]  + piece_val_cnt[6]   as uint32[6]    (one per piece type)
+  v5-v8: piece_val[6][8] as float32[48] + piece_val_cnt[6][8] as uint32[48]  (averaged on load)
+]
 [Adam v section (v6+):
   t_adam as uint32
   8 FC stacks × { v_l0_b, v_l0_w, v_l1_b, v_l1_w, v_l2_b, v_l2_w } as raw float32
   v_ft_bias[1024] as float32
-  v_piece_val[6][8] as float32
+  v9: v_piece_val[6] as float32[6]
+  v6-v8: v_piece_val[6][8] as float32[48] (max-merged per piece type on load)
   n_psqt_v_rows as uint32
   per dirty row: fi(4) + v_psqt[8] as float32[8]
 ]
 [Adam m section (v7+):
   8 FC stacks × { m_l0_b, m_l0_w, m_l1_b, m_l1_w, m_l2_b, m_l2_w } as raw float32
   m_ft_bias[1024] as float32
-  m_piece_val[6][8] as float32
+  v9: m_piece_val[6] as float32[6]
+  v7-v8: m_piece_val[6][8] as float32[48] (averaged per piece type on load)
   n_psqt_m_rows as uint32
   per dirty row: fi(4) + m_psqt[8] as float32[8]
 ]
@@ -495,16 +541,29 @@ Weight values are stored at 128× resolution (divide by 128 on load) to preserve
 sub-integer drift across sessions.  Adam v and m arrays are stored as raw float32 (no scaling).
 Update counts enable weighted averaging of concurrent training runs.
 
-The Adam v section (~564 KB for FC + FT bias + piece_val, plus sparse PSQT) persists
-gradient scale across sessions so Adam doesn't cold-start with v=0.  The Adam m section
-(~563 KB for FC + FT bias + piece_val, plus sparse PSQT) persists gradient direction so
-the optimizer continues in the learned direction from the previous session — eliminating
-the slow/negative Elo trend at the start of each new training run.  FT weight v/m
-(~92 MB each) are NOT persisted — too large, and FT weights use RMSProp (no m array).
+The Adam v section persists gradient scale across sessions so Adam doesn't cold-start
+with v=0.  The Adam m section persists gradient direction so the optimizer continues in
+the learned direction from the previous session — eliminating the slow/negative Elo
+trend at the start of each new training run.  FT weight v/m (~92 MB each) are NOT
+persisted — too large, and FT weights use RMSProp (no m array).
 
-Version 6 files (no Adam m) are accepted on load; m starts at zero and will be included
-on the next save.  Versions 2–5 are also still accepted with appropriate defaults.
-A notice is printed on load for any version upgrade.
+Versions 2–9 are accepted on load with appropriate defaults; a notice is printed for
+any version upgrade.  V5–V8 `piece_val[6][8]` is averaged to `piece_val[6]` on load.
+V6–V8 `v_piece_val[6][8]` is max-merged to `v_piece_val[6]`; V7–V8 `m_piece_val[6][8]`
+is averaged to `m_piece_val[6]`.
+
+### Source-.nnue content hash (v10+)
+
+The v10 header stores an FNV-1a fingerprint of the source `.nnue` FT weight bytes,
+computed once at load/init time (see `nnue_update_content_hash()` in `nnue.cpp`).
+On load, if the stored hash does not match the hash of the currently-loaded `.nnue`,
+the file is refused — preventing accidental pairing of weight deltas with the wrong
+baseline network.  The same check guards the merge-read phase of every save, so a
+worker running against a different `.nnue` cannot corrupt the file.
+
+V5–V9 files have no hash and are accepted without a check; saving promotes them to
+v10 carrying the current `.nnue`'s content hash.  `--init-nnue` fingerprints the
+freshly-initialised FT weights so the companion `.tdleaf.bin` is born consistent.
 
 ---
 
@@ -551,7 +610,7 @@ atomic `rename()` of the main file.  The lock is held only during the re-read/wr
 | `ft_delta_f32` (heap) | ~92 MB | FT weight deltas (all rows) |
 | `psqt_delta_f32` (heap) | ~720 KB | PSQT weight deltas |
 | `ft_bias_delta[1024]` | 4 KB | FT bias deltas (static) |
-| `delta_piece_val[6][8]` | 192 B | Dense piece value deltas |
+| `delta_piece_val[6]` | 24 B | Dense piece value deltas |
 
 **Delta count arrays** (parallel to weight deltas, track update counts since last sync):
 
@@ -564,7 +623,7 @@ atomic `rename()` of the main file.  The lock is held only during the re-read/wr
 | `delta_l2_w_cnt[8][32]` | 1 KB | FC2 weight delta counts |
 | `delta_l2_b_cnt[8]` | 32 B | FC2 bias delta counts |
 | `delta_ft_bias_cnt[1024]` | 4 KB | FT bias delta counts (static) |
-| `delta_piece_val_cnt[6][8]` | 192 B | Dense piece value delta counts |
+| `delta_piece_val_cnt[6]` | 24 B | Dense piece value delta counts |
 | `delta_psqt_cnt` (heap) | ~720 KB | PSQT delta counts |
 
 Deltas (both weight and count) are zeroed after each successful write (either on first
@@ -690,6 +749,7 @@ weight snapshots but is no longer part of the default training workflow.
 | `src/nnue.cpp` — `nnue_load()` | Calls `nnue_init_fp32_weights()` inside `#if TDLEAF` |
 | `src/search.cpp` — search start | `id_score_count = 0;` reset at the start of each search |
 | `src/search.cpp` — after each ID iteration | Appends current `g` to `id_scores[]` ring, increments `id_score_count` |
+| `src/main.cpp` — after NNUE/TDLeaf load | `nnue_extract_piece_values()` overwrites `value[1..5]` with PSQT-derived material values |
 | `src/main.cpp` — after `ts.search()` | `tdleaf_record_ply()` with root acc + PV + `id_scores` + `id_score_count` |
 | `src/main.cpp` — `game.over = 1` sites | `tdleaf_update_after_game()` then `tdleaf_replay()` |
 | `src/main.cpp` — `new_game` / `setboard` | `td_game.n_plies = 0` |
@@ -766,6 +826,97 @@ file against the baseline `.nnue` and shows FC, FT, and PSQT weight statistics.
 
 ---
 
+## Hyperparameter Calibration
+
+`K` and `λ` were calibrated empirically from 1.6M self-play games produced during
+training run `nn-fresh-260410` (stages 5–6, ~100K games, ~10M positions after sampling).
+The analysis scripts live in `scripts/`; the methodology is summarised below.
+
+### Sigmoid temperature K
+
+**Method:** Maximum-likelihood estimation over all (score, outcome) pairs.  For each
+candidate K, compute the log-likelihood of the observed game outcomes under the model
+`P(White wins | score) = σ(score / K)`, where the score is the white-POV PV leaf
+evaluation in centipawns.  Optimise with a grid search (50–800 cp) followed by Brent
+refinement.
+
+**Result (stages 5–6, 10M positions):**
+
+| | K (cp) | NLL/position | Brier score |
+|---|---|---|---|
+| Optimal (MLE) | **240** | 0.54037 | 0.12604 |
+| Previous value | 290 | 0.54296 | 0.12707 |
+
+The optimal K of ~239 cp was rounded to **240 cp**.  The earlier value of 290 cp was
+fitted from a different training stage; as the network improved its evaluations became
+sharper, narrowing the effective sigmoid.  The reliability diagram confirms K=240
+produces well-calibrated win probabilities across the full score range.
+
+**Operational value (post-2026-05-02): `K = 200 cp`.** The MLE-optimal K=240 is a
+sigmoid-fit objective; it does not directly optimise piece-value stability under TDLeaf.
+After raising K to 400 cp briefly to fight piece-value drift, 200k+ training games
+showed piece values had converged ~2× too high, indicating the larger K underweighted
+material differences in the gradient signal.  Halving to K=200 (slightly below the MLE
+optimum) restored a balanced piece-value spectrum while preserving probability
+calibration adequately.
+
+### Eligibility trace decay λ
+
+**Method:** Two independent estimates were computed:
+
+1. **Even-lag autocorrelation** — compute `corr(d_t, d_{t+k})` for even lags k=2,4,…,60
+   (same side-to-move pairs, removing the ply-alternation oscillation caused by mover-
+   optimism bias).  Fit `λ^k` to the even-lag curve in log-space.
+
+2. **d_t-vs-result decay** — compute `corr(d_t, result)` as a function of plies-to-game-
+   end, restricted to even-parity (white-to-move) positions to remove parity mixing.
+   For decisive games this is Pearson r; for draw games, `mean|d_t − 0.5|` is used
+   instead (result is constant at 0.5, so correlation is undefined).  Fit `λ^n` to the
+   normalised decay envelope.
+
+**Result (stages 5–6):**
+
+| Method | λ decisive | λ draw |
+|---|---|---|
+| Even-lag autocorr | 0.985 | 0.989 |
+| d_t-vs-result decay | 0.970 | 0.986 |
+| Previous (separate) | 0.800 | 0.500 |
+
+Key findings:
+- Both methods agree: λ ≈ 0.97–0.99.  The previous values (0.8 / 0.5) were
+  substantially below the empirical decay rate — the engine's depth-6 evaluations are
+  far more temporally stable than those values assumed.
+- **Decisive and draw games have essentially the same temporal correlation structure.**
+  The two-lambda scheme offered no empirical benefit, so it was collapsed to a single
+  `TDLEAF_LAMBDA = 0.98`.
+- The ply-alternation oscillation in the raw autocorrelation (period-2 ripple caused by
+  white/black mover-optimism bias) is a real data feature, not an artifact.  Even-lag
+  analysis removes it cleanly; the odd-lag trough at lag 1 suggests adjacent-ply pairs
+  are weakly anticorrelated within a game.
+
+Rounded to **λ = 0.98** (splitting the difference between the two methods).
+
+### Reproducing the analysis
+
+```sh
+# 1. Extract per-position parquet from the PGN directory (≈3–5 min for 200K games)
+python3 scripts/extract_positions.py \
+    --pgn-dir learn/pgn/nn-fresh-260410 \
+    --out     learn/positions.parquet \
+    --max-games 200000
+
+# 2. Run calibration analysis and generate plots
+python3 scripts/analyze_calibration.py \
+    --input   learn/positions.parquet \
+    --out-dir learn/calibration_plots \
+    --stage 5 6
+```
+
+Output: `calibration_K.png` (NLL curve, reliability diagram, sigmoid comparison),
+`lambda_decay.png` (4-panel autocorrelation and predictiveness plots), `summary.txt`.
+
+---
+
 ## Horizon Noise Mitigation
 
 ### Problem
@@ -777,24 +928,27 @@ horizon — a tactic the current position's evaluator cannot see.  Treating that
 large score jump as a genuine evaluation signal distorts the gradient: the network
 is penalised for correctly evaluating a position it cannot see past.
 
-### Approach 1 — Score-change clipping (TDLEAF_SCORE_CLIP_CP)
+### Approach 1 — Score-change clipping (TDLEAF_SCORE_CLIP_PAWNS)
 
-When the white-POV score change between consecutive moves exceeds
-`TDLEAF_SCORE_CLIP_CP` (default 200 cp), the `d[t+1] - d[t]` contribution to the
-eligibility trace is scaled down *proportionally* so the effective change is capped
-at 200 cp-equivalent:
+The threshold is computed dynamically as
+`score_clip_cp = max(TDLEAF_SCORE_CLIP_PAWNS × value[PAWN], 200 cp)`
+(default `TDLEAF_SCORE_CLIP_PAWNS = 2.0`, so ~200 cp at the classical pawn value
+and tracking piece-value drift upward as `value[PAWN]` grows).  When the white-POV
+score change between consecutive moves exceeds `score_clip_cp`, the
+`d[t+1] - d[t]` contribution to the eligibility trace is scaled down
+*proportionally* so the effective change is capped at the threshold:
 
 ```
 delta_d  = d[t+1] - d[t]
 delta_cp = |score_white[t+1] - score_white[t]|
-if delta_cp > TDLEAF_SCORE_CLIP_CP:
-    delta_d *= TDLEAF_SCORE_CLIP_CP / delta_cp
+if delta_cp > score_clip_cp:
+    delta_d *= score_clip_cp / delta_cp
 e[t] = delta_d + λ * e[t+1]
 ```
 
 This preserves the *direction* of the update while reducing its magnitude when the
-score swing is large.  Set `TDLEAF_SCORE_CLIP_CP` to a very large value (e.g., 1e6)
-to disable this approach.
+score swing is large.  Set `TDLEAF_SCORE_CLIP_PAWNS` to a very large value (e.g.,
+1e4) to effectively disable this approach.
 
 ### Approach 2 — Iterative-deepening stability weighting (TDLEAF_ID_VAR_SIGMA2)
 
@@ -818,7 +972,7 @@ large value to disable this approach.
 
 | Hyperparameter | Default | Effect of increasing | Effect of decreasing |
 |----------------|---------|---------------------|---------------------|
-| `TDLEAF_SCORE_CLIP_CP` | 200 cp | Less clipping; more sensitive to large swings | More aggressive attenuation of large score changes |
+| `TDLEAF_SCORE_CLIP_PAWNS` | 2.0 (≥ 200 cp floor) | Less clipping; more sensitive to large swings | More aggressive attenuation of large score changes |
 | `TDLEAF_ID_VAR_SIGMA2` | 10 000 cp² | More tolerant of unstable ID scores | Stronger down-weighting of ID-unstable positions |
 
 Both approaches are active simultaneously by default.  Use the ablation plan in
