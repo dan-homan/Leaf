@@ -123,7 +123,7 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
       // mark singular move as not singular
       singular_response.t = NOMOVE;
       // initialize each thread
-      for(int ti=0; ti<THREADS; ti++) {
+      for(int ti=0; ti<thread_cfg.threads; ti++) {
 	tdata[ti].n[0].pos = p;               // set the root node of the search
 	tdata[ti].n[0].pos.hmove.t = NOMOVE;  // clear the expected best move from the position
 	tdata[ti].init_thread_data(1);         // initialize data for thread
@@ -137,12 +137,12 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
       }
       max_ply = MAX(last_depth-7,3); 
       last_depth = max_ply;
-      int save_post = post; post = 0;
+      int save_post = proto.post; proto.post = 0;
       p.allmoves(&root_moves, &tdata[0]);
       assert(root_moves.count < MAX_MOVES);  
       sort_root_moves();
-      g = search_threads(-MATE, +MATE, max_ply-1, THREADS);
-      post = save_post;
+      g = search_threads(-MATE, +MATE, max_ply-1, thread_cfg.threads);
+      proto.post = save_post;
       ponder_time = 0;
       ponder_move = tdata[0].pc[0][0];
       tdata[0].pc[0][0].t = NOMOVE;
@@ -156,14 +156,14 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
       // don't search a stalemate or checkmate!
       if(p.in_check_mate() > 0) { ponder_time = 0; gr->searching = 0; return nomove; }
     } else { ponder_time = 0; gr->searching = 0; return nomove; }
-    if(!ALLEG && post) {
+    if(!ALLEG && proto.post) {
       cout << "Hint: " << mstring << "\n";
       cout.flush();
     }
     snprintf(outstring, sizeof(outstring), "***** Ponder Move: %s *****\n", mstring);
     write_out(outstring);
     // add ponder move to position list for all threads
-    for(int ti=0;ti < THREADS;ti++) { tdata[ti].plist[T-1] = p.hcode; }
+    for(int ti=0;ti < thread_cfg.threads;ti++) { tdata[ti].plist[T-1] = p.hcode; }
     // set ponder time doubling count
     ponder_time_double = 0;
     // set target time limit to 1/4 the previous maximum allowed
@@ -173,7 +173,7 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
   //-----------------------------
   // checking book
   //-----------------------------  
-  if(gr->book && !ponder && !uci_in_ponder && !analysis_mode) {
+  if(gr->book && !ponder && !proto.uci_in_ponder && !analysis_mode) {
     bookm = opening_book(p.hcode, p, gr);
     if(bookm.t) {
      tdata[0].pc[0][0] = bookm; tdata[0].pc[0][1].t = 0;
@@ -209,7 +209,7 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
 
   // if last search expected a singular move after opponents response,
   //  move instantly
-  if(!ponder && !uci_in_ponder && p.last.t && singular_response.t
+  if(!ponder && !proto.uci_in_ponder && p.last.t && singular_response.t
      && ((p.last.t == ponder_move.t && last_ponder && singular_response.t==tdata[0].pc[0][0].t)
 		  || (p.last.t == tdata[0].pc[0][1].t && singular_response.t==tdata[0].pc[0][2].t && !last_ponder))) {
     // output move to log or search screen
@@ -263,10 +263,10 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
   start_depth = 1;  // always force start_depth = 1 to test if this has been a problem
 
   // initialize starting position, best move, and search data in all threads
-  for(int ti=0;ti<THREADS;ti++) {
+  for(int ti=0;ti<thread_cfg.threads;ti++) {
     tdata[ti].n[0].pos = p;               // set the root node of the search
     tdata[ti].n[0].pos.hmove.t = NOMOVE;  // clear the expected best move from the position
-    tdata[ti].init_thread_data(ponder || uci_in_ponder);
+    tdata[ti].init_thread_data(ponder || proto.uci_in_ponder);
 #if NNUE
     if(nnue_available) {
       tdata[ti].n[0].acc.dirty[0] = tdata[ti].n[0].acc.dirty[1] = true;
@@ -285,10 +285,10 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
   last_ponder = 0;
   ponder_time = 0;
   max_limit = int(MIN(8.0*time_limit, MAX(time_limit, gr->timeleft[p.wtm]/4.0)));
-  if(!gr->mttc && !interface_mode && !tsuite && !analysis_mode) {max_limit = int(gr->timeleft[p.wtm]);}
+  if(!gr->mttc && !proto.interface_mode && !tsuite && !analysis_mode) {max_limit = int(gr->timeleft[p.wtm]);}
   max_limit = MIN(max_limit, max_search_time*100);
   if(!tsuite && !analysis_mode) {
-    if(!gr->mttc && !interface_mode) {
+    if(!gr->mttc && !proto.interface_mode) {
       limit = MIN(max_limit, limit);
     } else {
       limit = MIN(max_limit/2, limit);
@@ -303,10 +303,10 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
   //  Minimum time cushion is the smaller of 6 seconds or gr->base/100, but 
   //  it can be larger depending on lag and moves to go until time control.  
   //  NOTE: gr->base is in seconds, all times below are in centi-seconds
-  int min_cushion = MAX(MIN((int)gr->base, 600), MOVE_OVERHEAD_CS);  // at least MOVE_OVERHEAD_CS for increment-only games
+  int min_cushion = MAX(MIN((int)gr->base, 600), search_cfg.move_overhead_cs);  // at least search_cfg.move_overhead_cs for increment-only games
   int time_cushion = MAX((gr->mttc+3)*average_lag, min_cushion);
   int max_margin = MAX(MIN((int)gr->base*10, 6000), 3*min_cushion);  // non-zero for increment-only games
-  if(interface_mode && gr->timeleft[p.wtm] <= MIN(3*time_cushion, max_margin)) {
+  if(proto.interface_mode && gr->timeleft[p.wtm] <= MIN(3*time_cushion, max_margin)) {
     limit = MIN(limit, MAX(1,gr->timeleft[p.wtm]-2*time_cushion));
     max_limit = limit;  // no time extensions in this mode
     write_out("Short time control restrictions active.\n");
@@ -375,7 +375,7 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
     while(upper_bound > lower_bound) {
       if(g==lower_bound) beta=MIN(g+EVAL_GRAN*MAX(down,1),upper_bound);
       else beta = MAX(g-EVAL_GRAN*MAX(up,0), lower_bound); 
-      g = search_threads(beta-EVAL_GRAN, beta, max_ply-1-fail_high, THREADS);
+      g = search_threads(beta-EVAL_GRAN, beta, max_ply-1-fail_high, thread_cfg.threads);
       //      g = tdata[0].n[0].root_pvs(beta-EVAL_GRAN, beta, max_ply-1);
       if(g == -TIME_FLAG) break;
       if(g < beta) { 
@@ -401,7 +401,7 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
     //------------------------------------------
     fail_low = 0; fail_high = 0;
     while(1) {
-      g = search_threads(root_alpha, root_beta, max_ply-1-fail_high, THREADS);
+      g = search_threads(root_alpha, root_beta, max_ply-1-fail_high, thread_cfg.threads);
       if(g == -TIME_FLAG) break;
       if(g <= root_alpha && !fail_high) {
 	root_beta = root_alpha; fail_low = 1;
@@ -422,7 +422,7 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
 
     // display results of this search iteration
     if(g != -TIME_FLAG) {
-      if(post && !interface_mode) search_display(g);
+      if(proto.post && !proto.interface_mode) search_display(g);
       log_search(g);
       best_depth = max_ply;
     }
@@ -433,21 +433,21 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
     // if time is up OR we are interrupted... break
     //  -- require at least 3 ply before breaking due to time being up
     //     This is important to avoid draw by reps!
-    if(g == -TIME_FLAG || inter() || (elapsed >= limit && !ponder && !uci_in_ponder && max_ply > 3)) {
+    if(g == -TIME_FLAG || inter() || (elapsed >= limit && !ponder && !proto.uci_in_ponder && max_ply > 3)) {
       break;
     }
 
-    // Set CHECK_INTER integer for how often to check for
+    // Set search_cfg.check_inter integer for how often to check for
     //  time elapsed
     if(elapsed > 0 && limit > 0) {
       int min_interval = (limit*tdata[0].node_count)/(10*elapsed);
-      for(CHECK_INTER = 128; CHECK_INTER < 65536; CHECK_INTER *=2) {
-	if(CHECK_INTER > min_interval) {
-	  CHECK_INTER /= 2;
+      for(search_cfg.check_inter = 128; search_cfg.check_inter < 65536; search_cfg.check_inter *=2) {
+	if(search_cfg.check_inter > min_interval) {
+	  search_cfg.check_inter /= 2;
 	  break;
 	}
       }
-      CHECK_INTER -= 1;
+      search_cfg.check_inter -= 1;
     }
 
     g_last = g;
@@ -474,7 +474,7 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
   }
 
   //------------------------------------------------------------------
-  //  Clean up after search, record time used and post/log results
+  //  Clean up after search, record time used and proto.post/log results
   //------------------------------------------------------------------
 
   // record the ponder state
@@ -490,7 +490,7 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
   unsigned __int64 failed_high=0ULL, first_fail_high=0ULL, shash_count=0ULL, sing_count = 0ULL;
 
   // sum values over all threads
-  for(int t=0;t<THREADS;t++) {
+  for(int t=0;t<thread_cfg.threads;t++) {
     node_count+=tdata[t].node_count;
     eval_count+=tdata[t].eval_count;
     extensions+=tdata[t].extensions;
@@ -511,7 +511,7 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
   if(failed_high < 1) failed_high = 1;
   if(elapsed < 1) elapsed = 1;
 
-  if(!interface_mode && !ALLEG && post) {
+  if(!proto.interface_mode && !ALLEG && proto.post) {
    cout << "\nnodes = " << node_count
         << " hash moves = " << hmove_count
         << " qnodes = " << q_count
@@ -566,7 +566,7 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
   //------------------------------------------------------------------
 
   // book learning if applicable
-  if(!ponder && gr->learn_bk && BOOK_LEARNING) {
+  if(!ponder && gr->learn_bk && engine_cfg.book_learning) {
     if(!gr->book && gr->learn_count > 0 && wbest > +LEARN_SCORE)
       { book_learn(1, gr); gr->learned = gr->learn_count; gr->learn_count = -1; }
     else if(!gr->book && gr->learn_count > 0 && wbest < -LEARN_SCORE)
@@ -579,10 +579,10 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
   //-----------------------------------------
   // Assign a singular move, if appropriate
   //-----------------------------------------
-  if((tdata[0].pc[0][2].b.type&SINGULAR) && !ponder && !uci_in_ponder) {
+  if((tdata[0].pc[0][2].b.type&SINGULAR) && !ponder && !proto.uci_in_ponder) {
     tdata[0].pc[0][2].b.type &= NOT_SINGULAR;
     singular_response=tdata[0].pc[0][2];
-  } else if(!ponder && !uci_in_ponder) singular_response.t = NOMOVE;
+  } else if(!ponder && !proto.uci_in_ponder) singular_response.t = NOMOVE;
   else tdata[0].pc[0][2].b.type &= NOT_SINGULAR;
 
   //------------------------------------------------------------------
@@ -651,10 +651,10 @@ void tree_search::sort_root_moves() {
     // assign a history score to those non-capture/non-killer/non-hash moves
     if(root_moves.mv[mi].score < 2000000) {
       root_moves.mv[mi].score = 0;
-      for(int ti=0; ti < THREADS; ti++) {
+      for(int ti=0; ti < thread_cfg.threads; ti++) {
         root_moves.mv[mi].score += tdata[ti].history[tdata[0].n[0].pos.sq[root_moves.mv[mi].m.b.from]][root_moves.mv[mi].m.b.to];
       }
-      root_moves.mv[mi].score /= THREADS;
+      root_moves.mv[mi].score /= thread_cfg.threads;
     }
   }
 
@@ -799,9 +799,9 @@ void search_node::root_pvs()
    //  added to a list to be visited at the end
    //  of the movelist.
    //-----------------------------------------------
-   if(THREADS > 1 && !first && skipped < 23 && mcount < ts->root_moves.count) {
+   if(thread_cfg.threads > 1 && !first && skipped < 23 && mcount < ts->root_moves.count) {
      int skip = 0;
-     for(int ti = 0; ti < THREADS; ti++) {
+     for(int ti = 0; ti < thread_cfg.threads; ti++) {
        if(ti == tdata->ID) continue;
        if(ts->share_data[ply][ti].check_active_move(pos.hcode,depth,save_alpha,beta,smove.t)) {
 	 skip = 1; 
@@ -843,7 +843,7 @@ void search_node::root_pvs()
    //---------------------------------------------
    // now set this move as the one being worked
    //---------------------------------------------
-   if(THREADS > 1) {
+   if(thread_cfg.threads > 1) {
      ts->share_data[ply][tdata->ID].set_active_move(pos.hcode,depth,save_alpha,beta,smove.t);
    }
 
@@ -881,7 +881,7 @@ void search_node::root_pvs()
    //    -- position is scored with a search of reduced
    //       depth to decide if a reduction should happen
    // -----------------------------------------------------
-   if(depth > 4 && !pos.check && best > ts->g_last-NO_ROOT_LMR_SCORE
+   if(depth > 4 && !pos.check && best > ts->g_last-search_cfg.no_root_lmr_score
       && !depth_mod && !first && !next->pos.check 
       && mi != next_best_index
       && (ts->root_moves.mv[mi].score < 2000000)    // not a winning capture, promotion, killer move, etc...
@@ -939,15 +939,15 @@ void search_node::root_pvs()
      //  -- only in the main thread (ID == 0)
      //-----------------------------------------
      if(!tdata->ID && ts->limit < ts->max_limit/2 
-	&& score <= ts->g_last-EXTEND_TIME_SCORE*(ts->time_double+1)
+	&& score <= ts->g_last-search_cfg.extend_time_score*(ts->time_double+1)
 	&& !ts->tsuite 
 	&& GetTime() - ts->start_time >= ts->limit/4) {
        if(!ts->ponder) { 
 	 ts->limit = MIN(2*ts->limit, ts->max_limit/2);
-	 if(logging) logfile << "Extending search to: " << ts->limit << "\n";
+	 if(proto.logging) proto.logfile << "Extending search to: " << ts->limit << "\n";
        } else if(ts->ponder_time_double < 2) {
 	 ts->ponder_time_double++;
-	 if(logging) logfile << "Doubling required ponder time\n";
+	 if(proto.logging) proto.logfile << "Doubling required ponder time\n";
        }
        ts->time_double++;
      }
@@ -958,7 +958,7 @@ void search_node::root_pvs()
      //  -- only in the main thread (ID == 0)
      if(!tdata->ID) {
        tdata->fail = -1;
-       if(post && !interface_mode) ts->search_display(score);
+       if(proto.post && !proto.interface_mode) ts->search_display(score);
        ts->log_search(score);
        tdata->fail = 0;
      }
@@ -973,10 +973,10 @@ void search_node::root_pvs()
 	&& GetTime() - ts->start_time >= ts->limit/4) {
        if(!ts->ponder) { 
 	 ts->limit /= 2;
-	 if(logging) logfile << "Reducing search to: " << ts->limit << "\n";
+	 if(proto.logging) proto.logfile << "Reducing search to: " << ts->limit << "\n";
        } else if(ts->ponder_time_double > 0) {
 	 ts->ponder_time_double--;
-	 if(logging) logfile << "Halving required ponder time\n";
+	 if(proto.logging) proto.logfile << "Halving required ponder time\n";
        }
      }
    }
@@ -1016,7 +1016,7 @@ void search_node::root_pvs()
      //ts->wbest = score; ts->wply = ts->max_ply;  // whisper variables
      // only display search in the default thread
      if(tdata->ID==0) {
-       if(post && !interface_mode && (!tdata->fail || !first)) ts->search_display(score);
+       if(proto.post && !proto.interface_mode && (!tdata->fail || !first)) ts->search_display(score);
        ts->log_search(score);
      }
      tdata->fail = 0;
@@ -1033,7 +1033,7 @@ void search_node::root_pvs()
  //---------------------------------------------
  // Clear active move data for shared work
  //---------------------------------------------
- if(THREADS > 1) { 
+ if(thread_cfg.threads > 1) { 
    ts->share_data[ply][tdata->ID].set_active_move(0,0,0,0,0);
  }
 
@@ -1256,7 +1256,7 @@ int search_node::pvs(int alpha, int beta, int depth, int in_pv, int move_to_skip
  //     Null Move Heuristic
  // ----------------------------------------------------------
  if(!in_pv                               // Only outside of pv nodes
-    && NULL_MOVE                         // Not switched off
+    && search_cfg.null_move                         // Not switched off
     && pos.last.t                        // Don't repeat null or follow IID
     && premove_score > beta              // Must be a winning node
     && !pos.hmove.t                      // Don't have a hash move 
@@ -1581,9 +1581,9 @@ int search_node::pvs(int alpha, int beta, int depth, int in_pv, int move_to_skip
    //  of the movelist.
    // -- Only helps in pv nodes
    //-----------------------------------------------
-   if(in_pv && THREADS > 1 && !first && skipped < 23 && mcount < moves.count) {
+   if(in_pv && thread_cfg.threads > 1 && !first && skipped < 23 && mcount < moves.count) {
      int skip = 0;
-     for(int ti = 0; ti < THREADS; ti++) {
+     for(int ti = 0; ti < thread_cfg.threads; ti++) {
        if(ti == tdata->ID) continue;
        if(ts->share_data[ply][ti].check_active_move(pos.hcode,depth,save_alpha,beta,smove.t)) {
 	 skip = 1;
@@ -1625,7 +1625,7 @@ int search_node::pvs(int alpha, int beta, int depth, int in_pv, int move_to_skip
    //---------------------------------------------
    // now set this move as the one being worked
    //---------------------------------------------
-   if(in_pv && THREADS > 1) {
+   if(in_pv && thread_cfg.threads > 1) {
      ts->share_data[ply][tdata->ID].set_active_move(pos.hcode,depth,save_alpha,beta,smove.t);
    }
 
@@ -1714,7 +1714,7 @@ int search_node::pvs(int alpha, int beta, int depth, int in_pv, int move_to_skip
 	 int index = depth+(premove_score-beta)/100;
 	 if(index < 0) index = 0;
 	 else if(index > 7) index = 7;
-	 if(mcount > (abort_search_fraction[index]*moves.count)/1000) {
+	 if(mcount > (search_cfg.abort_search_fraction[index]*moves.count)/1000) {
 	   // if there is no identified threat square, just terminate the search
 	   if(pos.threat_square >= 64) {
 	     //tdata->node_count++;
@@ -1945,7 +1945,7 @@ int search_node::pvs(int alpha, int beta, int depth, int in_pv, int move_to_skip
  //---------------------------------------------
  // Clear active move data for shared work
  //---------------------------------------------
- if(in_pv && THREADS > 1) { 
+ if(in_pv && thread_cfg.threads > 1) { 
    ts->share_data[ply][tdata->ID].set_active_move(0,0,0,0,0);
  }
 

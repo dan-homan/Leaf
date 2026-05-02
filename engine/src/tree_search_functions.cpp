@@ -74,11 +74,11 @@ void tree_search::initialize_extra_threads() {
   // initialize theads and mutexes on first call of this
   // function 
   //  -- the daughter threads are numbered with 
-  //     thread IDs = 1, 2, ... up to THREADS-1.
+  //     thread IDs = 1, 2, ... up to thread_cfg.threads-1.
   //  -- the original (main) thread has ID = 0 (thread_index = 0)
   //     and doesn't need initialization
   //----------------------------------------------------
-  for(thread_index=initialized_threads+1; thread_index<THREADS; thread_index++) {
+  for(thread_index=initialized_threads+1; thread_index<thread_cfg.threads; thread_index++) {
     pthread_mutex_init(&runlock[thread_index],NULL);
     pthread_mutex_init(&waitlock[thread_index],NULL);
     pthread_mutex_init(&waitlock2[thread_index],NULL);
@@ -169,7 +169,7 @@ void tree_search::history_stats() {
   int bins[16] = { -1000001,-1000000,-100000,-10000,-1000,-100,-10,0,10,100,1000,10000,100000,999999,1000000,2000000000 };
   int count[16] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
   
-  for(int t=0; t < THREADS; t++) {
+  for(int t=0; t < thread_cfg.threads; t++) {
 
     cout << "History data for thread: " << t << "\n";
 

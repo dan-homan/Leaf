@@ -1287,7 +1287,7 @@ int position::score_pawns(pawn_data *pawn_record)
 //   pieces that are undefended by pawns.  This is a crude
 //   bonus, but it seems to improve play.  It could probably
 //   be tuned and improved.  Idea was inspired by a CCC
-//   post by Lucas Braesch about en-prise pieces.
+//   proto.post by Lucas Braesch about en-prise pieces.
 //----------------------------------------------------------
 // define a mobility array to transform the result to
 // a smaller value appropriate for scoring.  Transformation

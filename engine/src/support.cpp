@@ -335,10 +335,10 @@ void tree_search::log_search(int score)
 
   int total_time = GetTime()-start_time;
   unsigned __int64 node_count = 0ULL;
-  for(int ti=0; ti<THREADS; ti++) { node_count += tdata[ti].node_count; }
+  for(int ti=0; ti<thread_cfg.threads; ti++) { node_count += tdata[ti].node_count; }
 
   // UCI mode: emit UCI info line and return early
-  if (uci_mode) {
+  if (proto.uci_mode) {
     if (tdata[0].fail == 0) {
       uci_send_info(score, max_ply, total_time, (unsigned long long)node_count, this);
     }
@@ -351,7 +351,7 @@ void tree_search::log_search(int score)
   if(tdata[0].fail == 1) {
     snprintf(outstring, sizeof(outstring), "++\n");
     write_out(outstring);
-    if(post && xboard) {
+    if(proto.post && proto.xboard) {
       cout << outstring;
       cout.flush();
     }
@@ -359,7 +359,7 @@ void tree_search::log_search(int score)
   } else if(tdata[0].fail == -1) {
     snprintf(outstring, sizeof(outstring), "--\n");
     write_out(outstring);
-    if(post && xboard) {
+    if(proto.post && proto.xboard) {
       cout << outstring;
       cout.flush();
     }
@@ -396,10 +396,10 @@ void tree_search::log_search(int score)
 
   // Write to Logfile
   write_out(outstring); 
-  if(total_time >= 300) logfile.flush();
+  if(total_time >= 300) proto.logfile.flush();
 
   // Do a search display if we are posting
-  if(post && xboard) { 
+  if(proto.post && proto.xboard) { 
     cout << outstring;
     cout.flush();
   }
@@ -420,7 +420,7 @@ void tree_search::search_display(int score)
  int new_line = 0;
 
  unsigned __int64 node_count = 0ULL;
- for(int ti=0; ti<THREADS; ti++) { node_count += tdata[ti].node_count; }
+ for(int ti=0; ti<thread_cfg.threads; ti++) { node_count += tdata[ti].node_count; }
 
  int total_time = GetTime()-start_time;
 
@@ -470,7 +470,7 @@ void tree_search::search_display(int score)
    if(!(j&1)) cout << " " << (j/2 + 1) << ".";
    cout << " " << mstring;
    // truncate long lines
-   if(!xboard && !analysis_mode && i == 3 && tdata[0].pc[0][i+1].t) { 
+   if(!proto.xboard && !analysis_mode && i == 3 && tdata[0].pc[0][i+1].t) { 
      cout << " ... ";
      break;
    }

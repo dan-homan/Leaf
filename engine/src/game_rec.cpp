@@ -364,7 +364,7 @@ void game_rec::setboard(const char inboard[256], const char ms, const char castl
 }
 
 //-----------------------------------------------------------
-// This function is a special edit mode for xboard/winboard
+// This function is a special edit mode for proto.xboard/winboard
 //  -- NOT compatitable with Chess960
 //-----------------------------------------------------------
 void game_rec::board_edit()
@@ -488,7 +488,7 @@ void game_rec::test_suite(char *testfile, char *resfile, float testtime, int fix
   ts.bmcount = 0; ts.tsuite = 1;
   learn_bk = 0;
   // turn off opening book and turn on search posting
-  book = 0; post = 1; 
+  book = 0; proto.post = 1; 
 
 
   if(!testtime) {
@@ -582,7 +582,7 @@ void game_rec::test_suite(char *testfile, char *resfile, float testtime, int fix
     p_side = pos.wtm;
 
     // update total node count
-    for(int ti=0; ti<THREADS; ti++) { nodes += game.ts.tdata[ti].node_count; }
+    for(int ti=0; ti<thread_cfg.threads; ti++) { nodes += game.ts.tdata[ti].node_count; }
     // record time for this problem and total time used so far
     int used_time = GetTime() - ts.start_time;
     test_time += used_time;

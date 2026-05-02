@@ -24,11 +24,7 @@ book_rec learn_book[100];          // book learning array
 int learn_filepos[100];            // file positions of played moves 
 int learn_choice[100];             // number of move choices
 
-/* variables for returning book moves */
-int GAMBIT_SCORE = 80;                     // Gambit threshold 
-
-char BOOK_FILE[FILENAME_MAX] = "main_bk.dat";
-char START_BOOK[FILENAME_MAX] = "start_bk.dat";
+// Book filenames and gambit threshold are in engine_cfg (engine_globals.h / main.cpp)
 
 /* Function to build an opening book from a text file (pgn) of games */
 void build_book(position ipos)
@@ -404,13 +400,13 @@ move opening_book(h_code hash_code, position p, game_rec *gr)
   p.allmoves(&list, &(gr->ts.tdata[0]));
 
   // look for book
-  strcpy(book_file, exec_path);    // try executable directory
-  strcat(book_file, START_BOOK);
+  strcpy(book_file, engine_cfg.exec_path);    // try executable directory
+  strcat(book_file, engine_cfg.start_book);
   book_f.open(book_file, IOS_IN);
 
   if(!book_f.is_open()) {
    // try working directory
-   book_f.open(START_BOOK, IOS_IN);
+   book_f.open(engine_cfg.start_book, IOS_IN);
   }
 
   if(book_f.is_open()) {   // if no book is found jump ahead to main book
@@ -462,13 +458,13 @@ move opening_book(h_code hash_code, position p, game_rec *gr)
   p.allmoves(&list, &(gr->ts.tdata[0]));
 
   // look for book
-  strcpy(book_file, exec_path);  // try executable directory
-  strcat(book_file, BOOK_FILE);
+  strcpy(book_file, engine_cfg.exec_path);  // try executable directory
+  strcat(book_file, engine_cfg.book_file);
   book_f.open(book_file, IOS_IN);
 
   if(!book_f.is_open()) {
    // try working directory
-   book_f.open(BOOK_FILE, IOS_IN);
+   book_f.open(engine_cfg.book_file, IOS_IN);
   }
 
   if(!book_f.is_open()) { return nomove; }   // if no book is found
@@ -599,7 +595,7 @@ int edit_book(h_code hash_code, position *p)
   book_f.seekg(0,ios::end);
   file_size = book_f.tellg()/sizeof(book_rec);
 
-  post = 1;   // turn on search posting
+  proto.post = 1;   // turn on search posting
   game.book = 0;   // turn off book in search
 
   total_score = 0;
@@ -786,7 +782,7 @@ void book_learn(int flag, game_rec *gr)
    }
 
   // Now write the changes to the file...
-  fstream out(BOOK_FILE, IOS_IN|IOS_OUT);
+  fstream out(engine_cfg.book_file, IOS_IN|IOS_OUT);
 
   if(!out) { cout << "\nError(NoBookUpdate)"; out.close(); return; }
 

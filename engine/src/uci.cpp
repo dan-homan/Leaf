@@ -201,7 +201,7 @@ int uci_check_interrupt()
             return 1;
         } else if (token == "ponderhit") {
             // Transition from ponder to real search: lift the analysis_mode lock
-            uci_in_ponder = 0;
+            proto.uci_in_ponder = 0;
             game.ts.analysis_mode = 0;
             // Recompute time limit from stored go parameters
             int stm = game.pos.wtm;
@@ -220,7 +220,7 @@ int uci_check_interrupt()
                 if (ponder_flag) new_limit = (115 * new_limit) / 100;
                 new_limit = MIN(new_limit, (int)(game.timeleft[stm] / 2));
                 if (game.inc > 0.0f && game.inc < 0.10f) {
-                    new_limit = MAX(1, new_limit - MOVE_OVERHEAD_CS);
+                    new_limit = MAX(1, new_limit - search_cfg.move_overhead_cs);
                 }
                 game.ts.limit     = new_limit;
                 game.ts.max_limit = MIN((int)(8.0 * new_limit),
@@ -280,7 +280,7 @@ static void uci_setoption(const std::string &line)
         if (mb > 0) set_hash_size(mb);
     } else if (name_str == "Threads") {
         int n = atoi(val_str.c_str());
-        THREADS = (unsigned int)MIN(MAX(1, n), MAX_THREADS);
+        thread_cfg.threads = (unsigned int)MIN(MAX(1, n), MAX_THREADS);
         game.ts.initialize_extra_threads();
     } else if (name_str == "Ponder") {
         ponder_flag = (val_str == "true") ? 1 : 0;
@@ -356,7 +356,7 @@ static void uci_set_position(const std::string &line)
     // Clear first PV entry to avoid stale data
     game.ts.last_depth = 1;
     game.ts.last_ponder = 0;
-    for (int ti = 0; ti < THREADS; ti++) {
+    for (int ti = 0; ti < thread_cfg.threads; ti++) {
         game.ts.tdata[ti].pc[0][0].t = NOMOVE;
     }
 }
@@ -396,20 +396,20 @@ static void uci_dispatch_go(const std::string &line)
     game.terminate_search = 0;
 
     if (ponder_flag_go) {
-        // UCI ponder: use analysis_mode + uci_in_ponder so search doesn't time out.
+        // UCI ponder: use analysis_mode + proto.uci_in_ponder so search doesn't time out.
         // Loop the search because the ID loop only runs to MAX_MAIN_TREE (depth 79)
         // and would return naturally on simple positions before stop/ponderhit arrives.
-        uci_in_ponder = 1;
+        proto.uci_in_ponder = 1;
         game.ts.analysis_mode = 1;
         game.ts.max_search_depth = MAXD;
         game.ts.max_search_time  = MAXT;
         game.timeleft[stm] = float(MAXT * 100);
         game.inc  = 0.0f;
         game.mttc = 0;
-        while (uci_in_ponder && !uci_stop_flag && game.program_run) {
+        while (proto.uci_in_ponder && !uci_stop_flag && game.program_run) {
             game.best = game.ts.search(game.pos, MAXT, game.T, &game);
         }
-        uci_in_ponder = 0;
+        proto.uci_in_ponder = 0;
         game.ts.analysis_mode = 0;
     } else {
         // Normal search
@@ -443,7 +443,7 @@ static void uci_dispatch_go(const std::string &line)
             if (ponder_flag) time_limit = (115 * time_limit) / 100;
             time_limit = MIN(time_limit, (int)(game.timeleft[stm] / 2));
             if (game.inc > 0.0f && game.inc < 0.10f) {
-                time_limit = MAX(1, time_limit - MOVE_OVERHEAD_CS);
+                time_limit = MAX(1, time_limit - search_cfg.move_overhead_cs);
             }
         }
 
@@ -524,7 +524,7 @@ static void uci_dispatch_go(const std::string &line)
 
 void uci_send_info(int score, int depth, int elapsed_cs, unsigned long long nodes, tree_search *ts)
 {
-    if (!uci_mode) return;
+    if (!proto.uci_mode) return;
 
     int elapsed_ms = elapsed_cs * 10;
     long long nps  = (elapsed_cs > 0) ? (long long)(100LL * (long long)nodes / elapsed_cs) : 0LL;
@@ -595,14 +595,14 @@ void uci_loop(game_rec *gr)
 
         } else if (tok == "ucinewgame") {
             // Reset engine state for a new game
-            set_hash_size(HASH_SIZE);
+            set_hash_size(engine_cfg.hash_size);
             game.setboard((char*)i_pos, 'w', (char*)"KQkq", (char*)"-");
             game.T = 1;
             game.ts.last_ponder = 0;
             game.ts.last_depth  = 1;
             game.ts.singular_response.t = NOMOVE;
             game.ts.h_id = 0;
-            for (int ti = 0; ti < THREADS; ti++) {
+            for (int ti = 0; ti < thread_cfg.threads; ti++) {
                 for (int i = 0; i < 15; i++) {
                     for (int j = 0; j < 64; j++) {
                         game.ts.tdata[ti].history[i][j] = 0;
