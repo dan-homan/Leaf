@@ -1415,11 +1415,12 @@ int search_node::pvs(int alpha, int beta, int depth, int in_pv, int move_to_skip
  //        the move loop below
  // --------------------------------------------------------
  int generated_moves = 0;
- if(!pos.hmove.t || pos.check) { 
+ tdata->current_ply = ply;
+ if(!pos.hmove.t || pos.check) {
    pos.allmoves(&moves, tdata);
    assert(moves.count < MAX_MOVES);
    generated_moves = 1;
- } else { 
+ } else {
    moves.count = 2;
  }
 
@@ -1537,12 +1538,13 @@ int search_node::pvs(int alpha, int beta, int depth, int in_pv, int move_to_skip
    // we have not already done so
    //--------------------------------------------
    if(mcount == 1 && !generated_moves) {
+     tdata->current_ply = ply;
      pos.allmoves(&moves, tdata);
      assert(moves.count < MAX_MOVES);
      // Sort the first move so we don't search it again
      MSort(&moves.mv[0], &moves.mv[moves.count-1]);
      generated_moves = 1;
-     if(moves.count == 1) break; 
+     if(moves.count == 1) break;
    }
 
    // assign the move index
@@ -1888,12 +1890,11 @@ int search_node::pvs(int alpha, int beta, int depth, int in_pv, int move_to_skip
 	      && tdata->history[pos.sq[smove.b.from]][smove.b.to] < 1000000) {
 	     tdata->history[pos.sq[smove.b.from]][smove.b.to] += 11*(depth+depth_mod);
 	   }
-	   // update killers -- NOT when in check
+	   // update per-ply killers -- NOT when in check
 	   if(!pos.check) {
-	     if(tdata->killer1[pos.wtm] != smove.t) {
-	       tdata->killer3[pos.wtm] = tdata->killer2[pos.wtm];
-	       tdata->killer2[pos.wtm] = tdata->killer1[pos.wtm];
-	       tdata->killer1[pos.wtm] = smove.t;
+	     if(tdata->killer[ply][0] != smove.t) {
+	       tdata->killer[ply][1] = tdata->killer[ply][0];
+	       tdata->killer[ply][0] = smove.t;
 	     }
 	   }
 	 }
@@ -2171,8 +2172,9 @@ int search_node::qsearch(int alpha, int beta, int qply)
     { tdata->qchecks++; pos.captchecks(&moves, delta_score);} 
   */
   else if(!pos.check) pos.captures(&moves, delta_score);
-  else { 
-    pos.cmove.t = 0; pos.rmove.t = 0; 
+  else {
+    pos.cmove.t = 0; pos.rmove.t = 0;
+    tdata->current_ply = MIN(ply, MAXD+1);
     pos.allmoves(&moves,tdata);
   }
 

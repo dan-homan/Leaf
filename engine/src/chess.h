@@ -320,7 +320,10 @@ struct ts_thread_data {
 
   int fail;                     // fail high(+1)/low(-1) flag
 
-  int killer1[2], killer2[2], killer3[2]; // killer moves
+  // Per-ply killer moves: killer[ply][0..1].  Set by pvs() before each
+  // move generation via current_ply; updated on beta cutoff.
+  int killer[MAXD+2][2];
+  int current_ply;              // ply for the move generation about to run
 
   // Format of these move tables is piece_id, to-square
   int history[15][64];          // table for history scores
@@ -353,10 +356,9 @@ struct ts_thread_data {
       for(int pj = pi; pj < MAXD+1; pj++)
 	if(pi+pj) pc[pi][pj].t = NOMOVE;
 
-    // initialize killer moves
-    killer1[0]=0; killer1[1]=0;
-    killer2[0]=0; killer2[1]=0;
-    killer3[0]=0; killer3[1]=0;
+    // initialize per-ply killer table
+    for(int p = 0; p < MAXD+2; p++) { killer[p][0] = 0; killer[p][1] = 0; }
+    current_ply = 0;
   }
 
   /* search.cpp */
