@@ -1,5 +1,41 @@
 Changes since 2017_12_24
 
+2026_05_03 -- move ordering: per-ply killer table.  Replaced
+               killer1/killer2/killer3[wtm] (per-side) with killer[ply][2]
+               (per-ply, two slots) and dropped the third killer.  The
+               per-side scheme leaked killer hits across distant tree
+               positions; per-ply matches modern engine convention.
+               ts_thread_data.current_ply is set in pvs() and qsearch()
+               before each move generation so add_move() can index the
+               table.  Confirmed +19 Elo (52.7% over 500 games at TC
+               3+0.05).
+               Investigated four other move-ordering ideas in the same
+               session -- gravity-style history update, dropping the
+               history /=2 aging, scoring bad captures negative, 1-ply
+               continuation history, and late move pruning -- all of
+               which were neutral or net-negative in gauntlet testing
+               and were not merged.
+
+2026_05_02 -- engine refactor: split nnue.cpp (3,777 lines) into three
+               files: nnue.cpp (~844 lines, runtime inference only),
+               nnue_io.cpp (~530 lines, .nnue load/write + LEB128), and
+               nnue_training.cpp (~2,410 lines, TDLeaf training,
+               compiled only when TDLEAF=1).  Extracted parse_command()
+               and inter() from main.cpp into a new protocol.cpp
+               (~530 lines), reducing main.cpp from 1,474 to ~950 lines.
+               Grouped 40+ scattered globals into four typed structs in
+               a new engine_globals.h: ProtocolState proto (xboard,
+               uci_mode, interface_mode, logging, logfile, ...),
+               EngineConfig engine_cfg (paths, book files, hash size,
+               skill, ...), SearchConfig search_cfg (null_move,
+               verify_margin, var1-4, ...), and ThreadConfig thread_cfg
+               (threads, log_lock).  extern.h and search.h slimmed
+               accordingly; dead declarations removed.  Unity build
+               preserved; no runtime behaviour changes.  All six flag
+               combinations (NNUE / NNUE+TDLEAF / classical /
+               TDLEAF_READONLY / MATERIAL_ONLY / NNUE_EMBED) build and
+               pass UCI/xboard smoke tests.
+
 2026_05_02 -- tdleaf: lower TDLEAF_K from 400 back down to 200 cp.  After
                200k+ training games at K=400, piece values had converged to
                roughly 2x their intended magnitude -- the larger sigmoid
