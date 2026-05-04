@@ -47,10 +47,12 @@ int position::score_pos(game_rec *gr, ts_thread_data *tdata NNUE_ACC_DEF)
      score_rec *scores_n = score_table + (((SCORE_SIZE-1)*((hcode)&MAX_UINT))/MAX_UINT);
      if (scores_n->get_key() == hcode) {
        int cached = scores_n->score;
+       int8_t cached_qc0 = scores_n->qchecks[0];
+       int8_t cached_qc1 = scores_n->qchecks[1];
        if (scores_n->get_key() == hcode) {
          tdata->shash_count++;
-         qchecks[0] = 0;
-         qchecks[1] = 0;
+         qchecks[0] = cached_qc0;
+         qchecks[1] = cached_qc1;
          return wtm ? cached : -cached;
        }
      }
@@ -67,9 +69,37 @@ int position::score_pos(game_rec *gr, ts_thread_data *tdata NNUE_ACC_DEF)
 #if TDLEAF
      score += nnue_dense_piece_val(*this, wtm, pc);
 #endif
-     // qchecks: set to zero when using NNUE (no classical king-safety info)
+     // qchecks: classical king-safety eval is skipped under NNUE, but the
+     // search relies on this signal to drive check extensions (search.cpp:1671)
+     // and qsearch-with-checks (search.cpp:2164).  Recompute the king-tropism
+     // piece count here -- cheap (~30 distance lookups) and reproduces the
+     // pre-NNUE tactical behaviour.  Gated identically to score_king(): only
+     // populated when gstage < KING_SAFETY_STAGE.
      qchecks[0] = 0;
      qchecks[1] = 0;
+     if (gstage < KING_SAFETY_STAGE) {
+       int wksq = plist[WHITE][KING][1];
+       int bksq = plist[BLACK][KING][1];
+       int wtrop = 0, btrop = 0;
+       for (int j = KNIGHT; j <= QUEEN; j++) {
+         for (int i = 1; i <= plist[BLACK][j][0]; i++) {
+           if (plist[BLACK][QUEEN][0] && taxi_cab[plist[BLACK][j][i]][wksq] < 4) {
+             wtrop++;
+             if (j == QUEEN) wtrop++;
+           }
+           if (taxi_cab[plist[BLACK][j][i]][bksq] < 3) btrop--;
+         }
+         for (int i = 1; i <= plist[WHITE][j][0]; i++) {
+           if (plist[WHITE][QUEEN][0] && taxi_cab[plist[WHITE][j][i]][bksq] < 4) {
+             btrop++;
+             if (j == QUEEN) btrop++;
+           }
+           if (taxi_cab[plist[WHITE][j][i]][wksq] < 3) wtrop--;
+         }
+       }
+       qchecks[0] = wtrop;
+       qchecks[1] = btrop;
+     }
      // knowledge_scale weakening still applies
      if (gr->knowledge_scale < 100) {
        int nscore = (gr->knowledge_scale * score) / 100;
@@ -86,10 +116,10 @@ int position::score_pos(game_rec *gr, ts_thread_data *tdata NNUE_ACC_DEF)
      // Store in score hash table.
      // Hash convention: white POV.  nnue_evaluate returns stm POV, so convert.
      int16_t score_w = (int16_t)(wtm ? score : -score);
-     scores_n->qchecks[0] = 0;
-     scores_n->qchecks[1] = 0;
+     scores_n->qchecks[0] = (int8_t)qchecks[0];
+     scores_n->qchecks[1] = (int8_t)qchecks[1];
      scores_n->score = score_w;
-     scores_n->set_key(hcode, score_w, 0, 0);
+     scores_n->set_key(hcode, score_w, qchecks[0], qchecks[1]);
      // score is already from side-to-move's POV (nnue_evaluate returns stm POV)
      return score;
    }
