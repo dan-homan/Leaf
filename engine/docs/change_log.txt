@@ -1,5 +1,30 @@
 Changes since 2017_12_24
 
+2026_05_04 -- score: restore king-tropism qchecks signal under NNUE.
+               pos.qchecks[wtm/btm] is the "pieces threatening this king"
+               counter that gates two tactical paths in the search:
+               the third check-extension type (search.cpp:1671, PV/PV-
+               adjacent checking moves when the king area is contested)
+               and the qsearch-with-checks branch (search.cpp:2164).
+               Both gates require pos.qchecks[stm] > 0 to fire.
+               Under classical eval, score_king() populated qchecks[]
+               as a byproduct of computing king tropism.  Under NNUE,
+               classical king-safety code is skipped, so qchecks[]
+               stayed at 0 throughout the search and these tactical
+               paths almost never fired -- a silent regression that
+               had been costing real Elo since the NNUE switch.
+               Fix: inline the king-tropism piece loop into the NNUE
+               eval path of score_pos(), gated identically to the
+               classical eval (gstage < KING_SAFETY_STAGE).  Cost is
+               ~30 distance lookups per cache miss; cache hits load
+               qchecks from the score-hash record (the slot was
+               already there, just unused).  Diagnostic measurements
+               on a 10-position test set (depth 18, sum across
+               positions) showed extensions recovered from 29% of
+               EXchess to 85%, qsearch-with-checks from 8% to 109%.
+               Confirmed large Elo gain in self-play gauntlet vs the
+               pre-fix binary.
+
 2026_05_03 -- move ordering: per-ply killer table.  Replaced
                killer1/killer2/killer3[wtm] (per-side) with killer[ply][2]
                (per-ply, two slots) and dropped the third killer.  The

@@ -116,6 +116,56 @@ a self-play tournament with systematic variation would be the appropriate approa
 
 ## NNUE Infrastructure
 
+### Tactical signal under NNUE — follow-ups to qchecks restoration
+
+The 2026-05-04 fix restored `pos.qchecks[]` (king-tropism) under NNUE,
+which recovered the check-extension and qsearch-with-checks paths.
+Several follow-up investigations are worth running now that the search
+has a working tactical signal again.
+
+**Tune the qchecks threshold for NNUE.**  The classical-eval gating
+(`gstage < KING_SAFETY_STAGE` where `KING_SAFETY_STAGE = 10`) was
+calibrated for the classical eval's score distribution.  NNUE may
+benefit from extending the gate further into the endgame (e.g. 12 or
+14) — NNUE handles complex king-and-rook endgames where classical eval
+was weaker, and check-extensions there might help.  Self-play match
+with KING_SAFETY_STAGE=12 vs 10 to measure.
+
+**Singular-extension margin (SMARGIN) tuning.**  The 25-cp default was
+calibrated against classical scores.  NNUE scores have a different
+noise distribution (more depth-to-depth variance in the opening, less
+in the middlegame).  Test SMARGIN={25, 40, 60} in self-play; the
+correct value with NNUE may be ~40 cp.  See also the per-position
+analysis in the 2026-05-04 diagnostic — startpos fired sing_ext 22×
+more than EXchess, suggesting SMARGIN=25 is too tight in symmetric
+opening positions.
+
+**Option B from the original qchecks investigation: NNUE-native
+proxy.**  The current fix runs a small classical-style piece loop on
+every cache miss.  An alternative is to derive qchecks from cheap
+board-state info that doesn't reference the classical eval at all,
+e.g. `popcount(enemy_attackers_within_2_squares_of_king)`.
+Behaviorally similar but removes the residual coupling to the
+classical eval code path.  Worth A/B testing if the current fix's
+~5% node-count overhead is meaningful.
+
+**Re-tune extension trigger thresholds.**  The check-extension branch
+also gates on `moves.mv[mi].score > 1000000`.  This score threshold
+was set against the classical move-ordering scoring scheme.  With S1
+(per-ply killers) and the new qchecks signal, the move scores hitting
+this branch may have shifted.  Worth profiling which moves trigger
+extensions and verifying the threshold still selects high-quality
+checking moves.
+
+**Consider NNUE-derived king-safety bonus alongside qchecks.**  Now
+that we're running a small classical-style loop on every NNUE eval
+miss, it's cheap to extract more information.  The NNUE accumulator's
+PSQT terms encode king safety information; adding a small
+king-safety adjustment from NNUE psqt_diff (in addition to the main
+NNUE score) could in principle replace the classical king-safety
+score that's still missing.  Speculative; worth investigating only
+after the simpler tuning above is exhausted.
+
 ### Pawn hash under NNUE
 The classical eval stores pawn structure scores in a pawn hash table.  The NNUE eval
 bypasses classical eval entirely, so `pawn hash hits` is always 0 in NNUE mode and the
