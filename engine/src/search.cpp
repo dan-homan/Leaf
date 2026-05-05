@@ -362,10 +362,8 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
     //     with iteration and number of fails 
     //     strongly interacts with time extension
     //     mechanisms!!
-    //  -- IMPORTANT: Use FULL WINDOW during TDLEAF
-    //                learning to preserve PV.
     //------------------------------------------
-    if(max_ply > MAX(start_depth,3) && !TDLEAF)   
+    if(max_ply > MAX(start_depth,3))
      { root_alpha = g_last-15; root_beta = g_last+15; }
     else
      { root_alpha = -MATE; root_beta = +MATE; }

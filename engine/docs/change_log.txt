@@ -1,9 +1,5 @@
 Changes since 2017_12_24
 
-2026_05_04 -- search.cpp:  Added !TDLEAF gate to scoring window on PVS
-               search.  It is important to use the full window during 
-               TDLEAF learning to preserve the PV for learning.
-
 2026_05_04 -- score: restore king-tropism qchecks signal under NNUE.
                pos.qchecks[wtm/btm] is the "pieces threatening this king"
                counter that gates two tactical paths in the search:
