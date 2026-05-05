@@ -29,7 +29,7 @@ static const float TDLEAF_LAMBDA           = 0.98f;  // eligibility trace decay 
                                                      // from 1.6M self-play games; autocorrelation
                                                      // and d_t-vs-result methods give ~0.97–0.99
                                                      // for both game types)
-static const float TDLEAF_K               = 260.0f; // sigmoid temperature (centipawns)
+static const float TDLEAF_K               = 200.0f; // sigmoid temperature (centipawns)
                                                      // MLE over 10M positions from stages 5–6:
                                                      // optimum 239 cp (prev. 290 cp, fitted from
                                                      // earlier training stage).
