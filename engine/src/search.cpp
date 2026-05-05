@@ -362,6 +362,25 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
     //     with iteration and number of fails 
     //     strongly interacts with time extension
     //     mechanisms!!
+    //  -- WARNING: the narrow aspiration window is
+    //     LOAD-BEARING beyond just speed.  At fixed
+    //     depth, replacing it with (-MATE,+MATE)
+    //     loses ~6:1 in self-play.  The propagated
+    //     alpha/beta shape several decisions along
+    //     the PV:
+    //       * futility pruning (premove_score+MARGIN<alpha)
+    //         is disabled when alpha=-MATE, so noisy
+    //         non-tactical moves get full budget;
+    //       * internal singular-ext guard (hscore>alpha)
+    //         fires for every TT hit instead of only
+    //         promising positions, fragmenting effort;
+    //       * non-first-move re-search guard
+    //         (beta>alpha+1) becomes always true, so
+    //         every scout-improving move triggers a
+    //         full-window re-search.
+    //     The rest of the search has co-evolved with
+    //     this coupling.  Don't widen the root window
+    //     without re-tuning these guards together.
     //------------------------------------------
     if(max_ply > MAX(start_depth,3))
      { root_alpha = g_last-15; root_beta = g_last+15; }
