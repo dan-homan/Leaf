@@ -75,7 +75,7 @@ static const float TDLEAF_ADAM_FT_BIAS_LR0 = 0.01f;  // step size for FT biases 
 static const float TDLEAF_ADAM_PSQT_LR0 =    10.0f;    // step size for PSQT (int32 scale ~36k std; needs larger LR)
 static const float TDLEAF_ADAM_PV_LR0     =  50.0f;    // step size for dense piece values (same scale as PSQT)
 static const float TDLEAF_ADAM_BETA1    = 0.9f;    // first-moment decay  (FC + FT bias + PSQT)
-static const float TDLEAF_ADAM_BETA2    = 0.999f;  // second-moment decay (all layers)
+static const float TDLEAF_ADAM_BETA2    = 0.97f;  // second-moment decay (all layers)
 static const float TDLEAF_ADAM_EPS      = 1e-8f;   // numerical floor
 // AdamW decoupled weight decay: w -= λ × lr × w after each Adam step.
 // Applied to FC weights and FT weights only (not biases, not PSQT).
@@ -86,7 +86,7 @@ static const int   TDLEAF_ADAM_WARMUP        = 50;  // linear LR warmup over fir
 static const int   TDLEAF_FT_SESSION_WARMUP  = 100; // per-session FT LR ramp over first N Adam steps.
                                                      // Applied every restart via t_ft_session (not persisted).
                                                      // Damps FT updates during the v_ft_w accumulation phase.
-static const int   TDLEAF_BATCH_SIZE    = 4;        // accumulate gradients across N games before Adam step
+static const int   TDLEAF_BATCH_SIZE    = 8;        // accumulate gradients across N games before Adam step
 
 // Replay LR scale: multiplicative factor applied to all category LRs during
 // replay-pass Adam steps (1.0 = no softening, 0.0 = no-op replay).  Lower

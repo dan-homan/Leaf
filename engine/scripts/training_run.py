@@ -577,6 +577,7 @@ def main():
     los_stop_hi    = 0.99   # early-stop if LOS rises above this
     los_stop_lo    = 0.01   # early-stop if LOS falls below this
     val_tc         = None   # set in Step 4 after tc1 is known
+    val_depth      = 0      # set in Step 4 (0 = no depth limit; TC alone gates search)
     # Eval binary names (set in Step 2 if use_loop and val_ref_mode == "best")
     best_nnue_name = None
     cand_nnue_name = None
@@ -772,6 +773,22 @@ def main():
             print(f"  Backup saved  → {os.path.basename(bak)}")
     else:
         print(f"No existing .tdleaf.bin for {net_filename} — starting fresh.")
+        # An existing .nnue with no .tdleaf.bin may leave stale state behind
+        # from earlier runs (sidecar game count, lock file).  Reset both so
+        # the engine starts cleanly and the new .tdleaf.bin can be created
+        # on the first save without contention.
+        if prior_games > 0:
+            print(f"  Sidecar reports {prior_games:,} games but no .tdleaf.bin"
+                  f" — resetting count to 0.")
+            prior_games = 0
+            write_game_count(sidecar_path, 0)
+        lock_path = tdleaf_bin + ".lock"
+        if os.path.isfile(lock_path):
+            try:
+                os.remove(lock_path)
+                print(f"  Removed stale lock: {os.path.basename(lock_path)}")
+            except OSError:
+                pass
 
     # -----------------------------------------------------------------------
     # Step 4 — Match parameters
@@ -806,6 +823,10 @@ def main():
     depth2      = int(depth2_str) if depth2_str.strip() else 0
     if use_loop:
         val_tc = ask("  Validation time control  [--val-tc]  ", tc1)
+        val_depth_default = str(depth1) if depth1 else "0"
+        val_depth_str = ask("  Validation depth limit (0=none) [--val-depth]",
+                            val_depth_default)
+        val_depth = int(val_depth_str) if val_depth_str.strip() else 0
 
     games_per_cycle = n_games
 
@@ -845,7 +866,10 @@ def main():
         cycle_label = str(n_cycles) if n_cycles > 0 else "∞"
         print(f"  Loop:             {cycle_label} cycles × {games_per_cycle:,} games/cycle")
         ref_desc = "rolling best" if val_ref_mode == "best" else f"fixed: {val_fixed['display']}"
-        print(f"  Validation:       {val_games} games @ {val_tc}  "
+        val_limits = f"{val_tc}"
+        if val_depth:
+            val_limits += f", depth={val_depth}"
+        print(f"  Validation:       {val_games} games @ {val_limits}  "
               f"vs {ref_desc}  accept≥{los_thresh_pct:.0f}%  "
               f"early-stop ≥{los_stop_hi*100:.0f}% / ≤{los_stop_lo*100:.0f}%")
     else:
@@ -1169,6 +1193,9 @@ def main():
                     "--name1", f"{net_base}-cand",
                     "--name2", ref_name,
                 ]
+                if val_depth:
+                    val_cmd += ["--depth1", str(val_depth),
+                                "--depth2", str(val_depth)]
                 for key, val in ref_options:
                     val_cmd += ["--option2", f"{key}={val}"]
                 val_cmd += openings_args()
