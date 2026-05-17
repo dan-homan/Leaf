@@ -438,7 +438,7 @@ move opening_book(h_code hash_code, position p, game_rec *gr)
    // Now select a move from the list to play
    if(candidates) {
     int running_score = 0;
-    float random = float(rand())/RAND_MAX;
+    double random = (double)rand() / RAND_MAX;
     for(j = 0; j < candidates; j++) {
      running_score += list.mv[j].score;
      if(random <= (float(running_score)/total_score)) {
@@ -532,7 +532,7 @@ move opening_book(h_code hash_code, position p, game_rec *gr)
  // Now select a move from the list to play
  if(candidates) {
   int running_score = 0;
-  float random = float(rand())/RAND_MAX;
+  double random = (double)rand() / RAND_MAX;
 
   for(j = 0; j < candidates; j++) {
    running_score += list.mv[j].score;
