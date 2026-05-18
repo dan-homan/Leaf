@@ -19,7 +19,7 @@ and <base>.nnue when --baseline is given.  The .nnue is constructed by
 applying merged float weights (divided by TDLEAF_SCALE=128) on top of
 the baseline network, requantizing to int8/int16/int32.
 
-The output .tdleaf.bin is a valid v8 file that can be loaded by Leaf.
+The output .tdleaf.bin is a valid v10 file that can be loaded by Leaf.
 """
 
 import argparse
@@ -30,8 +30,10 @@ from pathlib import Path
 
 # Constants matching nnue.cpp / nnue.h
 TDLEAF_MAGIC   = 0x544D4C46  # "TMLF"
-TDLEAF_VERSION = 8
+TDLEAF_VERSION = 10
 TDLEAF_SCALE   = 128.0
+FNV_OFFSET     = 0xcbf29ce484222325
+FNV_PRIME      = 0x100000001b3
 
 LAYER_STACKS = 8
 L0_SIZE      = 16
@@ -171,9 +173,11 @@ class FCBlock:
 
 
 class TDLeafFile:
-    """Parsed .tdleaf.bin v8 file."""
+    """Parsed .tdleaf.bin v10 file."""
     def __init__(self):
         self.version = TDLEAF_VERSION
+        # FT content fingerprint of the source .nnue (v10+).  0 = legacy/unknown.
+        self.nnue_content_hash = 0
         self.fc = [FCBlock() for _ in range(LAYER_STACKS)]
         # Sparse FT/PSQT: dict keyed by feature index
         #   ft_rows[fi] = (ft_w[HALF_DIMS], ft_c[HALF_DIMS],
@@ -182,18 +186,18 @@ class TDLeafFile:
         # FT biases
         self.ft_bias_w = np.zeros(HALF_DIMS, dtype=np.float32)
         self.ft_bias_c = np.zeros(HALF_DIMS, dtype=np.uint32)
-        # Dense piece values: 6 piece types × 8 PSQT buckets (v5+)
-        self.piece_val_w = np.zeros(6 * PSQT_BKTS, dtype=np.float32)
-        self.piece_val_c = np.zeros(6 * PSQT_BKTS, dtype=np.uint32)
+        # Dense piece values: 6 piece types (v9+; v5-v8 had 6 × 8 PSQT buckets)
+        self.piece_val_w = np.zeros(6, dtype=np.float32)
+        self.piece_val_c = np.zeros(6, dtype=np.uint32)
         # Adam v section (v6+)
         self.t_adam = 0
         self.v_ft_bias   = np.zeros(HALF_DIMS, dtype=np.float32)
-        self.v_piece_val = np.zeros(6 * PSQT_BKTS, dtype=np.float32)
+        self.v_piece_val = np.zeros(6, dtype=np.float32)
         # Sparse PSQT v: dict keyed by feature index → v_psqt[PSQT_BKTS]
         self.psqt_v_rows = {}
         # Adam m section (v7+)
         self.m_ft_bias   = np.zeros(HALF_DIMS, dtype=np.float32)
-        self.m_piece_val = np.zeros(6 * PSQT_BKTS, dtype=np.float32)
+        self.m_piece_val = np.zeros(6, dtype=np.float32)
         # Sparse PSQT m: dict keyed by feature index → m_psqt[PSQT_BKTS]
         self.psqt_m_rows = {}
         # Sparse FT v section (v8+): dict keyed by feature index → v_ft[HALF_DIMS]
@@ -207,9 +211,13 @@ class TDLeafFile:
             version = read_u32(f)
             if magic != TDLEAF_MAGIC:
                 raise ValueError(f"{path}: bad magic 0x{magic:08X} (expected 0x{TDLEAF_MAGIC:08X})")
-            if version not in (2, 3, 4, 5, 6, 7, 8):
+            if version not in (2, 3, 4, 5, 6, 7, 8, 9, 10):
                 raise ValueError(f"{path}: unsupported version {version}")
             obj.version = version
+
+            # v10+: nnue_content_hash immediately after version.
+            if version >= 10:
+                obj.nnue_content_hash = read_u32(f)
 
             for s in range(LAYER_STACKS):
                 obj.fc[s].read(f)
@@ -230,16 +238,31 @@ class TDLeafFile:
                 obj.ft_bias_w = read_f32_array(f, HALF_DIMS)
                 obj.ft_bias_c = read_u32_array(f, HALF_DIMS)
 
+            # Dense piece values (v5+).  v9+: float32[6] + uint32[6].
+            # v5-v8: float32[6][8] + uint32[6][8] → collapse to [6] by averaging
+            # across PSQT buckets (matches engine load semantics in
+            # nnue_training.cpp).
             if version >= 5:
-                obj.piece_val_w = read_f32_array(f, 6 * PSQT_BKTS)
-                obj.piece_val_c = read_u32_array(f, 6 * PSQT_BKTS)
+                if version >= 9:
+                    obj.piece_val_w = read_f32_array(f, 6)
+                    obj.piece_val_c = read_u32_array(f, 6)
+                else:
+                    pv_w_48 = read_f32_array(f, 6 * PSQT_BKTS).reshape(6, PSQT_BKTS)
+                    pv_c_48 = read_u32_array(f, 6 * PSQT_BKTS).reshape(6, PSQT_BKTS)
+                    obj.piece_val_w = (pv_w_48.sum(axis=1) / PSQT_BKTS).astype(np.float32)
+                    obj.piece_val_c = (pv_c_48.sum(axis=1) // PSQT_BKTS).astype(np.uint32)
 
             if version >= 6:
                 obj.t_adam = read_u32(f)
                 for s in range(LAYER_STACKS):
                     obj.fc[s].read_v(f)
-                obj.v_ft_bias   = read_f32_array(f, HALF_DIMS)
-                obj.v_piece_val = read_f32_array(f, 6 * PSQT_BKTS)
+                obj.v_ft_bias = read_f32_array(f, HALF_DIMS)
+                # v_piece_val: max-per-piece-type when collapsing v6-v8.
+                if version >= 9:
+                    obj.v_piece_val = read_f32_array(f, 6)
+                else:
+                    v_pv_48 = read_f32_array(f, 6 * PSQT_BKTS).reshape(6, PSQT_BKTS)
+                    obj.v_piece_val = v_pv_48.max(axis=1).astype(np.float32)
                 n_pv_rows = read_u32(f)
                 for _ in range(n_pv_rows):
                     fi = read_u32(f)
@@ -250,8 +273,13 @@ class TDLeafFile:
             if version >= 7:
                 for s in range(LAYER_STACKS):
                     obj.fc[s].read_m(f)
-                obj.m_ft_bias   = read_f32_array(f, HALF_DIMS)
-                obj.m_piece_val = read_f32_array(f, 6 * PSQT_BKTS)
+                obj.m_ft_bias = read_f32_array(f, HALF_DIMS)
+                # m_piece_val: mean-per-piece-type when collapsing v7-v8.
+                if version >= 9:
+                    obj.m_piece_val = read_f32_array(f, 6)
+                else:
+                    m_pv_48 = read_f32_array(f, 6 * PSQT_BKTS).reshape(6, PSQT_BKTS)
+                    obj.m_piece_val = m_pv_48.mean(axis=1).astype(np.float32)
                 n_pm_rows = read_u32(f)
                 for _ in range(n_pm_rows):
                     fi = read_u32(f)
@@ -272,6 +300,8 @@ class TDLeafFile:
     def save(self, path):
         with open(path, 'wb') as f:
             f.write(struct.pack('<II', TDLEAF_MAGIC, TDLEAF_VERSION))
+            # v10+: nnue_content_hash immediately after version.
+            f.write(struct.pack('<I', self.nnue_content_hash & 0xFFFFFFFF))
 
             for s in range(LAYER_STACKS):
                 self.fc[s].write(f)
@@ -291,7 +321,7 @@ class TDLeafFile:
             write_f32_array(f, self.ft_bias_w)
             write_u32_array(f, self.ft_bias_c)
 
-            # Dense piece values (v5)
+            # Dense piece values (v9+: float32[6] + uint32[6])
             write_f32_array(f, self.piece_val_w)
             write_u32_array(f, self.piece_val_c)
 
@@ -530,20 +560,51 @@ def weighted_merge_arrays(pairs):
     return merged.astype(np.float32), total_cnt.astype(np.uint32)
 
 
+def fnv1a_u32_ft_hash(ft_weights_i16):
+    """FNV-1a hash matching engine nnue_fnv1a_u32 over the FT weight bytes.
+
+    Mirrors nnue.cpp:nnue_fnv1a_u32 — 64-bit FNV-1a processed 8 bytes at a
+    time, then folded to 32 bits with (h >> 32) ^ (uint32_t)h.
+    """
+    data = np.ascontiguousarray(ft_weights_i16, dtype='<i2').tobytes()
+    n8 = len(data) // 8
+    h = FNV_OFFSET
+    if n8:
+        words = np.frombuffer(data[:n8 * 8], dtype='<u8')
+        for w in words:
+            h = ((h ^ int(w)) * FNV_PRIME) & 0xFFFFFFFFFFFFFFFF
+    for b in data[n8 * 8:]:
+        h = ((h ^ b) * FNV_PRIME) & 0xFFFFFFFFFFFFFFFF
+    return ((h >> 32) ^ (h & 0xFFFFFFFF)) & 0xFFFFFFFF
+
+
 def merge_files(files, output_base, baseline_path=None, report=False):
     """Load all files, merge with count-weighting, write output."""
     loaded = []
     for path in files:
         print(f"Loading {path} ...", end=' ')
         td = TDLeafFile.load(path)
-        print(f"v{td.version}, {len(td.ft_rows)} FT rows")
+        hash_str = f"0x{td.nnue_content_hash:08X}" if td.version >= 10 else "n/a"
+        print(f"v{td.version}, {len(td.ft_rows)} FT rows, .nnue hash={hash_str}")
         loaded.append(td)
 
     if not loaded:
         print("No files to merge.", file=sys.stderr)
         return
 
+    # Sanity-check that all v10+ inputs reference the same source .nnue.
+    v10_hashes = {td.nnue_content_hash for td in loaded if td.version >= 10}
+    if len(v10_hashes) > 1:
+        print(f"WARNING: input files reference different .nnue content hashes: "
+              f"{sorted(f'0x{h:08X}' for h in v10_hashes)}.  "
+              f"Merging anyway, but trained deltas may be inconsistent.",
+              file=sys.stderr)
+
     out = TDLeafFile()
+    # Default to the first v10 hash; will be overwritten below if --baseline
+    # is given (we then recompute the hash from the output .nnue's FT weights).
+    if v10_hashes:
+        out.nnue_content_hash = next(iter(v10_hashes))
 
     # --- FC layers ---
     for s in range(LAYER_STACKS):
@@ -600,9 +661,12 @@ def merge_files(files, output_base, baseline_path=None, report=False):
     bias_pairs = [(td.ft_bias_w, td.ft_bias_c) for td in loaded]
     out.ft_bias_w, out.ft_bias_c = weighted_merge_arrays(bias_pairs)
 
-    # --- Dense piece values ---
+    # --- Dense piece values (size 6, v9+) ---
+    # Clamp ≥ 0: matches engine guard against negative piece values (which
+    # invert material evaluation and cause an unrecoverable death spiral).
     pv_pairs = [(td.piece_val_w, td.piece_val_c) for td in loaded]
     out.piece_val_w, out.piece_val_c = weighted_merge_arrays(pv_pairs)
+    out.piece_val_w = np.maximum(out.piece_val_w, 0.0).astype(np.float32)
 
     # --- Adam v (max-merge) ---
     out.t_adam = max(td.t_adam for td in loaded)
@@ -652,17 +716,23 @@ def merge_files(files, output_base, baseline_path=None, report=False):
         vals = [td.ft_v_rows.get(fi, zero_ftv) for td in loaded]
         out.ft_v_rows[fi] = np.maximum.reduce(vals)
 
+    # --- Write .nnue if baseline provided.  This runs before the .tdleaf.bin
+    # save so we can stamp the OUTPUT .nnue's FT content hash into the
+    # .tdleaf.bin (matching the engine's load-time pairing check).
+    if baseline_path:
+        out_nnue = write_merged_nnue(out, baseline_path, output_base + '.nnue')
+        out.nnue_content_hash = fnv1a_u32_ft_hash(out_nnue.ft_weights)
+        print(f"  Stamped .tdleaf.bin with output .nnue FT hash="
+              f"0x{out.nnue_content_hash:08X}")
+
     # --- Write .tdleaf.bin ---
     tdleaf_path = output_base + '.tdleaf.bin'
     out.save(tdleaf_path)
-    print(f"\nWrote {tdleaf_path}: {len(out.ft_rows)} FT rows")
+    print(f"\nWrote {tdleaf_path}: {len(out.ft_rows)} FT rows, "
+          f".nnue hash=0x{out.nnue_content_hash:08X}")
 
     if report:
         print_report(loaded, out)
-
-    # --- Write .nnue if baseline provided ---
-    if baseline_path:
-        write_merged_nnue(out, baseline_path, output_base + '.nnue')
 
     return out
 
@@ -754,13 +824,15 @@ def write_merged_nnue(merged_td, baseline_path, nnue_out_path):
     print(f"Writing {nnue_out_path} ...")
     out.save(nnue_out_path)
     print(f"Wrote {nnue_out_path}")
+    return out
 
 
 def print_report(loaded, merged):
-    """Print summary statistics about the merge (output is v8)."""
+    """Print summary statistics about the merge (output is v10)."""
     print("\n--- Merge Report ---")
     print(f"Input files: {len(loaded)}")
-    print(f"Output format: v8 (includes Adam m first-moment + sparse FT v second-moment arrays)")
+    print(f"Output format: v10 (.nnue content hash header + dense piece_val[6] "
+          f"+ Adam m first-moment + sparse FT v second-moment)")
 
     # FC total counts per file
     for i, td in enumerate(loaded):
