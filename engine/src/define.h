@@ -111,6 +111,14 @@
  #define TDLEAF_REPLAY_BUF_N 8  // ring buffer capacity (~4.5 MB × N static BSS)
 #endif
 
+// Compile-time default for chess_skill / game.knowledge_scale (1-100).
+// 100 = full strength.  Lower values weaken play in score.cpp by adding
+// noise to eval terms.  Override at compile time with KNOWLEDGE=<N> for
+// automated testing at fixed strength levels (e.g. KNOWLEDGE=75).
+#ifndef KNOWLEDGE
+ #define KNOWLEDGE 100
+#endif
+
 // define 64 bit integers and zero values for unsigned long long
 #if MSVC 
  #define ZERO 0ui64

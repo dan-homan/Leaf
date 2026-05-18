@@ -51,7 +51,7 @@ struct EngineConfig {
     int max_logs       = 100;
     int gambit_score   = 80;
     int book_learning  = 0;
-    int chess_skill    = 100;
+    int chess_skill    = KNOWLEDGE;  // compile-time default; see define.h
     int hash_size      = 128;
 };
 
