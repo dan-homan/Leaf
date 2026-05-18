@@ -636,11 +636,13 @@ def merge_files(files, output_base, baseline_path=None, report=False):
     for td in loaded:
         all_fi.update(td.ft_rows.keys())
 
-    zero_ft_w = np.zeros(HALF_DIMS, dtype=np.float32)
-    zero_ft_c = np.zeros(HALF_DIMS, dtype=np.uint32)
-    zero_ps_w = np.zeros(PSQT_BKTS, dtype=np.float32)
-    zero_ps_c = np.zeros(PSQT_BKTS, dtype=np.uint32)
-
+    # Only pass pairs from files that actually have the row.  Earlier versions
+    # zero-padded missing files into the pair list, but that breaks the
+    # count-weighted passthrough: when every count for an element is zero,
+    # weighted_merge_arrays falls back to pairs[0][0], and a zero-padded
+    # pairs[0] silently wipes the correct value from a later file.  This bit
+    # PSQT buckets where pcnt[b]=0 but psqt_weights_f32 still held the initial
+    # classical material value — they got merged to zero instead of preserved.
     for fi in sorted(all_fi):
         ft_pairs = []
         ps_pairs = []
@@ -649,9 +651,6 @@ def merge_files(files, output_base, baseline_path=None, report=False):
                 ft_w, ft_c, ps_w, ps_c = td.ft_rows[fi]
                 ft_pairs.append((ft_w, ft_c))
                 ps_pairs.append((ps_w, ps_c))
-            else:
-                ft_pairs.append((zero_ft_w, zero_ft_c))
-                ps_pairs.append((zero_ps_w, zero_ps_c))
 
         m_ft_w, m_ft_c = weighted_merge_arrays(ft_pairs)
         m_ps_w, m_ps_c = weighted_merge_arrays(ps_pairs)
@@ -814,13 +813,40 @@ def write_merged_nnue(merged_td, baseline_path, nnue_out_path):
         start = fi * HALF_DIMS
         out.ft_weights[start:start + HALF_DIMS] = np.clip(
             np.round(f32), -32767, 32767).astype(np.int16)
-        # PSQT: float at SCALE → int32
+        # PSQT: float at SCALE → int32 (un-baked, raw psqt_weights_f32)
         f32p = ps_w / TDLEAF_SCALE
         pstart = fi * PSQT_BKTS
         out.psqt_weights[pstart:pstart + PSQT_BKTS] = np.round(f32p).astype(np.int32)
         n_updated += 1
 
+    # Bake piece_val into PSQT to produce a self-contained .nnue, matching the
+    # engine's nnue_write_nnue (nnue_io.cpp:462-476).  Without this, the trained
+    # material values live only in .tdleaf.bin and never reach scoring when the
+    # .nnue is used standalone — own-piece PSQT averages can go negative and the
+    # engine's nnue_extract_piece_values clamps cp<1 to 1 across the board.
+    # Formula (per feature):
+    #   psqt_baked[fi][b] = psqt[fi][b] ± piece_val[ps_slot] × 0.5
+    # where + applies to own-piece features (fi % 704 % 128 < 64) and − to enemy.
+    # Assumes baseline.psqt_weights has piece_val=0 baked in (true for .nnue
+    # files produced by --init-nnue, since piece_val starts at 0 there).
+    PS_NB = 704
+    piece_val_raw = merged_td.piece_val_w / TDLEAF_SCALE  # size 6, PSQT units
+    fis = np.arange(FT_INPUTS)
+    fi_in_bkt = fis % PS_NB
+    ps_slot   = fi_in_bkt // 128
+    is_own    = (fi_in_bkt % 128) < 64
+    sign      = np.where(is_own, 1.0, -1.0)
+    # piece_val_raw[5] is always 0 (king), so the multiply zeros that contribution.
+    pv_per_feature = sign * piece_val_raw[np.minimum(ps_slot, 5)] * 0.5
+    pv_broadcast   = np.repeat(pv_per_feature, PSQT_BKTS)
+    out.psqt_weights = np.round(
+        out.psqt_weights.astype(np.float64) + pv_broadcast).astype(np.int32)
+
     print(f"Applied {n_updated} FT rows from .tdleaf.bin onto baseline")
+    print(f"Baked piece_val into PSQT: "
+          f"P={piece_val_raw[0]:.1f} N={piece_val_raw[1]:.1f} "
+          f"B={piece_val_raw[2]:.1f} R={piece_val_raw[3]:.1f} "
+          f"Q={piece_val_raw[4]:.1f} (PSQT internal units)")
     print(f"Writing {nnue_out_path} ...")
     out.save(nnue_out_path)
     print(f"Wrote {nnue_out_path}")
