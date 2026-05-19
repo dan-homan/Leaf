@@ -225,8 +225,40 @@ static uint32_t  t_ft_session = 0;
 #define INIT_FC1_W_STD    3.0f      // moderate — fan-in 30, low saturation risk
 #define INIT_FC2_W_STD    2.0f      // small — keep initial positional output ≈ 0 cp
 
-void nnue_init_zero_weights(bool noprior)
+// Map NNUE PSQT bucket (0..7, selected by piece_count) to a classical gstage
+// (0..15, used to index piece_sq[stage][piece][sq]).  Smooth gstage ladder so
+// the gstage interpolation gives a continuous PSQT shape across buckets.
+//   bucket 0 (1-4 pieces, deep endgame)     → gstage 15
+//   bucket 1 (5-8 pieces, late endgame)     → gstage 14
+//   bucket 2 (9-12 pieces, early endgame)   → gstage 12
+//   bucket 3 (13-16 pieces, late midgame)   → gstage 10
+//   bucket 4 (17-20 pieces, midgame)        → gstage  8
+//   bucket 5 (21-24 pieces, early midgame)  → gstage  6
+//   bucket 6 (25-28 pieces, opening trans.) → gstage  3
+//   bucket 7 (29-32 pieces, opening)        → gstage  0
+static const int NNUE_BUCKET_TO_GSTAGE[NNUE_PSQT_BKTS] = { 15, 14, 12, 10, 8, 6, 3, 0 };
+
+// Classical PSQT lookup with gstage interpolation, matching score.cpp:380.
+//   sq: square index in "black-POV" layout (matches piece_sq[] table layout).
+//       For NNUE persp-relative square Y: use Y for enemy-side (black-equivalent),
+//       use Y^56 for own-side (white-equivalent, via whitef[] convention).
+//   ptype: 1..5 (PAWN..QUEEN); KING (6) returns 0 here — king positional
+//          contribution is captured implicitly by the HalfKAv2_hm king bucket.
+static inline float classical_pst_cp(int gstage, int ptype, int sq)
 {
+    if (ptype < 1 || ptype > 5) return 0.f;
+    if (gstage >= 12)
+        return (float)piece_sq[3][ptype][sq];
+    int stage = gstage / 4;
+    int rem   = gstage % 4;
+    return ((4 - rem) * (float)piece_sq[stage][ptype][sq]
+            + rem    * (float)piece_sq[stage + 1][ptype][sq]) / 4.0f;
+}
+
+void nnue_init_zero_weights(int prior_mode)
+{
+    const bool noprior   = (prior_mode == NNUE_PRIOR_NOPRIOR);
+    const bool classical = (prior_mode == NNUE_PRIOR_CLASSICAL);
     // ---- FC layers: zero-mean weights (He principle); FC0 std He-adjusted; biases zero ----
     std::mt19937 rng(42);  // fixed seed for reproducibility
     // Truncated normal for int8 weights: reject samples outside [-127, 127]
@@ -354,29 +386,47 @@ void nnue_init_zero_weights(bool noprior)
         // Feature layout within each king-bucket (PS_NB=704 entries per bucket):
         //   ps_slot = (fi % PS_NB) / 128 → 0=pawn, 1=knight, 2=bishop, 3=rook, 4=queen, 5=king
         //   is_own  = (fi % PS_NB) % 128 < 64  (own-piece squares are [0,63], enemy are [64,127])
-        if (!noprior) {
-            static const float PSQT_CLASSICAL[6] = {
-                1.f * 100.f  * 5776.f / 100.f,  // ps_slot 0: PAWN   = 5776.0
-                1.f * 377.f  * 5776.f / 100.f,  // ps_slot 1: KNIGHT = 21775.5
-                1.f * 399.f  * 5776.f / 100.f,  // ps_slot 2: BISHOP = 23046.2
-                1.f * 596.f  * 5776.f / 100.f,  // ps_slot 3: ROOK   = 34425.0
-                1.f * 1197.f * 5776.f / 100.f,  // ps_slot 4: QUEEN  = 69138.1
-                0.f,                             // ps_slot 5: KING   = 0
+        if (noprior) {
+            memset(psqt_weights_f32, 0, psqt_sz * sizeof(float));
+            memset(psqt_weights,     0, psqt_sz * sizeof(int32_t));
+        } else {
+            // Material prior (cp) shared by both MATERIAL and CLASSICAL modes.
+            static const float MATERIAL_CP[6] = {
+                100.f,   // PAWN
+                377.f,   // KNIGHT
+                399.f,   // BISHOP
+                596.f,   // ROOK
+                1197.f,  // QUEEN
+                0.f,     // KING (PSQT contribution captured via king bucket)
             };
+            const float SCALE = 5776.f / 100.f;  // cp → PSQT-int32 units
             for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
                 int fi_in_bkt = fi % PS_NB;
                 int ps_slot   = fi_in_bkt / 128;
                 bool is_own   = (fi_in_bkt % 128) < 64;
-                float val = 0.f;
-                if (ps_slot < 5)
-                    val = is_own ? PSQT_CLASSICAL[ps_slot] : -PSQT_CLASSICAL[ps_slot];
+                int  persp_sq = (fi_in_bkt % 128) & 63;
+                // sq_lookup is in piece_sq[] table coordinates.  Table is indexed
+                // "from black's POV"; classical does pst[whitef[sq]] for white pieces
+                // and pst[sq] for black.  In NNUE persp-relative coords:
+                //   own piece at persp_sq Y → equivalent to white piece at real Y
+                //     (white-persp: no flip; black-persp: real sq = Y^56, then
+                //      whitef[Y^56] = Y — both reduce to table-index Y^56).
+                //   enemy piece at persp_sq Y → equivalent to black piece at real Y
+                //     (table-index Y, no flip).
+                int sq_lookup = is_own ? (persp_sq ^ 56) : persp_sq;
                 float   *fp = psqt_weights_f32 + (size_t)fi * NNUE_PSQT_BKTS;
                 int32_t *ip = psqt_weights     + (size_t)fi * NNUE_PSQT_BKTS;
-                for (int b = 0; b < NNUE_PSQT_BKTS; b++) { fp[b] = val; ip[b] = (int32_t)roundf(val); }
+                for (int b = 0; b < NNUE_PSQT_BKTS; b++) {
+                    float pst_cp = 0.f;
+                    if (classical && ps_slot < 5)
+                        pst_cp = classical_pst_cp(NNUE_BUCKET_TO_GSTAGE[b],
+                                                  ps_slot + 1, sq_lookup);
+                    float cp  = MATERIAL_CP[ps_slot] + pst_cp;
+                    float val = (is_own ? +1.f : -1.f) * cp * SCALE;
+                    fp[b] = val;
+                    ip[b] = (int32_t)roundf(val);
+                }
             }
-        } else {
-            memset(psqt_weights_f32, 0, psqt_sz * sizeof(float));
-            memset(psqt_weights,     0, psqt_sz * sizeof(int32_t));
         }
         memset(ft_weights_cnt,   0, ft_sz   * sizeof(uint32_t));
         memset(psqt_weights_cnt, 0, psqt_sz * sizeof(uint32_t));
@@ -416,12 +466,25 @@ void nnue_init_zero_weights(bool noprior)
     nnue_update_content_hash();
 
     nnue_zero_initialized = true;
+    nnue_init_prior_mode  = prior_mode;
+    const char *psqt_desc;
+    if (noprior)         psqt_desc = "zero (noprior)";
+    else if (classical)  psqt_desc = "classical material + 4-stage piece-square tables "
+                                     "(gstage-interpolated across 8 buckets; "
+                                     "P=100 N=377 B=399 R=596 Q=1197 cp + pst)";
+    else                 psqt_desc = "symmetric classical material "
+                                     "(own=+V,enemy=-V; P=100 N=377 B=399 R=596 Q=1197 cp)";
     printf("NNUE TDLeaf: FC weights=N(0,{%.0f,%.0f,%.0f}) passthrough[15]=0; "
            "FT weights=N(0,%.0f); biases=zero; "
            "PSQT=%s; piece_val=zero (learns corrections)\n",
            INIT_FC0_W_STD, INIT_FC1_W_STD, INIT_FC2_W_STD, INIT_FT_W_STD,
-           noprior ? "zero (noprior)" : "symmetric classical (own=+V,enemy=-V; P=100 N=377 B=399 R=596 Q=1197 cp)");
+           psqt_desc);
 }
+
+// Forward decl — defined near nnue_apply_gradients; used here to log envvar
+// overrides at startup rather than after the first training batch.
+struct TDLeafLRMultipliers;
+static const TDLeafLRMultipliers &tdleaf_lr_multipliers();
 
 // ---------------------------------------------------------------------------
 // nnue_init_fp32_weights — dequantize int8 → float after nnue_load()
@@ -557,6 +620,11 @@ void nnue_init_fp32_weights()
     piece_val_active = false;  // activated by init_zero_weights or v5+ load
 
     printf("NNUE TDLeaf: FP32 weights initialised (%d stacks + FT/PSQT + FT biases)\n", NNUE_LAYER_STACKS);
+
+    // Touch the LR-multiplier singleton so any envvar overrides log at startup
+    // (visibility before kicking off a long training run), not after the first
+    // batch.  No effect when all multipliers are at default 1.0.
+    (void)tdleaf_lr_multipliers();
 }
 
 // ---------------------------------------------------------------------------
@@ -893,6 +961,56 @@ float nnue_clip_gradients(float max_norm)
 }
 
 // ---------------------------------------------------------------------------
+// Runtime LR overrides (read once from environment).
+//
+// TDLEAF_LR_{FC,FT,FT_BIAS,PSQT,PV} multiply the corresponding TDLEAF_ADAM_*_LR0
+// constant.  TDLEAF_FREEZE_PSQT=1 forces the PSQT multiplier to 0 (PSQT weights
+// don't move; Adam state still advances, so a later session without the freeze
+// resumes normally).  Defaults are all 1.0 (no override).
+//
+// Intended for LR sweeps without recompiling.  Example:
+//   TDLEAF_LR_PSQT=0.1 TDLEAF_LR_FT=3.0 ./Leaf_vtrain ...
+// ---------------------------------------------------------------------------
+struct TDLeafLRMultipliers {
+    float fc, ft, ft_bias, psqt, pv;
+};
+static const TDLeafLRMultipliers &tdleaf_lr_multipliers()
+{
+    static const TDLeafLRMultipliers m = []() {
+        auto read_env = [](const char *name, float def) {
+            const char *v = getenv(name);
+            if (!v || !*v) return def;
+            char *end = nullptr;
+            float f = strtof(v, &end);
+            return (end == v) ? def : f;
+        };
+        TDLeafLRMultipliers x;
+        x.fc      = read_env("TDLEAF_LR_FC",      1.0f);
+        x.ft      = read_env("TDLEAF_LR_FT",      1.0f);
+        x.ft_bias = read_env("TDLEAF_LR_FT_BIAS", 1.0f);
+        x.psqt    = read_env("TDLEAF_LR_PSQT",    1.0f);
+        x.pv      = read_env("TDLEAF_LR_PV",      1.0f);
+        const char *fp = getenv("TDLEAF_FREEZE_PSQT");
+        bool frozen = fp && (*fp == '1' || *fp == 't' || *fp == 'T' || *fp == 'y' || *fp == 'Y');
+        if (frozen) x.psqt = 0.0f;
+        bool any = (x.fc != 1.0f || x.ft != 1.0f || x.ft_bias != 1.0f
+                    || x.psqt != 1.0f || x.pv != 1.0f);
+        if (any) {
+            fprintf(stderr, "TDLeaf LR overrides:");
+            if (x.fc      != 1.0f) fprintf(stderr, " FC=%.4g",      (double)x.fc);
+            if (x.ft      != 1.0f) fprintf(stderr, " FT=%.4g",      (double)x.ft);
+            if (x.ft_bias != 1.0f) fprintf(stderr, " FT_BIAS=%.4g", (double)x.ft_bias);
+            if (x.psqt    != 1.0f) fprintf(stderr, " PSQT=%.4g%s",  (double)x.psqt,
+                                                                    frozen ? " (frozen)" : "");
+            if (x.pv      != 1.0f) fprintf(stderr, " PV=%.4g",      (double)x.pv);
+            fprintf(stderr, "\n");
+        }
+        return x;
+    }();
+    return m;
+}
+
+// ---------------------------------------------------------------------------
 // nnue_apply_gradients — update FP32 weights from accumulators, increment counts,
 //                        then zero the accumulators.
 // Only weights that received a non-zero gradient this game are updated / counted.
@@ -932,11 +1050,13 @@ void nnue_apply_gradients(float lr_scale)
         : 1.0f;
 
     // Effective LRs.  lr_scale (<1.0 for replay) applied uniformly to all
-    // categories to soften replay-pass updates; live path passes 1.0.
-    const float fc_lr      = lr_scale * warmup_factor * TDLEAF_ADAM_LR0;
-    const float ft_lr      = lr_scale * warmup_factor * ft_session_factor * TDLEAF_ADAM_FT_LR0;
-    const float ft_bias_lr = lr_scale * warmup_factor * TDLEAF_ADAM_FT_BIAS_LR0;
-    const float psqt_lr    = lr_scale * warmup_factor * TDLEAF_ADAM_PSQT_LR0;
+    // categories to soften replay-pass updates; live path passes 1.0.  Env-var
+    // multipliers (TDLEAF_LR_*) layered on top — read once at first call.
+    const auto &lr_mul = tdleaf_lr_multipliers();
+    const float fc_lr      = lr_mul.fc      * lr_scale * warmup_factor * TDLEAF_ADAM_LR0;
+    const float ft_lr      = lr_mul.ft      * lr_scale * warmup_factor * ft_session_factor * TDLEAF_ADAM_FT_LR0;
+    const float ft_bias_lr = lr_mul.ft_bias * lr_scale * warmup_factor * TDLEAF_ADAM_FT_BIAS_LR0;
+    const float psqt_lr    = lr_mul.psqt    * lr_scale * warmup_factor * TDLEAF_ADAM_PSQT_LR0;
 
     // Full Adam step for FC layers and FT biases — per-weight bias correction.
     // bc1 (beta1=0.9): skipped at cnt>=20 (0.9^20≈0.12 → bc1≈0.88, close to 1).
@@ -1142,7 +1262,7 @@ void nnue_apply_gradients(float lr_scale)
     // Dense piece value update — full Adam, no weight decay.
     // Uses TDLEAF_ADAM_PV_LR0 (same scale as PSQT).
     if (piece_val_active) {
-        const float pv_lr = lr_scale * warmup_factor * TDLEAF_ADAM_PV_LR0;
+        const float pv_lr = lr_mul.pv * lr_scale * warmup_factor * TDLEAF_ADAM_PV_LR0;
         auto do_step_pv = [&](float g, float &m, float &v, uint32_t cnt) -> float {
             m = TDLEAF_ADAM_BETA1 * m + (1.0f - TDLEAF_ADAM_BETA1) * g;
             v = TDLEAF_ADAM_BETA2 * v + (1.0f - TDLEAF_ADAM_BETA2) * g * g;

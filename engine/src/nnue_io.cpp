@@ -407,8 +407,24 @@ bool nnue_write_nnue(const char *dst_path)
 
     // Build new description.
     char new_desc[4096];
-    if (nnue_zero_initialized || !orig_desc[0])
-        snprintf(new_desc, sizeof(new_desc), "Random init; PSQT=symmetric classical (own=+V,enemy=-V); piece_val baked into PSQT");
+    if (nnue_zero_initialized || !orig_desc[0]) {
+        const char *prior_desc;
+        switch (nnue_init_prior_mode) {
+            case NNUE_PRIOR_NOPRIOR:
+                prior_desc = "PSQT=0, piece_val=0 (noprior)";
+                break;
+            case NNUE_PRIOR_CLASSICAL:
+                prior_desc = "PSQT=classical material + 4-stage piece-square tables "
+                             "(gstage-interpolated across 8 buckets); piece_val baked into PSQT";
+                break;
+            case NNUE_PRIOR_MATERIAL:
+            default:
+                prior_desc = "PSQT=symmetric classical material (own=+V,enemy=-V; "
+                             "P=100 N=377 B=399 R=596 Q=1197 cp); piece_val baked into PSQT";
+                break;
+        }
+        snprintf(new_desc, sizeof(new_desc), "Random init; %s", prior_desc);
+    }
     else if (piece_val_active)
         snprintf(new_desc, sizeof(new_desc), "%s Trained by Leaf TDLeaf; piece_val baked into PSQT", orig_desc);
     else

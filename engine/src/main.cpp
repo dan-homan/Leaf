@@ -151,15 +151,21 @@ int main(int argc, char *argv[])
 #if NNUE
   {
     // --init-nnue: create a fresh random-initialised .nnue without reading an existing one.
-    //   PSQT=0; piece_val=classical material (P=100, N=377, B=399, R=596, Q=1197 cp).
-    // --init-nnue-noprior: same but piece_val=0 — learns all material values from scratch.
-    // Both require --write-nnue <filename>; write the .nnue AND a companion .tdleaf.bin
+    //   PSQT = classical material (own=+V, enemy=-V; P=100 N=377 B=399 R=596 Q=1197 cp,
+    //   same across all 8 buckets); piece_val = 0 (learns corrections).
+    // --init-nnue-noprior: PSQT = 0, piece_val = 0 — learns everything from scratch.
+    // --init-nnue-classical: PSQT = classical material + 4-stage piece-square tables
+    //   (gstage-interpolated across the 8 NNUE buckets); piece_val = 0.  Use to bootstrap
+    //   training from the classical hand-tuned positional prior; lets FC/FT learn finer
+    //   patterns instead of re-deriving piece values and positional shape.
+    // All require --write-nnue <filename>; write the .nnue AND a companion .tdleaf.bin
     // (piece_val is stored in .tdleaf.bin, not in the .nnue format), then exit.
     bool init_nnue_mode = false;
-    bool init_nnue_noprior = false;
+    int  init_nnue_prior = NNUE_PRIOR_MATERIAL;
     for (int ai = 1; ai < argc; ai++) {
       if (strcmp(argv[ai], "--init-nnue") == 0) { init_nnue_mode = true; }
-      if (strcmp(argv[ai], "--init-nnue-noprior") == 0) { init_nnue_mode = true; init_nnue_noprior = true; }
+      if (strcmp(argv[ai], "--init-nnue-noprior") == 0)   { init_nnue_mode = true; init_nnue_prior = NNUE_PRIOR_NOPRIOR; }
+      if (strcmp(argv[ai], "--init-nnue-classical") == 0) { init_nnue_mode = true; init_nnue_prior = NNUE_PRIOR_CLASSICAL; }
     }
 
     if (init_nnue_mode) {
@@ -178,7 +184,7 @@ int main(int argc, char *argv[])
       // Allocate arrays, init float shadows, then fill with random distributions.
       nnue_alloc_arrays();
       nnue_init_fp32_weights();
-      nnue_init_zero_weights(init_nnue_noprior);
+      nnue_init_zero_weights(init_nnue_prior);
       // Write .nnue file.
       if (!nnue_write_nnue(write_nnue_path)) {
         fprintf(stderr, "--write-nnue: failed to write %s\n", write_nnue_path);

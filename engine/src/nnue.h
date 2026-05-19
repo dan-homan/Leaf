@@ -163,10 +163,20 @@ struct NNUEActivations {
     int8_t  piece_count_diff[6];
 };
 
-// Initialise all FC and FT weights to zero, PSQT to 100 cp/piece equivalent.
+// Initialise FC/FT weights randomly and PSQT according to the prior mode.
 // Used when starting training from scratch (no .tdleaf.bin found).
-// Writes zero to FC int8 inference arrays and PSQT_100CP to int32 PSQT arrays.
-void nnue_init_zero_weights(bool noprior = false);
+//   NNUE_PRIOR_MATERIAL  — PSQT = classical material only (own=+V, enemy=-V,
+//                          P=100 N=377 B=399 R=596 Q=1197 cp), all 8 buckets equal.
+//                          piece_val = 0 (learns corrections).
+//   NNUE_PRIOR_NOPRIOR   — PSQT = 0, piece_val = 0; everything learned from scratch.
+//   NNUE_PRIOR_CLASSICAL — PSQT = material + 4-stage classical piece-square tables,
+//                          gstage-interpolated per NNUE bucket; piece_val = 0.
+enum NnuePriorMode : int {
+    NNUE_PRIOR_MATERIAL  = 0,
+    NNUE_PRIOR_NOPRIOR   = 1,
+    NNUE_PRIOR_CLASSICAL = 2,
+};
+void nnue_init_zero_weights(int prior_mode = NNUE_PRIOR_MATERIAL);
 
 // Initialise FP32 shadow copies from the just-loaded int8 arrays.
 // Called once at end of nnue_load().

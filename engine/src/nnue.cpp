@@ -171,6 +171,9 @@ static inline void sub_feat(int16_t *half_acc, int32_t *half_psqt, int fidx)
 
 // Set to true by nnue_init_zero_weights(); controls description in nnue_write_nnue().
 static bool nnue_zero_initialized = false;
+// Records the prior mode passed to nnue_init_zero_weights() (one of NNUE_PRIOR_*).
+// Used by nnue_write_nnue() to write an accurate architecture description.
+static int  nnue_init_prior_mode = 0;  // = NNUE_PRIOR_MATERIAL by default
 
 
 // ---------------------------------------------------------------------------

@@ -470,11 +470,14 @@ def main():
     print("  [1] Use existing .nnue file")
     print("  [2] Initialise a fresh random network (classical material prior)")
     print("  [3] Initialise a fresh random network (no prior, zeroed piece values)")
+    print("  [4] Initialise a fresh random network (classical material + 4-stage PSQT prior)")
     choice = ask("Choice", "1")
 
-    init_noprior = False
-    if choice.strip() in ("2", "3"):
-        init_noprior = (choice.strip() == "3")
+    # init_flavour ∈ {"material", "noprior", "classical"} — selects --init-nnue* flag below.
+    init_flavour = "material"
+    if choice.strip() in ("2", "3", "4"):
+        if   choice.strip() == "3": init_flavour = "noprior"
+        elif choice.strip() == "4": init_flavour = "classical"
         default_fresh = f"nn-fresh-{date_str}.nnue"
         fresh_name    = ask("Output filename for fresh network", default_fresh)
         if not fresh_name.endswith(".nnue"):
@@ -732,8 +735,16 @@ def main():
             overwrite = True
 
         if overwrite:
-            init_flag = "--init-nnue-noprior" if init_noprior else "--init-nnue"
-            label = "no-prior" if init_noprior else "classical"
+            init_flag = {
+                "material":  "--init-nnue",
+                "noprior":   "--init-nnue-noprior",
+                "classical": "--init-nnue-classical",
+            }[init_flavour]
+            label = {
+                "material":  "classical material prior",
+                "noprior":   "no-prior",
+                "classical": "classical material + 4-stage PSQT prior",
+            }[init_flavour]
             print(f"  Initialising fresh network ({label}) → {net_filename}")
             result = subprocess.run(
                 [train_exe, init_flag, "--write-nnue", net_file],
