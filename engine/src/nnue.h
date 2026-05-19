@@ -135,6 +135,25 @@ void nnue_apply_delta(NNUEAccumulator &acc,
 int nnue_evaluate(const NNUEAccumulator &acc, int stm, int piece_count);
 
 // ---------------------------------------------------------------------------
+// Prior modes for fresh-net initialisation (used by --init-nnue* CLI flags
+// and recorded in the .nnue header by nnue_write_nnue).  Visible to all NNUE
+// builds even when TDLEAF=0: nnue_io.cpp reads the stored mode for the header
+// description, and main.cpp reads CLI flags before deciding whether the build
+// supports init mode.  nnue_init_zero_weights itself lives under TDLEAF.
+//   NNUE_PRIOR_MATERIAL  — PSQT = classical material only (own=+V, enemy=-V,
+//                          P=100 N=377 B=399 R=596 Q=1197 cp), all 8 buckets equal.
+//                          piece_val = 0 (learns corrections).
+//   NNUE_PRIOR_NOPRIOR   — PSQT = 0, piece_val = 0; everything learned from scratch.
+//   NNUE_PRIOR_CLASSICAL — PSQT = material + 4-stage classical piece-square tables,
+//                          gstage-interpolated per NNUE bucket; piece_val = 0.
+// ---------------------------------------------------------------------------
+enum NnuePriorMode : int {
+    NNUE_PRIOR_MATERIAL  = 0,
+    NNUE_PRIOR_NOPRIOR   = 1,
+    NNUE_PRIOR_CLASSICAL = 2,
+};
+
+// ---------------------------------------------------------------------------
 // TDLeaf(λ) support — only compiled when TDLEAF=1
 // ---------------------------------------------------------------------------
 #if TDLEAF
@@ -163,19 +182,6 @@ struct NNUEActivations {
     int8_t  piece_count_diff[6];
 };
 
-// Initialise FC/FT weights randomly and PSQT according to the prior mode.
-// Used when starting training from scratch (no .tdleaf.bin found).
-//   NNUE_PRIOR_MATERIAL  — PSQT = classical material only (own=+V, enemy=-V,
-//                          P=100 N=377 B=399 R=596 Q=1197 cp), all 8 buckets equal.
-//                          piece_val = 0 (learns corrections).
-//   NNUE_PRIOR_NOPRIOR   — PSQT = 0, piece_val = 0; everything learned from scratch.
-//   NNUE_PRIOR_CLASSICAL — PSQT = material + 4-stage classical piece-square tables,
-//                          gstage-interpolated per NNUE bucket; piece_val = 0.
-enum NnuePriorMode : int {
-    NNUE_PRIOR_MATERIAL  = 0,
-    NNUE_PRIOR_NOPRIOR   = 1,
-    NNUE_PRIOR_CLASSICAL = 2,
-};
 void nnue_init_zero_weights(int prior_mode = NNUE_PRIOR_MATERIAL);
 
 // Initialise FP32 shadow copies from the just-loaded int8 arrays.
