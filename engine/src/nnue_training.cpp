@@ -872,12 +872,89 @@ void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
 }
 
 // ---------------------------------------------------------------------------
+// Runtime LR overrides (read once from environment).
+//
+// TDLEAF_LR_{FC,FT,FT_BIAS,PSQT,PV} multiply the corresponding TDLEAF_ADAM_*_LR0
+// constant.  TDLEAF_FREEZE_PSQT=1 forces the PSQT multiplier to 0 (PSQT weights
+// don't move; Adam state still advances, so a later session without the freeze
+// resumes normally).  TDLEAF_FREEZE_PASSTHROUGH=1 holds the FC0 passthrough row
+// (output NNUE_L0_DIRECT = 15, weights + bias) at its init value — gradient and
+// Adam state for those weights are zeroed before clipping/apply, so they stay
+// exactly stationary.  Defaults are all 1.0 (no override).
+//
+// Intended for LR sweeps without recompiling.  Example:
+//   TDLEAF_LR_PSQT=0.1 TDLEAF_LR_FT=3.0 ./Leaf_vtrain ...
+//   TDLEAF_FREEZE_PASSTHROUGH=1 ./Leaf_vtrain ...
+// ---------------------------------------------------------------------------
+struct TDLeafLRMultipliers {
+    float fc, ft, ft_bias, psqt, pv;
+    bool  freeze_passthrough;   // FC0 row NNUE_L0_DIRECT (15) weights+bias held at init
+};
+static const TDLeafLRMultipliers &tdleaf_lr_multipliers()
+{
+    static const TDLeafLRMultipliers m = []() {
+        auto read_env = [](const char *name, float def) {
+            const char *v = getenv(name);
+            if (!v || !*v) return def;
+            char *end = nullptr;
+            float f = strtof(v, &end);
+            return (end == v) ? def : f;
+        };
+        auto read_bool_env = [](const char *name) {
+            const char *v = getenv(name);
+            return v && (*v == '1' || *v == 't' || *v == 'T' || *v == 'y' || *v == 'Y');
+        };
+        TDLeafLRMultipliers x;
+        x.fc      = read_env("TDLEAF_LR_FC",      1.0f);
+        x.ft      = read_env("TDLEAF_LR_FT",      1.0f);
+        x.ft_bias = read_env("TDLEAF_LR_FT_BIAS", 1.0f);
+        x.psqt    = read_env("TDLEAF_LR_PSQT",    1.0f);
+        x.pv      = read_env("TDLEAF_LR_PV",      1.0f);
+        bool freeze_psqt = read_bool_env("TDLEAF_FREEZE_PSQT");
+        if (freeze_psqt) x.psqt = 0.0f;
+        x.freeze_passthrough = read_bool_env("TDLEAF_FREEZE_PASSTHROUGH");
+        bool any = (x.fc != 1.0f || x.ft != 1.0f || x.ft_bias != 1.0f
+                    || x.psqt != 1.0f || x.pv != 1.0f || x.freeze_passthrough);
+        if (any) {
+            fprintf(stderr, "TDLeaf LR overrides:");
+            if (x.fc      != 1.0f) fprintf(stderr, " FC=%.4g",      (double)x.fc);
+            if (x.ft      != 1.0f) fprintf(stderr, " FT=%.4g",      (double)x.ft);
+            if (x.ft_bias != 1.0f) fprintf(stderr, " FT_BIAS=%.4g", (double)x.ft_bias);
+            if (x.psqt    != 1.0f) fprintf(stderr, " PSQT=%.4g%s",  (double)x.psqt,
+                                                                    freeze_psqt ? " (frozen)" : "");
+            if (x.pv      != 1.0f) fprintf(stderr, " PV=%.4g",      (double)x.pv);
+            if (x.freeze_passthrough) fprintf(stderr, " PASSTHROUGH=frozen");
+            fprintf(stderr, "\n");
+        }
+        return x;
+    }();
+    return m;
+}
+
+// ---------------------------------------------------------------------------
 // nnue_clip_gradients — compute global L2 norm of all gradient arrays and
 // scale all gradients by max_norm/norm if the norm exceeds max_norm.
 // Returns the pre-clip norm.  If max_norm <= 0, does nothing (returns 0).
 // ---------------------------------------------------------------------------
 float nnue_clip_gradients(float max_norm)
 {
+    // Freeze the FC0 passthrough row (output NNUE_L0_DIRECT = 15) if requested.
+    // Zeroing here ensures: (a) passthrough gradients don't inflate the L2 norm
+    // and falsely scale down other layers' updates; (b) the per-weight `if grad
+    // != 0` guard in nnue_apply_gradients skips them, so Adam state (m, v) for
+    // passthrough weights doesn't move and the weights stay at their init value.
+    // Targets the runaway-bias pathology where TDLeaf concentrates "the eval is
+    // off by a constant" corrections into row 15 (the only FC0 row with
+    // strictly-positive activations from SqrCReLU, so its weight drift couples
+    // to a non-zero expectation rather than cancelling).
+    if (tdleaf_lr_multipliers().freeze_passthrough) {
+        for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
+            for (int i = 0; i < NNUE_L0_INPUT; i++)
+                grad_l0_w[s][NNUE_L0_DIRECT * NNUE_L0_INPUT + i] = 0.0f;
+            grad_l0_b[s][NNUE_L0_DIRECT] = 0.0f;
+        }
+    }
+
     if (max_norm <= 0.0f) return 0.0f;
 
     // Compute global L2 norm across all gradient arrays (use double to avoid overflow).
@@ -958,56 +1035,6 @@ float nnue_clip_gradients(float max_norm)
     }
 
     return norm;
-}
-
-// ---------------------------------------------------------------------------
-// Runtime LR overrides (read once from environment).
-//
-// TDLEAF_LR_{FC,FT,FT_BIAS,PSQT,PV} multiply the corresponding TDLEAF_ADAM_*_LR0
-// constant.  TDLEAF_FREEZE_PSQT=1 forces the PSQT multiplier to 0 (PSQT weights
-// don't move; Adam state still advances, so a later session without the freeze
-// resumes normally).  Defaults are all 1.0 (no override).
-//
-// Intended for LR sweeps without recompiling.  Example:
-//   TDLEAF_LR_PSQT=0.1 TDLEAF_LR_FT=3.0 ./Leaf_vtrain ...
-// ---------------------------------------------------------------------------
-struct TDLeafLRMultipliers {
-    float fc, ft, ft_bias, psqt, pv;
-};
-static const TDLeafLRMultipliers &tdleaf_lr_multipliers()
-{
-    static const TDLeafLRMultipliers m = []() {
-        auto read_env = [](const char *name, float def) {
-            const char *v = getenv(name);
-            if (!v || !*v) return def;
-            char *end = nullptr;
-            float f = strtof(v, &end);
-            return (end == v) ? def : f;
-        };
-        TDLeafLRMultipliers x;
-        x.fc      = read_env("TDLEAF_LR_FC",      1.0f);
-        x.ft      = read_env("TDLEAF_LR_FT",      1.0f);
-        x.ft_bias = read_env("TDLEAF_LR_FT_BIAS", 1.0f);
-        x.psqt    = read_env("TDLEAF_LR_PSQT",    1.0f);
-        x.pv      = read_env("TDLEAF_LR_PV",      1.0f);
-        const char *fp = getenv("TDLEAF_FREEZE_PSQT");
-        bool frozen = fp && (*fp == '1' || *fp == 't' || *fp == 'T' || *fp == 'y' || *fp == 'Y');
-        if (frozen) x.psqt = 0.0f;
-        bool any = (x.fc != 1.0f || x.ft != 1.0f || x.ft_bias != 1.0f
-                    || x.psqt != 1.0f || x.pv != 1.0f);
-        if (any) {
-            fprintf(stderr, "TDLeaf LR overrides:");
-            if (x.fc      != 1.0f) fprintf(stderr, " FC=%.4g",      (double)x.fc);
-            if (x.ft      != 1.0f) fprintf(stderr, " FT=%.4g",      (double)x.ft);
-            if (x.ft_bias != 1.0f) fprintf(stderr, " FT_BIAS=%.4g", (double)x.ft_bias);
-            if (x.psqt    != 1.0f) fprintf(stderr, " PSQT=%.4g%s",  (double)x.psqt,
-                                                                    frozen ? " (frozen)" : "");
-            if (x.pv      != 1.0f) fprintf(stderr, " PV=%.4g",      (double)x.pv);
-            fprintf(stderr, "\n");
-        }
-        return x;
-    }();
-    return m;
 }
 
 // ---------------------------------------------------------------------------
