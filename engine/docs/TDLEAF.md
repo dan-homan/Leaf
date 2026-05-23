@@ -63,7 +63,7 @@ For a game of T half-moves:
 
 - `d_t` = sigmoid of the **NNUE static evaluation at the PV leaf position** at ply t,
   from White's perspective:
-  `d_t = 1 / (1 + exp(-score_white_t / K))`, K = 200 cp.
+  `d_t = 1 / (1 + exp(-score_white_t / K))`, K = 150 cp.
 - `z` = game result from White's perspective: 1.0 = White wins, 0.5 = draw, 0.0 = Black wins.
 
 **Temporal difference errors (backward view):**
@@ -85,9 +85,9 @@ centipawns — see [Horizon Noise Mitigation](#horizon-noise-mitigation) below.
 
 where `∇_w d_t = d_t * (1 - d_t) / K * ∇_w score_t`.
 
-Defaults: `λ = 0.98`, `K = 200 cp` (λ empirically calibrated from 1.6M self-play games;
-K lowered from the calibrated 240 cp value after 200k+ training games showed piece
-values converging ~2× too high at K = 400 cp — see
+Defaults: `λ = 0.98`, `K = 150 cp` (λ empirically calibrated from 1.6M self-play games;
+K progressively lowered from 400 → 200 → 150 cp as classical-prior calibration runs
+showed remaining piece-value drift at 200 cp — see
 [Hyperparameter Calibration](#hyperparameter-calibration)).
 Gradient updates use Adam with per-weight LR decay; see [Adam Optimizer](#adam-optimizer-with-per-weight-lr-decay) below.
 
@@ -353,8 +353,8 @@ correction.
 
 | Layer | Update Rule | LR0 | Notes |
 |-------|-------------|-----|-------|
-| FC0/FC1/FC2 weights | Full Adam | `TDLEAF_ADAM_LR0 = 0.10` | Float shadow clamped to ±127 after each update |
-| FC0/FC1/FC2 biases  | Full Adam | `TDLEAF_ADAM_LR0 = 0.10` | |
+| FC0/FC1/FC2 weights | Full Adam | `TDLEAF_ADAM_LR0 = 0.15` | Float shadow clamped to ±127 after each update |
+| FC0/FC1/FC2 biases  | Full Adam | `TDLEAF_ADAM_LR0 = 0.15` | |
 | FT weights | RMSProp (per-weight v, no m) | `TDLEAF_ADAM_FT_LR0 = 1.0` | Sparse; higher LR than FC to compensate for fewer updates |
 | FT biases  | Full Adam | `TDLEAF_ADAM_FT_BIAS_LR0 = 0.01` | Reduced LR to prevent dying-ReLU — see below |
 | PSQT       | Full Adam | `TDLEAF_ADAM_PSQT_LR0 = 10.0` | Separate LR0 required — see below |
@@ -431,7 +431,7 @@ per-weight bias correction and monitoring.
 
 | Constant | Value | Notes |
 |----------|-------|-------|
-| `TDLEAF_ADAM_LR0` | 0.10 | Step size for FC layers (float weight units) |
+| `TDLEAF_ADAM_LR0` | 0.15 | Step size for FC layers (float weight units) |
 | `TDLEAF_ADAM_FT_LR0` | 1.0 | Step size for FT weights (sparse; need higher LR than dense FC) |
 | `TDLEAF_ADAM_FT_BIAS_LR0` | 0.01 | Step size for FT biases (10× slower than FC to prevent dying-ReLU) |
 | `TDLEAF_ADAM_PSQT_LR0` | 10.0 | Step size for PSQT (int32 scale; ~1000× FC) |
@@ -852,13 +852,10 @@ fitted from a different training stage; as the network improved its evaluations 
 sharper, narrowing the effective sigmoid.  The reliability diagram confirms K=240
 produces well-calibrated win probabilities across the full score range.
 
-**Operational value (post-2026-05-02): `K = 200 cp`.** The MLE-optimal K=240 is a
-sigmoid-fit objective; it does not directly optimise piece-value stability under TDLeaf.
-After raising K to 400 cp briefly to fight piece-value drift, 200k+ training games
-showed piece values had converged ~2× too high, indicating the larger K underweighted
-material differences in the gradient signal.  Halving to K=200 (slightly below the MLE
-optimum) restored a balanced piece-value spectrum while preserving probability
-calibration adequately.
+**Operational history:**
+- *Pre-2026-05-02:* K=400 (raised from earlier calibrated value to fight piece-value drift)
+- *2026-05-02:* lowered to **K=200**, after 200k+ training games at K=400 showed piece values converging ~2× too high — the larger K underweighted material differences in the gradient signal.
+- *2026-05-23:* lowered further to **K=150**, after classical-PSQT-prior calibration runs (see [Learning_Rate_Experiment](../../learn/Learning_Rate_Experiment.md) in the Obsidian vault) showed residual piece-value drift at K=200 and a moderately wider effective gradient was needed for FC/FT to track PSQT shape changes.  K=150 is below the MLE optimum (~240 cp from raw sigmoid fit) but produces a balanced piece-value spectrum and faster FC/FT response.  Probability calibration remains acceptable across the score range used in TDLeaf updates (most positions are within ±400 cp of zero where the difference between K=150 and K=240 sigmoids is small).
 
 ### Eligibility trace decay λ
 
@@ -932,8 +929,8 @@ is penalised for correctly evaluating a position it cannot see past.
 
 The threshold is computed dynamically as
 `score_clip_cp = max(TDLEAF_SCORE_CLIP_PAWNS × value[PAWN], 200 cp)`
-(default `TDLEAF_SCORE_CLIP_PAWNS = 2.0`, so ~200 cp at the classical pawn value
-and tracking piece-value drift upward as `value[PAWN]` grows).  When the white-POV
+(default `TDLEAF_SCORE_CLIP_PAWNS = 1.0`, so ~100 cp at the classical pawn value,
+clamped to the 200 cp floor at typical piece-value drift levels).  When the white-POV
 score change between consecutive moves exceeds `score_clip_cp`, the
 `d[t+1] - d[t]` contribution to the eligibility trace is scaled down
 *proportionally* so the effective change is capped at the threshold:
@@ -964,16 +961,16 @@ grad_scale *= id_weight
 
 Positions with stable ID scores (low variance) receive full weight; positions whose
 score fluctuated across search depths are down-weighted.  `TDLEAF_ID_VAR_SIGMA2`
-(default 10 000 cp²) is the reference variance — a position with variance equal to
-`TDLEAF_ID_VAR_SIGMA2` receives half weight.  Set `TDLEAF_ID_VAR_SIGMA2` to a very
-large value to disable this approach.
+(default 2 500 cp², equivalent to a 50 cp std-dev reference) is the reference variance
+— a position with variance equal to `TDLEAF_ID_VAR_SIGMA2` receives half weight.  Set
+`TDLEAF_ID_VAR_SIGMA2` to a very large value to disable this approach.
 
 ### Tuning guidance
 
 | Hyperparameter | Default | Effect of increasing | Effect of decreasing |
 |----------------|---------|---------------------|---------------------|
-| `TDLEAF_SCORE_CLIP_PAWNS` | 2.0 (≥ 200 cp floor) | Less clipping; more sensitive to large swings | More aggressive attenuation of large score changes |
-| `TDLEAF_ID_VAR_SIGMA2` | 10 000 cp² | More tolerant of unstable ID scores | Stronger down-weighting of ID-unstable positions |
+| `TDLEAF_SCORE_CLIP_PAWNS` | 1.0 (≥ 200 cp floor) | Less clipping; more sensitive to large swings | More aggressive attenuation of large score changes |
+| `TDLEAF_ID_VAR_SIGMA2` | 2 500 cp² | More tolerant of unstable ID scores | Stronger down-weighting of ID-unstable positions |
 
 Both approaches are active simultaneously by default.  Use the ablation plan in
 `docs/TODO.md` to isolate their individual contributions.  A good starting ablation:

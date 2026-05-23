@@ -1,5 +1,25 @@
 Changes since 2017_12_24
 
+2026_05_23 -- tdleaf.h: hyperparameter retuning from classical-PSQT-prior
+               calibration runs.  Four constants changed:
+                 TDLEAF_K              : 200  -> 150  cp
+                   (sigmoid temperature; further reduced to address
+                    residual piece-value drift seen at K=200 and to
+                    widen the effective gradient for FC/FT)
+                 TDLEAF_ADAM_LR0       : 0.10 -> 0.15
+                   (FC layer LR; bumped slightly for faster FC response
+                    in line with the wider K=150 sigmoid gradient)
+                 TDLEAF_SCORE_CLIP_PAWNS : 2.0  -> 1.0
+                   (horizon-noise clip threshold; tighter clipping
+                    after observing classical-prior runs benefitting
+                    from more aggressive score-jump attenuation)
+                 TDLEAF_ID_VAR_SIGMA2  : 10000 -> 2500 cp**2
+                   (ID-stability reference variance; 4x tighter so the
+                    half-weight point sits at 50 cp ID-score std-dev
+                    rather than 100 cp -- positions with depth-to-depth
+                    score noise are down-weighted more aggressively)
+               Updated docs/TDLEAF.md and CLAUDE.md to reflect new defaults.
+
 2026_05_04 -- score: restore king-tropism qchecks signal under NNUE.
                pos.qchecks[wtm/btm] is the "pieces threatening this king"
                counter that gates two tactical paths in the search:

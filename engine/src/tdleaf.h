@@ -29,7 +29,7 @@ static const float TDLEAF_LAMBDA           = 0.98f;  // eligibility trace decay 
                                                      // from 1.6M self-play games; autocorrelation
                                                      // and d_t-vs-result methods give ~0.97–0.99
                                                      // for both game types)
-static const float TDLEAF_K               = 200.0f; // sigmoid temperature (centipawns)
+static const float TDLEAF_K               = 150.0f; // sigmoid temperature (centipawns)
                                                      // MLE over 10M positions from stages 5–6:
                                                      // optimum 239 cp (prev. 290 cp, fitted from
                                                      // earlier training stage).
@@ -41,12 +41,12 @@ static const int   TDLEAF_MIN_PLIES_REP   = 40;     // skip 3-rep draws shorter 
 // contribution to the eligibility trace is scaled down proportionally.
 // Expressed as a multiple of the current pawn value so the threshold tracks
 // piece-value drift under TDLeaf.  Set to a large value to disable.
-static const float TDLEAF_SCORE_CLIP_PAWNS = 2.0f;
+static const float TDLEAF_SCORE_CLIP_PAWNS = 1.0f;
 // Approach 2 — iterative-deepening score stability weight.
 // w_t = 1 / (1 + id_score_variance / TDLEAF_ID_VAR_SIGMA2)
 // Expressed in cp²: 10000 corresponds to a 100 cp std-dev reference.
 // Larger values are more tolerant of ID score instability.
-static const float TDLEAF_ID_VAR_SIGMA2  = 10000.0f;
+static const float TDLEAF_ID_VAR_SIGMA2  = 2500.0f;
 // Gradient clipping: if global L2 norm of all gradients exceeds this threshold,
 // scale all gradients by max_norm/norm.  Set to 0 to disable.
 static const float TDLEAF_GRAD_CLIP_NORM = 1.0f;
@@ -56,7 +56,7 @@ static const float TDLEAF_GRAD_CLIP_NORM = 1.0f;
 // v makes a normal gradient produce an oversized parameter change.  Uniform
 // across FC / FT / FT-bias / PSQT / piece_val because the Adam step is scale-
 // normalised by design.  Set to a large value to disable.
-static const float TDLEAF_ADAM_STEP_CLIP = 30.0f;
+static const float TDLEAF_ADAM_STEP_CLIP = 30.0f; 
 
 // ---------------------------------------------------------------------------
 // Adam hyperparameters
@@ -69,18 +69,18 @@ static const float TDLEAF_ADAM_STEP_CLIP = 30.0f;
 // LR warmup: ramps from 0 to full LR over first WARMUP Adam steps.
 // Mini-batch: gradients accumulated across BATCH_SIZE games before each Adam step.
 // ---------------------------------------------------------------------------
-static const float TDLEAF_ADAM_LR0         = 0.10f;  // step size for FC layers (float weight units)
-static const float TDLEAF_ADAM_FT_LR0      = 1.0f;   // step size for FT weights (sparse; need higher LR than dense FC)
-static const float TDLEAF_ADAM_FT_BIAS_LR0 = 0.01f;  // step size for FT biases (10× slower than FC to prevent dying-ReLU)
-static const float TDLEAF_ADAM_PSQT_LR0 =    10.0f;    // step size for PSQT (int32 scale ~36k std; needs larger LR)
-static const float TDLEAF_ADAM_PV_LR0     =  50.0f;    // step size for dense piece values (same scale as PSQT)
+static const float TDLEAF_ADAM_LR0         = 0.15f;  // step size for FC layers (float weight units)
+static const float TDLEAF_ADAM_FT_LR0      = 1.00f;   // step size for FT weights (sparse; need higher LR than dense FC)
+static const float TDLEAF_ADAM_FT_BIAS_LR0 = 0.01f;   // step size for FT biases (10× slower than FC to prevent dying-ReLU)
+static const float TDLEAF_ADAM_PSQT_LR0 =   10.0f;    // step size for PSQT (int32 scale ~36k std; needs larger LR)
+static const float TDLEAF_ADAM_PV_LR0     = 50.0f;    // step size for dense piece values (same scale as PSQT)
 static const float TDLEAF_ADAM_BETA1    = 0.9f;    // first-moment decay  (FC + FT bias + PSQT)
 static const float TDLEAF_ADAM_BETA2    = 0.97f;  // second-moment decay (all layers)
 static const float TDLEAF_ADAM_EPS      = 1e-8f;   // numerical floor
 // AdamW decoupled weight decay: w -= λ × lr × w after each Adam step.
 // Applied to FC weights and FT weights only (not biases, not PSQT).
 // Set to 0.0 to disable.
-static const float TDLEAF_WEIGHT_DECAY  = 1e-4f;   // decoupled weight decay coefficient
+static const float TDLEAF_WEIGHT_DECAY  = 1e-4f; //1e-4f;   // decoupled weight decay coefficient
 static const int   TDLEAF_ADAM_WARMUP        = 50;  // linear LR warmup over first N Adam steps (0 = disabled)
                                                      // Keyed on t_adam (persisted) so only fires in first session.
 static const int   TDLEAF_FT_SESSION_WARMUP  = 100; // per-session FT LR ramp over first N Adam steps.
