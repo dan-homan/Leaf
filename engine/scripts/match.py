@@ -22,9 +22,13 @@
 import argparse
 import math
 import os
+import queue
 import re
+import signal
 import subprocess
 import sys
+import threading
+import time
 
 # Resolve symlinks so scripts invoked via run/ or learn/ symlinks can import
 # sibling modules from scripts/.
@@ -71,7 +75,40 @@ def elo_from_wdl(w, d, l):
     return elo, elo_err
 
 
-def run_match(cmd, error_log=None):
+def _kill_group(proc, reason):
+    """
+    SIGTERM the entire process group containing proc, escalate to SIGKILL
+    after 5s if anything is still alive.  Used for stall recovery and
+    KeyboardInterrupt cleanup so cutechess-cli + every child engine die
+    together instead of getting reparented to launchd.
+    """
+    print(f"\n[match.py] {reason} — killing cutechess-cli + engines.",
+          file=sys.stderr, flush=True)
+    try:
+        pgid = os.getpgid(proc.pid)
+    except ProcessLookupError:
+        return
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        proc.wait(timeout=5)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        print("[match.py] WARNING: processes survived SIGKILL.",
+              file=sys.stderr, flush=True)
+
+
+def run_match(cmd, error_log=None, stall_timeout=600):
     """
     Run cutechess-cli, stream its output to stdout line-by-line, and capture the
     final Score and Elo difference lines.
@@ -83,6 +120,11 @@ def run_match(cmd, error_log=None):
     If error_log is given, cutechess-cli's stderr is routed to that file in
     append mode (child engines inherit the same fd).  Otherwise stderr is
     merged into stdout as before.
+
+    stall_timeout: if no output appears for this many seconds, assume
+    cutechess-cli has deadlocked (known Qt threading bug observed in 1.4.0
+    under high concurrency, often after a -recover restart) and kill the
+    whole process group.  Returns rc=124 in that case.
 
     Returns (w, d, l, elo, elo_err, returncode).
     w/d/l are engine1 wins/draws/losses; elo/elo_err may be None.
@@ -96,16 +138,45 @@ def run_match(cmd, error_log=None):
 
     w = d = l = 0
     elo = elo_err = None
+    stalled = False
 
     err_fh = open(error_log, "a", buffering=1) if error_log else None
+    proc = None
     try:
+        # start_new_session=True puts cutechess in its own process group so
+        # _kill_group() can take down it + all engine children atomically.
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=(err_fh if err_fh is not None else subprocess.STDOUT),
             text=True, bufsize=1,
+            start_new_session=True,
         )
-        for line in proc.stdout:
+
+        # Reader thread drains stdout into a queue so the main loop can
+        # impose a stall timeout via queue.get(timeout=...).
+        q: "queue.Queue[str | None]" = queue.Queue()
+
+        def _reader():
+            try:
+                for line in proc.stdout:
+                    q.put(line)
+            finally:
+                q.put(None)  # EOF sentinel
+
+        t = threading.Thread(target=_reader, daemon=True)
+        t.start()
+
+        while True:
+            try:
+                line = q.get(timeout=stall_timeout)
+            except queue.Empty:
+                stalled = True
+                _kill_group(proc,
+                            f"STALL: no cutechess-cli output for {stall_timeout}s")
+                break
+            if line is None:
+                break  # EOF
             print(line, end="", flush=True)
             m = score_re.search(line)
             if m:
@@ -117,10 +188,18 @@ def run_match(cmd, error_log=None):
                 elo_err = float(m.group(2))
 
         proc.wait()
+    except KeyboardInterrupt:
+        if proc is not None and proc.poll() is None:
+            _kill_group(proc, "KeyboardInterrupt")
+        raise
     finally:
         if err_fh is not None:
             err_fh.close()
-    return w, d, l, elo, elo_err, proc.returncode
+
+    rc = proc.returncode
+    if stalled and rc == 0:
+        rc = 124  # conventional timeout exit code
+    return w, d, l, elo, elo_err, rc
 
 
 def main():
@@ -191,6 +270,12 @@ def main():
                              "training telemetry via fprintf(stderr, ...), so "
                              "this captures per-batch [tdleaf step-clip] lines "
                              "from all concurrent engines into one file.")
+    parser.add_argument("--stall-timeout", type=int, default=600, metavar="SEC",
+                        help="Kill cutechess-cli + engines if no output appears "
+                             "for SEC seconds (default: 600).  Guards against a "
+                             "known cutechess-cli 1.4.0 Qt-threading deadlock "
+                             "that wedges long high-concurrency matches forever. "
+                             "Exits with code 124 on stall.")
     parser.add_argument("--option1", action="append", default=[], metavar="KEY=VALUE",
                         help="Pass a UCI/xboard option to engine1 (repeatable). "
                              "Forwarded as cutechess option.KEY=VALUE.  "
@@ -428,7 +513,11 @@ def main():
 
             cmd = base_cmd + pgnout_args + openings_args
 
-            w, d, l, elo, elo_err, rc = run_match(cmd, error_log=args.error_log)
+            w, d, l, elo, elo_err, rc = run_match(
+                cmd,
+                error_log=args.error_log,
+                stall_timeout=args.stall_timeout,
+            )
 
             if rc != 0:
                 print(f"\nError: cutechess-cli exited with code {rc} on iteration {it}.",
