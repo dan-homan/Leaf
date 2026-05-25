@@ -75,15 +75,17 @@ class Opponent:
     """One entry in the training roster.
 
     type     : "self-play" | "readonly" | "fixed"
-    label    : display name used in summaries and cutechess name= field
+    label    : display name used in summaries and PGN name= field
     exe      : absolute path to the opponent binary (set after build step)
-    proto    : "xboard" (Leaf) or "uci" (external)
-    options  : list of (KEY, VALUE) UCI/xboard options to forward
+    proto    : "uci" (both Leaf and external engines speak UCI; the fastchess
+               driver is UCI-only, and Leaf's UCI loop now triggers TDLeaf
+               learning via self-adjudicated game outcomes)
+    options  : list of (KEY, VALUE) UCI options to forward
     """
     type: str
     label: str
     exe: str = ""
-    proto: str = "xboard"
+    proto: str = "uci"
     options: List[Tuple[str, str]] = field(default_factory=list)
 
 
@@ -104,18 +106,17 @@ def pick_fixed_engine(label="fixed engine"):
     Returns a dict:
       {
         "exe":     <absolute path>,
-        "display": <name used in cutechess and PGN; may be -elo<N>-suffixed>,
+        "display": <name used in match summaries and PGN; may be -elo<N>-suffixed>,
         "options": [(KEY, VALUE), ...]   — UCI options to forward,
-        "proto":   "xboard" for Leaf binaries, "uci" otherwise,
+        "proto":   "uci",
       }
     """
     leaf_engines, ext_engines = discover_engines()
     name, path = pick_engine(f"    Select {label}:", leaf_engines, ext_engines)
 
-    # Leaf binaries speak xboard (for TDLeaf hooks in training builds; plain
-    # NNUE builds still support xboard).  External engines default to UCI.
-    is_leaf = os.path.basename(path).startswith("Leaf_v")
-    proto   = "xboard" if is_leaf else "uci"
+    # All engines now run under UCI: the fastchess driver is UCI-only, and
+    # Leaf's UCI loop triggers TDLeaf learning via self-adjudicated outcomes.
+    proto = "uci"
 
     options = []
     elo_str = input("    Limit strength by Elo? (blank = full strength): ").strip()
@@ -127,9 +128,6 @@ def pick_fixed_engine(label="fixed engine"):
         else:
             options = [("UCI_LimitStrength", "true"), ("UCI_Elo", str(elo))]
             name = f"{name}-elo{elo}"
-            # UCI_Elo is a UCI standard; force UCI protocol so the option
-            # reaches the engine (xboard doesn't use this option name).
-            proto = "uci"
 
     return {"exe": path, "display": name, "options": options, "proto": proto}
 
@@ -397,8 +395,12 @@ def analyze_segment_progress(pgn_path, engine1_name, window_frac=0.25,
 
 
 def run_match_streaming(cmd, los_stop_hi=None, los_stop_lo=None):
-    """Run a subprocess, stream its stdout to the console, and capture the
-    final Score line (cutechess-cli format).
+    """Run a subprocess, stream its stdout to the console, and capture
+    running W/L/D counts from the driver's intermediate progress output.
+
+    Supports both:
+      cutechess: "Score of E1 vs E2: W - L - D ..."
+      fastchess: "Games: N, Wins: W, Losses: L, Draws: D, ..."
 
     If los_stop_hi or los_stop_lo are given (fractions, e.g. 0.90 / 0.10),
     the match is terminated early once the running LOS crosses either bound
@@ -408,6 +410,9 @@ def run_match_streaming(cmd, los_stop_hi=None, los_stop_lo=None):
     """
     score_re = re.compile(
         r"Score of .+? vs .+?:\s+(\d+)\s+-\s+(\d+)\s+-\s+(\d+)"
+    )
+    fc_score_re = re.compile(
+        r"Games:\s*\d+,\s*Wins:\s*(\d+),\s*Losses:\s*(\d+),\s*Draws:\s*(\d+)"
     )
     w = d = l = 0
     early_stop = False
@@ -421,6 +426,12 @@ def run_match_streaming(cmd, los_stop_hi=None, los_stop_lo=None):
         if m:
             # cutechess: "W - L - D" from engine1 perspective
             w, l, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        else:
+            m = fc_score_re.search(line)
+            if m:
+                # fastchess: "Wins: W, Losses: L, Draws: D" from engine1 POV
+                w, l, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if m:
             n = w + d + l
             if n >= 20 and n % 10 == 0 and (los_stop_hi is not None or los_stop_lo is not None):
                 los = compute_los(w, d, l)
@@ -435,7 +446,7 @@ def run_match_streaming(cmd, los_stop_hi=None, los_stop_lo=None):
                     early_stop = True
                     break
     if early_stop:
-        # Kill the entire process group (match.py + cutechess-cli + all engine processes).
+        # Kill the entire process group (match.py + driver + all engine processes).
         # Without this, orphaned engine processes keep consuming CPU and starve
         # cycle-2+ training engine startups.
         try:
@@ -925,7 +936,7 @@ def main():
     cycle_log     = []   # list of (cycle, accepted, vw, vd, vl, los)
 
     def openings_args():
-        """cutechess openings arguments for both training and validation."""
+        """Openings-related args for match.py (both training and validation)."""
         if use_training_epd:
             return ["--openings", training_epd_path, "--fischer-random"]
         if fischer:
@@ -943,7 +954,7 @@ def main():
             "-c", str(concurrency),
             "--wait", str(wait_ms),
             "--pgn-out", pgn_path,
-            "--proto1", "xboard",
+            "--proto1", "uci",
             "--proto2", opp.proto,
             "--name2", opp.label,
         ]
@@ -1181,7 +1192,7 @@ def main():
                 if val_ref_mode == "best":
                     ref_exe     = eval_best_exe
                     ref_name    = f"{net_base}-best"
-                    ref_proto   = "xboard"
+                    ref_proto   = "uci"
                     ref_options = []
                     ref_label   = "best"
                 else:
@@ -1199,7 +1210,7 @@ def main():
                     "-tc", val_tc,
                     "-c", str(concurrency),
                     "--pgn-out", val_pgn,
-                    "--proto1", "xboard",
+                    "--proto1", "uci",
                     "--proto2", ref_proto,
                     "--name1", f"{net_base}-cand",
                     "--name2", ref_name,
