@@ -321,6 +321,14 @@ def main():
                         help="Play each opening once (-rounds N, no -games 2 -repeat). "
                              "Increases opening diversity at the cost of color-balance "
                              "per opening.  Recommended for symmetric self-play training.")
+    parser.add_argument("--no-adjudication", action="store_true", default=False,
+                        help="Disable score-based early adjudication (-draw / -resign).  "
+                             "Games end only on natural conditions: mate, stalemate, "
+                             "3-fold repetition, 50-move rule, insufficient material.  "
+                             "Useful for early training when engine evaluations are "
+                             "noisy — every game ends on a position-state outcome that "
+                             "the engine's terminal-position check catches.  "
+                             "A -maxmoves 400 cap is still applied as a safety net.")
     parser.add_argument("--fischer-random", action="store_true", default=False,
                         help="Use Chess960 / Fischer Random starting positions")
     parser.add_argument("--depth1", type=int, default=None, metavar="N",
@@ -578,6 +586,18 @@ def main():
         each_ponder = (["ponder"] if (args.ponder and args.driver == "cutechess")
                        else [])
 
+        # Adjudication: -draw and -resign trigger early termination on
+        # score thresholds.  --no-adjudication suppresses both so games
+        # run to natural endings; we still cap with -maxmoves so runaway
+        # positions can't hang training.
+        if args.no_adjudication:
+            adj_args = ["-maxmoves", "400"]
+        else:
+            adj_args = [
+                "-draw",   "movenumber=40", "movecount=8", "score=10",
+                "-resign", "movecount=6",   "score=600",
+            ]
+
         base_cmd = [
             driver_cli,
             "-engine", *eng1_spec,
@@ -587,8 +607,7 @@ def main():
             "-concurrency", str(args.concurrency),
             "-rounds", rounds_arg,
             "-recover",
-            "-draw",   "movenumber=40", "movecount=8", "score=10",
-            "-resign", "movecount=6",   "score=600",
+            *adj_args,
             "-ratinginterval", "10",
         ] + games_arg + (["-wait", str(args.wait)] if args.wait > 0 else []) \
           + (["-noswap"] if args.noswap else [])

@@ -843,6 +843,12 @@ def main():
     depth1      = int(depth1_str) if depth1_str.strip() else 0
     depth2_str  = ask(f"  Opponent depth limit (0=none) [--depth2]", str(depth1))
     depth2      = int(depth2_str) if depth2_str.strip() else 0
+    # Adjudication: off → games run to natural endings (mate / stalemate /
+    # 3-rep / 50-move / insufficient material).  Useful for early training:
+    # all natural endings are caught by the engine's terminal-position
+    # check, so the score-noise that drives ambiguous-skip vanishes.
+    no_adj = ask_yes_no("  Disable score-based adjudication? [--no-adjudication]",
+                        default="n")
     if use_loop:
         val_tc = ask("  Validation time control  [--val-tc]  ", tc1)
         val_depth_default = str(depth1) if depth1 else "0"
@@ -915,6 +921,8 @@ def main():
         print( "  Fischer Random:   yes")
     elif use_book:
         print(f"  Opening book:     {os.path.basename(book_path)}")
+    if no_adj:
+        print( "  Adjudication:     disabled (natural endings only, -maxmoves 400 cap)")
     if use_seg_analysis:
         print(f"  Seg. analysis:    accept≥{seg_accept_los*100:.0f}%  "
               f"reject≤{seg_reject_los*100:.0f}%  "
@@ -967,6 +975,8 @@ def main():
             cmd += ["--depth2", str(depth2)]
         if no_repeat:
             cmd.append("--no-repeat")
+        if no_adj:
+            cmd.append("--no-adjudication")
         if error_log:
             cmd += ["--error-log", error_log]
         for key, val in opp.options:
@@ -1218,6 +1228,8 @@ def main():
                 if val_depth:
                     val_cmd += ["--depth1", str(val_depth),
                                 "--depth2", str(val_depth)]
+                if no_adj:
+                    val_cmd.append("--no-adjudication")
                 for key, val in ref_options:
                     val_cmd += ["--option2", f"{key}={val}"]
                 val_cmd += openings_args()
