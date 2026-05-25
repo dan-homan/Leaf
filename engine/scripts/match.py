@@ -526,16 +526,19 @@ def main():
                    else os.path.basename(opp_arg)
         pgn_base = args.pgn_out or f"match_{name1}_vs_{name2}.pgn"
 
-        # rounds/games setup
+        # rounds/games setup.  cutechess defaults -games to 1; fastchess
+        # defaults to 2 (color-swapped pair per round).  Under --no-repeat
+        # we want exactly args.games games, so pin -games 1 explicitly for
+        # fastchess — otherwise fastchess silently doubles the total.
         if args.no_repeat:
             rounds_arg = str(args.games)
-            games_arg  = []
+            games_arg  = ["-games", "1"] if args.driver == "fastchess" else []
         elif args.games % 2 == 0:
             rounds_arg = str(args.games // 2)
             games_arg  = ["-games", "2", "-repeat"]
         else:
             rounds_arg = str(args.games)
-            games_arg  = []
+            games_arg  = ["-games", "1"] if args.driver == "fastchess" else []
 
         tc1 = args.tc1 or args.time_control
         tc2 = args.tc2 or args.time_control
