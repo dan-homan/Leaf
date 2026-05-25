@@ -46,6 +46,45 @@ DRIVER_PATHS = {
 }
 
 
+def detect_frc_openings(path, sample_lines=10):
+    """
+    Heuristically detect whether an EPD/PGN openings file contains FRC
+    (Chess960) starting positions.  Returns the FEN of the first FRC-looking
+    line if found, else None.
+
+    Heuristic: a starting position has all 8 back-rank pieces present
+    (no empty squares = no digits in the rank string), so the rank string
+    is exactly 8 alphabetic characters.  Standard chess has "rnbqkbnr" /
+    "RNBQKBNR"; any other 8-alpha permutation is FRC.
+
+    Falls through quietly if the file isn't readable or parseable — auto-
+    detect is a footgun guard, not a hard correctness check.
+    """
+    try:
+        with open(path, "r", errors="replace") as f:
+            checked = 0
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("[") or line.startswith("#"):
+                    continue
+                first = line.split()[0] if line.split() else ""
+                ranks = first.split("/")
+                if len(ranks) != 8:
+                    continue
+                # rank[0] is rank 8 (black back rank), rank[7] is rank 1 (white).
+                # A back rank with all pieces present and non-standard order
+                # is an FRC starting position.
+                for rank, std in ((ranks[0], "rnbqkbnr"), (ranks[7], "RNBQKBNR")):
+                    if len(rank) == 8 and rank.isalpha() and rank != std:
+                        return first
+                checked += 1
+                if checked >= sample_lines:
+                    break
+    except OSError:
+        pass
+    return None
+
+
 def ask(prompt, default=None):
     suffix = f" [{default}]" if default is not None else ""
     val = input(f"{prompt}{suffix}: ").strip()
@@ -432,6 +471,20 @@ def main():
                 sys.exit(2)
             polyglot_book = args.openings  # injected into each -engine spec as book=FILE
         else:
+            # Auto-detect FRC starting positions in the book.  Without this,
+            # running an FRC book without --fischer-random produces silently
+            # broken games: fastchess doesn't enable UCI_Chess960 on the engine,
+            # the engine emits standard-chess castling notation, and fastchess
+            # rejects it as illegal in the FRC position.
+            if not args.fischer_random:
+                frc_fen = detect_frc_openings(args.openings)
+                if frc_fen is not None:
+                    print(f"Warning: --openings {args.openings} contains FRC (Chess960) "
+                          f"starting positions (first detected: {frc_fen!r}).\n"
+                          f"         Auto-enabling --fischer-random.  Pass --fischer-random "
+                          f"explicitly to suppress this warning.",
+                          file=sys.stderr)
+                    args.fischer_random = True
             fmt = "epd" if args.openings.lower().endswith(".epd") else "pgn"
             openings_args = ["-openings", f"file={args.openings}", f"format={fmt}", "order=random"]
 
