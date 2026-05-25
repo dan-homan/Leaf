@@ -41,12 +41,12 @@ static const int   TDLEAF_MIN_PLIES_REP   = 40;     // skip 3-rep draws shorter 
 // contribution to the eligibility trace is scaled down proportionally.
 // Expressed as a multiple of the current pawn value so the threshold tracks
 // piece-value drift under TDLeaf.  Set to a large value to disable.
-static const float TDLEAF_SCORE_CLIP_PAWNS = 1.0f;
+static const float TDLEAF_SCORE_CLIP_PAWNS = 0.5f;
 // Approach 2 — iterative-deepening score stability weight.
 // w_t = 1 / (1 + id_score_variance / TDLEAF_ID_VAR_SIGMA2)
 // Expressed in cp²: 10000 corresponds to a 100 cp std-dev reference.
 // Larger values are more tolerant of ID score instability.
-static const float TDLEAF_ID_VAR_SIGMA2  = 2500.0f;
+static const float TDLEAF_ID_VAR_SIGMA2  = 625.0f;
 // Gradient clipping: if global L2 norm of all gradients exceeds this threshold,
 // scale all gradients by max_norm/norm.  Set to 0 to disable.
 static const float TDLEAF_GRAD_CLIP_NORM = 1.0f;

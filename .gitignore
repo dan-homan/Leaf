@@ -17,6 +17,7 @@ scripts/*
 !.gitignore
 !README.md
 !CLAUDE.md
+engine/.DS_Store
 
 # Within engine/run/, only track scripts, config, and the opening book (not binaries)
 engine/run/*
@@ -55,3 +56,4 @@ gui/.packages
 gui/.flutter-plugins
 gui/.flutter-plugins-dependencies
 gui/assets/engines/
+gui/.DS_Store
