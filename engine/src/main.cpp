@@ -458,6 +458,14 @@ int main(int argc, char *argv[])
   if (proto.uci_mode) {
     uci_loop(&game);
     if(proto.logging) proto.logfile.close();
+#if TDLEAF && NNUE && !TDLEAF_READONLY
+    if (nnue_available) {
+      char tdleaf_save[FILENAME_MAX];
+      snprintf(tdleaf_save, sizeof(tdleaf_save), "%s%s",
+               engine_cfg.exec_path, NNUE_TDLEAF_BIN);
+      tdleaf_flush_batch(tdleaf_save);
+    }
+#endif
     close_hash();
     return 0;
   }
@@ -772,7 +780,8 @@ void make_move()
      if (strstr(game.overstring, "3-rep") && game.td_game.n_plies < TDLEAF_MIN_PLIES_REP) {
        fprintf(stderr, "[TDLeaf] Skipping early 3-rep draw (%d plies < %d)\n",
                game.td_game.n_plies, TDLEAF_MIN_PLIES_REP);
-       game.td_game.n_plies = 0;
+       game.td_game.n_plies      = 0;
+       game.td_game.engine_color = -1;
      } else {
        float td_result = 0.5f;
        if (strstr(game.overstring, "1-0"))  td_result = 1.0f;
@@ -781,7 +790,8 @@ void make_move()
        snprintf(tdleaf_save, sizeof(tdleaf_save), "%s%s", engine_cfg.exec_path, NNUE_TDLEAF_BIN);
        tdleaf_update_after_game(game.td_game, td_result, tdleaf_save);
        tdleaf_replay(game.td_game, td_result, tdleaf_save);
-       game.td_game.n_plies = 0;  // prevent double-trigger
+       game.td_game.n_plies      = 0;  // prevent double-trigger
+       game.td_game.engine_color = -1;
      }
    }
 #endif

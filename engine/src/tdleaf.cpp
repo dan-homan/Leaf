@@ -31,6 +31,10 @@ void tdleaf_record_ply(TDGameRecord &rec,
 {
     if (rec.n_plies >= MAX_GAME_PLY) return;  // safety guard
 
+    // Capture engine color on the first ply of a fresh game.  Every recorded
+    // ply has root_pos.wtm == engine's color (we only record on engine moves).
+    if (rec.n_plies == 0) rec.engine_color = (int8_t)root_pos.wtm;
+
     // Walk the PV, updating the position and accumulator incrementally.
     // We use two alternating accumulator slots to avoid unnecessary copies.
     NNUEAccumulator acc_a = root_acc;   // current leaf accumulator
@@ -95,6 +99,7 @@ void tdleaf_record_ply(TDGameRecord &rec,
     memcpy(r.psqt[0], acc_a.psqt[0], NNUE_PSQT_BKTS * sizeof(int32_t));
     memcpy(r.psqt[1], acc_a.psqt[1], NNUE_PSQT_BKTS * sizeof(int32_t));
     r.score_stm         = leaf_score_stm;
+    r.score_root_stm    = score_root_stm;   // engine-POV root score (cp) for adjudication
     r.wtm               = leaf_wtm;
     r.stack             = (pc - 1) / 4;
     r.id_score_variance = id_var;
@@ -361,6 +366,131 @@ void tdleaf_flush_batch(const char *save_path)
 
     fprintf(stderr, "TDLeaf flush: applied partial batch of %d game(s)\n", td_batch_pending);
     td_batch_pending = 0;
+}
+
+// ---------------------------------------------------------------------------
+// tdleaf_self_adjudicate — derive a game result without a protocol "result"
+// command, so UCI mode (no game-over signal) can still feed the learner.
+//
+// Priority:
+//   1. Terminal position on final_pos:
+//        - no legal moves + in_check → mate (loser = side to move)
+//        - no legal moves, not in check → stalemate (draw)
+//        - fifty-move counter >= 100 → draw
+//        - 3-fold repetition over `plist` (stride-2 same-STM hashes) → draw
+//   2. Score-history adjudication (mirrors cutechess/fastchess defaults):
+//        - last 6 plies' engine-POV score >= +600 cp → engine won
+//        - last 6 plies' engine-POV score <= -600 cp → engine lost
+//        - past move 40, last 8 plies' |engine-POV score| <= 10 cp → draw
+//   3. Otherwise return false (caller should skip learning).
+//
+// Engine-POV score per ply: TDRecord stores leaf STM score; if the leaf STM
+// matches rec.engine_color the leaf score is already engine-POV, else negate.
+// ---------------------------------------------------------------------------
+bool tdleaf_self_adjudicate(const TDGameRecord &rec,
+                            const position &final_pos,
+                            const uint64_t *plist,
+                            int game_T,
+                            float &out_result_white_pov)
+{
+    if (rec.n_plies == 0 || rec.engine_color < 0) return false;
+
+    // ---- (1) Terminal position checks ------------------------------------
+    {
+        position scratch = final_pos;
+        int mate = scratch.in_check_mate();   // 1 = mate, 2 = stalemate, 0 = neither
+        if (mate == 1) {
+            // Side to move on final_pos is the loser.
+            out_result_white_pov = final_pos.wtm ? 0.0f : 1.0f;
+            return true;
+        }
+        if (mate == 2) {
+            out_result_white_pov = 0.5f;
+            return true;
+        }
+    }
+    if (final_pos.fifty >= 100) { out_result_white_pov = 0.5f; return true; }
+
+    // 3-fold: count matches of final_pos.hcode within the last `fifty` plies
+    // at stride 2 (same-STM repetitions).  `plist[game_T-1]` is the current
+    // hash; we already count that as one occurrence.
+    {
+        int reps = 1;
+        int floor = game_T - 1 - final_pos.fifty;
+        if (floor < 0) floor = 0;
+        for (int ri = game_T - 3; ri >= floor; ri -= 2) {
+            if (plist[ri] == final_pos.hcode) {
+                reps++;
+                if (reps >= 3) { out_result_white_pov = 0.5f; return true; }
+            }
+        }
+    }
+
+    // Insufficient mating material: each side has no pawns/rooks/queens and
+    // at most one minor piece (KvK, KvKN, KvKB, KNvK, KBvK, KNvKN, KBvKB,
+    // KNvKB).  Mirrors fastchess's standalone "draw by insufficient mating
+    // material" rule.  Slightly over-broad on KNvKB but those cannot force
+    // mate in normal play.
+    {
+        auto insuff = [](const position &p, int side) {
+            int heavy = p.plist[side][PAWN][0] + p.plist[side][ROOK][0] +
+                        p.plist[side][QUEEN][0];
+            int minor = p.plist[side][KNIGHT][0] + p.plist[side][BISHOP][0];
+            return heavy == 0 && minor <= 1;
+        };
+        if (insuff(final_pos, 0) && insuff(final_pos, 1)) {
+            out_result_white_pov = 0.5f;
+            return true;
+        }
+    }
+
+    // ---- (2) Score-history self-adjudication -----------------------------
+    // Cutechess defaults: -resign movecount=6 score=600, -draw movenumber=40
+    // movecount=8 score=10.  Fastchess uses the same semantics.
+    const int RESIGN_PLIES      = 6;
+    const int RESIGN_CP         = 600;
+    const int DRAW_PLIES        = 8;
+    const int DRAW_CP           = 10;
+    const int DRAW_MOVE_NUMBER  = 40;
+
+    int n = rec.n_plies;
+
+    // Root-position score is already from engine's POV (we only record on
+    // engine moves, so root STM == engine_color at every entry).  We use
+    // score_root_stm (not the leaf score) because it matches what the engine
+    // reported via UCI `info ... score cp X` — i.e., exactly what cutechess /
+    // fastchess sees when applying its own adjudication thresholds.
+
+    if (n >= RESIGN_PLIES) {
+        bool all_won = true, all_lost = true;
+        for (int i = n - RESIGN_PLIES; i < n; i++) {
+            int s = rec.plies[i].score_root_stm;
+            if (s <  RESIGN_CP) all_won  = false;
+            if (s > -RESIGN_CP) all_lost = false;
+        }
+        if (all_won) {
+            out_result_white_pov = rec.engine_color ? 1.0f : 0.0f;
+            return true;
+        }
+        if (all_lost) {
+            out_result_white_pov = rec.engine_color ? 0.0f : 1.0f;
+            return true;
+        }
+    }
+
+    // game_T counts plies from game start (1-based).  Move number = (T-1)/2 + 1.
+    int move_number = (game_T - 1) / 2 + 1;
+    if (n >= DRAW_PLIES && move_number >= DRAW_MOVE_NUMBER) {
+        bool all_drawish = true;
+        for (int i = n - DRAW_PLIES; i < n; i++) {
+            int s = rec.plies[i].score_root_stm;
+            if (s > DRAW_CP || s < -DRAW_CP) { all_drawish = false; break; }
+        }
+        if (all_drawish) { out_result_white_pov = 0.5f; return true; }
+    }
+
+    // Ambiguous (e.g. time forfeit, unusual termination): skip learning.
+    return false;
 }
 
 #endif // TDLEAF

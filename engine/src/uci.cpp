@@ -301,6 +301,15 @@ static void uci_setoption(const std::string &line)
 
 static void uci_set_position(const std::string &line)
 {
+    // setboard() clears game.td_game.n_plies, but `position` is sent for
+    // every move of a continuing UCI game (it rebuilds the move list from
+    // scratch each time).  Save TDLeaf game state across the rebuild;
+    // ucinewgame is the authoritative game-boundary signal.
+#if TDLEAF
+    int    saved_n_plies      = game.td_game.n_plies;
+    int8_t saved_engine_color = game.td_game.engine_color;
+#endif
+
     std::istringstream iss(line);
     std::string tok;
     iss >> tok; // "position"
@@ -359,6 +368,11 @@ static void uci_set_position(const std::string &line)
     for (int ti = 0; ti < thread_cfg.threads; ti++) {
         game.ts.tdata[ti].pc[0][0].t = NOMOVE;
     }
+
+#if TDLEAF
+    game.td_game.n_plies      = saved_n_plies;
+    game.td_game.engine_color = saved_engine_color;
+#endif
 }
 
 //----------------------------------------------------------------------
@@ -458,6 +472,21 @@ static void uci_dispatch_go(const std::string &line)
             game.best = game.ts.search(game.pos, time_limit, game.T, &game);
         }
         int elapsed_cs = GetTime() - search_start;
+
+#if TDLEAF && NNUE && !TDLEAF_READONLY
+        // Record this ply for TDLeaf.  Skip infinite/analysis searches — those
+        // are not normal game moves.  (Depth-limited searches are normal game
+        // moves under cutechess/fastchess `depth=N` config and are recorded.)
+        if (nnue_available && !uci_go_infinite) {
+            tdleaf_record_ply(game.td_game,
+                              game.pos,
+                              game.ts.tdata[0].n[0].acc,
+                              game.ts.tdata[0].pc[0],
+                              game.ts.g_last,
+                              game.ts.id_scores,
+                              game.ts.id_score_count);
+        }
+#endif
 
         // Update time tracking
         game.timeleft[stm] -= float(elapsed_cs);
@@ -560,6 +589,82 @@ void uci_send_info(int score, int depth, int elapsed_cs, unsigned long long node
 }
 
 //----------------------------------------------------------------------
+// Finish a UCI game for TDLeaf learning
+//----------------------------------------------------------------------
+//
+// UCI has no protocol command for game outcomes.  Tournament drivers
+// (fastchess, cutechess-cli in UCI mode) signal end-of-game by sending
+// `ucinewgame` (next game starting) or `quit` (match done).  We hook both
+// to derive a result via tdleaf_self_adjudicate() and run the learning
+// update before the GUI clobbers our state with the next game's position.
+//
+// If self-adjudication is ambiguous (time forfeit, unusual termination)
+// we silently drop the game — better to lose one game's training signal
+// than poison gradients with a guess.
+
+static void uci_finish_game()
+{
+#if TDLEAF && NNUE && !TDLEAF_READONLY
+    if (!nnue_available || game.td_game.n_plies <= 0) return;
+
+    // game.pos at end-of-game is the position the engine searched FROM (i.e.,
+    // before its last bestmove).  If our last move was the game-ending move
+    // (a mate, the move that triggered 3-rep, etc.), the terminal position is
+    // game.pos + game.best.  Apply game.best to a scratch copy so terminal-
+    // state checks (mate / stalemate / 3-rep / insufficient material) see
+    // the actual final position.  If the opponent made the last move we
+    // never saw, plist will still drive the score-based fallback correctly.
+    position final_pos    = game.pos;
+    uint64_t plist_local[MAX_GAME_PLY];
+    memcpy(plist_local, game.ts.tdata[0].plist, sizeof(uint64_t) * game.T);
+    int      final_T      = game.T;
+    if (game.best.t) {
+        position scratch = game.pos;
+        if (scratch.exec_move(game.best, 0)) {
+            final_pos          = scratch;
+            plist_local[final_T] = final_pos.hcode;
+            final_T++;
+        }
+    }
+
+    // Early 3-rep guard, mirroring main.cpp's logic.  Inspect plist directly
+    // so we can skip too-short cycle games before invoking the full update.
+    int reps = 1;
+    int floor = final_T - 1 - final_pos.fifty;
+    if (floor < 0) floor = 0;
+    for (int ri = final_T - 3; ri >= floor; ri -= 2) {
+        if (plist_local[ri] == final_pos.hcode) reps++;
+    }
+    if (reps >= 3 && game.td_game.n_plies < TDLEAF_MIN_PLIES_REP) {
+        fprintf(stderr, "[TDLeaf] Skipping early 3-rep draw (%d plies < %d)\n",
+                game.td_game.n_plies, TDLEAF_MIN_PLIES_REP);
+        game.td_game.n_plies      = 0;
+        game.td_game.engine_color = -1;
+        return;
+    }
+
+    float td_result = 0.5f;
+    if (!tdleaf_self_adjudicate(game.td_game, final_pos,
+                                plist_local, final_T,
+                                td_result)) {
+        fprintf(stderr, "[TDLeaf] Ambiguous UCI game outcome (%d plies); skipping learning\n",
+                game.td_game.n_plies);
+        game.td_game.n_plies      = 0;
+        game.td_game.engine_color = -1;
+        return;
+    }
+
+    char tdleaf_save[FILENAME_MAX];
+    snprintf(tdleaf_save, sizeof(tdleaf_save), "%s%s",
+             engine_cfg.exec_path, NNUE_TDLEAF_BIN);
+    tdleaf_update_after_game(game.td_game, td_result, tdleaf_save);
+    tdleaf_replay(game.td_game, td_result, tdleaf_save);
+    game.td_game.n_plies      = 0;
+    game.td_game.engine_color = -1;
+#endif
+}
+
+//----------------------------------------------------------------------
 // Main UCI loop
 //----------------------------------------------------------------------
 
@@ -594,6 +699,8 @@ void uci_loop(game_rec *gr)
             printf("uciok\n"); fflush(stdout);
 
         } else if (tok == "ucinewgame") {
+            // Finish the previous game's TDLeaf update before resetting state.
+            uci_finish_game();
             // Reset engine state for a new game
             set_hash_size(engine_cfg.hash_size);
             game.setboard((char*)i_pos, 'w', (char*)"KQkq", (char*)"-");
@@ -630,6 +737,9 @@ void uci_loop(game_rec *gr)
             // optional: ignore
 
         } else if (tok == "quit") {
+            // Finish the pending game (if any) before exit; main() will then
+            // flush any half-full mini-batch via tdleaf_flush_batch().
+            uci_finish_game();
             gr->program_run = 0;
             break;
         }

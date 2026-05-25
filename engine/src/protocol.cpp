@@ -275,7 +275,8 @@ void parse_command()
         tdleaf_update_after_game(game.td_game, td_result, tdleaf_save);
         tdleaf_replay(game.td_game, td_result, tdleaf_save);
       }
-      game.td_game.n_plies = 0;  // always reset — prevent carry-over to next game
+      game.td_game.n_plies      = 0;  // always reset — prevent carry-over to next game
+      game.td_game.engine_color = -1;
     }
 #endif
   }

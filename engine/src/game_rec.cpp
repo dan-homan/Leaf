@@ -35,7 +35,8 @@ game_rec::game_rec() {
 	program_run = 1;
 
 #if TDLEAF
-	td_game.n_plies = 0;
+	td_game.n_plies      = 0;
+	td_game.engine_color = -1;
 #endif
 
 	/* tree search parameters */
@@ -60,7 +61,8 @@ void game_rec::setboard(const char inboard[256], const char ms, const char castl
   over = 0;
 
 #if TDLEAF
-  td_game.n_plies = 0;
+  td_game.n_plies      = 0;
+  td_game.engine_color = -1;
 #endif
 
   // reset time control variables

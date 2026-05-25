@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 #
-# Run a head-to-head match or gauntlet between chess engines using cutechess-cli.
+# Run a head-to-head match or gauntlet between chess engines using a tournament
+# driver (fastchess by default, cutechess-cli available via --driver=cutechess).
 # Run from the engine/run directory:
 #
 #   python3 match.py                              # fully interactive
@@ -39,7 +40,10 @@ from engine_discovery import (
     run_dir, learn_dir, tools_dir,
 )
 
-cutechess_cli = os.path.normpath(os.path.join(tools_dir, "cutechess-1.4.0/build/cutechess-cli"))
+DRIVER_PATHS = {
+    "fastchess": os.path.normpath(os.path.join(tools_dir, "fastchess/fastchess")),
+    "cutechess": os.path.normpath(os.path.join(tools_dir, "cutechess-1.4.0/build/cutechess-cli")),
+}
 
 
 def ask(prompt, default=None):
@@ -79,10 +83,10 @@ def _kill_group(proc, reason):
     """
     SIGTERM the entire process group containing proc, escalate to SIGKILL
     after 5s if anything is still alive.  Used for stall recovery and
-    KeyboardInterrupt cleanup so cutechess-cli + every child engine die
+    KeyboardInterrupt cleanup so the driver + every child engine die
     together instead of getting reparented to launchd.
     """
-    print(f"\n[match.py] {reason} — killing cutechess-cli + engines.",
+    print(f"\n[match.py] {reason} — killing driver + engines.",
           file=sys.stderr, flush=True)
     try:
         pgid = os.getpgid(proc.pid)
@@ -110,30 +114,38 @@ def _kill_group(proc, reason):
 
 def run_match(cmd, error_log=None, stall_timeout=600):
     """
-    Run cutechess-cli, stream its output to stdout line-by-line, and capture the
-    final Score and Elo difference lines.
+    Run the tournament driver (cutechess-cli or fastchess), stream its output to
+    stdout line-by-line, and capture the final Score and Elo difference lines.
 
-    cutechess-cli output format (engine1 perspective):
+    Both drivers print engine1-perspective progress lines of the form:
       Score of E1 vs E2: W - L - D  [pct]  N
       Elo difference: ELO +/- ERR, LOS: ...
 
-    If error_log is given, cutechess-cli's stderr is routed to that file in
+    If error_log is given, the driver's stderr is routed to that file in
     append mode (child engines inherit the same fd).  Otherwise stderr is
     merged into stdout as before.
 
-    stall_timeout: if no output appears for this many seconds, assume
-    cutechess-cli has deadlocked (known Qt threading bug observed in 1.4.0
-    under high concurrency, often after a -recover restart) and kill the
-    whole process group.  Returns rc=124 in that case.
+    stall_timeout: if no output appears for this many seconds, assume the
+    driver has deadlocked (known cutechess-cli 1.4.0 Qt-threading bug under
+    high concurrency; less expected with fastchess but the watchdog is cheap
+    insurance) and kill the whole process group.  Returns rc=124 in that case.
 
     Returns (w, d, l, elo, elo_err, returncode).
     w/d/l are engine1 wins/draws/losses; elo/elo_err may be None.
     """
+    # cutechess: "Score of E1 vs E2: W - L - D ..." and "Elo difference: X +/- Y"
+    # fastchess: "Games: N, Wins: W, Losses: L, Draws: D, ..." and "Elo: X +/- Y"
     score_re = re.compile(
         r"Score of .+? vs .+?:\s+(\d+)\s+-\s+(\d+)\s+-\s+(\d+)"
     )
     elo_re = re.compile(
         r"Elo difference:\s*([+-]?\d+(?:\.\d+)?)\s*\+/-\s*(\d+(?:\.\d+)?)"
+    )
+    fc_score_re = re.compile(
+        r"Games:\s*\d+,\s*Wins:\s*(\d+),\s*Losses:\s*(\d+),\s*Draws:\s*(\d+)"
+    )
+    fc_elo_re = re.compile(
+        r"^Elo:\s*([+-]?\d+(?:\.\d+)?)\s*\+/-\s*(\d+(?:\.\d+)?)"
     )
 
     w = d = l = 0
@@ -143,7 +155,7 @@ def run_match(cmd, error_log=None, stall_timeout=600):
     err_fh = open(error_log, "a", buffering=1) if error_log else None
     proc = None
     try:
-        # start_new_session=True puts cutechess in its own process group so
+        # start_new_session=True puts the driver in its own process group so
         # _kill_group() can take down it + all engine children atomically.
         proc = subprocess.Popen(
             cmd,
@@ -173,7 +185,7 @@ def run_match(cmd, error_log=None, stall_timeout=600):
             except queue.Empty:
                 stalled = True
                 _kill_group(proc,
-                            f"STALL: no cutechess-cli output for {stall_timeout}s")
+                            f"STALL: no driver output for {stall_timeout}s")
                 break
             if line is None:
                 break  # EOF
@@ -183,6 +195,14 @@ def run_match(cmd, error_log=None, stall_timeout=600):
                 # cutechess: "W - L - D" from engine1 perspective
                 w, l, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
             m = elo_re.search(line)
+            if m:
+                elo     = float(m.group(1))
+                elo_err = float(m.group(2))
+            m = fc_score_re.search(line)
+            if m:
+                # fastchess: "Wins: W, Losses: L, Draws: D" from engine1 perspective
+                w, l, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            m = fc_elo_re.search(line)
             if m:
                 elo     = float(m.group(1))
                 elo_err = float(m.group(2))
@@ -207,10 +227,18 @@ def main():
     default_concurrency = max(1, cpu_count // 2)
 
     parser = argparse.ArgumentParser(
-        description="Run a match or gauntlet between chess engines via cutechess-cli.\n"
+        description="Run a match or gauntlet between chess engines using a "
+                    "tournament driver (fastchess by default).\n"
                     "Run with no arguments for interactive mode.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    parser.add_argument("--driver", default="fastchess",
+                        choices=["fastchess", "cutechess"],
+                        help="Tournament driver (default: fastchess).  fastchess "
+                             "is UCI-only and the engine self-adjudicates "
+                             "game outcomes for TDLeaf learning; cutechess "
+                             "supports xboard so the engine receives explicit "
+                             "result commands.")
     parser.add_argument("engine1", nargs="?", default=None,
                         help="Probe engine (name in run/ or absolute path). "
                              "Omit for interactive selection.")
@@ -239,7 +267,7 @@ def main():
                         help="Override protocol for engine2 only")
     parser.add_argument("--pgn", default=None, metavar="FILE",
                         help="Persistent PGN: all games from all opponents/iterations are "
-                             "appended to this file (cutechess -pgnout FILE append)")
+                             "appended to this file.")
     parser.add_argument("--pgn-out", default=None, metavar="FILE",
                         help="Per-iteration PGN base name "
                              "(default: match_<engine1>_vs_<engine2>.pgn); "
@@ -265,20 +293,21 @@ def main():
     parser.add_argument("--wait", type=int, default=0, metavar="MS",
                         help="Milliseconds to wait between games (default: 0)")
     parser.add_argument("--error-log", default=None, metavar="FILE",
-                        help="Route cutechess-cli stderr (and inherited engine "
+                        help="Route driver stderr (and inherited engine "
                              "stderr) to FILE in append mode.  Engines log "
                              "training telemetry via fprintf(stderr, ...), so "
                              "this captures per-batch [tdleaf step-clip] lines "
                              "from all concurrent engines into one file.")
     parser.add_argument("--stall-timeout", type=int, default=600, metavar="SEC",
-                        help="Kill cutechess-cli + engines if no output appears "
+                        help="Kill driver + engines if no output appears "
                              "for SEC seconds (default: 600).  Guards against a "
                              "known cutechess-cli 1.4.0 Qt-threading deadlock "
-                             "that wedges long high-concurrency matches forever. "
-                             "Exits with code 124 on stall.")
+                             "that wedges long high-concurrency matches forever; "
+                             "less expected with fastchess but the watchdog is "
+                             "cheap insurance.  Exits with code 124 on stall.")
     parser.add_argument("--option1", action="append", default=[], metavar="KEY=VALUE",
                         help="Pass a UCI/xboard option to engine1 (repeatable). "
-                             "Forwarded as cutechess option.KEY=VALUE.  "
+                             "Forwarded as option.KEY=VALUE on the engine spec.  "
                              "Example: --option1 'UCI_Elo=2000'")
     parser.add_argument("--option2", action="append", default=[], metavar="KEY=VALUE",
                         help="Pass a UCI/xboard option to engine2 (repeatable).")
@@ -372,9 +401,22 @@ def main():
                 sys.exit(1)
             opponent_exes.append(exe)
 
+    # Driver
+    driver_cli = DRIVER_PATHS[args.driver]
+    if not os.path.isfile(driver_cli):
+        print(f"Error: driver binary not found: {driver_cli}", file=sys.stderr)
+        sys.exit(1)
+
     # Protocols
     proto1 = args.proto1 or args.proto
     proto2 = args.proto2 or args.proto
+    if args.driver == "fastchess" and (proto1 != "uci" or proto2 != "uci"):
+        print("Error: --driver=fastchess requires proto=uci for both engines.",
+              file=sys.stderr)
+        sys.exit(2)
+    if args.driver == "fastchess" and args.ponder:
+        print("Warning: --ponder has no effect with --driver=fastchess; "
+              "pondering is not exposed by fastchess.", file=sys.stderr)
 
     # Openings
     openings_args = []
@@ -384,6 +426,10 @@ def main():
             print(f"Error: openings file not found: {args.openings}", file=sys.stderr)
             sys.exit(1)
         if args.openings.lower().endswith(".bin"):
+            if args.driver == "fastchess":
+                print("Error: --driver=fastchess does not support .bin Polyglot books. "
+                      "Use --openings <file.epd|file.pgn> instead.", file=sys.stderr)
+                sys.exit(2)
             polyglot_book = args.openings  # injected into each -engine spec as book=FILE
         else:
             fmt = "epd" if args.openings.lower().endswith(".epd") else "pgn"
@@ -455,8 +501,9 @@ def main():
             eng1_spec.append(f"depth={args.depth1}")
         if args.depth2 is not None:
             eng2_spec.append(f"depth={args.depth2}")
-        # Forward --option1/--option2 as cutechess option.KEY=VALUE (quoted
-        # keys support spaces, e.g. "Skill Level").
+        # Forward --option1/--option2 as option.KEY=VALUE on the engine spec
+        # (same syntax in cutechess and fastchess; quoted keys support spaces,
+        # e.g. "Skill Level").
         for o in args.option1:
             eng1_spec.append(f"option.{o}")
         for o in args.option2:
@@ -470,11 +517,16 @@ def main():
             eng2_spec.append(f"tc={tc2}")
             each_tc = []
 
+        # Pondering: cutechess takes `ponder` on `-each`; fastchess has no
+        # equivalent (warned above) — emit nothing.
+        each_ponder = (["ponder"] if (args.ponder and args.driver == "cutechess")
+                       else [])
+
         base_cmd = [
-            cutechess_cli,
+            driver_cli,
             "-engine", *eng1_spec,
             "-engine", *eng2_spec,
-            "-each",   *each_tc, *(["ponder"] if args.ponder else []),
+            "-each",   *each_tc, *each_ponder,
             *([ "-variant", "fischerandom"] if args.fischer_random else []),
             "-concurrency", str(args.concurrency),
             "-rounds", rounds_arg,
@@ -493,9 +545,19 @@ def main():
         opp_w = opp_d = opp_l = 0
         last_elo = last_elo_err = None
 
+        def _pgnout(fname, append):
+            # cutechess: -pgnout FILE  (defaults to append when file exists)
+            # fastchess: -pgnout file=FILE [append=true]
+            if args.driver == "fastchess":
+                a = ["-pgnout", f"file={fname}"]
+                if append:
+                    a.append("append=true")
+                return a
+            return ["-pgnout", fname]
+
         for it in range(1, args.iterations + 1):
             if args.pgn:
-                pgnout_args = ["-pgnout", args.pgn]
+                pgnout_args = _pgnout(args.pgn, append=True)
                 if multi:
                     print(f"--- Iteration {it} / {args.iterations} ---")
                 elif not gauntlet:
@@ -509,7 +571,7 @@ def main():
                     pgn_out = pgn_base
                     if not gauntlet:
                         print(f"PGN output:  {pgn_out}")
-                pgnout_args = ["-pgnout", pgn_out]
+                pgnout_args = _pgnout(pgn_out, append=False)
 
             cmd = base_cmd + pgnout_args + openings_args
 
@@ -520,7 +582,7 @@ def main():
             )
 
             if rc != 0:
-                print(f"\nError: cutechess-cli exited with code {rc} on iteration {it}.",
+                print(f"\nError: {args.driver} exited with code {rc} on iteration {it}.",
                       file=sys.stderr)
                 sys.exit(rc)
 

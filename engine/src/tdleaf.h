@@ -101,6 +101,9 @@ struct TDRecord {
     int16_t acc [2][NNUE_HALF_DIMS];   // raw accumulator [perspective][dim]
     int32_t psqt[2][NNUE_PSQT_BKTS];  // PSQT sums [perspective][bucket]
     int     score_stm;                 // search score (centipawns, side-to-move POV)
+    int     score_root_stm;            // root-position search score (engine POV, cp).
+                                        // For self-adjudication only — does not feed
+                                        // TDLeaf gradients (those use score_stm at leaf).
     int     stack;                     // layer stack index used (piece_count-1)/4
     bool    wtm;                       // White to move at the leaf position
     float   id_score_variance;         // variance of last N ID depth scores (cp²); 0 if < 2 depths
@@ -120,6 +123,11 @@ struct TDGameRecord {
     TDRecord plies[MAX_GAME_PLY];
     int      n_plies;
     // n_plies is reset to 0 at game start; entries filled by tdleaf_record_ply()
+
+    // Engine's color this game (root STM at every recorded ply, since we only
+    // record when the engine is about to move).  -1 = unset; 0 = black, 1 = white.
+    // Used by UCI self-adjudication to map "engine won/lost" → white-POV result.
+    int8_t engine_color;
 };
 
 // ---------------------------------------------------------------------------
@@ -159,5 +167,21 @@ void tdleaf_replay(TDGameRecord &rec, float result, const char *save_path);
 
 // Flush any pending mini-batch gradients (e.g., at session end or weight export).
 void tdleaf_flush_batch(const char *save_path);
+
+// Self-adjudicate a UCI game outcome from in-engine state.  UCI has no protocol
+// command for game results, so we reconstruct one from:
+//   (1) the terminal position on `final_pos` (mate / stalemate / 50-move / 3-rep), or
+//   (2) the engine's own recent score history (mirrors cutechess/fastchess
+//       `-resign movecount=6 score=600` and `-draw movenumber=40 movecount=8 score=10`).
+// Returns true with `out_result_white_pov` set (1.0/0.5/0.0) when confident.
+// Returns false when the outcome is ambiguous — caller should skip learning.
+//
+// `plist` is one thread's repetition list (game.ts.tdata[0].plist); `game_T` is
+// game.T (1-based ply index, so most recent recorded hash is at plist[game_T-1]).
+bool tdleaf_self_adjudicate(const TDGameRecord &rec,
+                            const struct position &final_pos,
+                            const uint64_t *plist,
+                            int game_T,
+                            float &out_result_white_pov);
 
 #endif // TDLEAF_H
