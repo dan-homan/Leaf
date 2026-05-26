@@ -580,12 +580,20 @@ void uci_send_info(int score, int depth, int elapsed_cs, unsigned long long node
                depth, cp, bound_str, elapsed_ms, nodes, nps);
     }
 
-    // PV — validate each move before printing to catch stale PV entries
+    // PV — validate each move before printing to catch stale PV entries.
+    // exec_move's sanity check is lax (only verifies the from-square holds
+    // a piece of the right color), so a stale TT-sourced move with wrong
+    // piece-type geometry can slip through and produce nonsense board
+    // state.  verify_move checks the piece on `from` actually reaches
+    // `to` by that piece's movement rules — defensive complement to the
+    // verify_move guards already in search.cpp's TT-cutoff sites.
     printf(" pv");
     position p = ts->tdata[0].n[0].pos;
     for (int i = 0; i < MAXD; i++) {
         move m = ts->tdata[0].pc[0][i];
         if (!m.t) break;
+        move_list vmlist;
+        if (!p.verify_move(&vmlist, &ts->tdata[0], m)) break;
         char ms[6];
         uci_move_str(m, ms);
         uci_960_output(m, ms, p);

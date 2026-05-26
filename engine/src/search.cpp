@@ -970,8 +970,18 @@ void search_node::root_pvs()
        }
        ts->time_double++;
      }
-     // set the PV moves appropriately
-     tdata->pc[0][1].t = next->pos.hmove.t;
+     // set the PV moves appropriately.  next->pos.hmove came from the
+     // child's TT slot and may be illegal in next->pos (Zobrist collision,
+     // or an old move whose piece-type/geometry no longer matches the
+     // current piece arrangement).  Validate against next->pos so we
+     // don't propagate an illegal move into pc[0][1].
+     {
+       move_list _vmlist;
+       if (next->pos.verify_move(&_vmlist, tdata, next->pos.hmove))
+         tdata->pc[0][1].t = next->pos.hmove.t;
+       else
+         tdata->pc[0][1].t = NOMOVE;
+     }
      tdata->pc[0][2].t = NOMOVE;
      // log/display a fail low when it happens
      //  -- only in the main thread (ID == 0)
@@ -1025,8 +1035,17 @@ void search_node::root_pvs()
        tdata->fail_high++;
        if(!mi) tdata->first_fail_high++;
        tdata->fail = 1;
-       tdata->pc[0][0].t = smove.t; 
-       tdata->pc[0][1].t = next->pos.hmove.t;  // guess at best reply
+       tdata->pc[0][0].t = smove.t;
+       // Guess at best reply from the child's TT slot — validate against
+       // next->pos so a stale/colliding hmove doesn't become an illegal
+       // PV entry.
+       {
+         move_list _vmlist;
+         if (next->pos.verify_move(&_vmlist, tdata, next->pos.hmove))
+           tdata->pc[0][1].t = next->pos.hmove.t;
+         else
+           tdata->pc[0][1].t = NOMOVE;
+       }
        tdata->pc[0][2].t = NOMOVE;
      } else tdata->pc_update(smove, ply);
      //---------------------------------
@@ -1231,8 +1250,17 @@ int search_node::pvs(int alpha, int beta, int depth, int in_pv, int move_to_skip
      if(hflag == FLAG_P) {
        tdata->hash_count++;
        if(hscore > alpha) {
-	 tdata->pc[ply][ply].t = pos.hmove.t;
-	 tdata->pc[ply][ply+1].t = NOMOVE;
+         // pos.hmove came from the TT and may be illegal in the current
+         // position (Zobrist collision, or stale move whose piece type
+         // / geometry no longer matches the actual pieces on the board).
+         // Validate before writing to the PV so we don't propagate
+         // garbage through pc_update into the displayed PV.
+         move_list _vmlist;
+         if (pos.verify_move(&_vmlist, tdata, pos.hmove))
+           tdata->pc[ply][ply].t = pos.hmove.t;
+         else
+           tdata->pc[ply][ply].t = NOMOVE;
+         tdata->pc[ply][ply+1].t = NOMOVE;
        }
        //return hscore;
        if(ABS(hscore) > MATE/2) return hscore;
@@ -2115,11 +2143,18 @@ int search_node::qsearch(int alpha, int beta, int qply)
     hscore = get_hash(&pos.hcode, &hflag, &hdepth, &pos.hmove, ply, &singular);
     if(hscore != HASH_MISS) {
       // see if we can return a score
-      if(hdepth >= -1) { 
+      if(hdepth >= -1) {
 	if(hflag == FLAG_P) {
 	  tdata->hash_count++;
 	  if(hscore > alpha) {
-	    tdata->pc[ply][ply].t = pos.hmove.t;
+	    // Validate the TT hmove against the current position; qsearch
+	    // hits this path most often at shallow depth-1 searches and
+	    // was the source of most "Illegal PV move" warnings we saw.
+	    move_list _vmlist;
+	    if (pos.verify_move(&_vmlist, tdata, pos.hmove))
+	      tdata->pc[ply][ply].t = pos.hmove.t;
+	    else
+	      tdata->pc[ply][ply].t = NOMOVE;
 	    tdata->pc[ply][ply+1].t = NOMOVE;
 	  }
 	  //return(hscore);
