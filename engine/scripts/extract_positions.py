@@ -75,6 +75,8 @@ SCHEMA = pa.schema([
 #   {0.00/6 0.01s}     →  group(1) = "0.00"
 SCORE_RE = re.compile(r'\{([+-]?M?\d+(?:\.\d+)?)/\d+')
 RESULT_HDR_RE = re.compile(r'\[Result\s+"([^"]+)"\]')
+WHITE_HDR_RE  = re.compile(r'\[White\s+"([^"]+)"\]')
+BLACK_HDR_RE  = re.compile(r'\[Black\s+"([^"]+)"\]')
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -107,24 +109,48 @@ def mover_to_white_pov(scores_mover: list) -> list:
 # PGN streaming parser
 # ---------------------------------------------------------------------------
 
-def iter_games(path: Path):
+def iter_games(path: Path, player_filter: str | None = None):
     """
-    Yield (result_float, white_pov_scores_cp) for each complete game in a
-    PGN file.  Uses a simple state machine; no external PGN library needed.
+    Yield (result_float, white_pov_scores_cp, white_pov_plies) for each
+    complete game in a PGN file.  Uses a simple state machine; no external
+    PGN library needed.
+
+    If `player_filter` is given, only positions where that engine made the
+    moving-side move are kept.  Returned scores are still white-POV; the
+    accompanying `plies` list gives the 0-based ply index of each kept
+    score so downstream consumers can recover position metadata.
 
     States: WAITING → HEADERS → MOVES → (back to WAITING)
     """
     state = 'WAITING'
     result = None
+    white  = None
+    black  = None
     scores_mover = []
 
     def _emit():
-        nonlocal result, scores_mover
-        wp = mover_to_white_pov(scores_mover)
+        nonlocal result, white, black, scores_mover
+        total = len(scores_mover)
+        if player_filter is None:
+            wp_scores = mover_to_white_pov(scores_mover)
+            wp_plies  = list(range(total))
+        else:
+            # Keep only plies where the moving side is player_filter.
+            # White moves at even plies (0, 2, ...), black at odd (1, 3, ...).
+            keep_even = (white == player_filter)
+            keep_odd  = (black == player_filter)
+            wp_scores = []
+            wp_plies  = []
+            for i, s in enumerate(scores_mover):
+                if (i % 2 == 0 and keep_even) or (i % 2 == 1 and keep_odd):
+                    wp_scores.append(s if i % 2 == 0 else -s)  # mover→white POV
+                    wp_plies.append(i)
         result_val = result
         scores_mover = []
         result = None
-        return result_val, wp
+        white = None
+        black = None
+        return result_val, wp_scores, wp_plies, total
 
     with open(path, 'r', encoding='utf-8', errors='replace') as fh:
         for raw in fh:
@@ -138,6 +164,12 @@ def iter_games(path: Path):
                 m = RESULT_HDR_RE.match(line)
                 if m:
                     result = RESULT_MAP.get(m.group(1))
+                m = WHITE_HDR_RE.match(line)
+                if m:
+                    white = m.group(1)
+                m = BLACK_HDR_RE.match(line)
+                if m:
+                    black = m.group(1)
                 continue
 
             # ---- blank line -------------------------------------------------
@@ -185,14 +217,14 @@ class ParquetBatchWriter:
         self._n_plies    = []
 
     def add_game(self, game_id: int, stage: int, result: float,
-                 scores_wp: list):
+                 scores_wp: list, plies_wp: list, total_plies: int):
         n = len(scores_wp)
         self._game_ids.extend([game_id] * n)
         self._stages.extend([stage] * n)
-        self._plies.extend(range(n))
+        self._plies.extend(plies_wp)
         self._scores.extend(scores_wp)
         self._results.extend([result] * n)
-        self._n_plies.extend([n] * n)
+        self._n_plies.extend([total_plies] * n)
 
     def flush(self):
         if not self._game_ids:
@@ -225,23 +257,33 @@ def main():
     ap = argparse.ArgumentParser(
         description='Extract per-position data from Leaf self-play PGN files.')
     ap.add_argument('--pgn-dir',   type=Path, default=DEFAULT_PGN_DIR,
-                    help='Directory containing .pgn files')
+                    help='Directory containing .pgn files (mutually exclusive with --pgn-file)')
+    ap.add_argument('--pgn-file',  type=Path, default=None,
+                    help='Single .pgn file to extract from (overrides --pgn-dir)')
     ap.add_argument('--out',       type=Path, default=DEFAULT_OUT,
                     help='Output parquet file path')
     ap.add_argument('--max-games', type=int,  default=200_000,
                     help='Approximate max games to sample (0 = all ~1.6M)')
     ap.add_argument('--min-plies', type=int,  default=8,
                     help='Skip games shorter than this many plies')
+    ap.add_argument('--player',    type=str,  default=None,
+                    help='Engine name (matches [White]/[Black] header) — keep '
+                         'only positions where this engine made the moving-side '
+                         'move.  Scores are still recorded in white POV.')
     ap.add_argument('--seed',      type=int,  default=42,
                     help='Random seed for sampling')
     args = ap.parse_args()
 
-    if not args.pgn_dir.is_dir():
-        sys.exit(f'ERROR: PGN directory not found: {args.pgn_dir}')
-
-    pgn_files = sorted(args.pgn_dir.glob('*.pgn'))
-    if not pgn_files:
-        sys.exit(f'ERROR: No .pgn files found in {args.pgn_dir}')
+    if args.pgn_file is not None:
+        if not args.pgn_file.is_file():
+            sys.exit(f'ERROR: PGN file not found: {args.pgn_file}')
+        pgn_files = [args.pgn_file]
+    else:
+        if not args.pgn_dir.is_dir():
+            sys.exit(f'ERROR: PGN directory not found: {args.pgn_dir}')
+        pgn_files = sorted(args.pgn_dir.glob('*.pgn'))
+        if not pgn_files:
+            sys.exit(f'ERROR: No .pgn files found in {args.pgn_dir}')
 
     # Estimate total games to compute sample probability.
     # Approximate: count [Result lines in first file, scale by file size ratio.
@@ -256,11 +298,16 @@ def main():
     kept      = 0   # games written
     batch_buf = 0   # games in current batch
 
-    print(f'PGN dir : {args.pgn_dir}')
+    if args.pgn_file is not None:
+        print(f'PGN file: {args.pgn_file}')
+    else:
+        print(f'PGN dir : {args.pgn_dir}')
+        print(f'Files   : {len(pgn_files)}')
     print(f'Output  : {args.out}')
-    print(f'Files   : {len(pgn_files)}')
     print(f'Sample  : {sample_prob:.3f}  (target ≈ {args.max_games:,} games)')
     print(f'Min plies: {args.min_plies}')
+    if args.player:
+        print(f'Player  : {args.player}  (only its moves kept)')
     print()
 
     try:
@@ -268,17 +315,22 @@ def main():
             stage = stage_for_file(fpath.name)
             file_kept = 0
 
-            for result, scores_wp in iter_games(fpath):
+            for result, scores_wp, plies_wp, total_plies in iter_games(
+                    fpath, args.player):
                 game_id += 1
 
-                if len(scores_wp) < args.min_plies:
+                # min_plies guards short games.  When filtering by player,
+                # require the target side itself to have at least min_plies
+                # recorded — otherwise the game is too short to inform K.
+                if not scores_wp or len(scores_wp) < args.min_plies:
                     continue
                 if result is None:
                     continue
                 if sample_prob < 1.0 and random.random() >= sample_prob:
                     continue
 
-                writer.add_game(game_id, stage, result, scores_wp)
+                writer.add_game(game_id, stage, result, scores_wp, plies_wp,
+                                total_plies)
                 kept += 1
                 file_kept += 1
                 batch_buf += 1
