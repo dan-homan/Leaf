@@ -1,5 +1,20 @@
 Changes since 2017_12_24
 
+2026_05_26 -- search.cpp qsearch: clear pc[ply][ply] BEFORE the draw
+               checks instead of after them.  When qsearch's 50-move,
+               3-fold, or KK-draw checks fire and return early, a
+               stale pc[ply][ply] from a previous search at the same
+               ply (typically a TT hash move that landed there via
+               an earlier FLAG_P cutoff) would survive — and the
+               parent's pc_update would propagate it into the
+               displayed PV.  Fastchess flagged the result as
+               "Warning; PV continues after threefold repetition".
+               The search's draw score (0) was correct; only the PV
+               display was stale.  Fix matches the ordering pvs()
+               already uses (clear before draw checks).  A/B at 60
+               games / 3+0.05 / concurrency 4: 2 → 0 of these
+               warnings.
+
 2026_05_26 -- training_run.py: three workflow refinements.
                (1) Removed intermediate .nnue snapshots — at rotation
                boundaries (export_rotation_checkpoint) and after each

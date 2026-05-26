@@ -2067,7 +2067,17 @@ int search_node::qsearch(int alpha, int beta, int qply)
   //    Add hash code for this position to position list
   //--------------------------------------------------
   tdata->plist[ts->turn+ply-1] = pos.hcode;
-  
+
+  //--------------------------------------------------------
+  // Must put a blank move in the principle continuation
+  // BEFORE any early return below — the draw and KK-draw
+  // checks can return early with stale pc[ply][ply] from a
+  // previous search at this ply, which would propagate up
+  // through pc_update as a "PV continues after rep" PV.
+  // pvs() does this same clear before its draw checks.
+  //--------------------------------------------------------
+  tdata->pc[ply][ply].t = NOMOVE;
+
   //--------------------------------------------------
   //    Do Draw Testing on first layer of Q-search
   //--------------------------------------------------
@@ -2116,10 +2126,9 @@ int search_node::qsearch(int alpha, int beta, int qply)
   }
  
   //--------------------------------------------------------
-  // must put a blank move in the principle continuation
-  // because we may choose to make no move during qsearch
+  // (pc[ply][ply] already cleared above, before draw checks.)
+  // Continue initialising per-node state.
   //--------------------------------------------------------
-  tdata->pc[ply][ply].t = NOMOVE;
   pos.hmove.t = NOMOVE;
   hflag = 0;
   pos.threat_square = 64;
