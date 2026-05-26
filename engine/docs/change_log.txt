@@ -1,5 +1,23 @@
 Changes since 2017_12_24
 
+2026_05_26 -- search.cpp / uci.cpp: validate TT-sourced hash moves
+               before writing them to pc[][].  uci_send_info's PV
+               walk uses exec_move, whose sanity check verifies only
+               that the from-square holds a piece of the right color
+               — not that the piece type matches the move's geometry.
+               So TT hmoves that are stale or hash-collide can slip
+               through and produce nonsense board state that fastchess
+               flags as "Illegal PV move".  Five sites pulled
+               pos.hmove (or next->pos.hmove) directly from the TT
+               into pc[][] without checking: the exact-score cutoffs
+               in pvs() and qsearch(), and the two root fail-low /
+               fail-high paths writing next->pos.hmove into pc[0][1].
+               Each now calls position::verify_move() — a cheap per-
+               piece-type pseudo-legal generation — and invalid hmoves
+               get replaced with NOMOVE.  uci_send_info also runs
+               verify_move before each PV step as a defensive
+               complement.  A/B at 60 games / 3+0.05: warnings 7 → 0.
+
 2026_05_26 -- uci.cpp: emit lowerbound / upperbound info on aspiration
                fail-high / fail-low at the root.  Previously log_search's
                UCI branch was gated on tdata[0].fail == 0 so failed
