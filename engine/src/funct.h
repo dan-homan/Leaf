@@ -49,7 +49,8 @@ int GetTime();
 
 /* uci.cpp */
 void uci_loop(game_rec *gr);
-void uci_send_info(int score, int depth, int elapsed_cs, unsigned long long nodes, tree_search *ts);
+void uci_send_info(int score, int depth, int elapsed_cs, unsigned long long nodes,
+                   tree_search *ts, int bound = 0);
 int  uci_check_interrupt();
 
 #endif

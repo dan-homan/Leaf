@@ -337,11 +337,16 @@ void tree_search::log_search(int score)
   unsigned __int64 node_count = 0ULL;
   for(int ti=0; ti<thread_cfg.threads; ti++) { node_count += tdata[ti].node_count; }
 
-  // UCI mode: emit UCI info line and return early
+  // UCI mode: emit UCI info line and return early.  Map the engine's fail
+  // flag to a UCI score-bound annotation so GUIs/drivers know the score is
+  // partial and don't flag a PV-vs-bestmove mismatch when the search
+  // switches its best move during the failed-aspiration retry.
+  //   fail = +1 (fail-high) → lowerbound
+  //   fail = -1 (fail-low ) → upperbound
+  //   fail =  0             → exact score
   if (proto.uci_mode) {
-    if (tdata[0].fail == 0) {
-      uci_send_info(score, max_ply, total_time, (unsigned long long)node_count, this);
-    }
+    uci_send_info(score, max_ply, total_time, (unsigned long long)node_count,
+                  this, tdata[0].fail);
     return;
   }
 

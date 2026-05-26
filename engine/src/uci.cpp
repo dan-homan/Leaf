@@ -551,25 +551,33 @@ static void uci_dispatch_go(const std::string &line)
 // UCI info output -- called from log_search() in support.cpp
 //----------------------------------------------------------------------
 
-void uci_send_info(int score, int depth, int elapsed_cs, unsigned long long nodes, tree_search *ts)
+void uci_send_info(int score, int depth, int elapsed_cs, unsigned long long nodes,
+                   tree_search *ts, int bound)
 {
     if (!proto.uci_mode) return;
 
     int elapsed_ms = elapsed_cs * 10;
     long long nps  = (elapsed_cs > 0) ? (long long)(100LL * (long long)nodes / elapsed_cs) : 0LL;
 
+    // UCI score-bound suffix: appended after the score field per UCI spec.
+    //   bound = +1  → score is a lower bound (fail-high in aspiration window)
+    //   bound = -1  → score is an upper bound (fail-low)
+    //   bound =  0  → exact score
+    const char *bound_str = (bound > 0) ? " lowerbound"
+                          : (bound < 0) ? " upperbound" : "";
+
     if (score > MATE/2) {
         int mate_in = (MATE - score + 1) / 2;
-        printf("info depth %d score mate %d time %d nodes %llu nps %lld",
-               depth, mate_in, elapsed_ms, nodes, nps);
+        printf("info depth %d score mate %d%s time %d nodes %llu nps %lld",
+               depth, mate_in, bound_str, elapsed_ms, nodes, nps);
     } else if (score < -MATE/2) {
         int mate_in = (MATE + score + 1) / 2;
-        printf("info depth %d score mate -%d time %d nodes %llu nps %lld",
-               depth, mate_in, elapsed_ms, nodes, nps);
+        printf("info depth %d score mate -%d%s time %d nodes %llu nps %lld",
+               depth, mate_in, bound_str, elapsed_ms, nodes, nps);
     } else {
         int cp = (value[PAWN] > 0) ? (score * 100) / value[PAWN] : score;
-        printf("info depth %d score cp %d time %d nodes %llu nps %lld",
-               depth, cp, elapsed_ms, nodes, nps);
+        printf("info depth %d score cp %d%s time %d nodes %llu nps %lld",
+               depth, cp, bound_str, elapsed_ms, nodes, nps);
     }
 
     // PV — validate each move before printing to catch stale PV entries
