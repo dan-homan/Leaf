@@ -148,18 +148,78 @@ def read_game_count(sidecar_path):
         return 0
 
 
+def round_game_count(n):
+    """Round to one decimal place of leading mantissa for compact filenames.
+
+    Goal: write a tidy game count to the .games sidecar and into snapshot
+    filenames without tracking exact game-count noise.
+
+    Examples:
+        1395321 → 1400000   (1.4e6)
+        1356789 → 1400000
+        87654   → 90000     (9e4)
+        9999    → 10000     (1e4)
+        50000   → 50000     (5e4)  (already clean)
+        500     → 500       (small counts left exact)
+    Counts below 1000 are left exact.
+    """
+    if n < 1000:
+        return n
+    import math
+    log10 = math.log10(n)
+    exp = int(math.floor(log10)) - 1   # one digit after leading
+    factor = 10 ** exp
+    return int(round(n / factor) * factor)
+
+
 def write_game_count(sidecar_path, count):
+    """Write `count` to sidecar after rounding to one-decimal mantissa."""
+    rounded = round_game_count(count)
     with open(sidecar_path, "w") as f:
-        f.write(f"{count}\n")
+        f.write(f"{rounded}\n")
+
+
+def count_completed_games_in_pgn(pgn_path):
+    """Return the count of completed games in a PGN file.
+
+    Counts [Result ...] header lines, which mark game-completion in
+    Cute-Chess-format PGN.  Returns 0 if the file doesn't exist or can't
+    be read — best-effort tool used to detect actual progress after a
+    Ctrl-C, when current_games in memory doesn't reflect what the engines
+    actually played.
+    """
+    if not os.path.isfile(pgn_path):
+        return 0
+    n = 0
+    try:
+        with open(pgn_path, "r", errors="replace") as fh:
+            for line in fh:
+                if line.startswith("[Result "):
+                    n += 1
+    except OSError:
+        pass
+    return n
+
+
+def count_run_games(pgn_dir, prefix):
+    """Sum [Result] lines across all .pgn files in pgn_dir matching prefix."""
+    if not os.path.isdir(pgn_dir):
+        return 0
+    total = 0
+    for f in os.listdir(pgn_dir):
+        if f.startswith(prefix) and f.endswith(".pgn"):
+            total += count_completed_games_in_pgn(os.path.join(pgn_dir, f))
+    return total
 
 
 def format_game_count(n):
     """Convert a game count integer to compact scientific-notation suffix.
 
-    Examples: 100000 → '1e5', 150000 → '1.5e5', 40000 → '4e4', 500 → '500'.
-    Counts that are not a clean multiple of a power of 10 (e.g. 123456) are
-    left as plain integers.  The threshold for switching to exponent form is
-    counts >= 10000 (4 trailing zeros or more expresses as Xe4+).
+    Expects a value already passed through round_game_count (i.e. at most
+    one decimal of leading mantissa).  Strips trailing zeros to express
+    the mantissa cleanly.
+
+    Examples: 100000 → '1e5', 1400000 → '1.4e6', 90000 → '9e4', 500 → '500'.
     """
     if n <= 0:
         return str(n)
@@ -168,10 +228,10 @@ def format_game_count(n):
     while x % 10 == 0:
         x //= 10
         exp += 1
-    if exp < 4:
+    if exp < 3:
         # Not enough trailing zeros — keep as plain integer
         return str(n)
-    # Normalise to mantissa in [1, 10): e.g. x=15, exp=4 → 1.5e5
+    # Normalise to mantissa in [1, 10): e.g. x=14, exp=5 → 1.4e6
     digits = len(str(x))
     total_exp = exp + digits - 1
     mantissa = x / 10 ** (digits - 1)
@@ -843,12 +903,16 @@ def main():
     depth1      = int(depth1_str) if depth1_str.strip() else 0
     depth2_str  = ask(f"  Opponent depth limit (0=none) [--depth2]", str(depth1))
     depth2      = int(depth2_str) if depth2_str.strip() else 0
-    # Adjudication: off → games run to natural endings (mate / stalemate /
-    # 3-rep / 50-move / insufficient material).  Useful for early training:
-    # all natural endings are caught by the engine's terminal-position
-    # check, so the score-noise that drives ambiguous-skip vanishes.
-    no_adj = ask_yes_no("  Disable score-based adjudication? [--no-adjudication]",
-                        default="n")
+    # Adjudication: off by default — games run to natural endings (mate /
+    # stalemate / 3-rep / 50-move / insufficient material).  All natural
+    # endings are caught by the engine's terminal-position check, so the
+    # score-noise that drives ambiguous-skip vanishes.  Enable it
+    # explicitly for fast Elo measurement runs where the engine's eval
+    # is reliable enough for cutechess/fastchess thresholds.
+    use_adj = ask_yes_no("  Enable score-based adjudication? "
+                         "(default: off — games play to natural end)",
+                         default="n")
+    no_adj  = not use_adj
     if use_loop:
         val_tc = ask("  Validation time control  [--val-tc]  ", tc1)
         val_depth_default = str(depth1) if depth1 else "0"
@@ -991,12 +1055,10 @@ def main():
             print(f"  --write-nnue ({label}) failed.", file=sys.stderr)
             sys.exit(r.returncode)
 
-    def export_rotation_checkpoint():
-        """Export current weights to a game-count-stamped checkpoint."""
-        wait_until_stable(tdleaf_bin)
-        snap_name = f"{net_base}-{format_game_count(current_games)}g.nnue"
-        snap_path = os.path.join(learn_dir, snap_name)
-        export_nnue(train_exe, snap_path, f"checkpoint @ {format_game_count(current_games)}g")
+    # Intermediate .nnue snapshots at rotation boundaries / accepted cycles
+    # have been removed — only the final .nnue at end-of-run is exported.
+    # The end-of-run export naturally still occurs in step 6, and best.nnue
+    # is still maintained in loop mode as the validation baseline.
 
     # -----------------------------------------------------------------------
     # Step 5b-pre — Set up initial best.nnue baseline (loop mode only).
@@ -1142,9 +1204,8 @@ def main():
                     if seg_checkpoint and os.path.isfile(seg_checkpoint):
                         os.remove(seg_checkpoint)
 
-                    # Export checkpoint at rotation boundary (if more segments remain).
-                    if games_remaining > 0:
-                        export_rotation_checkpoint()
+                    # (Rotation-boundary .nnue snapshots removed — only the
+                    # final end-of-run .nnue is exported now.)
 
                     roster_idx += 1
 
@@ -1262,10 +1323,8 @@ def main():
                 # has no rolling best to advance.
                 if val_ref_mode == "best":
                     export_nnue(train_exe, best_nnue_path, "new best (accepted)")
-                # Save a game-count-stamped snapshot for later tournament use.
-                snapshot_name = f"{net_base}-{format_game_count(current_games)}g.nnue"
-                snapshot_path = os.path.join(learn_dir, snapshot_name)
-                export_nnue(train_exe, snapshot_path, f"snapshot @ {format_game_count(current_games)}g")
+                # (Per-cycle .nnue snapshots removed — only the final
+                # end-of-run .nnue is exported.)
                 print(f"  Banked games: {current_games:,}")
             else:
                 # Revert game count — rejected cycle's games don't count.
@@ -1292,10 +1351,27 @@ def main():
     # -----------------------------------------------------------------------
     # Step 6 — Export final .nnue
     # -----------------------------------------------------------------------
-    # Update the game-count sidecar first so the names we choose below
-    # (which embed current_games) always match what the sidecar records.
-    # Loop mode keeps .games current after each accepted cycle; this write
-    # is the canonical final update for all other exit paths.
+    # On Ctrl-C the in-memory current_games is whatever the loop happened to
+    # have advanced to (typically last segment boundary); it doesn't reflect
+    # games that ran in the partially-completed segment.  Recount completed
+    # games from the run's PGN files and use that as ground truth so the
+    # sidecar and snapshot filename advance to match actual progress
+    # (avoiding the case where an interrupted run silently overwrites the
+    # previous game-count-stamped snapshot).
+    actual_run_games = count_run_games(
+        pgn_dir, f"match_{net_base}_{pgn_start_tag}")
+    expected_run_games = current_games - prior_games
+    if actual_run_games > expected_run_games:
+        if interrupted:
+            print(f"  PGN count: {actual_run_games:,} games played this run "
+                  f"(in-memory tracker had {expected_run_games:,}); using "
+                  f"PGN count.")
+        current_games = prior_games + actual_run_games
+
+    # Round and persist sidecar first so file names embed the same rounded
+    # count we record.  round_game_count happens inside write_game_count,
+    # mirror it here to keep filenames consistent.
+    current_games = round_game_count(current_games)
     write_game_count(sidecar_path, current_games)
 
     print()
@@ -1339,9 +1415,14 @@ def main():
             if not interrupted:
                 sys.exit(result.returncode)
 
-    # Save a .tdleaf.bin snapshot at the final game count for archival / rollback.
+    # Save a .tdleaf.bin snapshot at the final game count for archival /
+    # rollback.  Use a -partial suffix on interrupted exits so a non-clean
+    # exit can't silently overwrite a prior clean snapshot at the same
+    # rounded game count (the .nnue export above already does this).
     if os.path.isfile(tdleaf_bin):
-        tdleaf_snap_name = f"{net_base}.tdleaf.bin-{format_game_count(current_games)}g"
+        suffix = "-partial" if interrupted else ""
+        tdleaf_snap_name = (f"{net_base}.tdleaf.bin-"
+                            f"{format_game_count(current_games)}g{suffix}")
         tdleaf_snap_path = os.path.join(learn_dir, tdleaf_snap_name)
         shutil.copy2(tdleaf_bin, tdleaf_snap_path)
         print(f"  .tdleaf.bin snapshot → {tdleaf_snap_name}")

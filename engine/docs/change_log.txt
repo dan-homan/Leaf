@@ -1,5 +1,37 @@
 Changes since 2017_12_24
 
+2026_05_26 -- training_run.py: three workflow refinements.
+               (1) Removed intermediate .nnue snapshots — at rotation
+               boundaries (export_rotation_checkpoint) and after each
+               accepted loop-mode cycle.  Only the final end-of-run
+               .nnue is exported now.  best.nnue is still maintained
+               as the validation baseline.  This drastically cuts the
+               number of .nnue files left in learn/ after a long
+               training run.
+               (2) Game-count tracking rounded to one decimal of
+               leading mantissa: 1395321 → 1400000 in the .games
+               sidecar, "1.4e6g" in snapshot filenames.  New
+               round_game_count() helper, called inside
+               write_game_count() and again at end-of-run before
+               naming snapshots.  Plus: on early exit (Ctrl-C) the
+               .games sidecar previously kept its prior value
+               because current_games never advanced past the last
+               completed segment — that caused interrupted runs to
+               name the .tdleaf.bin snapshot with the OLD count and
+               silently overwrite the prior clean snapshot.  We now
+               recount completed games from the PGN files written
+               during this run (count_run_games) and use that as
+               ground truth before writing the sidecar.  The
+               .tdleaf.bin snapshot also gains a -partial suffix on
+               interrupted exits, matching the existing behavior of
+               the .nnue export.
+               (3) Adjudication default flipped: prompt is now
+               "Enable score-based adjudication? (default: off —
+               games play to natural end)".  Score-noise driven
+               ambiguous-skip is rare with the UCI self-adjudication
+               path catching all natural endings, so turning
+               adjudication off is the better baseline for training.
+
 2026_05_26 -- search.cpp: skip TT cutoffs when the stored hmove fails
                verify_move in the current position.  If hmove is set
                but illegal, the entry's score almost certainly comes
