@@ -1,5 +1,119 @@
 Changes since 2017_12_24
 
+2026_05_26 -- uci.cpp: emit lowerbound / upperbound info on aspiration
+               fail-high / fail-low at the root.  Previously log_search's
+               UCI branch was gated on tdata[0].fail == 0 so failed
+               aspiration iterations produced no info line at all.  When
+               such an iteration also switched the engine's root best
+               move (via the sort_root_moves() path in search.cpp), the
+               last info line a GUI saw still reported the previous
+               iteration's PV — and fastchess logged "Warning; Bestmove
+               does not match beginning of last PV" on every game where
+               this happened.  Fix: thread tdata[0].fail to uci_send_info
+               as an optional `bound` parameter and append the standard
+               UCI " lowerbound" / " upperbound" suffix after the score
+               field.  Fastchess (and other compliant GUIs) treat bound
+               info lines as non-PV updates and skip the cross-check.
+               A/B at 40 games / 3+0.05 / concurrency 4: 10 warnings →
+               0.  Per-search cost ~5–30 extra info lines (~150B each),
+               negligible.
+
+2026_05_26 -- scripts/extract_positions.py: --pgn-file and --player
+               filters.  --pgn-file FILE operates on a single .pgn
+               instead of globbing a directory; --player NAME keeps
+               only positions where the named engine made the moving
+               side's move (matched against [White]/[Black] headers),
+               with scores still recorded in white POV.  Lets K /
+               lambda calibration target a single engine's eval when
+               two engines coexist in a PGN — e.g. calibrating against
+               Leaf_vclassic_eval as a stable baseline reference.
+               First use (1.015M classical-side positions from
+               match_nn-fresh-260514-1.39e6g_9.5e5g.pgn) suggests
+               K_opt ≈ 218 cp and lambda ≈ 0.98 for both decisive and
+               draw games, versus current TDLEAF_K=150 / lambda=0.98.
+
+2026_05_25 -- match.py / training_run.py: --no-adjudication option to
+               disable score-based early termination (-draw and
+               -resign) and play games to natural endings only (mate /
+               stalemate / 3-fold / 50-move / insufficient material).
+               A -maxmoves 400 cap is still applied as a safety net.
+               Useful for early training when engine scores are too
+               noisy to drive the cutechess/fastchess thresholds
+               reliably — with score-noise off the table, every game
+               terminates on a position-state condition that Leaf's
+               UCI self-adjudication path catches, so ambiguous-skip
+               rate should drop close to zero.  training_run.py
+               prompts for the flag and forwards it to both the
+               training match and validation cycles so the two halves
+               measure under matching conditions.
+
+2026_05_25 -- match.py: pin -games 1 explicitly when running fastchess
+               with --no-repeat.  Cutechess defaults -games to 1;
+               fastchess defaults to 2 (color-swapped pair per round).
+               Without an explicit -games 1 under fastchess,
+               --no-repeat silently doubled the requested game count.
+
+2026_05_25 -- training_run.py: switch Leaf opponents from xboard to UCI
+               and parse fastchess's "Games: N, Wins: W, Losses: L,
+               Draws: D" progress format alongside cutechess's "Score
+               of E1 vs E2" line.  Both training and validation match
+               invocations now use --proto1 uci; the historical
+               rationale for forcing xboard (xboard's `result` command
+               as the only learning-trigger path) is obsolete now that
+               UCI mode self-adjudicates game outcomes.
+
+2026_05_25 -- match.py: auto-detect FRC openings.  Sample the first
+               ~10 lines of an EPD opening file; if any back rank is
+               eight alphabetic characters in a non-standard order
+               (i.e., not rnbqkbnr / RNBQKBNR), auto-enable
+               --fischer-random and emit a loud warning naming the
+               FEN.  Without this, feeding FRC books to a non-Fischer
+               match silently produces illegal-move forfeits in 15-
+               20% of games because fastchess won't tell the engine
+               UCI_Chess960=true and the engine emits standard-chess
+               castling notation that doesn't make sense in the FRC
+               position.
+
+2026_05_25 -- scripts/match.py + engine: new fastchess tournament
+               driver path with UCI-side TDLeaf learning.  fastchess
+               replaces cutechess-cli as the default driver
+               (--driver={fastchess,cutechess}, default fastchess);
+               fastchess is significantly more stable than cutechess
+               1.4.0 under high concurrency (no Qt-threading
+               deadlocks).  Because fastchess is UCI-only and UCI has
+               no `result` command, the engine's UCI loop now:
+                 * records each ply via tdleaf_record_ply() after
+                   every search (uci_dispatch_go());
+                 * preserves TDGameRecord state across `position`
+                   rebuilds (save/restore around setboard, since
+                   `position` is sent every move of a continuing
+                   game);
+                 * on `ucinewgame` or `quit`, derives a game outcome
+                   via tdleaf_self_adjudicate() and runs the full
+                   TDLeaf update.
+               tdleaf_self_adjudicate first checks terminal-position
+               state (mate / stalemate / 50-move / 3-fold /
+               insufficient material) on the post-bestmove position,
+               then falls back to score-history adjudication that
+               mirrors fastchess's `-draw movecount=8 score=10` and
+               `-resign movecount=6 score=600` defaults.  Truly
+               ambiguous outcomes (time forfeits, weird short games)
+               are skipped rather than poisoning gradients with a
+               guess.  TDRecord grew a score_root_stm field
+               (engine-POV root score, cp) used only for
+               self-adjudication; the leaf score TDLeaf uses for
+               gradient backprop is unchanged.  TDGameRecord grew an
+               engine_color field set on the first recorded ply.
+               Also fixes a pre-existing UCI-mode bug: main.cpp's UCI
+               exit path never called tdleaf_flush_batch(), so any
+               half-full mini-batch was silently dropped — previously
+               unreachable because UCI mode had no learning anyway.
+               match.py also: added --driver flag, validates
+               fastchess requires proto=uci and rejects .bin Polyglot
+               books, translates -pgnout to fastchess's file=FILE
+               syntax, parses both cutechess and fastchess progress
+               output for the W/D/L counters.
+
 2026_05_23 -- tdleaf.h: hyperparameter retuning from classical-PSQT-prior
                calibration runs.  Four constants changed:
                  TDLEAF_K              : 200  -> 150  cp
