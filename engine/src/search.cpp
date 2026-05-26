@@ -1245,21 +1245,27 @@ int search_node::pvs(int alpha, int beta, int depth, int in_pv, int move_to_skip
  // process the returned hash hit
  //---------------------------------
  if(hscore != HASH_MISS) {
-   // see if we can return a score 
-   if(hdepth >= depth) {    
+   // If the stored hmove fails verify_move in the current position,
+   // the TT entry is suspect (most plausibly a Zobrist collision —
+   // same 64-bit key, different board).  The entry's score is from
+   // the other position too, so don't trust the cutoff: invalidate
+   // hmove and fall through to a full search.  hmove == NOMOVE is
+   // a legitimate state (FLAG_A/B entries can be bound-only without
+   // a move hint), so only treat a set-but-illegal hmove as bad.
+   bool tt_ok = true;
+   if (pos.hmove.t != NOMOVE) {
+     move_list _vmlist;
+     if (!pos.verify_move(&_vmlist, tdata, pos.hmove)) {
+       pos.hmove.t = NOMOVE;
+       tt_ok = false;
+     }
+   }
+   // see if we can return a score
+   if(tt_ok && hdepth >= depth) {
      if(hflag == FLAG_P) {
        tdata->hash_count++;
        if(hscore > alpha) {
-         // pos.hmove came from the TT and may be illegal in the current
-         // position (Zobrist collision, or stale move whose piece type
-         // / geometry no longer matches the actual pieces on the board).
-         // Validate before writing to the PV so we don't propagate
-         // garbage through pc_update into the displayed PV.
-         move_list _vmlist;
-         if (pos.verify_move(&_vmlist, tdata, pos.hmove))
-           tdata->pc[ply][ply].t = pos.hmove.t;
-         else
-           tdata->pc[ply][ply].t = NOMOVE;
+         tdata->pc[ply][ply].t = pos.hmove.t;
          tdata->pc[ply][ply+1].t = NOMOVE;
        }
        //return hscore;
@@ -1271,7 +1277,7 @@ int search_node::pvs(int alpha, int beta, int depth, int in_pv, int move_to_skip
        //return hscore;
        if(ABS(hscore) > MATE/2) return hscore;
        return MAX(MIN(hscore,beta),alpha);
-     } 
+     }
      if(hflag == FLAG_B && hscore >= beta) {
        tdata->hash_count++;
        //return hscore;
@@ -2142,19 +2148,24 @@ int search_node::qsearch(int alpha, int beta, int qply)
   //if(!qply) {
     hscore = get_hash(&pos.hcode, &hflag, &hdepth, &pos.hmove, ply, &singular);
     if(hscore != HASH_MISS) {
+      // Same trustworthiness gate as in pvs(): if the TT-sourced hmove
+      // is set but illegal in this position, the entry is suspect (most
+      // likely a Zobrist collision).  Invalidate hmove and skip the
+      // cutoff so we don't act on a score from another position.
+      bool tt_ok = true;
+      if (pos.hmove.t != NOMOVE) {
+        move_list _vmlist;
+        if (!pos.verify_move(&_vmlist, tdata, pos.hmove)) {
+          pos.hmove.t = NOMOVE;
+          tt_ok = false;
+        }
+      }
       // see if we can return a score
-      if(hdepth >= -1) {
+      if(tt_ok && hdepth >= -1) {
 	if(hflag == FLAG_P) {
 	  tdata->hash_count++;
 	  if(hscore > alpha) {
-	    // Validate the TT hmove against the current position; qsearch
-	    // hits this path most often at shallow depth-1 searches and
-	    // was the source of most "Illegal PV move" warnings we saw.
-	    move_list _vmlist;
-	    if (pos.verify_move(&_vmlist, tdata, pos.hmove))
-	      tdata->pc[ply][ply].t = pos.hmove.t;
-	    else
-	      tdata->pc[ply][ply].t = NOMOVE;
+	    tdata->pc[ply][ply].t = pos.hmove.t;
 	    tdata->pc[ply][ply+1].t = NOMOVE;
 	  }
 	  //return(hscore);
@@ -2166,7 +2177,7 @@ int search_node::qsearch(int alpha, int beta, int qply)
 	  //return(hscore);
 	  if(ABS(hscore) > MATE/2) return hscore;
 	  return MAX(MIN(hscore,beta),alpha);
-	} 
+	}
 	if(hflag == FLAG_B && hscore >= beta) {
 	  tdata->hash_count++;
           //return(hscore);

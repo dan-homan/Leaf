@@ -1,5 +1,24 @@
 Changes since 2017_12_24
 
+2026_05_26 -- search.cpp: skip TT cutoffs when the stored hmove fails
+               verify_move in the current position.  If hmove is set
+               but illegal, the entry's score almost certainly comes
+               from a different position (Zobrist collision; XOR-key
+               consistency ensures partial corruption doesn't pass
+               get_hash) — using that score for a cutoff would mean
+               making decisions on the colliding board's evaluation,
+               not ours.  Treat the hmove failing as the trust signal
+               for the whole entry: set pos.hmove = NOMOVE and fall
+               through to a full search.  Applied uniformly to
+               FLAG_P, FLAG_A, FLAG_B cutoffs in both pvs() and
+               qsearch().  hmove == NOMOVE is left alone (legitimate
+               state for FLAG_A/B bound-only entries).  No observable
+               playing-strength change in a 60-game A/B (W/L noise
+               within the expected envelope at that sample size).
+               Defensive: the previous PV-validation commit already
+               brought "Illegal PV move" warnings to zero; this
+               extends the same protection to score-based decisions.
+
 2026_05_26 -- search.cpp / uci.cpp: validate TT-sourced hash moves
                before writing them to pc[][].  uci_send_info's PV
                walk uses exec_move, whose sanity check verifies only
