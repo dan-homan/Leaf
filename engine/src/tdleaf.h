@@ -30,9 +30,11 @@ static const float TDLEAF_LAMBDA           = 0.98f;  // eligibility trace decay 
                                                      // and d_t-vs-result methods give ~0.97–0.99
                                                      // for both game types)
 static const float TDLEAF_K               = 220.0f; // sigmoid temperature (centipawns)
-                                                     // MLE over 10M positions from stages 5–6:
-                                                     // optimum 239 cp (prev. 290 cp, fitted from
-                                                     // earlier training stage).
+                                                     // MLE over 58M positions from the classical
+                                                     // eval side of match_nn-fresh-260514-
+                                                     // 1.39e6g_9.5e5g.pgn (1.015M games,
+                                                     // 2026-05-25): optimum 217.71 cp, rounded
+                                                     // to 220.
 static const int   TDLEAF_MIN_PLIES       = 8;      // skip games shorter than this
 static const int   TDLEAF_MIN_PLIES_REP   = 40;     // skip 3-rep draws shorter than this
 // Approach 1 — TD error clipping.

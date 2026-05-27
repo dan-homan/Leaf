@@ -121,7 +121,7 @@ See `docs/TDLEAF.md` for the full algorithm reference, hyperparameters, and grad
 - After each game: `tdleaf_update_after_game()` computes backward TD errors, backpropagates through all layers, and applies Adam/RMSProp updates.
 - Optional replay: `tdleaf_replay()` runs additional passes over recent games (currently disabled, `TDLEAF_REPLAY_K=0`).
 
-**Key hyperparameters:** `TDLEAF_K = 150 cp` (sigmoid temperature), `TDLEAF_LAMBDA = 0.98` (single eligibility trace decay — decisive and draw games use the same value).  Seven separate Adam LRs sized to ~0.001 × median(|w|) per section: FC0/FC1 weights (0.005), FC2 weights (0.07), FC biases (1.5), FT weights (0.015), FT bias (0.02), PSQT (13.0), piece_val (13.0).  Runtime sweep via env vars `TDLEAF_LR_{FC,FC2,FC_BIAS,FT,FT_BIAS,PSQT,PV}`.  Gradient clipping (L2 norm, 1.0) and AdamW weight decay (1e-4, FC+FT weights only).  Horizon noise mitigation: `TDLEAF_SCORE_CLIP_PAWNS = 1.0` and `TDLEAF_ID_VAR_SIGMA2 = 2500 cp²`.
+**Key hyperparameters:** `TDLEAF_K = 220 cp` (sigmoid temperature), `TDLEAF_LAMBDA = 0.98` (single eligibility trace decay — decisive and draw games use the same value).  Seven separate Adam LRs sized to ~0.001 × median(|w|) per section: FC0/FC1 weights (0.005), FC2 weights (0.07), FC biases (1.5), FT weights (0.015), FT bias (0.02), PSQT (13.0), piece_val (13.0).  Runtime sweep via env vars `TDLEAF_LR_{FC,FC2,FC_BIAS,FT,FT_BIAS,PSQT,PV}`.  Gradient clipping (L2 norm, 1.0) and AdamW weight decay (1e-4, FC+FT weights only).  Horizon noise mitigation: `TDLEAF_SCORE_CLIP_PAWNS = 1.0` and `TDLEAF_ID_VAR_SIGMA2 = 2500 cp²`.
 
 **Critical gotchas for code changes:**
 - `material` in `score.cpp` is **already STM (side-to-move) POV** — do not flip it.

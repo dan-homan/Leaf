@@ -1,5 +1,18 @@
 Changes since 2017_12_24
 
+2026_05_26 -- tdleaf.h: TDLEAF_K 150 → 220 cp.  Aligns with today's
+               sigmoid-temperature calibration on the classical-eval
+               side of match_nn-fresh-260514-1.39e6g_9.5e5g.pgn
+               (1.015M games / 58M positions): K_opt = 217.71 cp,
+               NLL/pos 0.5107 vs 0.5164 at the old default.  The
+               classical eval is a more stable reference than NNUE
+               at early training stages — its scores aren't chasing
+               the moving target the learner is creating — so this
+               is the better fit for the early-training regime.
+               Updated CLAUDE.md and the source-level comment that
+               had a stale "MLE 239 cp" reference from an earlier
+               calibration pass.
+
 2026_05_26 -- tdleaf.h: bring FT / FT_BIAS / PSQT / PV LRs up to the
                0.001 × median(|w|) heuristic measured against
                nn-ad9b42354671.nnue.  Was 0.001 each (effectively
