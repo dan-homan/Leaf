@@ -84,10 +84,11 @@ static const float TDLEAF_ADAM_STEP_CLIP = 30.0f;
 static const float TDLEAF_ADAM_LR0         = 0.005f;  // FC0/FC1 weights (int8, median ~5)
 static const float TDLEAF_ADAM_FC2_LR0     = 0.07f;   // FC2 weights (int8, median ~68 — final 32→1 layer)
 static const float TDLEAF_ADAM_FC_BIAS_LR0 = 1.5f;    // FC biases (int32, median ~1500 across stacks)
-static const float TDLEAF_ADAM_FT_LR0      = 0.001f;  // FT weights (int16, sparse; tune separately)
-static const float TDLEAF_ADAM_FT_BIAS_LR0 = 0.001f;  // FT biases  (int16; slow to prevent dying-ReLU)
-static const float TDLEAF_ADAM_PSQT_LR0    = 0.001f;  // PSQT weights (int32; tune separately)
-static const float TDLEAF_ADAM_PV_LR0      = 0.001f;  // dense piece values (int32; same scale as PSQT)
+static const float TDLEAF_ADAM_FT_LR0      = 0.015f;  // FT weights (int16, median ~16)
+static const float TDLEAF_ADAM_FT_BIAS_LR0 = 0.02f;   // FT biases  (int16, median ~51; hedged below
+                                                       // 0.001×median to limit dying-ReLU risk)
+static const float TDLEAF_ADAM_PSQT_LR0    = 13.0f;   // PSQT weights (int32, median ~13343)
+static const float TDLEAF_ADAM_PV_LR0      = 13.0f;   // dense piece values (int32, same scale as PSQT)
 static const float TDLEAF_ADAM_BETA1    = 0.9f;    // first-moment decay  (FC + FT bias + PSQT)
 static const float TDLEAF_ADAM_BETA2    = 0.97f;  // second-moment decay (all layers)
 static const float TDLEAF_ADAM_EPS      = 1e-8f;   // numerical floor

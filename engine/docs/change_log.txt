@@ -1,5 +1,24 @@
 Changes since 2017_12_24
 
+2026_05_26 -- tdleaf.h: bring FT / FT_BIAS / PSQT / PV LRs up to the
+               0.001 × median(|w|) heuristic measured against
+               nn-ad9b42354671.nnue.  Was 0.001 each (effectively
+               frozen against int32-scale weights).  Now:
+                 TDLEAF_ADAM_FT_LR0      : 0.001 → 0.015
+                   (FT weights;  int16, median ~16)
+                 TDLEAF_ADAM_FT_BIAS_LR0 : 0.001 → 0.02
+                   (FT biases;  int16, median ~51 — hedged below
+                    0.001×median to limit dying-ReLU risk)
+                 TDLEAF_ADAM_PSQT_LR0    : 0.001 → 13.0
+                   (PSQT weights;  int32, median ~13,343)
+                 TDLEAF_ADAM_PV_LR0      : 0.001 → 13.0
+                   (dense piece values;  int32, same scale as PSQT)
+               Combined with the FC LR split landed earlier today,
+               every section now moves at roughly the same fractional
+               rate (~0.1% per Adam step at typical weight magnitude)
+               under Adam's m_hat/sqrt(v_hat) per-weight normalisation.
+               Updated CLAUDE.md hyperparameter line.
+
 2026_05_26 -- tdleaf.h / nnue_training.cpp: split FC learning rate into
                three categories instead of one.  Previously a single
                TDLEAF_ADAM_LR0 applied to FC0/FC1/FC2 weights and
