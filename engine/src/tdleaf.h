@@ -92,7 +92,7 @@ static const float TDLEAF_ADAM_FT_BIAS_LR0 = 0.02f;   // FT biases  (int16, medi
 static const float TDLEAF_ADAM_PSQT_LR0    = 13.0f;   // PSQT weights (int32, median ~13343)
 static const float TDLEAF_ADAM_PV_LR0      = 13.0f;   // dense piece values (int32, same scale as PSQT)
 static const float TDLEAF_ADAM_BETA1    = 0.9f;    // first-moment decay  (FC + FT bias + PSQT)
-static const float TDLEAF_ADAM_BETA2    = 0.97f;  // second-moment decay (all layers)
+static const float TDLEAF_ADAM_BETA2    = 0.999f;  // second-moment decay (all layers)
 static const float TDLEAF_ADAM_EPS      = 1e-8f;   // numerical floor
 // AdamW decoupled weight decay: w -= λ × lr × w after each Adam step.
 // Applied to FC weights and FT weights only (not biases, not PSQT).
