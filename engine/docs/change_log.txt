@@ -1,5 +1,33 @@
 Changes since 2017_12_24
 
+2026_05_26 -- tdleaf.h / nnue_training.cpp: split FC learning rate into
+               three categories instead of one.  Previously a single
+               TDLEAF_ADAM_LR0 applied to FC0/FC1/FC2 weights and
+               biases alike, despite their median magnitudes spanning
+               three orders of magnitude (FC0 w=4, FC1 w=9, FC2 w=68,
+               FC biases ~1500).  At a uniform LR=0.001 that meant FC
+               biases moved at ~7e-7 fractional rate per step
+               (effectively frozen) while FC0 weights moved at
+               ~2.5e-4 — 350× faster relative to magnitude.
+               New constants (values from the 0.001×median(|w|)
+               heuristic measured against nn-ad9b42354671.nnue):
+                 TDLEAF_ADAM_LR0         : 0.001 → 0.005
+                   (FC0/FC1 weights; int8 scale ~5)
+                 TDLEAF_ADAM_FC2_LR0     : new, 0.07
+                   (FC2 weights — final 32→1 layer, int8 scale ~68;
+                    each FC2 weight has high leverage on the score)
+                 TDLEAF_ADAM_FC_BIAS_LR0 : new, 1.5
+                   (FC0/FC1/FC2 biases; int32 scale ~1500)
+               do_step lambda parameterised on lr so the same Adam
+               routine is reused for all three FC categories.  Three
+               new env-var overrides for runtime sweeps:
+                 TDLEAF_LR_FC, TDLEAF_LR_FC2, TDLEAF_LR_FC_BIAS.
+               AdamW weight decay continues to scale with the LR used
+               for that section's update (so the pull-to-zero remains
+               proportional across the section).
+               FT, FT_BIAS, PSQT, PV LRs unchanged at 0.001 — to be
+               tuned separately.
+
 2026_05_26 -- search.cpp qsearch: clear pc[ply][ply] BEFORE the draw
                checks instead of after them.  When qsearch's 50-move,
                3-fold, or KK-draw checks fire and return early, a

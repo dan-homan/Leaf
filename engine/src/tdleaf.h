@@ -29,7 +29,7 @@ static const float TDLEAF_LAMBDA           = 0.98f;  // eligibility trace decay 
                                                      // from 1.6M self-play games; autocorrelation
                                                      // and d_t-vs-result methods give ~0.97–0.99
                                                      // for both game types)
-static const float TDLEAF_K               = 150.0f; // sigmoid temperature (centipawns)
+static const float TDLEAF_K               = 220.0f; // sigmoid temperature (centipawns)
                                                      // MLE over 10M positions from stages 5–6:
                                                      // optimum 239 cp (prev. 290 cp, fitted from
                                                      // earlier training stage).
@@ -69,11 +69,25 @@ static const float TDLEAF_ADAM_STEP_CLIP = 30.0f;
 // LR warmup: ramps from 0 to full LR over first WARMUP Adam steps.
 // Mini-batch: gradients accumulated across BATCH_SIZE games before each Adam step.
 // ---------------------------------------------------------------------------
-static const float TDLEAF_ADAM_LR0         = 0.15f;  // step size for FC layers (float weight units)
-static const float TDLEAF_ADAM_FT_LR0      = 1.00f;   // step size for FT weights (sparse; need higher LR than dense FC)
-static const float TDLEAF_ADAM_FT_BIAS_LR0 = 0.01f;   // step size for FT biases (10× slower than FC to prevent dying-ReLU)
-static const float TDLEAF_ADAM_PSQT_LR0 =   10.0f;    // step size for PSQT (int32 scale ~36k std; needs larger LR)
-static const float TDLEAF_ADAM_PV_LR0     = 50.0f;    // step size for dense piece values (same scale as PSQT)
+// Per-section Adam LRs.  Targets ~0.1% fractional change per Adam step at
+// each section's typical weight magnitude in the int-equivalent FP32 shadow
+// space (rule: LR ≈ 0.001 × median(|w|) measured on nn-ad9b42354671).
+// Median magnitudes per section in that net:
+//   FC0 weights = 4,  FC1 weights = 9,  FC2 weights = 68   (int8)
+//   FC0 bias = 2067,  FC1 bias = 1582,  FC2 bias = 861     (int32)
+//   FT weights = 16,  FT bias = 51                          (int16)
+//   PSQT = 13343                                            (int32)
+// FC2 weights are dramatically larger than FC0/FC1 because the 32→1 fan-in
+// gives each FC2 weight unusually high leverage on the score; they need
+// their own LR.  FC biases are int32-scale and need a different LR than
+// the int8-scale FC weights.
+static const float TDLEAF_ADAM_LR0         = 0.005f;  // FC0/FC1 weights (int8, median ~5)
+static const float TDLEAF_ADAM_FC2_LR0     = 0.07f;   // FC2 weights (int8, median ~68 — final 32→1 layer)
+static const float TDLEAF_ADAM_FC_BIAS_LR0 = 1.5f;    // FC biases (int32, median ~1500 across stacks)
+static const float TDLEAF_ADAM_FT_LR0      = 0.001f;  // FT weights (int16, sparse; tune separately)
+static const float TDLEAF_ADAM_FT_BIAS_LR0 = 0.001f;  // FT biases  (int16; slow to prevent dying-ReLU)
+static const float TDLEAF_ADAM_PSQT_LR0    = 0.001f;  // PSQT weights (int32; tune separately)
+static const float TDLEAF_ADAM_PV_LR0      = 0.001f;  // dense piece values (int32; same scale as PSQT)
 static const float TDLEAF_ADAM_BETA1    = 0.9f;    // first-moment decay  (FC + FT bias + PSQT)
 static const float TDLEAF_ADAM_BETA2    = 0.97f;  // second-moment decay (all layers)
 static const float TDLEAF_ADAM_EPS      = 1e-8f;   // numerical floor

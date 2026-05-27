@@ -887,7 +887,7 @@ void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
 //   TDLEAF_FREEZE_PASSTHROUGH=1 ./Leaf_vtrain ...
 // ---------------------------------------------------------------------------
 struct TDLeafLRMultipliers {
-    float fc, ft, ft_bias, psqt, pv;
+    float fc, fc2, fc_bias, ft, ft_bias, psqt, pv;
     bool  freeze_passthrough;   // FC0 row NNUE_L0_DIRECT (15) weights+bias held at init
 };
 static const TDLeafLRMultipliers &tdleaf_lr_multipliers()
@@ -905,7 +905,9 @@ static const TDLeafLRMultipliers &tdleaf_lr_multipliers()
             return v && (*v == '1' || *v == 't' || *v == 'T' || *v == 'y' || *v == 'Y');
         };
         TDLeafLRMultipliers x;
-        x.fc      = read_env("TDLEAF_LR_FC",      1.0f);
+        x.fc      = read_env("TDLEAF_LR_FC",      1.0f);  // FC0/FC1 weights
+        x.fc2     = read_env("TDLEAF_LR_FC2",     1.0f);  // FC2 (final 32→1) weights
+        x.fc_bias = read_env("TDLEAF_LR_FC_BIAS", 1.0f);  // FC biases (all three)
         x.ft      = read_env("TDLEAF_LR_FT",      1.0f);
         x.ft_bias = read_env("TDLEAF_LR_FT_BIAS", 1.0f);
         x.psqt    = read_env("TDLEAF_LR_PSQT",    1.0f);
@@ -913,11 +915,14 @@ static const TDLeafLRMultipliers &tdleaf_lr_multipliers()
         bool freeze_psqt = read_bool_env("TDLEAF_FREEZE_PSQT");
         if (freeze_psqt) x.psqt = 0.0f;
         x.freeze_passthrough = read_bool_env("TDLEAF_FREEZE_PASSTHROUGH");
-        bool any = (x.fc != 1.0f || x.ft != 1.0f || x.ft_bias != 1.0f
+        bool any = (x.fc != 1.0f || x.fc2 != 1.0f || x.fc_bias != 1.0f
+                    || x.ft != 1.0f || x.ft_bias != 1.0f
                     || x.psqt != 1.0f || x.pv != 1.0f || x.freeze_passthrough);
         if (any) {
             fprintf(stderr, "TDLeaf LR overrides:");
             if (x.fc      != 1.0f) fprintf(stderr, " FC=%.4g",      (double)x.fc);
+            if (x.fc2     != 1.0f) fprintf(stderr, " FC2=%.4g",     (double)x.fc2);
+            if (x.fc_bias != 1.0f) fprintf(stderr, " FC_BIAS=%.4g", (double)x.fc_bias);
             if (x.ft      != 1.0f) fprintf(stderr, " FT=%.4g",      (double)x.ft);
             if (x.ft_bias != 1.0f) fprintf(stderr, " FT_BIAS=%.4g", (double)x.ft_bias);
             if (x.psqt    != 1.0f) fprintf(stderr, " PSQT=%.4g%s",  (double)x.psqt,
@@ -1080,7 +1085,15 @@ void nnue_apply_gradients(float lr_scale)
     // categories to soften replay-pass updates; live path passes 1.0.  Env-var
     // multipliers (TDLEAF_LR_*) layered on top — read once at first call.
     const auto &lr_mul = tdleaf_lr_multipliers();
+    // FC LRs are split four ways:
+    //   fc_lr      — FC0/FC1 weights (int8 scale ~5)
+    //   fc2_lr     — FC2 weights (int8 scale ~68; final 32→1 layer)
+    //   fc_bias_lr — FC0/FC1/FC2 biases (int32 scale ~1500)
+    // The split lets each section move at roughly the same fractional rate
+    // per Adam step despite very different weight magnitudes.
     const float fc_lr      = lr_mul.fc      * lr_scale * warmup_factor * TDLEAF_ADAM_LR0;
+    const float fc2_lr     = lr_mul.fc2     * lr_scale * warmup_factor * TDLEAF_ADAM_FC2_LR0;
+    const float fc_bias_lr = lr_mul.fc_bias * lr_scale * warmup_factor * TDLEAF_ADAM_FC_BIAS_LR0;
     const float ft_lr      = lr_mul.ft      * lr_scale * warmup_factor * ft_session_factor * TDLEAF_ADAM_FT_LR0;
     const float ft_bias_lr = lr_mul.ft_bias * lr_scale * warmup_factor * TDLEAF_ADAM_FT_BIAS_LR0;
     const float psqt_lr    = lr_mul.psqt    * lr_scale * warmup_factor * TDLEAF_ADAM_PSQT_LR0;
@@ -1090,7 +1103,9 @@ void nnue_apply_gradients(float lr_scale)
     // bc2 (beta2=0.999): ALWAYS applied (0.999^20≈0.98 → bc2=0.02; skipping gives ~7× oversized steps).
     // The unit-less step m_hat/sqrt(v_hat) is clipped to TDLEAF_ADAM_STEP_CLIP
     // before the LR multiply to bound the worst-case per-weight update.
-    auto do_step = [&](float g, float &m, float &v, uint32_t cnt) -> float {
+    // lr is passed in so the same routine handles FC weights, FC2 weights,
+    // FC biases, etc. — only the LR differs.
+    auto do_step = [&](float g, float &m, float &v, uint32_t cnt, float lr) -> float {
         m = TDLEAF_ADAM_BETA1 * m + (1.0f - TDLEAF_ADAM_BETA1) * g;
         v = TDLEAF_ADAM_BETA2 * v + (1.0f - TDLEAF_ADAM_BETA2) * g * g;
         uint32_t eff_t = cnt + 1;
@@ -1099,7 +1114,7 @@ void nnue_apply_gradients(float lr_scale)
         float v_hat = v / (1.0f - powf(TDLEAF_ADAM_BETA2, (float)eff_t));
         float step  = m_hat / (sqrtf(v_hat) + TDLEAF_ADAM_EPS);
         step = clip_adam_step(step, step_max_fc, step_clips_fc);
-        return fc_lr * step;
+        return lr * step;
     };
     // PSQT Adam step — same per-weight BC but uses TDLEAF_ADAM_PSQT_LR0.
     auto do_step_psqt = [&](float g, float &m, float &v, uint32_t cnt) -> float {
@@ -1115,10 +1130,13 @@ void nnue_apply_gradients(float lr_scale)
     };
 
     for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
+        // FC0 weights — fc_lr (int8 scale ~5)
         for (int i = 0; i < NNUE_L0_SIZE * NNUE_L0_INPUT; i++) {
             if (grad_l0_w[s][i] != 0.0f) {
-                float dw = do_step(grad_l0_w[s][i], m_l0_w[s][i], v_l0_w[s][i], l0_weights_cnt[s][i]);
-                // AdamW: decoupled weight decay (weights only, not biases)
+                float dw = do_step(grad_l0_w[s][i], m_l0_w[s][i], v_l0_w[s][i], l0_weights_cnt[s][i], fc_lr);
+                // AdamW: decoupled weight decay (weights only, not biases).
+                // Scaled by the SAME LR used for the gradient step so the
+                // relative pull-to-zero is constant across sections.
                 float wd = TDLEAF_WEIGHT_DECAY * fc_lr * l0_weights_f32[s][i];
                 l0_weights_f32[s][i] -= dw + wd;  delta_l0_w[s][i] -= dw + wd;
                 // Clamp float shadow to int8 range: prevents zombie weights where the float
@@ -1128,16 +1146,18 @@ void nnue_apply_gradients(float lr_scale)
                 l0_weights_cnt[s][i]++;  delta_l0_w_cnt[s][i]++;
             }
         }
+        // FC0 biases — fc_bias_lr (int32 scale ~2000)
         for (int i = 0; i < NNUE_L0_SIZE; i++) {
             if (grad_l0_b[s][i] != 0.0f) {
-                float dw = do_step(grad_l0_b[s][i], m_l0_b[s][i], v_l0_b[s][i], l0_biases_cnt[s][i]);
+                float dw = do_step(grad_l0_b[s][i], m_l0_b[s][i], v_l0_b[s][i], l0_biases_cnt[s][i], fc_bias_lr);
                 l0_biases_f32[s][i] -= dw;  delta_l0_b[s][i] -= dw;
                 l0_biases_cnt[s][i]++;  delta_l0_b_cnt[s][i]++;
             }
         }
+        // FC1 weights — fc_lr (int8 scale ~9)
         for (int i = 0; i < NNUE_L1_SIZE * NNUE_L1_PADDED; i++) {
             if (grad_l1_w[s][i] != 0.0f) {
-                float dw = do_step(grad_l1_w[s][i], m_l1_w[s][i], v_l1_w[s][i], l1_weights_cnt[s][i]);
+                float dw = do_step(grad_l1_w[s][i], m_l1_w[s][i], v_l1_w[s][i], l1_weights_cnt[s][i], fc_lr);
                 float wd = TDLEAF_WEIGHT_DECAY * fc_lr * l1_weights_f32[s][i];
                 l1_weights_f32[s][i] -= dw + wd;  delta_l1_w[s][i] -= dw + wd;
                 // Clamp float shadow to int8 range (same reason as FC0).
@@ -1146,17 +1166,20 @@ void nnue_apply_gradients(float lr_scale)
                 l1_weights_cnt[s][i]++;  delta_l1_w_cnt[s][i]++;
             }
         }
+        // FC1 biases — fc_bias_lr (int32 scale ~1500)
         for (int i = 0; i < NNUE_L1_SIZE; i++) {
             if (grad_l1_b[s][i] != 0.0f) {
-                float dw = do_step(grad_l1_b[s][i], m_l1_b[s][i], v_l1_b[s][i], l1_biases_cnt[s][i]);
+                float dw = do_step(grad_l1_b[s][i], m_l1_b[s][i], v_l1_b[s][i], l1_biases_cnt[s][i], fc_bias_lr);
                 l1_biases_f32[s][i] -= dw;  delta_l1_b[s][i] -= dw;
                 l1_biases_cnt[s][i]++;  delta_l1_b_cnt[s][i]++;
             }
         }
+        // FC2 weights — fc2_lr (int8 scale ~68; final 32→1 layer has higher
+        // leverage per weight, so weights converge larger and need a larger LR).
         for (int i = 0; i < NNUE_L2_PADDED; i++) {
             if (grad_l2_w[s][i] != 0.0f) {
-                float dw = do_step(grad_l2_w[s][i], m_l2_w[s][i], v_l2_w[s][i], l2_weights_cnt[s][i]);
-                float wd = TDLEAF_WEIGHT_DECAY * fc_lr * l2_weights_f32[s][i];
+                float dw = do_step(grad_l2_w[s][i], m_l2_w[s][i], v_l2_w[s][i], l2_weights_cnt[s][i], fc2_lr);
+                float wd = TDLEAF_WEIGHT_DECAY * fc2_lr * l2_weights_f32[s][i];
                 l2_weights_f32[s][i] -= dw + wd;  delta_l2_w[s][i] -= dw + wd;
                 // Clamp float shadow to int8 range (same reason as FC0/FC1).
                 if (l2_weights_f32[s][i] >  127.0f) l2_weights_f32[s][i] =  127.0f;
@@ -1164,8 +1187,9 @@ void nnue_apply_gradients(float lr_scale)
                 l2_weights_cnt[s][i]++;  delta_l2_w_cnt[s][i]++;
             }
         }
+        // FC2 bias — fc_bias_lr (int32 scale ~860)
         if (grad_l2_b[s] != 0.0f) {
-            float dw = do_step(grad_l2_b[s], m_l2_b[s], v_l2_b[s], l2_bias_cnt[s]);
+            float dw = do_step(grad_l2_b[s], m_l2_b[s], v_l2_b[s], l2_bias_cnt[s], fc_bias_lr);
             l2_bias_f32[s] -= dw;  delta_l2_b[s] -= dw;
             l2_bias_cnt[s]++;  delta_l2_b_cnt[s]++;
         }
