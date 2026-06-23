@@ -1360,7 +1360,7 @@ void nnue_apply_gradients(float lr_scale)
     // Disabled at compile time with -D TDLEAF_LOG_STEP_CLIPS=0.
 #if TDLEAF_LOG_STEP_CLIPS
     {
-        extern char engine_cfg.exec_path[FILENAME_MAX];
+        // engine_cfg is declared in extern.h, already included via the unity build.
         static FILE *tele_fp = nullptr;
         if (tele_fp == nullptr) {
             char path[FILENAME_MAX + 64];

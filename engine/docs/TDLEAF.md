@@ -63,7 +63,7 @@ For a game of T half-moves:
 
 - `d_t` = sigmoid of the **NNUE static evaluation at the PV leaf position** at ply t,
   from White's perspective:
-  `d_t = 1 / (1 + exp(-score_white_t / K))`, K = 150 cp.
+  `d_t = 1 / (1 + exp(-score_white_t / K))`, K = 220 cp.
 - `z` = game result from White's perspective: 1.0 = White wins, 0.5 = draw, 0.0 = Black wins.
 
 **Temporal difference errors (backward view):**
@@ -85,10 +85,11 @@ centipawns — see [Horizon Noise Mitigation](#horizon-noise-mitigation) below.
 
 where `∇_w d_t = d_t * (1 - d_t) / K * ∇_w score_t`.
 
-Defaults: `λ = 0.98`, `K = 150 cp` (λ empirically calibrated from 1.6M self-play games;
-K progressively lowered from 400 → 200 → 150 cp as classical-prior calibration runs
-showed remaining piece-value drift at 200 cp — see
-[Hyperparameter Calibration](#hyperparameter-calibration)).
+Defaults: `λ = 0.98`, `K = 220 cp` (λ empirically calibrated from 1.6M self-play games;
+K was lowered from 400 → 200 → 150 cp during the classical-prior calibration runs, then
+recalibrated to 220 cp from a 1M-game MLE fit on the classical-eval side of
+`match_nn-fresh-260514-1.39e6g_9.5e5g.pgn` — optimum 217.71 cp, rounded to 220.
+See [Hyperparameter Calibration](#hyperparameter-calibration)).
 Gradient updates use Adam with per-weight LR decay; see [Adam Optimizer](#adam-optimizer-with-per-weight-lr-decay) below.
 
 **Key design choice:** `d_t` is computed from `nnue_evaluate()` (direct static eval of the
@@ -195,11 +196,12 @@ g_pv[pt] += grad_scale × piece_count_diff[pt]
 
 ### Optimizer
 
-Full Adam with `TDLEAF_ADAM_PV_LR0 = 50.0`.  No weight decay is applied.
-Dense piece value gradients are included in the global L2 norm for gradient clipping.
-The large LR0 is appropriate because `piece_val` units are at the same raw int32 scale
-as PSQT (~36 000 std), so the effective per-step size in centipawns is comparable to
-PSQT despite the higher LR0 number.
+Full Adam with `TDLEAF_ADAM_PV_LR0 = 13.0` (matches `TDLEAF_ADAM_PSQT_LR0`).
+No weight decay is applied.  Dense piece value gradients are included in the
+global L2 norm for gradient clipping.  `piece_val_f32[pt]` is clamped ≥ 0 after each
+Adam step (Adam moments continue to advance through the clamp so it self-lifts
+when the gradient turns constructive) — negative piece values invert material
+evaluation and create an unrecoverable death spiral.
 
 ### PSQT gradient mean-centering
 
@@ -311,14 +313,15 @@ FC2 output (positional)
   → PSQT weight rows for each active feature index (sparse)
 ```
 
-The step size for each layer is governed by the Adam LR schedule.  Five separate LRs:
-`TDLEAF_ADAM_LR0` (FC layers), `TDLEAF_ADAM_FT_LR0` (FT weights),
-`TDLEAF_ADAM_FT_BIAS_LR0` (FT biases), `TDLEAF_ADAM_PSQT_LR0` (PSQT), and
-`TDLEAF_ADAM_PV_LR0` (dense piece values).  FT weights use a higher LR than FC because
-sparse features receive far fewer updates (~8 per 5000 games vs. every game for FC);
-FT biases use a reduced LR (10× slower than FC) to prevent dying-ReLU from update
-frequency asymmetry (biases ~200×/game vs FT weights ~8/5000g); PSQT at int32 scale
-needs a different LR than FC at int8 scale.  See [Adam Optimizer](#adam-optimizer).
+The step size for each layer is governed by the Adam LR schedule.  Seven separate LRs,
+each sized to ~0.001 × median(|w|) of the corresponding weight section:
+`TDLEAF_ADAM_LR0` (FC0/FC1 weights), `TDLEAF_ADAM_FC2_LR0` (FC2 weights — separate
+because the 32→1 fan-in gives FC2 weights far higher leverage), `TDLEAF_ADAM_FC_BIAS_LR0`
+(FC biases — int32 scale ~1500), `TDLEAF_ADAM_FT_LR0` (FT weights — int16 scale),
+`TDLEAF_ADAM_FT_BIAS_LR0` (FT biases — hedged below the median-rule value to limit
+dying-ReLU risk from update frequency asymmetry: biases ~200×/game vs FT weights ~8/5000g),
+`TDLEAF_ADAM_PSQT_LR0` (PSQT — int32 scale ~13000), and `TDLEAF_ADAM_PV_LR0` (dense piece
+values — int32 scale matching PSQT).  See [Adam Optimizer](#adam-optimizer).
 
 ---
 
@@ -351,32 +354,55 @@ correction.
 
 ### Per-Layer Configuration
 
+LRs follow the "0.001 × median(|w|)" heuristic measured on `nn-ad9b42354671`.  Median
+weight magnitudes (per section): FC0 weights ≈ 4, FC1 weights ≈ 9, FC2 weights ≈ 68,
+FC biases ≈ 1500 (int32 scale), FT weights ≈ 16, FT biases ≈ 51, PSQT ≈ 13343.
+
 | Layer | Update Rule | LR0 | Notes |
 |-------|-------------|-----|-------|
-| FC0/FC1/FC2 weights | Full Adam | `TDLEAF_ADAM_LR0 = 0.15` | Float shadow clamped to ±127 after each update |
-| FC0/FC1/FC2 biases  | Full Adam | `TDLEAF_ADAM_LR0 = 0.15` | |
-| FT weights | RMSProp (per-weight v, no m) | `TDLEAF_ADAM_FT_LR0 = 1.0` | Sparse; higher LR than FC to compensate for fewer updates |
-| FT biases  | Full Adam | `TDLEAF_ADAM_FT_BIAS_LR0 = 0.01` | Reduced LR to prevent dying-ReLU — see below |
-| PSQT       | Full Adam | `TDLEAF_ADAM_PSQT_LR0 = 10.0` | Separate LR0 required — see below |
-| Dense piece values | Full Adam | `TDLEAF_ADAM_PV_LR0 = 50.0` | Dense; no weight decay; LR tuned for int32 scale matching PSQT |
+| FC0/FC1 weights | Full Adam | `TDLEAF_ADAM_LR0 = 0.005` | Float shadow clamped to ±127 after each update |
+| FC2 weights | Full Adam | `TDLEAF_ADAM_FC2_LR0 = 0.07` | Separate LR — 32→1 fan-in gives FC2 weights ~14× the leverage and ~14× the median magnitude of FC0/FC1 |
+| FC0/FC1/FC2 biases  | Full Adam | `TDLEAF_ADAM_FC_BIAS_LR0 = 1.5` | Int32 scale; separate from int8-scale FC weights |
+| FT weights | RMSProp (per-weight v, no m) | `TDLEAF_ADAM_FT_LR0 = 0.015` | Sparse update; per-session warmup damps first 100 steps |
+| FT biases  | Full Adam | `TDLEAF_ADAM_FT_BIAS_LR0 = 0.02` | Hedged below the median-rule value to limit dying-ReLU risk from update-frequency asymmetry |
+| PSQT       | Full Adam | `TDLEAF_ADAM_PSQT_LR0 = 13.0` | Int32 scale; gradients mean-centered per piece-type slot when `piece_val` is active |
+| Dense piece values | Full Adam | `TDLEAF_ADAM_PV_LR0 = 13.0` | Same scale as PSQT; no weight decay; `piece_val` clamped ≥ 0 after each step |
 
 ### Why a Separate PSQT LR0?
 
 Adam normalises gradient magnitude: the effective per-step size in weight-space is
 approximately ±LR0 per update, independent of the raw gradient magnitude.  PSQT
-weights are at int32 scale (std ≈ 36,000) while FC weights are at int8 scale (std ≈ 30)
-— a ratio of ~1,000×.  Using the same LR0=0.2 for both caused PSQT to change negligibly
-relative to its baseline scale.  `TDLEAF_ADAM_PSQT_LR0` is tuned separately for this reason.
+weights are at int32 scale (median |w| ≈ 13343) while FC weights are at int8 scale
+(median |w| ≈ 5 for FC0/FC1) — a ratio of ~2600×.  Using the same LR0 for both caused
+PSQT to change negligibly relative to its baseline scale.  `TDLEAF_ADAM_PSQT_LR0 = 13.0`
+keeps PSQT's per-step fractional change matched to the other sections.
 
 ### Why a Separate FT Bias LR0?
 
 FT biases are updated densely (~200 times per game), while FT weights are updated
-sparsely (~8 per 5000 games for a typical feature row).  Without a reduced LR, biases
+sparsely (~8 per 5000 games for a typical feature row).  Without a hedged LR, biases
 race ahead of weights: they drift strongly negative before FT weights have learned
-useful features, suppressing SqrCReLU activations and causing dying-ReLU.  At 190k
-games with the FC LR, FT bias mean drifted to -291 with 100% of biases negative.
-`TDLEAF_ADAM_FT_BIAS_LR0 = 0.01` (10× slower than FC) limits drift to ~-30 over
-190k games — enough adaptation without racing ahead of FT weight convergence.
+useful features, suppressing SqrCReLU activations and causing dying-ReLU.
+`TDLEAF_ADAM_FT_BIAS_LR0 = 0.02` is hedged below the 0.001×median(|w|) value
+(median |w| ≈ 51 would suggest 0.05) to limit that drift without freezing adaptation.
+
+### Adam step clipping
+
+`TDLEAF_ADAM_STEP_CLIP = 30.0` bounds the unit-less Adam step
+`|m_hat / sqrt(v_hat)|` (or `|g / sqrt(v_hat)|` for FT's RMSProp path) before the
+LR multiply.  Uniform across categories — Adam is scale-normalised by design, so a
+single threshold catches the rare-feature pathology where a low running `v` makes a
+normal gradient produce an oversized parameter change.  Per-category max-step and
+clip counts are logged when built with `-D TDLEAF_LOG_STEP_CLIPS=1`.
+
+### Per-session FT warmup
+
+Beyond the global `TDLEAF_ADAM_WARMUP = 50` (keyed on the persisted `t_adam`, so
+it fires only on the very first session), FT updates use an additional
+per-session ramp `TDLEAF_FT_SESSION_WARMUP = 100`.  This damps FT-weight updates
+during the `v_ft_w` accumulation phase at every restart, regardless of whether `v`
+was loaded from disk — protecting freshly-zeroed (cold) FT rows from oversized
+first-batch steps.
 
 ### Why Float-Shadow Clamping for FC0/FC1/FC2?
 
@@ -431,31 +457,40 @@ per-weight bias correction and monitoring.
 
 | Constant | Value | Notes |
 |----------|-------|-------|
-| `TDLEAF_ADAM_LR0` | 0.15 | Step size for FC layers (float weight units) |
-| `TDLEAF_ADAM_FT_LR0` | 1.0 | Step size for FT weights (sparse; need higher LR than dense FC) |
-| `TDLEAF_ADAM_FT_BIAS_LR0` | 0.01 | Step size for FT biases (10× slower than FC to prevent dying-ReLU) |
-| `TDLEAF_ADAM_PSQT_LR0` | 10.0 | Step size for PSQT (int32 scale; ~1000× FC) |
-| `TDLEAF_ADAM_PV_LR0` | 50.0 | Step size for dense piece values (int32 scale; fast-converging dense channel) |
-| `TDLEAF_ADAM_BETA1` | 0.9 | First-moment decay (FC weights/biases, FT biases, PSQT) |
+| `TDLEAF_ADAM_LR0` | 0.005 | FC0/FC1 weights (int8 scale; median \|w\| ≈ 5) |
+| `TDLEAF_ADAM_FC2_LR0` | 0.07 | FC2 weights (int8 scale; median \|w\| ≈ 68 — final 32→1 layer) |
+| `TDLEAF_ADAM_FC_BIAS_LR0` | 1.5 | FC0/FC1/FC2 biases (int32 scale; median ≈ 1500 across stacks) |
+| `TDLEAF_ADAM_FT_LR0` | 0.015 | FT weights (sparse; int16 scale; median \|w\| ≈ 16) |
+| `TDLEAF_ADAM_FT_BIAS_LR0` | 0.02 | FT biases (hedged below 0.001×median to limit dying-ReLU risk) |
+| `TDLEAF_ADAM_PSQT_LR0` | 13.0 | PSQT (int32 scale; median ≈ 13343) |
+| `TDLEAF_ADAM_PV_LR0` | 13.0 | Dense piece values (int32 scale matching PSQT) |
+| `TDLEAF_ADAM_BETA1` | 0.9 | First-moment decay (FC weights/biases, FT biases, PSQT, piece_val) |
 | `TDLEAF_ADAM_BETA2` | 0.999 | Second-moment decay (all layers) |
 | `TDLEAF_ADAM_EPS` | 1e-8 | Numerical floor in denominator |
-| `TDLEAF_ADAM_WARMUP` | 50 | Linear LR warmup: ramp from 0 to full LR over first N Adam steps (0 = disabled) |
-| `TDLEAF_BATCH_SIZE` | 4 | Mini-batch: accumulate gradients across N games before each Adam step |
+| `TDLEAF_ADAM_STEP_CLIP` | 30.0 | Bound on unit-less Adam step `\|m_hat/sqrt(v_hat)\|` before LR multiply; uniform across categories |
+| `TDLEAF_ADAM_WARMUP` | 50 | Linear LR warmup over first N Adam steps; keyed on persisted `t_adam` (first session only) |
+| `TDLEAF_FT_SESSION_WARMUP` | 100 | Per-session FT LR ramp over first N steps of each restart; keyed on `t_ft_session` (not persisted) |
+| `TDLEAF_BATCH_SIZE` | 8 | Mini-batch: accumulate gradients across N games before each Adam step |
 | `TDLEAF_WEIGHT_DECAY` | 1e-4 | AdamW decoupled weight decay coefficient (FC + FT weights only) |
 | `TDLEAF_GRAD_CLIP_NORM` | 1.0 | Global gradient L2 norm clip threshold; 0 = disabled |
+| `TDLEAF_REPLAY_LR_SCALE` | 0.3 | Multiplicative LR scale applied during replay-pass Adam steps |
 | `TDLEAF_MIN_PLIES` | 8 | Skip games with fewer recorded TDLeaf plies than this |
 | `TDLEAF_MIN_PLIES_REP` | 40 | Skip 3-fold repetition draws with fewer plies than this |
+
+Runtime LR sweep via env vars `TDLEAF_LR_{FC,FC2,FC_BIAS,FT,FT_BIAS,PSQT,PV}` and
+freeze flags `TDLEAF_FREEZE_PSQT`, `TDLEAF_FREEZE_PASSTHROUGH`.
 
 Set `TDLEAF_BATCH_SIZE = 1` to restore per-game Adam steps.
 Set `TDLEAF_ADAM_WARMUP = 0` to disable warmup.
 Set `TDLEAF_WEIGHT_DECAY = 0.0` to disable weight decay.
 Set `TDLEAF_GRAD_CLIP_NORM = 0.0` to disable gradient clipping.
+Set `TDLEAF_ADAM_STEP_CLIP` to a very large value to effectively disable step clipping.
 
 ---
 
 ## Mini-Batch Gradient Accumulation
 
-By default (`TDLEAF_BATCH_SIZE=4`), gradients are accumulated across 4 games before
+By default (`TDLEAF_BATCH_SIZE=8`), gradients are accumulated across 8 games before
 a single Adam step is applied.  This gives the optimizer a more reliable gradient signal
 per step, reducing single-game noise that otherwise causes Adam's first moment to chase
 stochastic fluctuations.
@@ -472,8 +507,8 @@ stochastic fluctuations.
 
 ### Trade-offs
 
-- **Pro:** each Adam step uses ~4× more gradient data, improving signal-to-noise ratio.
-- **Pro:** file I/O reduced by ~4× (one write per batch instead of per game).
+- **Pro:** each Adam step uses ~8× more gradient data, improving signal-to-noise ratio.
+- **Pro:** file I/O reduced by ~8× (one write per batch instead of per game).
 - **Con:** weight updates are delayed by up to `BATCH_SIZE-1` games (negligible in practice;
   the delay is a few seconds at typical game durations).
 
@@ -856,6 +891,7 @@ produces well-calibrated win probabilities across the full score range.
 - *Pre-2026-05-02:* K=400 (raised from earlier calibrated value to fight piece-value drift)
 - *2026-05-02:* lowered to **K=200**, after 200k+ training games at K=400 showed piece values converging ~2× too high — the larger K underweighted material differences in the gradient signal.
 - *2026-05-23:* lowered further to **K=150**, after classical-PSQT-prior calibration runs (see [Learning_Rate_Experiment](../../learn/Learning_Rate_Experiment.md) in the Obsidian vault) showed residual piece-value drift at K=200 and a moderately wider effective gradient was needed for FC/FT to track PSQT shape changes.  K=150 is below the MLE optimum (~240 cp from raw sigmoid fit) but produces a balanced piece-value spectrum and faster FC/FT response.  Probability calibration remains acceptable across the score range used in TDLeaf updates (most positions are within ±400 cp of zero where the difference between K=150 and K=240 sigmoids is small).
+- *Current:* **K=220**, recalibrated 2026-05-25 via MLE over 58M positions from the classical-eval side of `match_nn-fresh-260514-1.39e6g_9.5e5g.pgn` (1.015M games).  Optimum 217.71 cp, rounded to 220.  As the network's PSQT/piece_val converged closer to the classical prior, the per-position score distribution sharpened again and the MLE optimum drifted upward from the earlier sub-150 cp regime.
 
 ### Eligibility trace decay λ
 
@@ -929,9 +965,10 @@ is penalised for correctly evaluating a position it cannot see past.
 
 The threshold is computed dynamically as
 `score_clip_cp = max(TDLEAF_SCORE_CLIP_PAWNS × value[PAWN], 200 cp)`
-(default `TDLEAF_SCORE_CLIP_PAWNS = 1.0`, so ~100 cp at the classical pawn value,
-clamped to the 200 cp floor at typical piece-value drift levels).  When the white-POV
-score change between consecutive moves exceeds `score_clip_cp`, the
+(default `TDLEAF_SCORE_CLIP_PAWNS = 0.5`, so ~50 cp at the classical pawn value,
+which the 200 cp floor then dominates at typical piece-value drift levels — the floor
+also protects the `--init-nnue-noprior` bootstrap where `value[PAWN]` can clamp to 1).
+When the white-POV score change between consecutive moves exceeds `score_clip_cp`, the
 `d[t+1] - d[t]` contribution to the eligibility trace is scaled down
 *proportionally* so the effective change is capped at the threshold:
 
@@ -961,7 +998,7 @@ grad_scale *= id_weight
 
 Positions with stable ID scores (low variance) receive full weight; positions whose
 score fluctuated across search depths are down-weighted.  `TDLEAF_ID_VAR_SIGMA2`
-(default 2 500 cp², equivalent to a 50 cp std-dev reference) is the reference variance
+(default 625 cp², equivalent to a 25 cp std-dev reference) is the reference variance
 — a position with variance equal to `TDLEAF_ID_VAR_SIGMA2` receives half weight.  Set
 `TDLEAF_ID_VAR_SIGMA2` to a very large value to disable this approach.
 
@@ -969,8 +1006,8 @@ score fluctuated across search depths are down-weighted.  `TDLEAF_ID_VAR_SIGMA2`
 
 | Hyperparameter | Default | Effect of increasing | Effect of decreasing |
 |----------------|---------|---------------------|---------------------|
-| `TDLEAF_SCORE_CLIP_PAWNS` | 1.0 (≥ 200 cp floor) | Less clipping; more sensitive to large swings | More aggressive attenuation of large score changes |
-| `TDLEAF_ID_VAR_SIGMA2` | 2 500 cp² | More tolerant of unstable ID scores | Stronger down-weighting of ID-unstable positions |
+| `TDLEAF_SCORE_CLIP_PAWNS` | 0.5 (≥ 200 cp floor) | Less clipping; more sensitive to large swings | More aggressive attenuation of large score changes |
+| `TDLEAF_ID_VAR_SIGMA2` | 625 cp² | More tolerant of unstable ID scores | Stronger down-weighting of ID-unstable positions |
 
 Both approaches are active simultaneously by default.  Use the ablation plan in
 `docs/TODO.md` to isolate their individual contributions.  A good starting ablation:

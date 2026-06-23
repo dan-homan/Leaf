@@ -164,6 +164,13 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result,
 
     for (int t = 0; t < T; t++) {
         float sig_grad = d[t] * (1.0f - d[t]) / TDLEAF_K;
+        // wtm_sign converts ∂d_t/∂w (white-POV utility we want to ascend)
+        // into the descent-form gradient expected by nnue_apply_gradients
+        // (which does w -= LR × step on the supplied "loss" gradient).
+        // score_white = wtm ? +score_stm : -score_stm; nnue_forward_fp32
+        // backprops ∂(stm-POV score)/∂w, so the white-POV sign is
+        // (wtm ? +1 : -1) and the loss-form sign we pass downstream is its
+        // negative — hence (wtm ? -1 : +1).
         float wtm_sign = rec.plies[t].wtm ? -1.0f : 1.0f;
         float id_weight = 1.0f / (1.0f + rec.plies[t].id_score_variance / TDLEAF_ID_VAR_SIGMA2);
         float grad_scale = e[t] * sig_grad * cp_factor * wtm_sign * id_weight;
