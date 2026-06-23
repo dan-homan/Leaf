@@ -39,10 +39,12 @@ static const int   TDLEAF_MIN_PLIES       = 8;      // skip games shorter than t
 static const int   TDLEAF_MIN_PLIES_REP   = 40;     // skip 3-rep draws shorter than this
 // Approach 1 — TD error clipping.
 // When the white-POV score change between consecutive moves exceeds
-// TDLEAF_SCORE_CLIP_PAWNS × value[PAWN] (centipawns), the (d[t+1]−d[t])
+// TDLEAF_SCORE_CLIP_PAWNS × max(value[PAWN], 100 cp), the (d[t+1]−d[t])
 // contribution to the eligibility trace is scaled down proportionally.
 // Expressed as a multiple of the current pawn value so the threshold tracks
-// piece-value drift under TDLeaf.  Set to a large value to disable.
+// piece-value drift under TDLeaf; the 100 cp floor on value[PAWN] protects
+// the --init-nnue-noprior bootstrap where value[PAWN] can clamp to 1.
+// Set to a large value to disable.
 static const float TDLEAF_SCORE_CLIP_PAWNS = 0.5f;
 // Approach 2 — iterative-deepening score stability weight.
 // w_t = 1 / (1 + id_score_variance / TDLEAF_ID_VAR_SIGMA2)

@@ -142,11 +142,15 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result,
 
     // 2. Compute TD errors backward
     const float lambda = TDLEAF_LAMBDA;
-    // Floor at 200 cp so --init-nnue-noprior bootstrap (where value[PAWN] gets
-    // clamped to 1 by nnue_extract_piece_values when PSQT and piece_val are
-    // both zeroed) doesn't collapse the threshold to ~2 cp and gut the TD signal.
-    const float score_clip_cp = std::max(
-        TDLEAF_SCORE_CLIP_PAWNS * (float)value[PAWN], 200.0f);
+    // Floor value[PAWN] at 100 cp (the classical default) before applying the
+    // SCORE_CLIP_PAWNS multiplier, so the --init-nnue-noprior bootstrap (where
+    // value[PAWN] can be clamped to 1 by nnue_extract_piece_values when PSQT and
+    // piece_val are both zeroed) doesn't collapse the threshold.  This keeps
+    // SCORE_CLIP_PAWNS as the dominant control across the full piece-value range:
+    // at value[PAWN]=100 the threshold is exactly SCORE_CLIP_PAWNS × 100 cp; for
+    // value[PAWN] > 100 the threshold scales linearly with the current pawn value.
+    const float score_clip_cp =
+        TDLEAF_SCORE_CLIP_PAWNS * std::max((float)value[PAWN], 100.0f);
 
     static float e[MAX_GAME_PLY];
     e[T - 1] = result - d[T - 1];

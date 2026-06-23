@@ -74,8 +74,8 @@ e_t     = clip(d_{t+1} - d_t) + λ * e_{t+1}     for t = T-2 … 0
 ```
 
 where `clip(d_{t+1} - d_t)` applies proportional scaling when the white-POV score
-change between consecutive moves exceeds `TDLEAF_SCORE_CLIP_PAWNS × value[PAWN]`
-centipawns — see [Horizon Noise Mitigation](#horizon-noise-mitigation) below.
+change between consecutive moves exceeds `TDLEAF_SCORE_CLIP_PAWNS × max(value[PAWN], 100 cp)`
+— see [Horizon Noise Mitigation](#horizon-noise-mitigation) below.
 
 **Weight update (gradient ascent on prediction accuracy):**
 
@@ -964,10 +964,13 @@ is penalised for correctly evaluating a position it cannot see past.
 ### Approach 1 — Score-change clipping (TDLEAF_SCORE_CLIP_PAWNS)
 
 The threshold is computed dynamically as
-`score_clip_cp = max(TDLEAF_SCORE_CLIP_PAWNS × value[PAWN], 200 cp)`
-(default `TDLEAF_SCORE_CLIP_PAWNS = 0.5`, so ~50 cp at the classical pawn value,
-which the 200 cp floor then dominates at typical piece-value drift levels — the floor
-also protects the `--init-nnue-noprior` bootstrap where `value[PAWN]` can clamp to 1).
+`score_clip_cp = TDLEAF_SCORE_CLIP_PAWNS × max(value[PAWN], 100 cp)`
+(default `TDLEAF_SCORE_CLIP_PAWNS = 0.5`, so 50 cp at the classical pawn value
+and scaling linearly with `value[PAWN]` once piece-value drift pushes it above
+100 cp).  The 100 cp floor on `value[PAWN]` (the classical default) protects the
+`--init-nnue-noprior` bootstrap, where `nnue_extract_piece_values` can clamp
+`value[PAWN]` down to 1 when PSQT and `piece_val` start at zero — without the
+floor, the threshold would collapse to ~0.5 cp and gut the TD signal.
 When the white-POV score change between consecutive moves exceeds `score_clip_cp`, the
 `d[t+1] - d[t]` contribution to the eligibility trace is scaled down
 *proportionally* so the effective change is capped at the threshold:
@@ -1006,7 +1009,7 @@ score fluctuated across search depths are down-weighted.  `TDLEAF_ID_VAR_SIGMA2`
 
 | Hyperparameter | Default | Effect of increasing | Effect of decreasing |
 |----------------|---------|---------------------|---------------------|
-| `TDLEAF_SCORE_CLIP_PAWNS` | 0.5 (≥ 200 cp floor) | Less clipping; more sensitive to large swings | More aggressive attenuation of large score changes |
+| `TDLEAF_SCORE_CLIP_PAWNS` | 0.5 (with 100 cp floor on `value[PAWN]`) | Less clipping; more sensitive to large swings | More aggressive attenuation of large score changes |
 | `TDLEAF_ID_VAR_SIGMA2` | 625 cp² | More tolerant of unstable ID scores | Stronger down-weighting of ID-unstable positions |
 
 Both approaches are active simultaneously by default.  Use the ablation plan in
