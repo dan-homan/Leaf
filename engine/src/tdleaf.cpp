@@ -224,6 +224,7 @@ void tdleaf_update_after_game(TDGameRecord &rec, float result, const char *save_
     td_batch_pending++;
 
     if (td_batch_pending >= TDLEAF_BATCH_SIZE) {
+        nnue_mean_center_psqt_gradients();
         nnue_clip_gradients(TDLEAF_GRAD_CLIP_NORM);
         nnue_apply_gradients();
         nnue_requantize_fc();
@@ -344,6 +345,7 @@ void tdleaf_replay(TDGameRecord &rec, float result, const char *save_path)
         // pass's tdleaf_refresh_scores() sees the updated weights.
         // LR scaled down via TDLEAF_REPLAY_LR_SCALE to soften overfitting to
         // the small replay buffer.
+        nnue_mean_center_psqt_gradients();
         nnue_clip_gradients(TDLEAF_GRAD_CLIP_NORM);
         nnue_apply_gradients(TDLEAF_REPLAY_LR_SCALE);
         nnue_requantize_fc();
@@ -366,6 +368,7 @@ void tdleaf_flush_batch(const char *save_path)
 {
     if (td_batch_pending <= 0) return;
 
+    nnue_mean_center_psqt_gradients();
     nnue_clip_gradients(TDLEAF_GRAD_CLIP_NORM);
     nnue_apply_gradients();
     nnue_requantize_fc();

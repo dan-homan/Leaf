@@ -937,6 +937,45 @@ static const TDLeafLRMultipliers &tdleaf_lr_multipliers()
 }
 
 // ---------------------------------------------------------------------------
+// nnue_mean_center_psqt_gradients — subtract the per-(slot, bucket) mean from
+// PSQT gradients so PSQT learns only positional (per-square) corrections; the
+// uniform slot-mean component is the material-scale shift and belongs to
+// dense piece_val instead.
+//
+// Slots (from halfkav2_feature index structure):
+//   fi % 704 / 64 → 0=own pawn, 1=opp pawn, 2=own knight, ...
+//                    8=own queen, 9=opp queen, 10=king (both)
+//
+// Run before nnue_clip_gradients() so the about-to-be-removed slot-mean does
+// not inflate the global L2 norm and throttle other layers' updates.  No-op
+// when piece_val is not being trained or when PSQT gradients are absent.
+// ---------------------------------------------------------------------------
+void nnue_mean_center_psqt_gradients()
+{
+    if (!piece_val_active || !grad_psqt_w || !ft_dirty) return;
+
+    float slot_sum  [11][NNUE_PSQT_BKTS] = {};
+    int   slot_count[11] = {};
+    for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
+        if (!ft_dirty[fi]) continue;
+        int slot = (fi % 704) / 64;
+        slot_count[slot]++;
+        float *gpw = grad_psqt_w + (size_t)fi * NNUE_PSQT_BKTS;
+        for (int b = 0; b < NNUE_PSQT_BKTS; b++)
+            slot_sum[slot][b] += gpw[b];
+    }
+    for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
+        if (!ft_dirty[fi]) continue;
+        int slot = (fi % 704) / 64;
+        if (slot_count[slot] < 2) continue;
+        float *gpw = grad_psqt_w + (size_t)fi * NNUE_PSQT_BKTS;
+        float inv_n = 1.0f / (float)slot_count[slot];
+        for (int b = 0; b < NNUE_PSQT_BKTS; b++)
+            gpw[b] -= slot_sum[slot][b] * inv_n;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // nnue_clip_gradients — compute global L2 norm of all gradient arrays and
 // scale all gradients by max_norm/norm if the norm exceeds max_norm.
 // Returns the pre-clip norm.  If max_norm <= 0, does nothing (returns 0).
@@ -1202,39 +1241,9 @@ void nnue_apply_gradients(float lr_scale)
     memset(grad_l2_b, 0, sizeof(grad_l2_b));
 
     // FT/PSQT: only iterate over dirty feature rows (sparse update).
+    // PSQT mean-centering runs in nnue_mean_center_psqt_gradients(), called
+    // before nnue_clip_gradients() so the slot-mean does not enter the L2 norm.
     if (ft_dirty) {
-        // Mean-center PSQT gradients per piece-type slot before applying.
-        // This forces PSQT to learn only positional (per-square) corrections,
-        // not material-scale shifts — those are handled by dense piece_val.
-        //
-        // Slots (from halfkav2_feature index structure):
-        //   fi % 704 / 64 → 0=own pawn, 1=opp pawn, 2=own knight, ...
-        //                    8=own queen, 9=opp queen, 10=king (both)
-        // For each slot × PSQT bucket, compute the mean gradient across all
-        // dirty features and subtract it.  This removes the uniform component
-        // (material correction) while preserving per-square variation.
-        if (piece_val_active && grad_psqt_w) {
-            float  slot_sum  [11][NNUE_PSQT_BKTS] = {};
-            int    slot_count[11] = {};
-            for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
-                if (!ft_dirty[fi]) continue;
-                int slot = (fi % 704) / 64;
-                slot_count[slot]++;
-                float *gpw = grad_psqt_w + (size_t)fi * NNUE_PSQT_BKTS;
-                for (int b = 0; b < NNUE_PSQT_BKTS; b++)
-                    slot_sum[slot][b] += gpw[b];
-            }
-            for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
-                if (!ft_dirty[fi]) continue;
-                int slot = (fi % 704) / 64;
-                if (slot_count[slot] < 2) continue;
-                float *gpw = grad_psqt_w + (size_t)fi * NNUE_PSQT_BKTS;
-                float inv_n = 1.0f / (float)slot_count[slot];
-                for (int b = 0; b < NNUE_PSQT_BKTS; b++)
-                    gpw[b] -= slot_sum[slot][b] * inv_n;
-            }
-        }
-
         for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
             if (!ft_dirty[fi]) continue;
             // FT weights — per-weight RMSProp (no m; FT rows are too sparse for

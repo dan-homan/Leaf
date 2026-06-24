@@ -204,6 +204,13 @@ void nnue_forward_fp32(const int16_t acc[2][NNUE_HALF_DIMS],
 void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
                                bool replay_mode = false);
 
+// Subtract the per-(slot, bucket) mean from PSQT gradients.  Removes the
+// material-scale (uniform) component so PSQT learns only positional
+// corrections; piece_val absorbs the material shift instead.  Call BEFORE
+// nnue_clip_gradients() so the slot-mean does not inflate the L2 norm.
+// No-op when piece_val is not being trained.
+void nnue_mean_center_psqt_gradients();
+
 // Clip gradients by global L2 norm.  Returns pre-clip norm (0 if disabled).
 float nnue_clip_gradients(float max_norm);
 
