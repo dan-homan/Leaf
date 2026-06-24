@@ -214,6 +214,12 @@ void nnue_mean_center_psqt_gradients();
 // Clip gradients by global L2 norm.  Returns pre-clip norm (0 if disabled).
 float nnue_clip_gradients(float max_norm);
 
+// Dump running L2-clip telemetry to stderr (call count, fire count, norm
+// min/mean/max, log-spaced histogram).  Non-destructive — counters keep
+// accumulating.  Auto-printed every N calls inside nnue_clip_gradients;
+// call this explicitly to force a dump at session end.
+void nnue_clip_gradient_stats_report();
+
 // Apply accumulated gradients (zero them afterwards).
 // lr_scale multiplies all category LRs (fc/ft/ft_bias/psqt/piece_val) before
 // the Adam step.  Replay passes pass <1.0 to reduce overfitting to the small

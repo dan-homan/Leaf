@@ -976,6 +976,57 @@ void nnue_mean_center_psqt_gradients()
 }
 
 // ---------------------------------------------------------------------------
+// Pre-clip gradient-norm telemetry.  Tracks call count, fire count, running
+// min/mean/max, and a log-spaced histogram so we can answer "is the L2 clip
+// guarding outliers, or just renormalising every batch?".
+// Bin i covers norms in [EDGES[i-1], EDGES[i]); bin 0 is [0, EDGES[0]); the
+// last bin is [EDGES[last], +inf).
+// ---------------------------------------------------------------------------
+static const float CLIP_NORM_HIST_EDGES[] = {
+    0.1f, 0.3f, 1.0f, 3.0f, 10.0f, 30.0f, 100.0f, 300.0f, 1000.0f,
+};
+static constexpr int CLIP_NORM_HIST_NEDGES = (int)(sizeof(CLIP_NORM_HIST_EDGES) / sizeof(float));
+static constexpr int CLIP_NORM_HIST_NBINS  = CLIP_NORM_HIST_NEDGES + 1;
+static const int   CLIP_STATS_REPORT_EVERY = 50;  // print a summary every N calls
+static uint64_t g_clip_call_count = 0;
+static uint64_t g_clip_fire_count = 0;
+static double   g_clip_norm_sum   = 0.0;
+static float    g_clip_norm_min   = HUGE_VALF;
+static float    g_clip_norm_max   = 0.0f;
+static float    g_clip_last_thr   = 0.0f;
+static uint64_t g_clip_hist[CLIP_NORM_HIST_NBINS] = {};
+
+static void nnue_clip_stats_print()
+{
+    if (g_clip_call_count == 0) return;
+    double mean = g_clip_norm_sum / (double)g_clip_call_count;
+    double fire_pct = 100.0 * (double)g_clip_fire_count / (double)g_clip_call_count;
+    fprintf(stderr,
+            "TDLeaf clip stats: N=%llu fires=%llu (%.1f%%) thr=%.2f norm min=%.3f mean=%.3f max=%.3f  hist:",
+            (unsigned long long)g_clip_call_count,
+            (unsigned long long)g_clip_fire_count,
+            fire_pct, (double)g_clip_last_thr,
+            (double)g_clip_norm_min, mean, (double)g_clip_norm_max);
+    // First bin label: "<EDGES[0]"; middle bins: "<EDGES[i]"; last bin: ">=EDGES[last]"
+    for (int i = 0; i < CLIP_NORM_HIST_NBINS; i++) {
+        if (i < CLIP_NORM_HIST_NEDGES)
+            fprintf(stderr, " <%g:%llu", (double)CLIP_NORM_HIST_EDGES[i],
+                    (unsigned long long)g_clip_hist[i]);
+        else
+            fprintf(stderr, " >=%g:%llu", (double)CLIP_NORM_HIST_EDGES[CLIP_NORM_HIST_NEDGES-1],
+                    (unsigned long long)g_clip_hist[i]);
+    }
+    fprintf(stderr, "\n");
+}
+
+// Public: dump the running clip stats (e.g. at session end / flush).
+// Non-destructive — does not reset counters.
+void nnue_clip_gradient_stats_report()
+{
+    nnue_clip_stats_print();
+}
+
+// ---------------------------------------------------------------------------
 // nnue_clip_gradients — compute global L2 norm of all gradient arrays and
 // scale all gradients by max_norm/norm if the norm exceeds max_norm.
 // Returns the pre-clip norm.  If max_norm <= 0, does nothing (returns 0).
@@ -1044,12 +1095,26 @@ float nnue_clip_gradients(float max_norm)
     }
 
     float norm = (float)sqrt(sum_sq);
+
+    // Telemetry: tally call, fire, distribution.  Periodic summary every
+    // CLIP_STATS_REPORT_EVERY calls; per-fire spam removed.
+    g_clip_call_count++;
+    g_clip_norm_sum += norm;
+    if (norm < g_clip_norm_min) g_clip_norm_min = norm;
+    if (norm > g_clip_norm_max) g_clip_norm_max = norm;
+    g_clip_last_thr = max_norm;
+    {
+        int bin = 0;
+        while (bin < CLIP_NORM_HIST_NEDGES && norm >= CLIP_NORM_HIST_EDGES[bin]) bin++;
+        g_clip_hist[bin]++;
+    }
+    if (norm > max_norm) g_clip_fire_count++;
+    if ((g_clip_call_count % CLIP_STATS_REPORT_EVERY) == 0) nnue_clip_stats_print();
+
     if (norm <= max_norm) return norm;
 
     // Scale all gradients by max_norm/norm.
     float scale = max_norm / norm;
-    fprintf(stderr, "TDLeaf: gradient norm %.3f exceeds %.1f, clipping (scale=%.4f)\n",
-            (double)norm, (double)max_norm, (double)scale);
     for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
         for (int i = 0; i < NNUE_L0_SIZE * NNUE_L0_INPUT; i++) grad_l0_w[s][i] *= scale;
         for (int i = 0; i < NNUE_L0_SIZE; i++)                 grad_l0_b[s][i] *= scale;

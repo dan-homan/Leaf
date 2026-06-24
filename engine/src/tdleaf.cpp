@@ -380,6 +380,10 @@ void tdleaf_flush_batch(const char *save_path)
 
     fprintf(stderr, "TDLeaf flush: applied partial batch of %d game(s)\n", td_batch_pending);
     td_batch_pending = 0;
+
+    // End-of-session dump of the L2-clip telemetry so we still get a summary
+    // even if the periodic cadence didn't tick on this run's call count.
+    nnue_clip_gradient_stats_report();
 }
 
 // ---------------------------------------------------------------------------
