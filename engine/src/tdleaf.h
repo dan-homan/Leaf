@@ -45,12 +45,12 @@ static const int   TDLEAF_MIN_PLIES_REP   = 40;     // skip 3-rep draws shorter 
 // piece-value drift under TDLeaf; the 100 cp floor on value[PAWN] protects
 // the --init-nnue-noprior bootstrap where value[PAWN] can clamp to 1.
 // Set to a large value to disable.
-static const float TDLEAF_SCORE_CLIP_PAWNS = 0.5f;
+static const float TDLEAF_SCORE_CLIP_PAWNS = 1.0f;
 // Approach 2 — iterative-deepening score stability weight.
 // w_t = 1 / (1 + id_score_variance / TDLEAF_ID_VAR_SIGMA2)
 // Expressed in cp²: 10000 corresponds to a 100 cp std-dev reference.
 // Larger values are more tolerant of ID score instability.
-static const float TDLEAF_ID_VAR_SIGMA2  = 625.0f;
+static const float TDLEAF_ID_VAR_SIGMA2  = 10000.0f;
 // Gradient clipping: if global L2 norm of all gradients exceeds this threshold,
 // scale all gradients by max_norm/norm.  Set to 0 to disable.
 static const float TDLEAF_GRAD_CLIP_NORM = 1.0f;
@@ -76,23 +76,50 @@ static const float TDLEAF_ADAM_STEP_CLIP = 30.0f;
 // Per-section Adam LRs.  Targets ~0.1% fractional change per Adam step at
 // each section's typical weight magnitude in the int-equivalent FP32 shadow
 // space (rule: LR ≈ 0.001 × median(|w|) measured on nn-ad9b42354671).
-// Median magnitudes per section in that net:
-//   FC0 weights = 4,  FC1 weights = 9,  FC2 weights = 68   (int8)
-//   FC0 bias = 2067,  FC1 bias = 1582,  FC2 bias = 861     (int32)
-//   FT weights = 16,  FT bias = 51                          (int16)
-//   PSQT = 13343                                            (int32)
+// Per-section magnitudes in that net (signed std vs median of absolute val):
+//                      median(|w|)   std(w)   std/med
+//   FC0 weights              3          8       2.8×    (sparse, heavy-tail)
+//   FC1 weights              7         18       2.6×    (sparse, heavy-tail)
+//   FC2 weights             68         76       1.1×    (dense, final 32→1)
+//   FC0 bias              2067       2937       1.4×
+//   FC1 bias              1582       2510       1.6×
+//   FC2 bias               861       1218       1.4×
+//   FT weights              15         44       3.0×    (~92% near zero;
+//                                                        std dominated by tail)
+//   FT bias                 51         97       1.9×
+//   PSQT                 13319      20519       1.5×    (int32)
+// Median (not std) drives LR sizing: in the sparse sections (FC0/FC1/FT
+// weights), std is dominated by the heavy upper tail rather than the bulk
+// where most updates land, so a std-based rule would over-LR by 2–3×.  std
+// is recorded here for regime-drift monitoring — if std/med ever collapses
+// toward 1 for the sparse sections, the bulk has spread and the "0.1% of
+// typical weight" interpretation no longer holds.
 // FC2 weights are dramatically larger than FC0/FC1 because the 32→1 fan-in
 // gives each FC2 weight unusually high leverage on the score; they need
 // their own LR.  FC biases are int32-scale and need a different LR than
 // the int8-scale FC weights.
+//
+// PSQT / piece_val subspace nuance: nnue_mean_center_psqt_gradients()
+// constrains PSQT updates to the per-piece-slot deviation subspace; the
+// slot-mean (material) component flows to piece_val instead.  In that
+// active subspace median(|deviation|) ≈ 665, not 13319 — so PSQT_LR0 = 13
+// is sized to the raw weight magnitude, not the subspace PSQT actually
+// moves in.  Effective Adam step is ~2% of typical deviation magnitude
+// per step (the 0.001 × median(|w|) rule applied to the subspace would
+// give PSQT_LR0 ≈ 0.67).  Empirically stable; flag for any future LR
+// sweep.  piece_val now absorbs the slot-mean component (median ~12 901)
+// and PV_LR0 = 13 ≈ 0.001 × 12.9k is correctly aligned with its active
+// subspace.
 static const float TDLEAF_ADAM_LR0         = 0.005f;  // FC0/FC1 weights (int8, median ~5)
 static const float TDLEAF_ADAM_FC2_LR0     = 0.07f;   // FC2 weights (int8, median ~68 — final 32→1 layer)
 static const float TDLEAF_ADAM_FC_BIAS_LR0 = 1.5f;    // FC biases (int32, median ~1500 across stacks)
 static const float TDLEAF_ADAM_FT_LR0      = 0.015f;  // FT weights (int16, median ~16)
 static const float TDLEAF_ADAM_FT_BIAS_LR0 = 0.02f;   // FT biases  (int16, median ~51; hedged below
                                                        // 0.001×median to limit dying-ReLU risk)
-static const float TDLEAF_ADAM_PSQT_LR0    = 13.0f;   // PSQT weights (int32, median ~13343)
-static const float TDLEAF_ADAM_PV_LR0      = 13.0f;   // dense piece values (int32, same scale as PSQT)
+static const float TDLEAF_ADAM_PSQT_LR0    = 13.0f;   // PSQT (int32; sized to raw ~13 319 — active
+                                                       // post-centering subspace is ~665, see note above)
+static const float TDLEAF_ADAM_PV_LR0      = 13.0f;   // dense piece values (int32; absorbs PSQT slot-mean
+                                                       // ~12 901 after mean-centering, well calibrated)
 static const float TDLEAF_ADAM_BETA1    = 0.9f;    // first-moment decay  (FC + FT bias + PSQT)
 static const float TDLEAF_ADAM_BETA2    = 0.999f;  // second-moment decay (all layers)
 static const float TDLEAF_ADAM_EPS      = 1e-8f;   // numerical floor
