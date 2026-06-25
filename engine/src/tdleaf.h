@@ -88,6 +88,8 @@ static const float TDLEAF_ADAM_STEP_CLIP = 30.0f;
 //                                                        std dominated by tail)
 //   FT bias                 51         97       1.9×
 //   PSQT                 13319      20519       1.5×    (int32)
+//   PSQT deviation         665       1207       1.8x    (slot mean PV removed)
+//
 // Median (not std) drives LR sizing: in the sparse sections (FC0/FC1/FT
 // weights), std is dominated by the heavy upper tail rather than the bulk
 // where most updates land, so a std-based rule would over-LR by 2–3×.  std
