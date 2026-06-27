@@ -1313,11 +1313,22 @@ void nnue_apply_gradients(float lr_scale)
     memset(grad_l2_b, 0, sizeof(grad_l2_b));
 
     // FT/PSQT: only iterate over dirty feature rows (sparse update).
-    // PSQT mean-centering runs in nnue_mean_center_psqt_gradients(), called
-    // before nnue_clip_gradients() so the slot-mean does not enter the L2 norm.
+    // PSQT mean-centering runs in nnue_mean_center_psqt_gradients() before
+    // nnue_clip_gradients() so the slot-mean does not enter the L2 norm.
+    // That zeros the gradient slot-sum but is NOT sufficient: Adam's per-weight
+    // 1/sqrt(v_hat) normalisation makes the applied step (dw) not zero-sum
+    // within a slot, since sparse features (low v) take proportionally larger
+    // steps than dense ones.  Pass 2 below post-corrects by adding the
+    // per-(slot, bucket) mean dw back to every dirty feature, restoring the
+    // slot-mean invariant exactly.  Without this, PSQT pawn slot drifted ~+13%
+    // over 50k games even with piece_val[PAWN] hard-pinned at 0.
     if (ft_dirty) {
+        float psqt_dw_sum[11][NNUE_PSQT_BKTS] = {};
+        int   psqt_dirty_count[11] = {};
+        // Pass 1: apply FT + PSQT Adam steps; accumulate per-slot PSQT dw.
         for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
             if (!ft_dirty[fi]) continue;
+            int slot = (fi % 704) / 64;
             // FT weights — per-weight RMSProp (no m; FT rows are too sparse for
             // first-moment to carry useful directional signal).
             float    *fw  = ft_weights_f32 + (size_t)fi * NNUE_HALF_DIMS;
@@ -1358,7 +1369,29 @@ void nnue_apply_gradients(float lr_scale)
                     pw[b] -= dw;  if (pd) pd[b] -= dw;
                     pcnt[b]++;
                     if (delta_psqt_cnt) delta_psqt_cnt[(size_t)fi * NNUE_PSQT_BKTS + b]++;
+                    psqt_dw_sum[slot][b] += dw;
                     gpw[b] = 0.0f;
+                }
+            }
+            psqt_dirty_count[slot]++;
+            // ft_dirty[fi] not cleared yet — Pass 2 needs to find dirty rows.
+        }
+        // Pass 2: post-Adam mean-center.  Add (slot-mean of dw) back to every
+        // dirty feature so sum_{fi dirty in slot S}(Δpw[b]) = 0 per bucket.
+        // Slots with < 2 dirty features are skipped (consistent with the
+        // gradient pre-clip centering); their slot-mean drift is bounded by
+        // dw / total-slot-size = O(1/2048) and is negligible.
+        for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
+            if (!ft_dirty[fi]) continue;
+            int slot = (fi % 704) / 64;
+            if (psqt_dirty_count[slot] >= 2) {
+                float inv_n = 1.0f / (float)psqt_dirty_count[slot];
+                float *pw = psqt_weights_f32 + (size_t)fi * NNUE_PSQT_BKTS;
+                float *pd = psqt_delta_f32 ? psqt_delta_f32 + (size_t)fi * NNUE_PSQT_BKTS : nullptr;
+                for (int b = 0; b < NNUE_PSQT_BKTS; b++) {
+                    float corr = psqt_dw_sum[slot][b] * inv_n;
+                    pw[b] += corr;
+                    if (pd) pd[b] += corr;
                 }
             }
             ft_dirty[fi] = false;
