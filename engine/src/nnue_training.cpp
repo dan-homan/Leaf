@@ -407,6 +407,28 @@ void nnue_init_zero_weights(int prior_mode)
         };
         const float *MATERIAL_CP = noprior ? MATERIAL_CP_NOPRIOR : MATERIAL_CP_NORMAL;
         const float SCALE = 5776.f / 100.f;  // cp → PSQT-int32 units
+
+        // Classical PST mean-centering: classical piece-square tables have
+        // non-zero mean across the 64 squares (e.g. pawns favour the centre,
+        // knights penalise edges).  Without centering, that bias contaminates
+        // the slot-mean target persisted in .tdleaf.bin (v11+) and the engine
+        // would treat the positional bias as part of the material level.  We
+        // pre-compute the per-(slot, bucket) PST mean and subtract it, leaving
+        // the slot-mean target as MATERIAL_CP[slot] (pure material) and the
+        // PST contribution as zero-mean positional deviation only.
+        float pst_mean[5][NNUE_PSQT_BKTS] = {};
+        if (classical) {
+            for (int slot = 0; slot < 5; slot++) {
+                for (int b = 0; b < NNUE_PSQT_BKTS; b++) {
+                    double s = 0.0;
+                    for (int sq = 0; sq < 64; sq++)
+                        s += classical_pst_cp(NNUE_BUCKET_TO_GSTAGE[b],
+                                              slot + 1, sq);
+                    pst_mean[slot][b] = (float)(s / 64.0);
+                }
+            }
+        }
+
         for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
             int fi_in_bkt = fi % PS_NB;
             int ps_slot   = fi_in_bkt / 128;
@@ -427,7 +449,8 @@ void nnue_init_zero_weights(int prior_mode)
                 float pst_cp = 0.f;
                 if (classical && ps_slot < 5)
                     pst_cp = classical_pst_cp(NNUE_BUCKET_TO_GSTAGE[b],
-                                              ps_slot + 1, sq_lookup);
+                                              ps_slot + 1, sq_lookup)
+                           - pst_mean[ps_slot][b];
                 float cp  = MATERIAL_CP[ps_slot] + pst_cp;
                 float val = (is_own ? +1.f : -1.f) * cp * SCALE;
                 fp[b] = val;
