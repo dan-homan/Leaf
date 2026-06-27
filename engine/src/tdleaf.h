@@ -113,12 +113,18 @@ static const float TDLEAF_ADAM_STEP_CLIP = 30.0f;
 // and PV_LR0 = 13 ≈ 0.001 × 12.9k is correctly aligned with its active
 // subspace.
 //
-// Gradient mean-centering alone does NOT preserve the slot-mean invariant
+// Gradient mean-centering alone does NOT preserve the slot-total invariant
 // across an Adam step: per-weight 1/sqrt(v_hat) makes the applied dw
 // non-zero-sum within a slot (sparse features take proportionally larger
 // steps).  nnue_apply_gradients adds a post-Adam pass that re-centers the
-// applied dw per (slot, bucket).  Without this, PSQT pawn-slot mean drifted
-// +13% over 50k games even with piece_val[PAWN] hard-pinned at 0.
+// applied dw per slot (aggregated across all NNUE_PSQT_BKTS buckets).  Both
+// gradient and dw centering use the per-slot AGGREGATE (sum over buckets),
+// not per-(slot, bucket) — only the slot's absolute material level is
+// anchored; the bucket structure is left free so PSQT can learn
+// phase-dependent piece values (e.g. "pawn is worth more in deep endgame"),
+// which is the entire reason HalfKAv2_hm uses 8 PSQT buckets.  Without
+// post-Adam centering, PSQT pawn-slot mean drifted +13% over 50k games even
+// with piece_val[PAWN] hard-pinned at 0.
 static const float TDLEAF_ADAM_LR0         = 0.005f;  // FC0/FC1 weights (int8, median ~5)
 static const float TDLEAF_ADAM_FC2_LR0     = 0.07f;   // FC2 weights (int8, median ~68 — final 32→1 layer)
 static const float TDLEAF_ADAM_FC_BIAS_LR0 = 1.5f;    // FC biases (int32, median ~1500 across stacks)

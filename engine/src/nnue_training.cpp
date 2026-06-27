@@ -991,24 +991,31 @@ void nnue_mean_center_psqt_gradients()
 {
     if (!piece_val_active || !grad_psqt_w || !ft_dirty) return;
 
-    float slot_sum  [11][NNUE_PSQT_BKTS] = {};
-    int   slot_count[11] = {};
+    // Per-slot aggregate (summed across all NNUE_PSQT_BKTS buckets): zeros only
+    // the slot's total gradient, leaving per-bucket relative drift free.  This
+    // is what lets the bucketed PSQT learn phase-dependent piece values
+    // (e.g. "pawn is more valuable in deep endgame") — the absolute material
+    // level (slot total) is anchored, but the distribution across buckets is
+    // unconstrained.
+    double slot_total[11] = {};
+    int    slot_count[11] = {};
     for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
         if (!ft_dirty[fi]) continue;
         int slot = (fi % 704) / 64;
         slot_count[slot]++;
-        float *gpw = grad_psqt_w + (size_t)fi * NNUE_PSQT_BKTS;
+        const float *gpw = grad_psqt_w + (size_t)fi * NNUE_PSQT_BKTS;
         for (int b = 0; b < NNUE_PSQT_BKTS; b++)
-            slot_sum[slot][b] += gpw[b];
+            slot_total[slot] += gpw[b];
     }
     for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
         if (!ft_dirty[fi]) continue;
         int slot = (fi % 704) / 64;
         if (slot_count[slot] < 2) continue;
+        float corr = (float)(slot_total[slot]
+                             / ((double)slot_count[slot] * NNUE_PSQT_BKTS));
         float *gpw = grad_psqt_w + (size_t)fi * NNUE_PSQT_BKTS;
-        float inv_n = 1.0f / (float)slot_count[slot];
         for (int b = 0; b < NNUE_PSQT_BKTS; b++)
-            gpw[b] -= slot_sum[slot][b] * inv_n;
+            gpw[b] -= corr;
     }
 }
 
@@ -1048,15 +1055,16 @@ void nnue_capture_psqt_init_slot_means()
 }
 
 // ---------------------------------------------------------------------------
-// nnue_recenter_psqt_slot_means — pin each (slot, bucket) PSQT slot-mean back
-// to its persisted init target by subtracting the per-(slot, bucket) drift
-// from every feature in that slot.  Restores the gauge invariant after multi-
-// writer merge or numerical accumulation.  No-op if targets are not valid or
-// PSQT shadow is not allocated.
+// nnue_recenter_psqt_slot_means — pin the per-slot AGGREGATE PSQT mean (summed
+// across all NNUE_PSQT_BKTS buckets) back to its persisted init target by
+// subtracting the per-slot drift uniformly across every feature × bucket cell.
+// Per-bucket distribution within a slot is left free, so the bucketed PSQT
+// can learn phase-dependent piece values (e.g. pawn worth more in deep
+// endgame) — only the absolute material level (slot total) is gauge-anchored.
 //
-// Touches all FT_INPUTS × PSQT_BKTS PSQT cells.  Also syncs the int32
-// inference array (psqt_weights) and updates psqt_delta_f32 so the persisted
-// delta reflects the post-correction state.
+// The persisted target is stored per-(slot, bucket) for forward compatibility,
+// but only its per-slot sum is used here.  Touches all FT_INPUTS × PSQT_BKTS
+// PSQT cells; also syncs the int32 inference array and psqt_delta_f32.
 // ---------------------------------------------------------------------------
 void nnue_recenter_psqt_slot_means()
 {
@@ -1065,23 +1073,31 @@ void nnue_recenter_psqt_slot_means()
     float cur_means[11][NNUE_PSQT_BKTS];
     nnue_compute_psqt_slot_means(cur_means);
 
-    float corr[11][NNUE_PSQT_BKTS];
+    // Per-slot mean across all buckets (= total / NNUE_PSQT_BKTS).
+    float corr[11];
     bool  any_corr = false;
     for (int slot = 0; slot < 11; slot++) {
+        double init_total = 0.0;
+        double cur_total  = 0.0;
         for (int b = 0; b < NNUE_PSQT_BKTS; b++) {
-            corr[slot][b] = psqt_init_slot_means[slot][b] - cur_means[slot][b];
-            if (corr[slot][b] != 0.0f) any_corr = true;
+            init_total += psqt_init_slot_means[slot][b];
+            cur_total  += cur_means[slot][b];
         }
+        // corr is added per cell; total drift per slot = corr × NNUE_PSQT_BKTS.
+        corr[slot] = (float)((init_total - cur_total) / NNUE_PSQT_BKTS);
+        if (corr[slot] != 0.0f) any_corr = true;
     }
     if (!any_corr) return;
 
     for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
         int slot = (fi % 704) / 64;
+        float c = corr[slot];
+        if (c == 0.0f) continue;
         float *pw = psqt_weights_f32 + (size_t)fi * NNUE_PSQT_BKTS;
         float *pd = psqt_delta_f32 ? psqt_delta_f32 + (size_t)fi * NNUE_PSQT_BKTS : nullptr;
         for (int b = 0; b < NNUE_PSQT_BKTS; b++) {
-            pw[b] += corr[slot][b];
-            if (pd) pd[b] += corr[slot][b];
+            pw[b] += c;
+            if (pd) pd[b] += c;
         }
     }
     // Resync the int32 inference array.
@@ -1423,17 +1439,19 @@ void nnue_apply_gradients(float lr_scale)
 
     // FT/PSQT: only iterate over dirty feature rows (sparse update).
     // PSQT mean-centering runs in nnue_mean_center_psqt_gradients() before
-    // nnue_clip_gradients() so the slot-mean does not enter the L2 norm.
-    // That zeros the gradient slot-sum but is NOT sufficient: Adam's per-weight
-    // 1/sqrt(v_hat) normalisation makes the applied step (dw) not zero-sum
-    // within a slot, since sparse features (low v) take proportionally larger
-    // steps than dense ones.  Pass 2 below post-corrects by adding the
-    // per-(slot, bucket) mean dw back to every dirty feature, restoring the
-    // slot-mean invariant exactly.  Without this, PSQT pawn slot drifted ~+13%
-    // over 50k games even with piece_val[PAWN] hard-pinned at 0.
+    // nnue_clip_gradients() so the slot-total does not enter the L2 norm.
+    // That zeros the gradient slot-total but is NOT sufficient: Adam's
+    // per-weight 1/sqrt(v_hat) normalisation makes the applied step (dw) not
+    // zero-sum within a slot, since sparse features (low v) take
+    // proportionally larger steps than dense ones.  Pass 2 below post-corrects
+    // by spreading the per-slot mean dw back across every (dirty fi, bucket),
+    // restoring the slot-total invariant exactly while leaving the per-bucket
+    // distribution unconstrained (allows phase-dependent piece-value drift).
+    // Without this, PSQT pawn slot drifted ~+13% over 50k games even with
+    // piece_val[PAWN] hard-pinned at 0.
     if (ft_dirty) {
-        float psqt_dw_sum[11][NNUE_PSQT_BKTS] = {};
-        int   psqt_dirty_count[11] = {};
+        double psqt_dw_total[11] = {};
+        int    psqt_dirty_count[11] = {};
         // Pass 1: apply FT + PSQT Adam steps; accumulate per-slot PSQT dw.
         for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
             if (!ft_dirty[fi]) continue;
@@ -1478,27 +1496,30 @@ void nnue_apply_gradients(float lr_scale)
                     pw[b] -= dw;  if (pd) pd[b] -= dw;
                     pcnt[b]++;
                     if (delta_psqt_cnt) delta_psqt_cnt[(size_t)fi * NNUE_PSQT_BKTS + b]++;
-                    psqt_dw_sum[slot][b] += dw;
+                    psqt_dw_total[slot] += dw;
                     gpw[b] = 0.0f;
                 }
             }
             psqt_dirty_count[slot]++;
             // ft_dirty[fi] not cleared yet — Pass 2 needs to find dirty rows.
         }
-        // Pass 2: post-Adam mean-center.  Add (slot-mean of dw) back to every
-        // dirty feature so sum_{fi dirty in slot S}(Δpw[b]) = 0 per bucket.
-        // Slots with < 2 dirty features are skipped (consistent with the
-        // gradient pre-clip centering); their slot-mean drift is bounded by
-        // dw / total-slot-size = O(1/2048) and is negligible.
+        // Pass 2: post-Adam aggregate centering.  Spread the per-slot mean dw
+        // (summed across all NNUE_PSQT_BKTS buckets) back to every dirty
+        // feature × bucket cell so Σ_{fi dirty in slot S, b}(Δpw) = 0.  Buckets
+        // can drift relative to each other (which is what lets PSQT learn
+        // phase-dependent piece values via the HalfKAv2_hm bucket structure);
+        // only the slot's absolute material level is anchored.  Slots with < 2
+        // dirty features are skipped — their drift is bounded by O(1/2048).
         for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
             if (!ft_dirty[fi]) continue;
             int slot = (fi % 704) / 64;
             if (psqt_dirty_count[slot] >= 2) {
-                float inv_n = 1.0f / (float)psqt_dirty_count[slot];
+                float corr = (float)(psqt_dw_total[slot]
+                                     / ((double)psqt_dirty_count[slot]
+                                        * NNUE_PSQT_BKTS));
                 float *pw = psqt_weights_f32 + (size_t)fi * NNUE_PSQT_BKTS;
                 float *pd = psqt_delta_f32 ? psqt_delta_f32 + (size_t)fi * NNUE_PSQT_BKTS : nullptr;
                 for (int b = 0; b < NNUE_PSQT_BKTS; b++) {
-                    float corr = psqt_dw_sum[slot][b] * inv_n;
                     pw[b] += corr;
                     if (pd) pd[b] += corr;
                 }
