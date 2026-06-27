@@ -1062,9 +1062,12 @@ void nnue_capture_psqt_init_slot_means()
 // can learn phase-dependent piece values (e.g. pawn worth more in deep
 // endgame) — only the absolute material level (slot total) is gauge-anchored.
 //
-// The persisted target is stored per-(slot, bucket) for forward compatibility,
-// but only its per-slot sum is used here.  Touches all FT_INPUTS × PSQT_BKTS
-// PSQT cells; also syncs the int32 inference array and psqt_delta_f32.
+// Touches psqt_weights_f32 only — NOT psqt_delta_f32.  The correction is a
+// gauge restoration, not a user-applied delta: if we baked it into pd it would
+// be re-applied at every subsequent merge cycle (since the merge protocol does
+// pw = file_value + pd), causing geometric error growth.  pw is always set
+// directly to the gauge-correct value; pd continues to track only the actual
+// per-batch updates.  Also syncs the int32 inference array.
 // ---------------------------------------------------------------------------
 void nnue_recenter_psqt_slot_means()
 {
@@ -1094,11 +1097,8 @@ void nnue_recenter_psqt_slot_means()
         float c = corr[slot];
         if (c == 0.0f) continue;
         float *pw = psqt_weights_f32 + (size_t)fi * NNUE_PSQT_BKTS;
-        float *pd = psqt_delta_f32 ? psqt_delta_f32 + (size_t)fi * NNUE_PSQT_BKTS : nullptr;
-        for (int b = 0; b < NNUE_PSQT_BKTS; b++) {
+        for (int b = 0; b < NNUE_PSQT_BKTS; b++)
             pw[b] += c;
-            if (pd) pd[b] += c;
-        }
     }
     // Resync the int32 inference array.
     if (psqt_weights) {
@@ -2205,6 +2205,18 @@ bool nnue_save_fc_weights(const char *path)
         memset(ft_bias_delta,   0, sizeof(ft_bias_delta));
         memset(delta_piece_val, 0, sizeof(delta_piece_val));
     }
+
+    // ---- Restore PSQT slot-mean gauge after merge ----
+    // The merge above replaced our in-memory shadow with (file_value + pd),
+    // which doesn't preserve the per-slot-aggregate gauge invariant (each
+    // worker's pd has zero slot-total per the per-batch centering, but the
+    // file_value carries whatever gauge state the previous writers left it
+    // in — possibly drifted from accumulated multi-worker merge artifacts).
+    // Re-anchor the slot totals to the persisted init targets before writing,
+    // so the file we emit has gauge-correct dirty rows.  Without this, drift
+    // compounds geometrically across merge cycles and causes catastrophic
+    // piece-value blow-ups (observed: piece_val[Bishop] +515 cp in 571 batches).
+    nnue_recenter_psqt_slot_means();
 
     // Sync value[] with the (possibly co-worker-updated) piece_val.
     if (piece_val_active)
