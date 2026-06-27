@@ -30,7 +30,7 @@ from pathlib import Path
 
 # Constants matching nnue.cpp / nnue.h
 TDLEAF_MAGIC   = 0x544D4C46  # "TMLF"
-TDLEAF_VERSION = 10
+TDLEAF_VERSION = 11
 TDLEAF_SCALE   = 128.0
 FNV_OFFSET     = 0xcbf29ce484222325
 FNV_PRIME      = 0x100000001b3
@@ -202,6 +202,13 @@ class TDLeafFile:
         self.psqt_m_rows = {}
         # Sparse FT v section (v8+): dict keyed by feature index → v_ft[HALF_DIMS]
         self.ft_v_rows = {}
+        # PSQT init slot-means (v11+): per-(slot, bucket) re-centering targets.
+        # 11 slots × PSQT_BKTS floats.  Identical across all .tdleaf.bin files
+        # written from the same --init-nnue session, so merge is trivial (take
+        # one source's copy).  Pre-v11 files default to zeros and merge will
+        # prefer any non-zero source.
+        self.psqt_init_slot_means = np.zeros((11, PSQT_BKTS), dtype=np.float32)
+        self.psqt_init_slot_means_loaded = False
 
     @classmethod
     def load(cls, path):
@@ -211,7 +218,7 @@ class TDLeafFile:
             version = read_u32(f)
             if magic != TDLEAF_MAGIC:
                 raise ValueError(f"{path}: bad magic 0x{magic:08X} (expected 0x{TDLEAF_MAGIC:08X})")
-            if version not in (2, 3, 4, 5, 6, 7, 8, 9, 10):
+            if version not in (2, 3, 4, 5, 6, 7, 8, 9, 10, 11):
                 raise ValueError(f"{path}: unsupported version {version}")
             obj.version = version
 
@@ -295,6 +302,12 @@ class TDLeafFile:
                         break
                     obj.ft_v_rows[fi] = read_f32_array(f, HALF_DIMS)
 
+            # v11+: PSQT init slot-means used by engine load-time re-centering.
+            if version >= 11:
+                arr = read_f32_array(f, 11 * PSQT_BKTS)
+                obj.psqt_init_slot_means = arr.reshape(11, PSQT_BKTS).astype(np.float32).copy()
+                obj.psqt_init_slot_means_loaded = True
+
         return obj
 
     def save(self, path):
@@ -356,6 +369,9 @@ class TDLeafFile:
             for fi in sorted_ftv_fi:
                 f.write(struct.pack('<I', fi))
                 write_f32_array(f, self.ft_v_rows[fi])
+
+            # PSQT init slot-means (v11): 11 × PSQT_BKTS floats.
+            write_f32_array(f, self.psqt_init_slot_means.astype(np.float32).reshape(-1))
 
 
 # ---------------------------------------------------------------------------
@@ -714,6 +730,21 @@ def merge_files(files, output_base, baseline_path=None, report=False):
     for fi in sorted(all_ftv_fi):
         vals = [td.ft_v_rows.get(fi, zero_ftv) for td in loaded]
         out.ft_v_rows[fi] = np.maximum.reduce(vals)
+
+    # --- PSQT init slot-means (v11) ---
+    # These are set once at --init-nnue time and should be identical across all
+    # inputs from the same init session.  Take the first loaded copy; warn on
+    # any mismatch (would indicate inputs come from different init sessions).
+    sources = [td for td in loaded if td.psqt_init_slot_means_loaded]
+    if sources:
+        out.psqt_init_slot_means = sources[0].psqt_init_slot_means.copy()
+        out.psqt_init_slot_means_loaded = True
+        for td in sources[1:]:
+            if not np.array_equal(td.psqt_init_slot_means, out.psqt_init_slot_means):
+                print("WARNING: PSQT init slot-means differ across input files — "
+                      "inputs may come from different --init-nnue sessions.",
+                      file=sys.stderr)
+                break
 
     # --- Write .nnue if baseline provided.  This runs before the .tdleaf.bin
     # save so we can stamp the OUTPUT .nnue's FT content hash into the
