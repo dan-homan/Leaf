@@ -411,7 +411,8 @@ bool nnue_write_nnue(const char *dst_path)
         const char *prior_desc;
         switch (nnue_init_prior_mode) {
             case NNUE_PRIOR_NOPRIOR:
-                prior_desc = "PSQT=0, piece_val=0 (noprior)";
+                prior_desc = "PSQT=symmetric uniform 100 cp (own=+V,enemy=-V; "
+                             "P=N=B=R=Q=100 cp); piece_val=0 (noprior)";
                 break;
             case NNUE_PRIOR_CLASSICAL:
                 prior_desc = "PSQT=classical material + 4-stage piece-square tables "

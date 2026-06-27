@@ -153,7 +153,9 @@ int main(int argc, char *argv[])
     // --init-nnue: create a fresh random-initialised .nnue without reading an existing one.
     //   PSQT = classical material (own=+V, enemy=-V; P=100 N=377 B=399 R=596 Q=1197 cp,
     //   same across all 8 buckets); piece_val = 0 (learns corrections).
-    // --init-nnue-noprior: PSQT = 0, piece_val = 0 — learns everything from scratch.
+    // --init-nnue-noprior: PSQT = uniform 100 cp (own=+V, enemy=-V; P=N=B=R=Q=100 cp,
+    //   same across all 8 buckets); piece_val = 0.  Materially blind from move 1 but
+    //   value[PAWN] stays anchored at 100 cp; N/B/R/Q learn from a 100 cp baseline.
     // --init-nnue-classical: PSQT = classical material + 4-stage piece-square tables
     //   (gstage-interpolated across the 8 NNUE buckets); piece_val = 0.  Use to bootstrap
     //   training from the classical hand-tuned positional prior; lets FC/FT learn finer

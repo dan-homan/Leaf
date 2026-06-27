@@ -364,7 +364,10 @@ void nnue_init_zero_weights(int prior_mode)
     // Enemy-piece features stay at zero: psqt_diff = own_val − 0 = own_val, giving the
     // correct one-sided material contribution without double-counting.
     //
-    // noprior: PSQT=0, piece_val=0 — everything learned from scratch.
+    // noprior: PSQT = uniform 100 cp per piece type (P=N=B=R=Q=100), piece_val = 0.
+    // Materially blind from move 1 but value[PAWN] stays at 100 cp, preserving
+    // SEE/material-accounting semantics; N/B/R/Q differentiate from 100 cp via
+    // piece_val updates during training.
     if (ft_weights_f32) {
         size_t ft_sz   = (size_t)NNUE_FT_INPUTS * NNUE_HALF_DIMS;
         size_t psqt_sz = (size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS;
@@ -386,46 +389,49 @@ void nnue_init_zero_weights(int prior_mode)
         // Feature layout within each king-bucket (PS_NB=704 entries per bucket):
         //   ps_slot = (fi % PS_NB) / 128 → 0=pawn, 1=knight, 2=bishop, 3=rook, 4=queen, 5=king
         //   is_own  = (fi % PS_NB) % 128 < 64  (own-piece squares are [0,63], enemy are [64,127])
-        if (noprior) {
-            memset(psqt_weights_f32, 0, psqt_sz * sizeof(float));
-            memset(psqt_weights,     0, psqt_sz * sizeof(int32_t));
-        } else {
-            // Material prior (cp) shared by both MATERIAL and CLASSICAL modes.
-            static const float MATERIAL_CP[6] = {
-                100.f,   // PAWN
-                377.f,   // KNIGHT
-                399.f,   // BISHOP
-                596.f,   // ROOK
-                1197.f,  // QUEEN
-                0.f,     // KING (PSQT contribution captured via king bucket)
-            };
-            const float SCALE = 5776.f / 100.f;  // cp → PSQT-int32 units
-            for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
-                int fi_in_bkt = fi % PS_NB;
-                int ps_slot   = fi_in_bkt / 128;
-                bool is_own   = (fi_in_bkt % 128) < 64;
-                int  persp_sq = (fi_in_bkt % 128) & 63;
-                // sq_lookup is in piece_sq[] table coordinates.  Table is indexed
-                // "from black's POV"; classical does pst[whitef[sq]] for white pieces
-                // and pst[sq] for black.  In NNUE persp-relative coords:
-                //   own piece at persp_sq Y → equivalent to white piece at real Y
-                //     (white-persp: no flip; black-persp: real sq = Y^56, then
-                //      whitef[Y^56] = Y — both reduce to table-index Y^56).
-                //   enemy piece at persp_sq Y → equivalent to black piece at real Y
-                //     (table-index Y, no flip).
-                int sq_lookup = is_own ? (persp_sq ^ 56) : persp_sq;
-                float   *fp = psqt_weights_f32 + (size_t)fi * NNUE_PSQT_BKTS;
-                int32_t *ip = psqt_weights     + (size_t)fi * NNUE_PSQT_BKTS;
-                for (int b = 0; b < NNUE_PSQT_BKTS; b++) {
-                    float pst_cp = 0.f;
-                    if (classical && ps_slot < 5)
-                        pst_cp = classical_pst_cp(NNUE_BUCKET_TO_GSTAGE[b],
-                                                  ps_slot + 1, sq_lookup);
-                    float cp  = MATERIAL_CP[ps_slot] + pst_cp;
-                    float val = (is_own ? +1.f : -1.f) * cp * SCALE;
-                    fp[b] = val;
-                    ip[b] = (int32_t)roundf(val);
-                }
+        // Per-piece-type baseline PSQT (cp).  MATERIAL/CLASSICAL use classical
+        // values; CLASSICAL additionally adds the 4-stage piece-square table.
+        // NOPRIOR uses uniform 100 cp across all pieces: a minimal material
+        // prior that anchors value[PAWN] = value[N] = value[B] = value[R]
+        // = value[Q] = 100 cp from the start.  This preserves the SEE /
+        // material-accounting semantics that consume value[PAWN] as cp and
+        // works with the PAWN-pinned gauge fix (TDLEAF_PIN_PAWN_VALUE in
+        // tdleaf.h).  N/B/R/Q differentiate via piece_val_f32 updates during
+        // training; the engine is materially blind from move 1 but never
+        // sees value[PAWN] clamp to 1.
+        static const float MATERIAL_CP_NORMAL[6] = {
+            100.f, 377.f, 399.f, 596.f, 1197.f, 0.f,
+        };
+        static const float MATERIAL_CP_NOPRIOR[6] = {
+            100.f, 100.f, 100.f, 100.f, 100.f, 0.f,
+        };
+        const float *MATERIAL_CP = noprior ? MATERIAL_CP_NOPRIOR : MATERIAL_CP_NORMAL;
+        const float SCALE = 5776.f / 100.f;  // cp → PSQT-int32 units
+        for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
+            int fi_in_bkt = fi % PS_NB;
+            int ps_slot   = fi_in_bkt / 128;
+            bool is_own   = (fi_in_bkt % 128) < 64;
+            int  persp_sq = (fi_in_bkt % 128) & 63;
+            // sq_lookup is in piece_sq[] table coordinates.  Table is indexed
+            // "from black's POV"; classical does pst[whitef[sq]] for white pieces
+            // and pst[sq] for black.  In NNUE persp-relative coords:
+            //   own piece at persp_sq Y → equivalent to white piece at real Y
+            //     (white-persp: no flip; black-persp: real sq = Y^56, then
+            //      whitef[Y^56] = Y — both reduce to table-index Y^56).
+            //   enemy piece at persp_sq Y → equivalent to black piece at real Y
+            //     (table-index Y, no flip).
+            int sq_lookup = is_own ? (persp_sq ^ 56) : persp_sq;
+            float   *fp = psqt_weights_f32 + (size_t)fi * NNUE_PSQT_BKTS;
+            int32_t *ip = psqt_weights     + (size_t)fi * NNUE_PSQT_BKTS;
+            for (int b = 0; b < NNUE_PSQT_BKTS; b++) {
+                float pst_cp = 0.f;
+                if (classical && ps_slot < 5)
+                    pst_cp = classical_pst_cp(NNUE_BUCKET_TO_GSTAGE[b],
+                                              ps_slot + 1, sq_lookup);
+                float cp  = MATERIAL_CP[ps_slot] + pst_cp;
+                float val = (is_own ? +1.f : -1.f) * cp * SCALE;
+                fp[b] = val;
+                ip[b] = (int32_t)roundf(val);
             }
         }
         memset(ft_weights_cnt,   0, ft_sz   * sizeof(uint32_t));
@@ -468,7 +474,8 @@ void nnue_init_zero_weights(int prior_mode)
     nnue_zero_initialized = true;
     nnue_init_prior_mode  = prior_mode;
     const char *psqt_desc;
-    if (noprior)         psqt_desc = "zero (noprior)";
+    if (noprior)         psqt_desc = "symmetric uniform 100 cp "
+                                     "(own=+V,enemy=-V; P=N=B=R=Q=100 cp) (noprior)";
     else if (classical)  psqt_desc = "classical material + 4-stage piece-square tables "
                                      "(gstage-interpolated across 8 buckets; "
                                      "P=100 N=377 B=399 R=596 Q=1197 cp + pst)";
@@ -1401,6 +1408,14 @@ void nnue_apply_gradients(float lr_scale)
         };
         bool pv_changed = false;
         for (int pt = 0; pt < 6; pt++) {
+            // Gauge fix: piece_val[PAWN] is pinned at its init value (see
+            // TDLEAF_PIN_PAWN_VALUE in tdleaf.h).  Discard the accumulated
+            // pawn gradient so it doesn't leak into telemetry or the next
+            // batch; leave moments (m, v) untouched.
+            if (TDLEAF_PIN_PAWN_VALUE && pt == PAWN - 1) {
+                grad_piece_val[pt] = 0.0f;
+                continue;
+            }
             if (grad_piece_val[pt] == 0.0f) continue;
             float dw = do_step_pv(grad_piece_val[pt],
                                   m_piece_val[pt], v_piece_val[pt],

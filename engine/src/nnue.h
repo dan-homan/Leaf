@@ -143,7 +143,10 @@ int nnue_evaluate(const NNUEAccumulator &acc, int stm, int piece_count);
 //   NNUE_PRIOR_MATERIAL  — PSQT = classical material only (own=+V, enemy=-V,
 //                          P=100 N=377 B=399 R=596 Q=1197 cp), all 8 buckets equal.
 //                          piece_val = 0 (learns corrections).
-//   NNUE_PRIOR_NOPRIOR   — PSQT = 0, piece_val = 0; everything learned from scratch.
+//   NNUE_PRIOR_NOPRIOR   — PSQT = uniform 100 cp (P=N=B=R=Q=100, symmetric own/enemy),
+//                          piece_val = 0.  Materially blind from move 1 but
+//                          value[PAWN] is anchored at 100 cp; N/B/R/Q learn
+//                          their corrections via piece_val from a 100 cp baseline.
 //   NNUE_PRIOR_CLASSICAL — PSQT = material + 4-stage classical piece-square tables,
 //                          gstage-interpolated per NNUE bucket; piece_val = 0.
 // ---------------------------------------------------------------------------

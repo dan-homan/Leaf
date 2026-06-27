@@ -41,9 +41,9 @@ static const int   TDLEAF_MIN_PLIES_REP   = 40;     // skip 3-rep draws shorter 
 // When the white-POV score change between consecutive moves exceeds
 // TDLEAF_SCORE_CLIP_PAWNS × max(value[PAWN], 100 cp), the (d[t+1]−d[t])
 // contribution to the eligibility trace is scaled down proportionally.
-// Expressed as a multiple of the current pawn value so the threshold tracks
-// piece-value drift under TDLeaf; the 100 cp floor on value[PAWN] protects
-// the --init-nnue-noprior bootstrap where value[PAWN] can clamp to 1.
+// With TDLEAF_PIN_PAWN_VALUE the threshold is effectively constant at
+// TDLEAF_SCORE_CLIP_PAWNS × 100 cp; the floor on value[PAWN] is retained
+// as belt-and-braces against any future configuration that disables the pin.
 // Set to a large value to disable.
 static const float TDLEAF_SCORE_CLIP_PAWNS = 1.0f;
 // Approach 2 — iterative-deepening score stability weight.
@@ -122,6 +122,17 @@ static const float TDLEAF_ADAM_PSQT_LR0    = 13.0f;   // PSQT (int32; sized to r
                                                        // post-centering subspace is ~665, see note above)
 static const float TDLEAF_ADAM_PV_LR0      = 13.0f;   // dense piece values (int32; absorbs PSQT slot-mean
                                                        // ~12 901 after mean-centering, well calibrated)
+// Pin piece_val[PAWN] at its init value (skip its Adam update).  Together with
+// nnue_mean_center_psqt_gradients() (which zeroes the slot-mean PSQT gradient),
+// this completes the gauge fix: PSQT carries spatial deviation, piece_val
+// carries per-piece material, and PAWN is the unit reference — fixing the
+// overall material scale that TDLEAF_K=220 would otherwise leave free.  N/B/R/Q
+// piece_val still adapt freely (their values become ratios to the pinned pawn).
+// Without this pin, piece_val[PAWN] climbs without ceiling because the loss has
+// no anchor for absolute material magnitude; the resulting value[PAWN] drift
+// affects downstream code that consumes it as cp (SEE, endgame draw detection,
+// UCI score display, this file's SCORE_CLIP_PAWNS multiplier).
+static const bool  TDLEAF_PIN_PAWN_VALUE = true;
 static const float TDLEAF_ADAM_BETA1    = 0.9f;    // first-moment decay  (FC + FT bias + PSQT)
 static const float TDLEAF_ADAM_BETA2    = 0.999f;  // second-moment decay (all layers)
 static const float TDLEAF_ADAM_EPS      = 1e-8f;   // numerical floor
