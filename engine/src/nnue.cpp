@@ -101,6 +101,13 @@ static void nnue_update_content_hash()
 static float *psqt_weights_f32 = nullptr;
 static float  piece_val_f32[6] = {};    // one value per piece type (PAWN..KING), PSQT raw units
 static bool   piece_val_active = false;
+// Per-(slot, bucket) PSQT slot-means snapshotted at init time and persisted in
+// .tdleaf.bin (v11+).  nnue_recenter_psqt_slot_means() pins the current shadow
+// to these values after every .tdleaf.bin load, neutralising any drift the
+// multi-writer merge protocol may have introduced.  Slots match the layout in
+// nnue_mean_center_psqt_gradients(): 11 slots × 8 buckets.
+static float  psqt_init_slot_means[11][8] = {};
+static bool   psqt_init_slot_means_valid = false;
 
 // ---------------------------------------------------------------------------
 // HalfKAv2_hm lookup tables

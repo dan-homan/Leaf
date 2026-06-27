@@ -473,6 +473,13 @@ void nnue_init_zero_weights(int prior_mode)
 
     nnue_zero_initialized = true;
     nnue_init_prior_mode  = prior_mode;
+
+    // Snapshot per-(slot, bucket) init PSQT slot-means.  These are persisted in
+    // .tdleaf.bin (v11+) and used as the re-centering target at every subsequent
+    // load — keeps PSQT slot-mean (= material level) invariant against
+    // multi-writer merge drift and accumulated numerical error.
+    nnue_capture_psqt_init_slot_means();
+
     const char *psqt_desc;
     if (noprior)         psqt_desc = "symmetric uniform 100 cp "
                                      "(own=+V,enemy=-V; P=N=B=R=Q=100 cp) (noprior)";
@@ -979,6 +986,85 @@ void nnue_mean_center_psqt_gradients()
         float inv_n = 1.0f / (float)slot_count[slot];
         for (int b = 0; b < NNUE_PSQT_BKTS; b++)
             gpw[b] -= slot_sum[slot][b] * inv_n;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// nnue_compute_psqt_slot_means — fill means[11][8] with the average value of
+// psqt_weights_f32 across all features in each (slot, bucket) cell.
+// ---------------------------------------------------------------------------
+static void nnue_compute_psqt_slot_means(float means[11][NNUE_PSQT_BKTS])
+{
+    if (!psqt_weights_f32) return;
+    double  sum  [11][NNUE_PSQT_BKTS] = {};
+    int     n    [11] = {};
+    for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
+        int slot = (fi % 704) / 64;
+        n[slot]++;
+        const float *pw = psqt_weights_f32 + (size_t)fi * NNUE_PSQT_BKTS;
+        for (int b = 0; b < NNUE_PSQT_BKTS; b++)
+            sum[slot][b] += pw[b];
+    }
+    for (int slot = 0; slot < 11; slot++) {
+        float inv_n = n[slot] > 0 ? 1.0f / (float)n[slot] : 0.0f;
+        for (int b = 0; b < NNUE_PSQT_BKTS; b++)
+            means[slot][b] = (float)(sum[slot][b] * (double)inv_n);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// nnue_capture_psqt_init_slot_means — snapshot the current PSQT slot-means as
+// the persisted re-centering target.  Called once at --init-nnue time, and as
+// a fallback when loading a pre-v11 .tdleaf.bin file (which has no target).
+// ---------------------------------------------------------------------------
+void nnue_capture_psqt_init_slot_means()
+{
+    if (!psqt_weights_f32) return;
+    nnue_compute_psqt_slot_means(psqt_init_slot_means);
+    psqt_init_slot_means_valid = true;
+}
+
+// ---------------------------------------------------------------------------
+// nnue_recenter_psqt_slot_means — pin each (slot, bucket) PSQT slot-mean back
+// to its persisted init target by subtracting the per-(slot, bucket) drift
+// from every feature in that slot.  Restores the gauge invariant after multi-
+// writer merge or numerical accumulation.  No-op if targets are not valid or
+// PSQT shadow is not allocated.
+//
+// Touches all FT_INPUTS × PSQT_BKTS PSQT cells.  Also syncs the int32
+// inference array (psqt_weights) and updates psqt_delta_f32 so the persisted
+// delta reflects the post-correction state.
+// ---------------------------------------------------------------------------
+void nnue_recenter_psqt_slot_means()
+{
+    if (!psqt_init_slot_means_valid || !psqt_weights_f32) return;
+
+    float cur_means[11][NNUE_PSQT_BKTS];
+    nnue_compute_psqt_slot_means(cur_means);
+
+    float corr[11][NNUE_PSQT_BKTS];
+    bool  any_corr = false;
+    for (int slot = 0; slot < 11; slot++) {
+        for (int b = 0; b < NNUE_PSQT_BKTS; b++) {
+            corr[slot][b] = psqt_init_slot_means[slot][b] - cur_means[slot][b];
+            if (corr[slot][b] != 0.0f) any_corr = true;
+        }
+    }
+    if (!any_corr) return;
+
+    for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
+        int slot = (fi % 704) / 64;
+        float *pw = psqt_weights_f32 + (size_t)fi * NNUE_PSQT_BKTS;
+        float *pd = psqt_delta_f32 ? psqt_delta_f32 + (size_t)fi * NNUE_PSQT_BKTS : nullptr;
+        for (int b = 0; b < NNUE_PSQT_BKTS; b++) {
+            pw[b] += corr[slot][b];
+            if (pd) pd[b] += corr[slot][b];
+        }
+    }
+    // Resync the int32 inference array.
+    if (psqt_weights) {
+        for (size_t i = 0; i < (size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS; i++)
+            psqt_weights[i] = (int32_t)roundf(psqt_weights_f32[i]);
     }
 }
 
@@ -1698,7 +1784,7 @@ void nnue_requantize_fc()
 // ---------------------------------------------------------------------------
 static const float    TDLEAF_SCALE   = 128.0f;
 static const uint32_t TDLEAF_MAGIC   = 0x544D4C46u; // "TMLF"
-static const uint32_t TDLEAF_VERSION = 10u;
+static const uint32_t TDLEAF_VERSION = 11u;
 
 // ---------------------------------------------------------------------------
 // tdleaf_acquire_lock / tdleaf_release_lock
@@ -1762,7 +1848,7 @@ bool nnue_save_fc_weights(const char *path)
         bool ok = (fread(&magic, 4, 1, cur) == 1 &&
                    fread(&version, 4, 1, cur) == 1 &&
                    magic == TDLEAF_MAGIC &&
-                   (version == TDLEAF_VERSION || version == 9u || version == 8u || version == 7u || version == 6u || version == 5u || version == 4u || version == 3u || version == 2u));
+                   (version == TDLEAF_VERSION || version == 10u || version == 9u || version == 8u || version == 7u || version == 6u || version == 5u || version == 4u || version == 3u || version == 2u));
         if (ok && version >= 10u) {
             // v10+: header carries the source-.nnue content hash.  If another
             // worker wrote the file against a different .nnue, abort the save
@@ -2285,6 +2371,21 @@ bool nnue_save_fc_weights(const char *path)
         }
     }
 
+    // v11: PSQT init slot-means (11 slots × NNUE_PSQT_BKTS).  Used by
+    // nnue_recenter_psqt_slot_means() at load time to pin slot-means against
+    // merge drift.  If the in-memory targets are not valid (extremely unusual:
+    // a save called before any init or load populated them), fall back to the
+    // current PSQT slot-means so the file is self-consistent.
+    {
+        float means[11][NNUE_PSQT_BKTS];
+        if (psqt_init_slot_means_valid) {
+            memcpy(means, psqt_init_slot_means, sizeof(means));
+        } else {
+            nnue_compute_psqt_slot_means(means);
+        }
+        fwrite(means, sizeof(float), 11 * NNUE_PSQT_BKTS, f);
+    }
+
     fclose(f);
 
     // Atomic rename: temp → final (replaces the old file in one syscall).
@@ -2339,7 +2440,7 @@ bool nnue_load_fc_weights(const char *path)
     }
 
     // ---- Version 2 / 3 / 4 / 5 / 6 / 7 / 8 / 9 / 10: float32 × TDLEAF_SCALE + uint32 counts ----
-    if (version != 2u && version != 3u && version != 4u && version != 5u && version != 6u && version != 7u && version != 8u && version != 9u && version != TDLEAF_VERSION) {
+    if (version != 2u && version != 3u && version != 4u && version != 5u && version != 6u && version != 7u && version != 8u && version != 9u && version != 10u && version != TDLEAF_VERSION) {
         fprintf(stderr, "TDLeaf: unsupported version %u in %s\n", version, path);
         fclose(f); tdleaf_release_lock(lock_fd); return false;
     }
@@ -2594,6 +2695,22 @@ bool nnue_load_fc_weights(const char *path)
         // Non-fatal if FT v section is truncated; unloaded rows use t_ft_session bc2.
     }
 
+    // v11: PSQT init slot-means used by nnue_recenter_psqt_slot_means().
+    // Pre-v11 files have no targets stored — fall back to a snapshot of the
+    // currently loaded PSQT slot-means (locks in whatever drift the older file
+    // carried; subsequent training preserves that anchor and prevents further
+    // drift).  Re-init via --init-nnue is the clean way to reset the targets.
+    bool slot_means_loaded = false;
+    if (ok && version >= 11u) {
+        float means[11][NNUE_PSQT_BKTS];
+        if (fread(means, sizeof(float), 11 * NNUE_PSQT_BKTS, f)
+            == (size_t)(11 * NNUE_PSQT_BKTS)) {
+            memcpy(psqt_init_slot_means, means, sizeof(means));
+            psqt_init_slot_means_valid = true;
+            slot_means_loaded = true;
+        }
+    }
+
     fclose(f);
     tdleaf_release_lock(lock_fd);
     if (!ok) {
@@ -2631,10 +2748,23 @@ bool nnue_load_fc_weights(const char *path)
     // ft_bias_cnt and ft_biases_f32 are populated from file in v4+; leave them.
     // For v2/v3 files, ft_biases_f32 was already initialised by nnue_init_fp32_weights.
     nnue_requantize_fc();
+
+    // Pin PSQT slot-means to the persisted target after merging-in this file's
+    // dirty rows.  For pre-v11 files (no targets persisted), snapshot the
+    // current slot-means here as the going-forward anchor; this preserves the
+    // loaded state but prevents future drift.
+    if (!slot_means_loaded)
+        nnue_capture_psqt_init_slot_means();
+    nnue_recenter_psqt_slot_means();
+
     if (version == TDLEAF_VERSION)
         printf("TDLeaf: loaded v%u weights from %s (%d FT rows, %d FT-v rows, piece_val=%s, adam_v=%s, adam_m=%s, t_adam=%u, content_hash=0x%08X)\n",
                TDLEAF_VERSION, path, n_ft_loaded, n_ft_v_loaded, piece_val_active ? "yes" : "no",
                adam_v_loaded ? "yes" : "no", adam_m_loaded ? "yes" : "no", t_adam, nnue_content_hash);
+    else if (version == 10u)
+        printf("TDLeaf: loaded v10 weights from %s (%d FT rows, %d FT-v rows, piece_val=%s, adam_v=%s, adam_m=%s, t_adam=%u, will upgrade to v%u on next save — slot-mean targets snapshotted from loaded state)\n",
+               path, n_ft_loaded, n_ft_v_loaded, piece_val_active ? "yes" : "no",
+               adam_v_loaded ? "yes" : "no", adam_m_loaded ? "yes" : "no", t_adam, TDLEAF_VERSION);
     else if (version == 9u)
         printf("TDLeaf: loaded v9 weights from %s (%d FT rows, %d FT-v rows, piece_val=%s, adam_v=%s, adam_m=%s, t_adam=%u, will upgrade to v%u on next save)\n",
                path, n_ft_loaded, n_ft_v_loaded, piece_val_active ? "yes" : "no",

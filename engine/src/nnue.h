@@ -213,6 +213,12 @@ void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
 // nnue_clip_gradients() so the slot-mean does not inflate the L2 norm.
 // No-op when piece_val is not being trained.
 void nnue_mean_center_psqt_gradients();
+// Snapshot the current PSQT slot-means as the persisted re-centering target.
+// Called at --init-nnue time and as a fallback for pre-v11 .tdleaf.bin loads.
+void nnue_capture_psqt_init_slot_means();
+// Pin per-(slot, bucket) PSQT slot-mean back to its persisted target.  Called
+// after every .tdleaf.bin load to neutralise multi-writer merge drift.
+void nnue_recenter_psqt_slot_means();
 
 // Clip gradients by global L2 norm.  Returns pre-clip norm (0 if disabled).
 float nnue_clip_gradients(float max_norm);
