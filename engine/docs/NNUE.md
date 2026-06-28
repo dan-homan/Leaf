@@ -87,10 +87,15 @@ where:
 - `positional = fc2_out + fwdOut`
 - `fwdOut = fc0_raw[15] × 9600 / 8128`  (passthrough; `600×OutputScale / (127×WeightScaleBits)`)
 - `5776 = 16 × 361`
-- `piece_val_cp` = dense piece value correction from `piece_val[6][8]` (48 TDLeaf-trained
-  floats; 6 piece types × 8 PSQT buckets).  Sums `piece_val[pt][bucket]` for each STM piece
-  and subtracts for each opponent piece.  Initialized to zero; learns material adjustments
-  via dense gradients (~200 updates/game vs ~8/5000g for sparse PSQT features).
+- `piece_val_cp` = dense piece value correction from `piece_val[6]` (6 TDLeaf-trained
+  floats, one per piece type; per-bucket variation lives in PSQT — see TDLEAF.md
+  [Evaluation Anchoring](TDLEAF.md#evaluation-anchoring-gauge-fix)).  Computes
+  `Σ_pt piece_count_diff[pt] × piece_val[pt]` and adds the cp-scaled result to the score.
+  Initialized to zero; learns material adjustments via dense gradients (~200 updates/game
+  vs ~8/5000g for sparse PSQT features).  `piece_val[PAWN]` is pinned at its init value
+  (`TDLEAF_PIN_PAWN_VALUE`) so the absolute material scale is anchored.  Format storage
+  was `piece_val[6][8]` (48 floats) in v5–v8 of `.tdleaf.bin`, collapsed to `piece_val[6]`
+  in v9+; older files are averaged across buckets on load.
 
 Relevant quantization constants in `nnue.h`:
 

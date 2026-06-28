@@ -1,5 +1,72 @@
 Changes since 2017_12_24
 
+2026_06_28 -- Evaluation anchoring (gauge fix) docs update.  TDLEAF.md
+               rewrote the "PSQT gradient mean-centering" section into
+               a fuller "Evaluation Anchoring (Gauge Fix)" section
+               describing the four-layer architecture: PAWN piece_val
+               pin (TDLEAF_PIN_PAWN_VALUE), per-batch gradient mean-
+               centering on the per-slot AGGREGATE (across buckets),
+               per-batch post-Adam dw centering to close the Adam-v
+               normalisation hole, and persisted per-(slot, bucket)
+               init slot-means in .tdleaf.bin v11 with re-centering at
+               every load AND post-merge in the save path.  NNUE.md
+               fixed stale piece_val[6][8] reference to piece_val[6].
+               training_run.py menu item [3] reworded to reflect that
+               --init-nnue-noprior now initialises PSQT to a flat
+               100 cp distribution across all piece types (anchors
+               value[PAWN] at 100 from move 1) instead of literal zero.
+               engine/CLAUDE.md key-hyperparameters paragraph refreshed
+               with the hand-tuned values and a summary of the gauge
+               architecture.
+
+2026_06_27 -- tdleaf.h: TDLEAF_SCORE_CLIP_PAWNS 0.5 → 1.0 (hand-tuned).
+               With TDLEAF_PIN_PAWN_VALUE on, value[PAWN] is locked at
+               100 cp, so the clip threshold is now a constant 100 cp
+               per ply (was 50 cp).  Less aggressive attenuation of
+               large score swings; lets more legitimate TD signal
+               through at horizons where the position changes
+               significantly between iterations.
+
+2026_06_27 -- tdleaf.h: TDLEAF_ID_VAR_SIGMA2 625 → 10000 cp² (hand-
+               tuned).  Reference variance for the ID-stability
+               gradient weight `id_weight = 1 / (1 + var / SIGMA2)`.
+               The old 625 cp² (25 cp std-dev reference) was too
+               aggressive given typical ID-score spreads at deeper
+               iterations: it down-weighted most positions and left
+               the gradient with a long tail of near-zero
+               contributions.  New 10000 cp² (100 cp std-dev) keeps
+               only genuinely unstable positions attenuated.
+
+2026_06_27 -- nnue_training.cpp + nnue.h + nnue.cpp + tdleaf.h:
+               Multi-layer evaluation gauge anchor.  Adds
+               TDLEAF_PIN_PAWN_VALUE (freezes piece_val[PAWN]),
+               nnue_mean_center_psqt_gradients (per-slot aggregate),
+               post-Adam dw centering in nnue_apply_gradients Pass 2,
+               nnue_capture_psqt_init_slot_means /
+               nnue_recenter_psqt_slot_means (persisted targets in
+               .tdleaf.bin v11), and post-multi-writer-merge re-center
+               in nnue_save_fc_weights.  Aggregate-across-buckets
+               leaves per-bucket distribution free so the bucketed
+               PSQT can learn phase-dependent piece values.  Fixes
+               unbounded piece_val drift and the multi-writer merge
+               protocol's geometric drift amplification (observed
+               piece_val[Bishop] +515 cp in 571 batches before the
+               post-merge re-center).
+
+2026_06_27 -- --init-nnue-noprior: PSQT is now initialised to a flat
+               100 cp symmetric distribution across all piece types
+               (P=N=B=R=Q=100 cp; own=+V, enemy=−V) instead of
+               literal zero.  Anchors value[PAWN] at 100 cp from
+               move 1 so the PAWN-piece-val pin lands on a sane
+               value and downstream code that consumes value[PAWN]
+               (SEE, endgame draw detection, UCI score display, the
+               TDLEAF_SCORE_CLIP_PAWNS multiplier) continues to work.
+               Earlier zero-PSQT behaviour left value[PAWN] clamped
+               to 1.  Classical PST (--init-nnue-classical) is now
+               also mean-centered per (slot, bucket) at init so the
+               persisted slot-mean target is pure material with no
+               PST contamination.
+
 2026_05_26 -- tdleaf.h: TDLEAF_K 150 → 220 cp.  Aligns with today's
                sigmoid-temperature calibration on the classical-eval
                side of match_nn-fresh-260514-1.39e6g_9.5e5g.pgn

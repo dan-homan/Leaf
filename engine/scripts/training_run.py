@@ -540,7 +540,7 @@ def main():
     print("Starting network:")
     print("  [1] Use existing .nnue file")
     print("  [2] Initialise a fresh random network (classical material prior)")
-    print("  [3] Initialise a fresh random network (no prior, zeroed piece values)")
+    print("  [3] Initialise a fresh random network (no prior; flat 100 cp PSQT for all pieces)")
     print("  [4] Initialise a fresh random network (classical material + 4-stage PSQT prior)")
     choice = ask("Choice", "1")
 

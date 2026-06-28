@@ -203,18 +203,69 @@ Adam step (Adam moments continue to advance through the clamp so it self-lifts
 when the gradient turns constructive) — negative piece values invert material
 evaluation and create an unrecoverable death spiral.
 
-### PSQT gradient mean-centering
+### Evaluation Anchoring (Gauge Fix)
 
-Because both PSQT and `piece_val` can learn material-scale corrections, and Adam's
-`1/√v` normalization amplifies sparse PSQT updates to match dense `piece_val` updates
-in magnitude, the two would learn redundant corrections without intervention.
+Both PSQT and `piece_val` can encode material-scale corrections, and `TDLEAF_K = 220 cp`
+is the only term in the loss that fixes the absolute score scale — so without
+intervention the training problem is non-identifiable: the optimizer can shift material
+mass arbitrarily between the two channels, and the absolute magnitude of either channel
+is unbounded.  Empirically, `piece_val[PAWN]` climbed without ceiling and PSQT
+slot-means drifted by tens of cp per session.  Under the multi-writer merge protocol
+(see [Concurrent File Access](#concurrent-file-access)) any drift compounds
+geometrically across save cycles, eventually producing catastrophic blow-ups
+(observed: `piece_val[Bishop]` +515 cp in 571 batches).
 
-To force PSQT to learn only **positional** (per-square) corrections, PSQT gradients
-are mean-centered per piece-type slot before each Adam step.  The HalfKAv2_hm feature
-index encodes 11 slots (`fi % 704 / 64`): own/opp × {pawn, knight, bishop, rook,
-queen} + king.  For each slot and each PSQT bucket, the mean gradient across all dirty
-features of that slot is subtracted.  This removes the uniform (material-scale)
-component while preserving per-square variation.
+The fix is a four-layer gauge anchor that completes the parameter identification while
+leaving the legitimate degrees of freedom free to learn.
+
+**1. PAWN piece_val pin (`TDLEAF_PIN_PAWN_VALUE`, src/tdleaf.h).**
+`piece_val[PAWN]` is frozen at its init value (0 for `--init-nnue` and `--init-nnue-noprior`;
+both put 100 cp of pawn material in PSQT).  Its accumulated gradient is discarded each
+batch; m/v moments are left untouched.  This fixes the unit of absolute material scale —
+N/B/R/Q `piece_val` still adapt freely and end up expressed in pawn-equivalent units.
+
+**2. Per-batch gradient mean-centering (`nnue_mean_center_psqt_gradients`, called before
+the L2 clip).**  For each of the 11 HalfKAv2_hm piece-type slots (`fi % 704 / 64`:
+own/opp × {pawn, knight, bishop, rook, queen} + king), the **per-slot aggregate**
+gradient summed across all NNUE_PSQT_BKTS buckets and all dirty features is forced to
+zero by subtracting the per-cell mean uniformly.  Per-bucket distribution within the slot
+is left untouched — only the absolute material level is constrained.  This is what lets
+the bucketed PSQT learn phase-dependent piece values (e.g. pawn worth more in deep
+endgame), the entire reason HalfKAv2_hm has 8 PSQT buckets.
+
+**3. Per-batch post-Adam dw centering (`nnue_apply_gradients` Pass 2).**  Mean-centering
+the gradient alone is not sufficient: Adam's per-weight `1/√v_hat` normalisation makes
+the applied step `dw = LR × m_hat / √v_hat` not zero-sum within a slot, because sparse
+features (low v) take proportionally larger steps than dense ones.  Pass 2 sums the
+applied dw per slot (aggregate across buckets), then adds the per-cell mean back to every
+dirty (fi, b) cell — restoring `Σ_(slot fi dirty, b) Δpw[b] = 0` exactly.  m and v are
+left untouched.  Without this step, PSQT pawn-slot mean drifted +13% over 50k games even
+with `piece_val[PAWN]` hard-pinned.
+
+**4. Persisted slot-mean targets + load-time and post-merge re-centering
+(`nnue_recenter_psqt_slot_means`).**  Per-(slot, bucket) init slot-means are snapshotted
+at `--init-nnue` time and persisted in `.tdleaf.bin` v11 as an 11×8 float array.  At
+every load (after merging in the .tdleaf.bin dirty rows) AND at every save (after the
+multi-writer merge block, before the write), the per-slot aggregate PSQT mean is
+computed and snapped to the persisted target by uniformly shifting every feature in the
+slot.  The correction is applied to `psqt_weights_f32` only — NOT to `psqt_delta_f32`;
+treating a gauge restoration as a fake "delta" would cause the merge to re-apply it on
+top of the file value (which already includes other workers' corrections), giving
+geometric error growth.  The post-merge re-center is essential under concurrent
+training: the merge protocol replaces in-memory shadow with `file_value + pd`, which
+discards the load-time anchor, and across 24 parallel workers the drift compounds
+without it.
+
+**Why per-slot aggregate (not per-(slot, bucket))**: per-(slot, bucket) locking would
+anchor PSQT[bishop_slot][bucket] separately at each of the 8 buckets, forcing the
+average bishop value across buckets to be constant.  Combined with a single global
+`piece_val[B]` (no bucket dependence), this leaves no representational room for
+phase-dependent piece values.  Aggregate centering anchors only the slot total, leaving
+the per-bucket distribution free.
+
+**Pre-v11 .tdleaf.bin compatibility:** files without persisted slot-means use the loaded
+state as the target (locks in any existing drift but prevents further accumulation).
+Re-init via `--init-nnue` is the clean reset.
 
 Mean-centering is active only when `piece_val_active` is true (i.e., when dense piece
 values are in use).  Without `piece_val`, PSQT is the only material correction channel
@@ -476,6 +527,9 @@ per-weight bias correction and monitoring.
 | `TDLEAF_REPLAY_LR_SCALE` | 0.3 | Multiplicative LR scale applied during replay-pass Adam steps |
 | `TDLEAF_MIN_PLIES` | 8 | Skip games with fewer recorded TDLeaf plies than this |
 | `TDLEAF_MIN_PLIES_REP` | 40 | Skip 3-fold repetition draws with fewer plies than this |
+| `TDLEAF_SCORE_CLIP_PAWNS` | 1.0 | Hand-tuned 0.5 → 1.0 (2026-06-27).  Clip threshold for inter-ply score-change attenuation: `score_clip_cp = SCORE_CLIP_PAWNS × max(value[PAWN], 100 cp)`.  With PAWN pinned, the threshold is effectively constant at 100 cp.  Set to a large value to disable |
+| `TDLEAF_ID_VAR_SIGMA2` | 10000 cp² | Hand-tuned 625 → 10000 (2026-06-27, equivalent to a 100 cp std-dev reference up from 25 cp).  Iterative-deepening stability weight: `id_weight = 1 / (1 + id_score_variance / SIGMA2)`.  Larger values are more tolerant of ID score instability.  Set to a large value to disable |
+| `TDLEAF_PIN_PAWN_VALUE` | true | Freeze `piece_val[PAWN]` at its init value.  Together with PSQT mean-centering, fixes the absolute material scale (gauge anchor).  See [Evaluation Anchoring](#evaluation-anchoring-gauge-fix) |
 
 Runtime LR sweep via env vars `TDLEAF_LR_{FC,FC2,FC_BIAS,FT,FT_BIAS,PSQT,PV}` and
 freeze flags `TDLEAF_FREEZE_PSQT`, `TDLEAF_FREEZE_PASSTHROUGH`.
@@ -537,12 +591,12 @@ Set `TDLEAF_ADAM_WARMUP = 0` to disable warmup.
 
 ---
 
-## Weight Persistence — `.tdleaf.bin` (version 10)
+## Weight Persistence — `.tdleaf.bin` (version 11)
 
 Saved at `{exec_path}<network>.tdleaf.bin`.  Format:
 
 ```
-[magic(4) + version(10)]
+[magic(4) + version(11)]
 [v10+: nnue_content_hash(4)  — FNV-1a over source .nnue FT weight bytes]
 [8 FC stacks: per-layer float32×128 weights/biases + uint32 counts]
 [n_ft_rows(4 bytes)]
@@ -570,6 +624,16 @@ Saved at `{exec_path}<network>.tdleaf.bin`.  Format:
   n_psqt_m_rows as uint32
   per dirty row: fi(4) + m_psqt[8] as float32[8]
 ]
+[Sparse FT v section (v8+):
+  n_ft_v_rows as uint32
+  per row with non-zero v: fi(4) + v_ft[1024] as float32[1024]
+]
+[PSQT init slot-means (v11+):  88 floats = 352 bytes
+  psqt_init_slot_means[11][PSQT_BKTS] as float32[88]  — per-(slot, bucket) target
+  used by nnue_recenter_psqt_slot_means() at every load and after every multi-
+  writer merge in the save path to pin the per-slot aggregate PSQT mean to its
+  init target.  See Evaluation Anchoring.
+]
 ```
 
 Weight values are stored at 128× resolution (divide by 128 on load) to preserve
@@ -582,10 +646,13 @@ the learned direction from the previous session — eliminating the slow/negativ
 trend at the start of each new training run.  FT weight v/m (~92 MB each) are NOT
 persisted — too large, and FT weights use RMSProp (no m array).
 
-Versions 2–9 are accepted on load with appropriate defaults; a notice is printed for
+Versions 2–10 are accepted on load with appropriate defaults; a notice is printed for
 any version upgrade.  V5–V8 `piece_val[6][8]` is averaged to `piece_val[6]` on load.
 V6–V8 `v_piece_val[6][8]` is max-merged to `v_piece_val[6]`; V7–V8 `m_piece_val[6][8]`
-is averaged to `m_piece_val[6]`.
+is averaged to `m_piece_val[6]`.  Pre-v11 files have no persisted slot-means: on load,
+`nnue_capture_psqt_init_slot_means()` snapshots the loaded state as the going-forward
+target — this locks in whatever drift the older file carried but prevents further
+accumulation.  Re-init via `--init-nnue` is the clean way to reset the targets.
 
 ### Source-.nnue content hash (v10+)
 
@@ -713,10 +780,14 @@ perl comp.pl init_nnue NNUE=1 TDLEAF=1
 ./Leaf_vinit_nnue --init-nnue --write-nnue nn-fresh.nnue
 ```
 
-A variant `--init-nnue-noprior` initialises all piece PSQT values at 100 cp (uniform)
-instead of classical material values, forcing the network to learn material values
-from scratch via TDLeaf.  The interactive `scripts/training_run.py` offers both options
-when initialising a new network.
+A variant `--init-nnue-noprior` initialises **all** piece PSQT slots at 100 cp (symmetric
+own=+V, enemy=−V; P=N=B=R=Q=100 cp) instead of classical material values, forcing the
+network to differentiate piece values from scratch via dense `piece_val[6]` updates while
+keeping `value[PAWN]` anchored at 100 cp from move 1 (preserves SEE / material-accounting
+semantics, supports the PAWN-pinned gauge).  Earlier behaviour was a literal-zero PSQT,
+which left `value[PAWN]` clamped to 1 by `nnue_extract_piece_values` and broke downstream
+code that consumes `value[PAWN]` as cp.  The interactive `scripts/training_run.py`
+offers both options when initialising a new network.
 
 This calls `nnue_alloc_arrays()` + `nnue_init_fp32_weights()` + `nnue_init_zero_weights()`:
 
@@ -965,12 +1036,14 @@ is penalised for correctly evaluating a position it cannot see past.
 
 The threshold is computed dynamically as
 `score_clip_cp = TDLEAF_SCORE_CLIP_PAWNS × max(value[PAWN], 100 cp)`
-(default `TDLEAF_SCORE_CLIP_PAWNS = 0.5`, so 50 cp at the classical pawn value
-and scaling linearly with `value[PAWN]` once piece-value drift pushes it above
-100 cp).  The 100 cp floor on `value[PAWN]` (the classical default) protects the
-`--init-nnue-noprior` bootstrap, where `nnue_extract_piece_values` can clamp
-`value[PAWN]` down to 1 when PSQT and `piece_val` start at zero — without the
-floor, the threshold would collapse to ~0.5 cp and gut the TD signal.
+(default `TDLEAF_SCORE_CLIP_PAWNS = 1.0` — hand-tuned from 0.5 on 2026-06-27 — so
+100 cp at the classical pawn value).  With `TDLEAF_PIN_PAWN_VALUE` on (see
+[Evaluation Anchoring](#evaluation-anchoring-gauge-fix)) `value[PAWN]` is locked at
+100 cp, so the threshold is effectively a constant `1.0 × 100 = 100 cp`.  The
+`max(..., 100 cp)` floor is retained as belt-and-braces against any future
+configuration that disables the pin or otherwise lets `value[PAWN]` sag below the
+classical default; under `--init-nnue-noprior` the new flat-100 cp PSQT init also
+keeps `value[PAWN]` anchored from move 1.
 When the white-POV score change between consecutive moves exceeds `score_clip_cp`, the
 `d[t+1] - d[t]` contribution to the eligibility trace is scaled down
 *proportionally* so the effective change is capped at the threshold:
@@ -1001,16 +1074,20 @@ grad_scale *= id_weight
 
 Positions with stable ID scores (low variance) receive full weight; positions whose
 score fluctuated across search depths are down-weighted.  `TDLEAF_ID_VAR_SIGMA2`
-(default 625 cp², equivalent to a 25 cp std-dev reference) is the reference variance
-— a position with variance equal to `TDLEAF_ID_VAR_SIGMA2` receives half weight.  Set
-`TDLEAF_ID_VAR_SIGMA2` to a very large value to disable this approach.
+(default 10000 cp², equivalent to a 100 cp std-dev reference; hand-tuned from 625
+on 2026-06-27) is the reference variance — a position with variance equal to
+`TDLEAF_ID_VAR_SIGMA2` receives half weight.  The previous 625 cp² (25 cp std-dev)
+was too aggressive given typical ID-score spreads at deeper iterations: it
+down-weighted the majority of positions and gave the gradient signal a long tail
+of near-zero contributions, slowing convergence.  Set `TDLEAF_ID_VAR_SIGMA2` to a
+very large value to disable this approach.
 
 ### Tuning guidance
 
 | Hyperparameter | Default | Effect of increasing | Effect of decreasing |
 |----------------|---------|---------------------|---------------------|
-| `TDLEAF_SCORE_CLIP_PAWNS` | 0.5 (with 100 cp floor on `value[PAWN]`) | Less clipping; more sensitive to large swings | More aggressive attenuation of large score changes |
-| `TDLEAF_ID_VAR_SIGMA2` | 625 cp² | More tolerant of unstable ID scores | Stronger down-weighting of ID-unstable positions |
+| `TDLEAF_SCORE_CLIP_PAWNS` | 1.0 (with 100 cp floor on `value[PAWN]`) | Less clipping; more sensitive to large swings | More aggressive attenuation of large score changes |
+| `TDLEAF_ID_VAR_SIGMA2` | 10000 cp² (100 cp std-dev reference) | More tolerant of unstable ID scores | Stronger down-weighting of ID-unstable positions |
 
 Both approaches are active simultaneously by default.  Use the ablation plan in
 `docs/TODO.md` to isolate their individual contributions.  A good starting ablation:
