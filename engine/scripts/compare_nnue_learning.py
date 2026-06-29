@@ -479,6 +479,27 @@ def _wstats(arr, is_int32=False):
                 pct_zero=100.0 * float(np.mean(a == 0)))
 
 
+def _fmt3(x, signed=True):
+    """Format `x` with 3 significant figures in fixed-point notation.
+
+    Used by the FC-layer summary table to keep cells within column boundaries
+    (raw `:+7.3f` overflows for values like -296.652 ± 168.454).  `signed=True`
+    always emits a leading '+' or '-' (mean Δ); `signed=False` strips the sign
+    (standard deviation, magnitude).
+    """
+    if x == 0:
+        return "+0" if signed else "0"
+    ax = abs(x)
+    if   ax >= 100:   spec = ".0f"
+    elif ax >= 10:    spec = ".1f"
+    elif ax >= 1:     spec = ".2f"
+    elif ax >= 0.1:   spec = ".3f"
+    elif ax >= 0.01:  spec = ".4f"
+    elif ax >= 0.001: spec = ".5f"
+    else:             return f"{x:+.2e}" if signed else f"{ax:.2e}"
+    return (f"{x:+{spec}}" if signed else f"{ax:{spec}}")
+
+
 def print_summary(orig, upd, ft_data=None):
     has_counts = upd.get('_has_counts', False)
 
@@ -498,15 +519,17 @@ def print_summary(orig, upd, ft_data=None):
         all_o = np.concatenate(orig[key_w])
         all_u = np.concatenate(upd[key_w])
         s = delta_stats(all_o, all_u)
+        ms = f"{_fmt3(s['dmean'])} ± {_fmt3(s['dstd'], signed=False)}"
         print(f"│ {layer_name:<8} │ {s['n_changed']:>6}/{s['n']:<7} │ {s['pct']:>12.2f}% │"
-              f" [{s['dmin']:+4d},{s['dmax']:+4d}]   │ {s['dmean']:+7.3f} ± {s['dstd']:.3f} │")
+              f" [{s['dmin']:+5d},{s['dmax']:+5d}] │{ms:^17}│")
 
         # biases (int32)
         all_ob = np.concatenate(orig[key_b])
         all_ub = np.concatenate(upd[key_b])
         sb = bias_delta_stats(all_ob, all_ub)
+        msb = f"{_fmt3(sb['dmean'])} ± {_fmt3(sb['dstd'], signed=False)}"
         print(f"│ {layer_name[:-3]+'bis':<8} │ {sb['n_changed']:>6}/{sb['n']:<7} │ {sb['pct']:>12.2f}% │"
-              f" [{sb['dmin']:+4d},{sb['dmax']:+4d}]   │ {sb['dmean']:+7.3f} ± {sb['dstd']:.3f} │")
+              f" [{sb['dmin']:+5d},{sb['dmax']:+5d}] │{msb:^17}│")
 
     print("└──────────┴────────────────┴───────────────┴───────────────┴─────────────────┘")
 
@@ -671,18 +694,44 @@ def print_summary(orig, upd, ft_data=None):
         piece_names = ['Pawn', 'Knight', 'Bishop', 'Rook', 'Queen', 'King']
         print(f"━━━━  Dense piece values (centipawns per unit material advantage)  ━━━━")
         print()
-        # Score formula: (pv_diff/2) × 100/5776 cp.  Display as cp per unit advantage.
-        pv_cp = pv * 0.5 * 100.0 / 5776.0
-        print(f"  {'Piece':<8}  {'cp':>8}  {'count':>9}")
-        print(f"  {'─'*8}  {'─'*8}  {'─'*9}")
+        # Score formula: (pv_diff/2) × 100/5776 cp.  piece_val starts at 0; the
+        # value shown here IS the delta from init.  Baseline piece value comes
+        # from the .nnue PSQT (own-piece feature average × 100/5776), so the
+        # net (effective) piece value equals the engine's value[*] reading at
+        # startup: baseline_PSQT + piece_val/2.
+        PSQT_TO_CP = 100.0 / 5776.0
+        pv_delta_cp = pv * 0.5 * PSQT_TO_CP
+        # Baseline (init) piece values from the .nnue PSQT: mean over own-piece
+        # features in each slot (matches nnue_extract_piece_values in nnue.cpp).
+        baseline_cp = np.zeros(6, dtype=np.float64)
+        if ft_data is not None and 'psqt_w' in ft_data:
+            psqt_base = ft_data['psqt_w']                  # [FT_INPUTS, PSQT_BKTS]
+            fi_arr    = np.arange(FT_INPUTS)
+            fi_in_bkt = fi_arr % 704
+            ps_slot   = fi_in_bkt // 128                   # 0..5 piece type
+            is_own    = (fi_in_bkt % 128) < 64
+            for pt in range(5):                            # P..Q; K is sentinel
+                mask = (ps_slot == pt) & is_own
+                if mask.any():
+                    baseline_cp[pt] = float(psqt_base[mask].astype(np.float64).mean()) * PSQT_TO_CP
+        print(f"  {'Piece':<8}  {'init cp':>9}  {'Δ piece_val':>13}  "
+              f"{'net cp':>9}  {'count':>9}")
+        print(f"  {'─'*8}  {'─'*9}  {'─'*13}  {'─'*9}  {'─'*9}")
         for pt in range(6):
-            print(f"  {piece_names[pt]:<8}  {pv_cp[pt]:>+8.2f}  {int(pv_cnt[pt]):>9}")
+            net_cp = baseline_cp[pt] + pv_delta_cp[pt]
+            init_str = f"{baseline_cp[pt]:+8.2f}" if pt < 5 else "       —"
+            net_str  = f"{net_cp:+8.2f}"          if pt < 5 else "       —"
+            print(f"  {piece_names[pt]:<8}  {init_str:>9}  {pv_delta_cp[pt]:>+13.2f}  "
+                  f"{net_str:>9}  {int(pv_cnt[pt]):>9}")
         print()
         total_updates = int(pv_cnt.sum())
         ever_updated  = int(np.sum(pv_cnt > 0))
         print(f"  Total updates: {total_updates:,}  "
               f"Pieces ever updated: {ever_updated}/6  "
               f"Max count: {int(pv_cnt.max())}")
+        print(f"  Δ piece_val: change since init (piece_val_f32 starts at 0).")
+        print(f"  init cp: baseline value extracted from .nnue PSQT slot average.")
+        print(f"  net cp = init cp + Δ piece_val (matches engine's value[*] at startup).")
     else:
         print(f"━━━━  Dense piece values (not present — v4 or older .tdleaf.bin)  ━━━━")
 
@@ -1186,7 +1235,14 @@ def plot_psqt_overview(orig, upd, ft_data, save):
 
     ax_top = fig.add_subplot(gs_inner[0])
     pb_flat_cp = pw_base.ravel().astype(np.float64) * PSQT_TO_CP
-    p_max   = max(abs(float(pb_flat_cp.min())), abs(float(pb_flat_cp.max())), 1.0)
+    # x-axis range covers BOTH panels so neither baseline nor learned data spills
+    # off-screen (learned PSQT tails can extend far beyond the symmetric baseline
+    # under gauge-anchored aggregate centering, where per-bucket drift is free).
+    ps_flat_cp = (upd['psqt_w'].ravel().astype(np.float64) * PSQT_TO_CP
+                  if has_v3 and 'psqt_w' in upd else None)
+    p_max = max(abs(float(pb_flat_cp.min())), abs(float(pb_flat_cp.max())), 1.0)
+    if ps_flat_cp is not None and ps_flat_cp.size > 0:
+        p_max = max(p_max, abs(float(ps_flat_cp.min())), abs(float(ps_flat_cp.max())))
     p_bins  = np.linspace(-p_max * 1.05, p_max * 1.05, 80)
     ax_top.hist(pb_flat_cp, bins=p_bins, color='steelblue', alpha=0.75, density=True)
     ax_top.set_title('PSQT weights (22528×8)', fontsize=9, fontweight='bold')
@@ -1223,8 +1279,7 @@ def plot_psqt_overview(orig, upd, ft_data, save):
     # extending well beyond the baseline range and making the shared x-axis misleading.
     # The combined PSQT + piece_val delta is correctly shown in col 1 and col 2.
     ax_bot = fig.add_subplot(gs_inner[1], sharex=ax_top)
-    if has_v3 and 'psqt_w' in upd:
-        ps_flat_cp = upd['psqt_w'].ravel().astype(np.float64) * PSQT_TO_CP
+    if has_v3 and 'psqt_w' in upd and ps_flat_cp is not None:
         ax_bot.hist(ps_flat_cp, bins=p_bins, color='lightcoral', alpha=0.75, density=True)
         ax_bot.text(0.98, 0.90, tdleaf_name, transform=ax_bot.transAxes,
                     fontsize=7, ha='right', va='top', color='firebrick')
