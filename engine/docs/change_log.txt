@@ -1,5 +1,27 @@
 Changes since 2017_12_24
 
+2026_07_02 -- Buffered I/O for .tdleaf.bin save path (nnue_training.cpp).
+               nnue_save_fc_weights previously re-read and rewrote parts
+               of the 263 MB weights file 4 bytes at a time (per-element
+               fread/fwrite in the FC merge/write loops and Adam v/m
+               merges) and rescanned the full count / v_ft_w arrays
+               (~92 MB each) up to five times per save to recompute
+               dirty-row flags.  Changes, all behavior-preserving:
+               section-level bulk fread/fwrite through a shared scratch
+               buffer (short reads merge what arrived, matching the old
+               per-element semantics); dirty-row and v-nonzero flags
+               computed once per save into cached bitmaps and reused by
+               the weights / PSQT-v / PSQT-m / FT-v write loops; 4 MB
+               setvbuf on the merge-read, temp-write, and load streams.
+               Measured on a 240-game depth-6 training match (c=5):
+               learning overhead vs a no-learning control dropped from
+               +39% to +13% wall clock (18.3 s -> 14.9 s; control
+               13.2 s), and save-lock contention fell from 51% to 31%
+               of save attempts deferred (fresher merges).  Motivated
+               by training-efficiency analysis ahead of the next long
+               run: at depth 6 the save path was ~28% of total wall
+               clock; at depth 8 it amortizes to ~10%.
+
 2026_06_28 -- Evaluation anchoring (gauge fix) docs update.  TDLEAF.md
                rewrote the "PSQT gradient mean-centering" section into
                a fuller "Evaluation Anchoring (Gauge Fix)" section

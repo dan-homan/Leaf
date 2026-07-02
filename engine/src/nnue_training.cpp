@@ -1883,11 +1883,18 @@ bool nnue_save_fc_weights(const char *path)
         return false;
     }
 
+    // Scratch buffers for section-level bulk I/O (sized to the largest FC
+    // section, L0_SIZE × L0_INPUT floats).  Static: saves are serialized by
+    // the exclusive lock, and within a process only one save runs at a time.
+    static float    io_buf_f[NNUE_L0_SIZE * NNUE_L0_INPUT];
+    static uint32_t io_buf_u[NNUE_L0_SIZE * NNUE_L0_INPUT];
+
     // ---- Re-read the current file and merge our deltas on top ----------
     // This picks up any changes written by other concurrent Leaf instances
     // since we last synced.  After merge, float shadows = file + our_delta.
     FILE *cur = fopen(path, "rb");
     if (cur) {
+        setvbuf(cur, nullptr, _IOFBF, 4u << 20);
         uint32_t magic = 0, version = 0;
         bool ok = (fread(&magic, 4, 1, cur) == 1 &&
                    fread(&version, 4, 1, cur) == 1 &&
@@ -1915,26 +1922,28 @@ bool nnue_save_fc_weights(const char *path)
             // FC section: float32 × TDLEAF_SCALE per weight, then uint32 counts.
             // Merge: shadow = file_value + our_delta; count = file_count + our_delta_count.
             for (int s = 0; s < NNUE_LAYER_STACKS && ok; s++) {
+                // Bulk-read each section into the scratch buffer, then merge.
+                // On a short read, merge the elements that were read (matching
+                // the old per-element behavior) and report failure.
                 auto merge_f = [&](float *shadow, float *delta, uint32_t *cnt, int n) -> bool {
-                    for (int i = 0; i < n; i++) {
-                        float raw;
-                        if (fread(&raw, sizeof(float), 1, cur) != 1) return false;
-                        shadow[i] = raw / TDLEAF_SCALE + delta[i];
+                    (void)cnt;
+                    size_t got = fread(io_buf_f, sizeof(float), n, cur);
+                    for (size_t i = 0; i < got; i++) {
+                        shadow[i] = io_buf_f[i] / TDLEAF_SCALE + delta[i];
                         delta[i]  = 0.0f;
                     }
-                    return true;
+                    return got == (size_t)n;
                 };
                 // Additive count merge: cnt = file_count + delta_count.
                 // delta_cnt tracks only updates since last sync, so adding it to
                 // the file's count correctly accumulates across concurrent instances.
                 auto merge_cnt = [&](uint32_t *cnt, uint32_t *dcnt, int n) -> bool {
-                    for (int i = 0; i < n; i++) {
-                        uint32_t fc;
-                        if (fread(&fc, sizeof(uint32_t), 1, cur) != 1) return false;
-                        cnt[i] = fc + dcnt[i];
+                    size_t got = fread(io_buf_u, sizeof(uint32_t), n, cur);
+                    for (size_t i = 0; i < got; i++) {
+                        cnt[i] = io_buf_u[i] + dcnt[i];
                         dcnt[i] = 0;
                     }
-                    return true;
+                    return got == (size_t)n;
                 };
                 ok = merge_f(l0_biases_f32[s],  delta_l0_b[s], l0_biases_cnt[s],  NNUE_L0_SIZE)
                   && merge_cnt(l0_biases_cnt[s],  delta_l0_b_cnt[s], NNUE_L0_SIZE)
@@ -2045,13 +2054,12 @@ bool nnue_save_fc_weights(const char *path)
                     if (fread(&file_t, sizeof(uint32_t), 1, cur) == 1) {
                         if (file_t > t_adam) t_adam = file_t;
                     }
-                    // FC v arrays: max-merge each element.
+                    // FC v arrays: max-merge each element (bulk read; on a short
+                    // read merge what arrived, matching old per-element behavior).
                     auto merge_v = [&](float *v_local, int n) {
-                        float tmp;
-                        for (int i = 0; i < n; i++) {
-                            if (fread(&tmp, sizeof(float), 1, cur) != 1) return;
-                            if (tmp > v_local[i]) v_local[i] = tmp;
-                        }
+                        size_t got = fread(io_buf_f, sizeof(float), n, cur);
+                        for (size_t i = 0; i < got; i++)
+                            if (io_buf_f[i] > v_local[i]) v_local[i] = io_buf_f[i];
                     };
                     for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
                         merge_v(v_l0_b[s], NNUE_L0_SIZE);
@@ -2097,11 +2105,9 @@ bool nnue_save_fc_weights(const char *path)
                 // about direction → smaller step, not a random-direction step).
                 if (version >= 7u) {
                     auto merge_m = [&](float *m_local, int n) {
-                        float tmp;
-                        for (int i = 0; i < n; i++) {
-                            if (fread(&tmp, sizeof(float), 1, cur) != 1) return;
-                            m_local[i] = 0.5f * (m_local[i] + tmp);
-                        }
+                        size_t got = fread(io_buf_f, sizeof(float), n, cur);
+                        for (size_t i = 0; i < got; i++)
+                            m_local[i] = 0.5f * (m_local[i] + io_buf_f[i]);
                     };
                     for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
                         merge_m(m_l0_b[s], NNUE_L0_SIZE);
@@ -2231,48 +2237,42 @@ bool nnue_save_fc_weights(const char *path)
         tdleaf_release_lock(lock_fd);
         return false;
     }
+    setvbuf(f, nullptr, _IOFBF, 4u << 20);
+    // Scale a section into the scratch buffer, then write it in one call.
+    auto write_scaled = [&](const float *src, int n) {
+        for (int i = 0; i < n; i++) io_buf_f[i] = src[i] * TDLEAF_SCALE;
+        fwrite(io_buf_f, sizeof(float), n, f);
+    };
     fwrite(&TDLEAF_MAGIC,   4, 1, f);
     fwrite(&TDLEAF_VERSION, 4, 1, f);
     // v10+: content fingerprint of the source .nnue, for load-time pairing check.
     fwrite(&nnue_content_hash, 4, 1, f);
     for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
         // FC0 biases
-        for (int i = 0; i < NNUE_L0_SIZE; i++) {
-            float v = l0_biases_f32[s][i] * TDLEAF_SCALE;
-            fwrite(&v, sizeof(float), 1, f);
-        }
+        write_scaled(l0_biases_f32[s], NNUE_L0_SIZE);
         fwrite(l0_biases_cnt[s], sizeof(uint32_t), NNUE_L0_SIZE, f);
         // FC0 weights (natural output-major layout: o * L0_INPUT + i)
-        for (int i = 0; i < NNUE_L0_SIZE * NNUE_L0_INPUT; i++) {
-            float v = l0_weights_f32[s][i] * TDLEAF_SCALE;
-            fwrite(&v, sizeof(float), 1, f);
-        }
+        write_scaled(l0_weights_f32[s], NNUE_L0_SIZE * NNUE_L0_INPUT);
         fwrite(l0_weights_cnt[s], sizeof(uint32_t), NNUE_L0_SIZE * NNUE_L0_INPUT, f);
         // FC1 biases
-        for (int i = 0; i < NNUE_L1_SIZE; i++) {
-            float v = l1_biases_f32[s][i] * TDLEAF_SCALE;
-            fwrite(&v, sizeof(float), 1, f);
-        }
+        write_scaled(l1_biases_f32[s], NNUE_L1_SIZE);
         fwrite(l1_biases_cnt[s], sizeof(uint32_t), NNUE_L1_SIZE, f);
         // FC1 weights (natural output-major layout: o * L1_PADDED + i)
-        for (int i = 0; i < NNUE_L1_SIZE * NNUE_L1_PADDED; i++) {
-            float v = l1_weights_f32[s][i] * TDLEAF_SCALE;
-            fwrite(&v, sizeof(float), 1, f);
-        }
+        write_scaled(l1_weights_f32[s], NNUE_L1_SIZE * NNUE_L1_PADDED);
         fwrite(l1_weights_cnt[s], sizeof(uint32_t), NNUE_L1_SIZE * NNUE_L1_PADDED, f);
         // FC2 bias
-        { float v = l2_bias_f32[s] * TDLEAF_SCALE; fwrite(&v, sizeof(float), 1, f); }
+        write_scaled(&l2_bias_f32[s], 1);
         fwrite(&l2_bias_cnt[s], sizeof(uint32_t), 1, f);
         // FC2 weights
-        for (int i = 0; i < NNUE_L2_PADDED; i++) {
-            float v = l2_weights_f32[s][i] * TDLEAF_SCALE;
-            fwrite(&v, sizeof(float), 1, f);
-        }
+        write_scaled(l2_weights_f32[s], NNUE_L2_PADDED);
         fwrite(l2_weights_cnt[s], sizeof(uint32_t), NNUE_L2_PADDED, f);
     }
 
     // Sparse FT/PSQT section (v3).
     // A feature row is "dirty" if any ft or psqt update count is non-zero.
+    // Compute the flag once per row and reuse it in the three later loops
+    // that previously rescanned the full count arrays (~92 MB per pass).
+    static uint8_t row_dirty[NNUE_FT_INPUTS];
     uint32_t n_ft_rows = 0;
     if (ft_weights_f32) {
         for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
@@ -2281,8 +2281,11 @@ bool nnue_save_fc_weights(const char *path)
             bool dirty = false;
             for (int d = 0; d < NNUE_HALF_DIMS && !dirty; d++) dirty = (wc[d] != 0);
             for (int b = 0; b < NNUE_PSQT_BKTS && !dirty; b++) dirty = (pc[b] != 0);
+            row_dirty[fi] = (uint8_t)dirty;
             if (dirty) n_ft_rows++;
         }
+    } else {
+        memset(row_dirty, 0, sizeof(row_dirty));
     }
     fwrite(&n_ft_rows, sizeof(uint32_t), 1, f);
 
@@ -2290,12 +2293,9 @@ bool nnue_save_fc_weights(const char *path)
         float tmp_w[NNUE_HALF_DIMS];
         float tmp_p[NNUE_PSQT_BKTS];
         for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
+            if (!row_dirty[fi]) continue;
             const uint32_t *wc = ft_weights_cnt   + (size_t)fi * NNUE_HALF_DIMS;
             const uint32_t *pc = psqt_weights_cnt + (size_t)fi * NNUE_PSQT_BKTS;
-            bool dirty = false;
-            for (int d = 0; d < NNUE_HALF_DIMS && !dirty; d++) dirty = (wc[d] != 0);
-            for (int b = 0; b < NNUE_PSQT_BKTS && !dirty; b++) dirty = (pc[b] != 0);
-            if (!dirty) continue;
 
             uint32_t fi_u = (uint32_t)fi;
             fwrite(&fi_u, sizeof(uint32_t), 1, f);
@@ -2350,12 +2350,7 @@ bool nnue_save_fc_weights(const char *path)
         fwrite(&n_pv_rows, sizeof(uint32_t), 1, f);
         if (v_psqt_w) {
             for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
-                const uint32_t *wc = ft_weights_cnt   + (size_t)fi * NNUE_HALF_DIMS;
-                const uint32_t *pc = psqt_weights_cnt + (size_t)fi * NNUE_PSQT_BKTS;
-                bool dirty = false;
-                for (int d = 0; d < NNUE_HALF_DIMS && !dirty; d++) dirty = (wc[d] != 0);
-                for (int b = 0; b < NNUE_PSQT_BKTS && !dirty; b++) dirty = (pc[b] != 0);
-                if (!dirty) continue;
+                if (!row_dirty[fi]) continue;
                 uint32_t fi_u = (uint32_t)fi;
                 fwrite(&fi_u, sizeof(uint32_t), 1, f);
                 fwrite(v_psqt_w + (size_t)fi * NNUE_PSQT_BKTS, sizeof(float), NNUE_PSQT_BKTS, f);
@@ -2381,12 +2376,7 @@ bool nnue_save_fc_weights(const char *path)
         fwrite(&n_pm_rows, sizeof(uint32_t), 1, f);
         if (m_psqt_w) {
             for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
-                const uint32_t *wc = ft_weights_cnt   + (size_t)fi * NNUE_HALF_DIMS;
-                const uint32_t *pc = psqt_weights_cnt + (size_t)fi * NNUE_PSQT_BKTS;
-                bool dirty = false;
-                for (int d = 0; d < NNUE_HALF_DIMS && !dirty; d++) dirty = (wc[d] != 0);
-                for (int b = 0; b < NNUE_PSQT_BKTS && !dirty; b++) dirty = (pc[b] != 0);
-                if (!dirty) continue;
+                if (!row_dirty[fi]) continue;
                 uint32_t fi_u = (uint32_t)fi;
                 fwrite(&fi_u, sizeof(uint32_t), 1, f);
                 fwrite(m_psqt_w + (size_t)fi * NNUE_PSQT_BKTS, sizeof(float), NNUE_PSQT_BKTS, f);
@@ -2402,6 +2392,9 @@ bool nnue_save_fc_weights(const char *path)
     // steps ~10,000× the intended LR, catastrophically corrupting FT weights.
     // Merge strategy: max(v_file, v_local) — same as FC v.
     {
+        // Compute the non-zero flag once per row and reuse it in the write
+        // loop (previously both loops scanned the full ~92 MB v_ft_w array).
+        static uint8_t ftv_nonzero[NNUE_FT_INPUTS];
         uint32_t n_ft_v_rows = 0;
         if (v_ft_w) {
             for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
@@ -2409,20 +2402,17 @@ bool nnue_save_fc_weights(const char *path)
                 bool v_nonzero = false;
                 for (int d = 0; d < NNUE_HALF_DIMS && !v_nonzero; d++)
                     v_nonzero = (vw[d] != 0.0f);
+                ftv_nonzero[fi] = (uint8_t)v_nonzero;
                 if (v_nonzero) n_ft_v_rows++;
             }
         }
         fwrite(&n_ft_v_rows, sizeof(uint32_t), 1, f);
         if (v_ft_w && n_ft_v_rows > 0) {
             for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
-                const float *vw = v_ft_w + (size_t)fi * NNUE_HALF_DIMS;
-                bool v_nonzero = false;
-                for (int d = 0; d < NNUE_HALF_DIMS && !v_nonzero; d++)
-                    v_nonzero = (vw[d] != 0.0f);
-                if (!v_nonzero) continue;
+                if (!ftv_nonzero[fi]) continue;
                 uint32_t fi_u = (uint32_t)fi;
                 fwrite(&fi_u, sizeof(uint32_t), 1, f);
-                fwrite(vw, sizeof(float), NNUE_HALF_DIMS, f);
+                fwrite(v_ft_w + (size_t)fi * NNUE_HALF_DIMS, sizeof(float), NNUE_HALF_DIMS, f);
             }
         }
     }
@@ -2463,6 +2453,7 @@ bool nnue_load_fc_weights(const char *path)
 
     FILE *f = fopen(path, "rb");
     if (!f) { tdleaf_release_lock(lock_fd); return false; }
+    setvbuf(f, nullptr, _IOFBF, 4u << 20);
     uint32_t magic = 0, version = 0;
     if (fread(&magic, 4, 1, f) != 1 || fread(&version, 4, 1, f) != 1) {
         fclose(f); tdleaf_release_lock(lock_fd); return false;
