@@ -14,6 +14,23 @@ Changes since 2017_12_24
                improves faster than its solo run (receiving the other's
                work).  Expected ~5-7x wall-clock speedup on 8-10 cores.
 
+2026_07_02 -- hybrid_loop.py: one-command hybrid-loop iteration driver.
+               Non-interactive playbook executor for the online-generation ->
+               offline-consolidation cycle: (1) optionally promote a given
+               .tdleaf.bin to the live training state (backing up the old
+               one), (2) online self-play generation via match.py with
+               TDLEAF_DUMP_TSV leaf/root corpus dumping, (3) checkpoint the
+               post-generation state, (4) shard dumps (+ optional extra
+               --corpus TSVs) round-robin, (5) sharded multi-process offline
+               training via Leaf_vbt --bt-sync, (6) export the merged final
+               net (zero-LR pass), (7) compile a rating binary and run a
+               gauntlet with an Elo results table.  Phases are skippable
+               (--skip-online = consolidate-only from existing corpora;
+               --skip-train = generate-only), covering the general "start
+               from a given point and continue learning" workflow.  Helper
+               binaries (Leaf_vbt, Leaf_vtrain_hl_a/b) are auto-compiled.
+               Smoke-tested end to end (tiny run through all seven phases).
+
 2026_07_02 -- TSV dump extended to ROOT positions (leaf + root corpora).
                TDLEAF_DUMP_TSV now writes two per-process files:
                <prefix>.<pid>.leaf.tsv (PV-leaf positions, static-eval
