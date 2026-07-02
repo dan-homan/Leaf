@@ -1,5 +1,32 @@
 Changes since 2017_12_24
 
+2026_07_02 -- nnue_batch_train.cpp: offline batch trainer (--batch-train).
+               Supervised training on the quiet-position TSV sets from
+               extract_quiet_positions.py, reusing the online-TDLeaf FP32
+               gradient machinery end to end (nnue_forward_fp32,
+               nnue_accumulate_gradients, per-section Adam LRs, PSQT
+               gradient mean-centering, PAWN pin, gradient clipping,
+               requantize) so the existing LR calibration and gauge
+               anchors carry over unchanged.  Per-position target is the
+               lambda blend  p = L*result + (1-L)*sigmoid(cp/K)  with
+               squared error in probability space (same update form as
+               the TD rule).  Positions are stored packed (32 B each:
+               occupancy bitboard + piece nibbles); train/validation
+               split is BY GAME via hashed gid; shuffled epochs; per-
+               epoch snapshots <prefix>_epN.nnue (piece_val baked — for
+               building gauntlet binaries) and <prefix>_epN.tdleaf.bin
+               (pairs with the ORIGINAL base .nnue to resume training;
+               the v10 content-hash check rejects mispairing with the
+               baked snapshot).  Options: --bt-out/-epochs/-lambda/-K/
+               -lr/-batch/-val/-seed/-max.  Runs after the normal
+               .nnue + .tdleaf.bin load in main(), then exits.  Single-
+               threaded ~32k positions/s (~18 min/epoch on the 34M-
+               position d8 corpus).  Smoke-tested: monotone train + val
+               loss decrease over 3 epochs from the 2.6e6g checkpoint;
+               snapshot files verified loadable.  Part of the offline
+               consolidation pilot (hybrid loop: online TDLeaf generates
+               data, offline training extracts it fully).
+
 2026_07_02 -- extract_quiet_positions.py: extraction pipeline for offline
                (supervised) NNUE training from existing PGNs.  Replays each
                game (python-chess, Chess960-aware, multiprocessing) and

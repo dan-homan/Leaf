@@ -259,6 +259,11 @@ int nnue_evaluate_acc_raw(const int16_t acc[2][NNUE_HALF_DIMS],
 // uninitialised (loading a pre-existing .nnue without .tdleaf.bin).
 int nnue_dense_piece_val(const struct position &pos, int stm, int piece_count);
 
+// Offline batch trainer (nnue_batch_train.cpp) — supervised training on
+// quiet-position TSV sets from scripts/extract_quiet_positions.py.
+// Invoked from main() when --batch-train is present; returns exit code.
+int nnue_batch_train(int argc, char *argv[]);
+
 #endif // TDLEAF
 
 #endif // NNUE_H

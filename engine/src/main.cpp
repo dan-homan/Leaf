@@ -244,6 +244,24 @@ int main(int argc, char *argv[])
   // so that any piece_val correction from .tdleaf.bin is included.
   if (nnue_available) nnue_extract_piece_values();
 #endif
+#if NNUE && TDLEAF
+  // --batch-train <tsv[,tsv...]>: offline supervised training on quiet-position
+  // sets (see nnue_batch_train.cpp for options).  Runs after the normal
+  // .nnue + .tdleaf.bin load above so training starts from the current
+  // checkpoint state, then exits.
+  {
+    bool bt_mode = false;
+    for (int ai = 1; ai < argc - 1; ai++)
+      if (strcmp(argv[ai], "--batch-train") == 0) { bt_mode = true; break; }
+    if (bt_mode) {
+      if (!nnue_available) {
+        fprintf(stderr, "--batch-train requires a loaded NNUE network\n");
+        return 1;
+      }
+      return nnue_batch_train(argc, argv);
+    }
+  }
+#endif
 #endif
 
 #if NNUE
