@@ -186,6 +186,14 @@ struct TDRecord {
     // Leaf position for Flavor A replay: allows full accumulator rebuild from
     // current FT weights during replay, rather than using stale accumulators.
     position pos;
+    // Root-position snapshot for the TSV dump (TDLEAF_DUMP_TSV): the root's
+    // search score (score_root_stm) is a search-amplified label for root_pos,
+    // unlike the leaf's static eval which is self-distillation.  root_static
+    // is the root's STATIC eval (STM POV) — |root_static − score_root_stm|
+    // is the root quietness test.  Filled only when dumping is enabled.
+    position root_pos;
+    int      root_static;
+    int8_t   id_depth;    // ID iteration count ≈ achieved search depth
 };
 
 // ---------------------------------------------------------------------------
@@ -220,7 +228,8 @@ void tdleaf_record_ply(TDGameRecord &rec,
                        const move *pv,
                        int score_root_stm,
                        const int *id_scores,
-                       int id_score_count);
+                       int id_score_count,
+                       int search_depth);
 
 // Run the full TDLeaf(λ) update after a game ends.
 // result: game outcome from White's perspective (1.0=White wins, 0.5=draw, 0.0=Black wins).

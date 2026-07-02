@@ -20,6 +20,20 @@
 // runtime — the threshold tracks piece-value drift under TDLeaf.
 extern int value[7];
 
+// True when the leaf/root TSV dump is enabled (TDLEAF_DUMP_TSV env var).
+// Cached once; consulted by tdleaf_record_ply to decide whether to snapshot
+// the root position and compute its static eval (one extra nnue_evaluate
+// per recorded ply — skipped entirely when dumping is off).
+static bool tdleaf_dump_wanted()
+{
+    static int wanted = -1;
+    if (wanted < 0) {
+        const char *p = getenv("TDLEAF_DUMP_TSV");
+        wanted = (p && *p) ? 1 : 0;
+    }
+    return wanted == 1;
+}
+
 // ---------------------------------------------------------------------------
 // tdleaf_record_ply — walk the PV to the leaf, then snapshot its accumulator
 // ---------------------------------------------------------------------------
@@ -29,7 +43,8 @@ void tdleaf_record_ply(TDGameRecord &rec,
                        const move *pv,
                        int score_root_stm,
                        const int *id_scores,
-                       int id_score_count)
+                       int id_score_count,
+                       int search_depth)
 {
     if (rec.n_plies >= MAX_GAME_PLY) return;  // safety guard
 
@@ -106,6 +121,19 @@ void tdleaf_record_ply(TDGameRecord &rec,
     r.stack             = (pc - 1) / 4;
     r.id_score_variance = id_var;
     r.pos               = cur;  // store leaf position for Flavor A replay
+    r.id_depth          = (int8_t)((search_depth < 1) ? 1 :
+                                   (search_depth > 127) ? 127 : search_depth);
+    if (tdleaf_dump_wanted()) {
+        // Root snapshot + static eval for the root-row TSV dump.
+        r.root_pos = root_pos;
+        int pc_root = 0;
+        for (int sd = 0; sd < 2; sd++)
+            for (int pt = PAWN; pt <= KING; pt++)
+                pc_root += root_pos.plist[sd][pt][0];
+        pc_root = (pc_root < 1) ? 1 : (pc_root > 32) ? 32 : pc_root;
+        r.root_static = nnue_evaluate(root_acc, (int)root_pos.wtm, pc_root)
+                      + nnue_dense_piece_val(root_pos, (int)root_pos.wtm, pc_root);
+    }
 
     // Enumerate active features at the leaf position for FT/PSQT backprop.
     // Indices are by actual perspective (0=BLACK, 1=WHITE) matching halfkav2_feature().
@@ -204,25 +232,57 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result,
 }
 
 // ---------------------------------------------------------------------------
-// Leaf-position TSV dump — build an offline-training corpus during play.
+// Leaf + root TSV dump — build offline-training corpora during play.
 //
-// Env-gated: TDLEAF_DUMP_TSV=<prefix> writes one record per recorded PV-leaf
-// position to <prefix>.<pid>.tsv (per-process file, append mode), in the same
-// format as scripts/extract_quiet_positions.py:
+// Env-gated: TDLEAF_DUMP_TSV=<prefix> writes two per-process files in the
+// scripts/extract_quiet_positions.py format
 //     fen \t cp \t result \t ply \t depth \t gid
-// cp is the leaf's static eval (white POV) — NOTE this is the current net's
-// own output (self-distillation), so these records carry training signal in
-// the OUTCOME label only; train them at lambda ≈ 1.
 //
-// Quietness filter: a leaf is kept only when its static eval agrees with the
-// propagated root search score to within TDLEAF_DUMP_QUIET_CP centipawns
-// (default 60) — an operational quietness test (any unresolved tactics show
-// up as static-vs-search disagreement).  |eval| > TDLEAF_DUMP_MAX_CP
-// (default 1500) is also skipped, mirroring the extraction pipeline.
+//   <prefix>.<pid>.leaf.tsv — the PV-leaf position of every recorded ply.
+//     cp = leaf STATIC eval (white POV) — the current net's own output
+//     (self-distillation), so leaf rows carry training signal in the OUTCOME
+//     label only.  depth column = 0, which the batch trainer treats as
+//     "no search label: train this record outcome-only (lambda = 1)".
+//     Quietness: |leaf static − propagated root search score| <= QUIET_CP.
+//
+//   <prefix>.<pid>.root.tsv — the root (played) position of every recorded
+//     ply.  cp = root SEARCH score (white POV) — a search-amplified label,
+//     the same kind the PGN extraction pipeline produces; depth column =
+//     achieved ID depth.  Quietness: |root static − root search| <= QUIET_CP
+//     (an operational test — unresolved tactics show up as static-vs-search
+//     disagreement).
+//
+// Both apply |cp| <= TDLEAF_DUMP_MAX_CP (default 1500).  QUIET_CP default 60
+// (TDLEAF_DUMP_QUIET_CP).
 // ---------------------------------------------------------------------------
+
+// FEN board+stm from a stored position (castling/ep are not NNUE features and
+// the trainer's parser ignores them — emit "- -").
+static void tdleaf_dump_fen(const position &pos, bool wtm, char *out)
+{
+    int fi = 0;
+    for (int ry = 7; ry >= 0; ry--) {
+        int run = 0;
+        for (int rx = 0; rx < 8; rx++) {
+            int code = pos.sq[SQR(rx, ry)];
+            int pt = PTYPE(code);
+            if (pt == 0) { run++; continue; }
+            if (run) out[fi++] = (char)('0' + run);
+            run = 0;
+            static const char pc[] = " pnbrqk";
+            char ch = pc[pt];
+            out[fi++] = PSIDE(code) ? (char)(ch - 32) : ch;
+        }
+        if (run) out[fi++] = (char)('0' + run);
+        if (ry) out[fi++] = '/';
+    }
+    snprintf(out + fi, 16, " %c - - 0 1", wtm ? 'w' : 'b');
+}
+
 static void tdleaf_dump_game(const TDGameRecord &rec, float result)
 {
-    static FILE    *dump_f = nullptr;
+    static FILE    *leaf_f = nullptr;
+    static FILE    *root_f = nullptr;
     static int      dump_quiet_cp = 60;
     static int      dump_max_cp   = 1500;
     static uint32_t dump_gid      = 0;
@@ -235,61 +295,65 @@ static void tdleaf_dump_game(const TDGameRecord &rec, float result)
             if ((v = getenv("TDLEAF_DUMP_QUIET_CP")) && *v) dump_quiet_cp = atoi(v);
             if ((v = getenv("TDLEAF_DUMP_MAX_CP"))   && *v) dump_max_cp   = atoi(v);
             char path[FILENAME_MAX];
-            snprintf(path, sizeof(path), "%s.%d.tsv", prefix, (int)getpid());
-            dump_f = fopen(path, "a");
-            if (dump_f) {
-                if (ftell(dump_f) == 0)
-                    fprintf(dump_f, "fen\tcp\tresult\tply\tdepth\tgid\n");
-                fprintf(stderr, "TDLeaf: dumping leaf positions to %s "
+            auto open_dump = [&](const char *kind) -> FILE* {
+                snprintf(path, sizeof(path), "%s.%d.%s.tsv", prefix, (int)getpid(), kind);
+                FILE *f = fopen(path, "a");
+                if (f) {
+                    if (ftell(f) == 0)
+                        fprintf(f, "fen\tcp\tresult\tply\tdepth\tgid\n");
+                } else {
+                    fprintf(stderr, "TDLeaf: cannot open dump file %s\n", path);
+                }
+                return f;
+            };
+            leaf_f = open_dump("leaf");
+            root_f = open_dump("root");
+            if (leaf_f && root_f)
+                fprintf(stderr, "TDLeaf: dumping leaf+root positions to %s.%d.{leaf,root}.tsv "
                                 "(quiet<=%d cp, max=%d cp)\n",
-                        path, dump_quiet_cp, dump_max_cp);
-            } else {
-                fprintf(stderr, "TDLeaf: cannot open leaf dump file %s\n", path);
-            }
+                        prefix, (int)getpid(), dump_quiet_cp, dump_max_cp);
             // gid: unique across concurrent processes (pid in high bits).
             dump_gid = ((uint32_t)getpid() & 0xFFF) << 20;
         }
     }
-    if (!dump_f) return;
+    if (!leaf_f && !root_f) return;
 
     dump_gid++;
     int root_wtm = (int)rec.engine_color;   // root STM == engine color at every recorded ply
     const char *res_str = (result > 0.75f) ? "1" : (result < 0.25f) ? "0" : "0.5";
+    char fen[110];
 
     for (int t = 0; t < rec.n_plies; t++) {
         const TDRecord &r = rec.plies[t];
-        // Propagated root score in the leaf's POV.
-        int root_leaf_pov = ((int)r.wtm == root_wtm) ? r.score_root_stm
-                                                     : -r.score_root_stm;
-        if (abs(r.score_stm - root_leaf_pov) > dump_quiet_cp) continue;
-        int cp_white = r.wtm ? r.score_stm : -r.score_stm;
-        if (cp_white > dump_max_cp || cp_white < -dump_max_cp) continue;
 
-        // FEN board field from the stored leaf position (castling/ep are not
-        // NNUE features and the trainer's parser ignores them — write "- -").
-        char fen[90];
-        int  fi = 0;
-        for (int ry = 7; ry >= 0; ry--) {
-            int run = 0;
-            for (int rx = 0; rx < 8; rx++) {
-                int code = r.pos.sq[SQR(rx, ry)];
-                int pt = PTYPE(code);
-                if (pt == 0) { run++; continue; }
-                if (run) fen[fi++] = (char)('0' + run);
-                run = 0;
-                static const char pc[] = " pnbrqk";
-                char ch = pc[pt];
-                fen[fi++] = PSIDE(code) ? (char)(ch - 32) : ch;
+        // ---- Leaf row: static-eval label, depth 0 (outcome-only) ---------
+        if (leaf_f) {
+            int root_leaf_pov = ((int)r.wtm == root_wtm) ? r.score_root_stm
+                                                         : -r.score_root_stm;
+            if (abs(r.score_stm - root_leaf_pov) <= dump_quiet_cp) {
+                int cp_white = r.wtm ? r.score_stm : -r.score_stm;
+                if (cp_white <= dump_max_cp && cp_white >= -dump_max_cp) {
+                    tdleaf_dump_fen(r.pos, r.wtm, fen);
+                    fprintf(leaf_f, "%s\t%d\t%s\t%d\t0\t%u\n",
+                            fen, cp_white, res_str, t + 1, dump_gid);
+                }
             }
-            if (run) fen[fi++] = (char)('0' + run);
-            if (ry) fen[fi++] = '/';
         }
-        fen[fi] = '\0';
 
-        fprintf(dump_f, "%s %c - - 0 1\t%d\t%s\t%d\t0\t%u\n",
-                fen, r.wtm ? 'w' : 'b', cp_white, res_str, t + 1, dump_gid);
+        // ---- Root row: search-score label, depth = achieved ID depth -----
+        if (root_f) {
+            if (abs(r.root_static - r.score_root_stm) <= dump_quiet_cp) {
+                int cp_white = root_wtm ? r.score_root_stm : -r.score_root_stm;
+                if (cp_white <= dump_max_cp && cp_white >= -dump_max_cp) {
+                    tdleaf_dump_fen(r.root_pos, (bool)root_wtm, fen);
+                    fprintf(root_f, "%s\t%d\t%s\t%d\t%d\t%u\n",
+                            fen, cp_white, res_str, t + 1, (int)r.id_depth, dump_gid);
+                }
+            }
+        }
     }
-    fflush(dump_f);   // survive process kills at match end
+    if (leaf_f) fflush(leaf_f);   // survive process kills at match end
+    if (root_f) fflush(root_f);
 }
 
 // ---------------------------------------------------------------------------

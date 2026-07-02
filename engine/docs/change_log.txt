@@ -14,6 +14,28 @@ Changes since 2017_12_24
                improves faster than its solo run (receiving the other's
                work).  Expected ~5-7x wall-clock speedup on 8-10 cores.
 
+2026_07_02 -- TSV dump extended to ROOT positions (leaf + root corpora).
+               TDLEAF_DUMP_TSV now writes two per-process files:
+               <prefix>.<pid>.leaf.tsv (PV-leaf positions, static-eval
+               labels, depth column 0) and <prefix>.<pid>.root.tsv (played
+               root positions, SEARCH-score labels — the search-amplified
+               kind the PGN pipeline produces — depth column = achieved ID
+               depth via a new search_depth parameter to
+               tdleaf_record_ply from ts.last_depth).  Root quietness test:
+               |root static - root search| <= TDLEAF_DUMP_QUIET_CP, using a
+               root static eval computed at record time from the root
+               accumulator (one nnue_evaluate per recorded ply, only when
+               dumping is enabled).  TDRecord gains root_pos /
+               root_static / id_depth fields.  Batch trainer: BTRecord
+               stores the depth column and records with depth == 0 are
+               trained OUTCOME-ONLY regardless of --bt-lambda (leaf rows'
+               cp is the net's own static eval, i.e. self-distillation) —
+               so mixed root+leaf corpora train correctly in one run.
+               This makes PGN retention optional for corpus building: one
+               env var during online play yields both corpora.  Validated:
+               root rows carry depth=6 at fixed-depth-6, leaf rows 0; all
+               FENs parse; mixed-corpus training runs clean.
+
 2026_07_02 -- tdleaf.cpp: leaf-position TSV dump (TDLEAF_DUMP_TSV env).
                During online TDLeaf play, optionally dump each recorded
                PV-leaf position to <prefix>.<pid>.tsv at game end, in the

@@ -12,6 +12,8 @@
 //
 // and the loss is squared error in probability space, (p_target - d)^2,
 // matching the TD update form so the existing LR calibration carries over.
+// Records with depth == 0 (leaf-dump rows — their cp is the net's own static
+// eval) are trained outcome-only regardless of lambda.
 //
 // Invocation (requires a NNUE=1 TDLEAF=1 build; loads the .nnue and
 // .tdleaf.bin next to the binary exactly like a normal training session,
@@ -65,6 +67,9 @@ struct BTRecord {
     uint8_t  result2;   // 2 × white result: 0 / 1 / 2
     uint8_t  wtm;       // 1 = White to move
     uint32_t gid;       // game id (validation split key)
+    uint8_t  depth;     // search depth of the cp label; 0 = no search label
+                        // (e.g. leaf-dump rows) → trained outcome-only
+    uint8_t  pad[3];
 };
 
 // ---------------------------------------------------------------------------
@@ -166,10 +171,11 @@ static bool bt_load_file(const char *path, std::vector<BTRecord> &out,
         else if (p[0] == '0' && p[1] == '.'){ result2 = 1; }
         else if (p[0] == '0')               { result2 = 0; }
         else { skipped++; continue; }
-        // skip to ply, depth, gid
+        // skip to ply, then read depth and gid
         p = strchr(p, '\t'); if (!p) { skipped++; continue; }
         p = strchr(p + 1, '\t'); if (!p) { skipped++; continue; }   // past ply
-        p = strchr(p + 1, '\t'); if (!p) { skipped++; continue; }   // past depth
+        long depth = strtol(p + 1, &p, 10);
+        if (*p != '\t') { skipped++; continue; }
         unsigned long gid = strtoul(p + 1, nullptr, 10);
 
         BTRecord r;
@@ -178,6 +184,7 @@ static bool bt_load_file(const char *path, std::vector<BTRecord> &out,
         if (cp < -32000) cp = -32000;
         r.cp      = (int16_t)cp;
         r.result2 = result2;
+        r.depth   = (uint8_t)((depth < 0) ? 0 : (depth > 255) ? 255 : depth);
         r.gid     = gid_base + (uint32_t)gid;
         if (r.gid > gid_max) gid_max = r.gid;
         out.push_back(r);
@@ -243,6 +250,9 @@ static float bt_eval_record(const BTRecord &r, float K, NNUEActivations *act_out
 static inline float bt_target(const BTRecord &r, float lambda, float K)
 {
     float outcome = 0.5f * (float)r.result2;
+    // depth 0 = no search label (leaf-dump rows: cp is the net's own static
+    // eval, i.e. self-distillation) → train outcome-only regardless of lambda.
+    if (r.depth == 0) return outcome;
     float ev = 1.0f / (1.0f + expf(-(float)r.cp / K));
     return lambda * outcome + (1.0f - lambda) * ev;
 }
