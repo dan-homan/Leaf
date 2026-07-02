@@ -1,5 +1,24 @@
 Changes since 2017_12_24
 
+2026_07_02 -- extract_quiet_positions.py: extraction pipeline for offline
+               (supervised) NNUE training from existing PGNs.  Replays each
+               game (python-chess, Chess960-aware, multiprocessing) and
+               emits one TSV record per QUIET position: Shredder-FEN,
+               search eval (white POV, cp, from the move comment), game
+               result (white POV), ply, eval depth, and a stable game id
+               (so the trainer can split train/validation BY GAME).  Eval
+               and outcome are stored separately so the trainer's
+               lambda-blend target  p = L*result + (1-L)*sigmoid(cp/K)
+               keeps L and K as training-time hyperparameters.  Quiet
+               filters: in-check, played-move-is-capture/promotion/check,
+               missing/mate eval, |eval| cap, min-ply, fifty-move clock.
+               Duplicate control via polyglot Zobrist hash with a per-
+               position record cap (FRC book openings repeat massively).
+               First use: pilot corpus for the offline consolidation
+               experiment (hybrid loop: online TDLeaf generates data,
+               offline training extracts it fully).  Requires the
+               python-chess package.
+
 2026_07_02 -- Buffered I/O for .tdleaf.bin save path (nnue_training.cpp).
                nnue_save_fc_weights previously re-read and rewrote parts
                of the 263 MB weights file 4 bytes at a time (per-element

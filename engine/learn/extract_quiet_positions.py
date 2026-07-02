@@ -1,0 +1,1 @@
+../scripts/extract_quiet_positions.py
