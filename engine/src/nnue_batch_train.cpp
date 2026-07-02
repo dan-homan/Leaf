@@ -26,8 +26,21 @@
 //              [--bt-val F]      validation fraction, BY GAME     (default 0.05)
 //              [--bt-seed N]     shuffle/split seed               (default 42)
 //              [--bt-max N]      cap on loaded positions, 0 = all (default 0)
+//              [--bt-sync F]     shared .tdleaf.bin for multi-process
+//                                data-parallel training (see below)
+//              [--bt-sync-every N]  batches between syncs        (default 256)
 //
 // Per epoch: <prefix>_ep<N>.nnue and <prefix>_ep<N>.tdleaf.bin are written.
+//
+// Multi-process data parallelism (--bt-sync): shard the TSV across N trainer
+// processes and point them all at the same --bt-sync file.  Every
+// --bt-sync-every batches each process calls nnue_save_fc_weights() on it —
+// the same POSIX-locked delta-merge protocol used by concurrent online
+// training — then requantizes, pulling co-workers' accumulated updates into
+// its own inference arrays.  Busy locks defer the sync (deltas are retained),
+// exactly as online.  Give each process a distinct --bt-out prefix; the
+// per-epoch .tdleaf.bin/.nnue snapshots are per-process views, while the
+// --bt-sync file holds the merged state (a final sync runs at exit).
 
 #include <cstdio>
 #include <cstdlib>
@@ -250,6 +263,8 @@ int nnue_batch_train(int argc, char *argv[])
     float val_frac = 0.05f;
     unsigned seed  = 42;
     size_t max_rec = 0;
+    const char *sync_path = nullptr;
+    int   sync_every = 256;
 
     for (int i = 1; i < argc; i++) {
         auto next = [&](const char *flag) -> const char* {
@@ -267,6 +282,8 @@ int nnue_batch_train(int argc, char *argv[])
         else if ((v = next("--bt-val")))     val_frac = (float)atof(v);
         else if ((v = next("--bt-seed")))    seed     = (unsigned)atoi(v);
         else if ((v = next("--bt-max")))     max_rec  = (size_t)atoll(v);
+        else if ((v = next("--bt-sync")))    sync_path = v;
+        else if ((v = next("--bt-sync-every"))) sync_every = atoi(v);
     }
     if (!files) { fprintf(stderr, "batch-train: no input files\n"); return 1; }
     if (batch < 1) batch = 1;
@@ -275,6 +292,9 @@ int nnue_batch_train(int argc, char *argv[])
                     "epochs=%d val=%.3f seed=%u\n",
             (double)lambda, (double)K, (double)lr_scale, batch, epochs,
             (double)val_frac, seed);
+    if (sync_path)
+        fprintf(stderr, "batch-train: multi-process sync → %s every %d batches\n",
+                sync_path, sync_every);
 
     // ---- Load data ------------------------------------------------------
     std::vector<BTRecord> recs;
@@ -326,6 +346,18 @@ int nnue_batch_train(int argc, char *argv[])
     std::mt19937 rng(seed);
     static NNUEActivations act;   // ~12 KB; single-threaded
 
+    // Multi-process sync: merge our deltas into the shared file (or defer if
+    // the lock is busy — deltas are retained, same as online training), then
+    // requantize so co-workers' merged updates reach our inference arrays.
+    int batches_since_sync = 0;
+    auto do_sync = [&](const char *when) {
+        if (!sync_path) return;
+        if (!nnue_save_fc_weights(sync_path))
+            fprintf(stderr, "batch-train: sync (%s) to %s FAILED\n", when, sync_path);
+        nnue_requantize_fc();
+        batches_since_sync = 0;
+    };
+
     for (int ep = 1; ep <= epochs; ep++) {
         std::shuffle(train_idx.begin(), train_idx.end(), rng);
         double se = 0.0;
@@ -353,6 +385,8 @@ int nnue_batch_train(int argc, char *argv[])
                 nnue_apply_gradients(lr_scale);
                 nnue_requantize_fc();
                 in_batch = 0;
+                if (sync_path && ++batches_since_sync >= sync_every)
+                    do_sync("periodic");
             }
             if ((n + 1) % 1000000 == 0) {
                 auto el = std::chrono::duration<double>(
@@ -367,6 +401,9 @@ int nnue_batch_train(int argc, char *argv[])
             nnue_apply_gradients(lr_scale);
             nnue_requantize_fc();
         }
+
+        // Merge before validation/snapshot so both reflect co-workers' work.
+        do_sync("epoch-end");
 
         auto el = std::chrono::duration<double>(
                       std::chrono::steady_clock::now() - t0).count();

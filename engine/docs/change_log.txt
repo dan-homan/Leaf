@@ -1,5 +1,37 @@
 Changes since 2017_12_24
 
+2026_07_02 -- Batch trainer: multi-process data parallelism (--bt-sync).
+               --bt-sync <file> --bt-sync-every <N> (default 256): shard the
+               TSV across N trainer processes pointing at one shared
+               .tdleaf.bin; every N batches each process runs the existing
+               POSIX-locked delta-merge save (same protocol as concurrent
+               online training) then requantizes, pulling co-workers'
+               updates into its own inference arrays.  Busy locks defer
+               (deltas retained).  Epoch-end sync before snapshots.
+               Validated with two concurrent sharded processes: merged
+               file intact (t_adam max-merged, v11 sections preserved),
+               deferrals handled, and each process's validation loss
+               improves faster than its solo run (receiving the other's
+               work).  Expected ~5-7x wall-clock speedup on 8-10 cores.
+
+2026_07_02 -- tdleaf.cpp: leaf-position TSV dump (TDLEAF_DUMP_TSV env).
+               During online TDLeaf play, optionally dump each recorded
+               PV-leaf position to <prefix>.<pid>.tsv at game end, in the
+               extract_quiet_positions.py format, using the machinery
+               already in TDGameRecord (leaf pos + evals + outcome).
+               Quietness filter: |leaf static - propagated root score| <=
+               TDLEAF_DUMP_QUIET_CP (default 60) — an operational test
+               that catches unresolved tactics; |eval| capped at
+               TDLEAF_DUMP_MAX_CP (1500).  NOTE: the cp label at a leaf
+               is the net's own static eval (self-distillation), so these
+               records carry signal in the OUTCOME label only — train
+               them at lambda ~= 1.  Complementary to PGN-extracted root
+               positions (which carry search-amplified eval labels);
+               leaves are distribution-matched to what the net actually
+               evaluates in search.  Validated: 40-game match produced
+               3,240 records (~81/game), all FENs valid, 3% in check,
+               sign conventions correct, trainer consumes them directly.
+
 2026_07_02 -- nnue_batch_train.cpp: offline batch trainer (--batch-train).
                Supervised training on the quiet-position TSV sets from
                extract_quiet_positions.py, reusing the online-TDLeaf FP32

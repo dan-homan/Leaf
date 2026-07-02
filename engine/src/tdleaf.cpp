@@ -8,7 +8,9 @@
 #include <cmath>
 #include <cstring>
 #include <cstdio>
+#include <cstdlib>
 #include <algorithm>
+#include <unistd.h>     // getpid — leaf-dump per-process file naming
 #include "chess.h"
 #include "nnue.h"
 #include "tdleaf.h"
@@ -202,6 +204,95 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result,
 }
 
 // ---------------------------------------------------------------------------
+// Leaf-position TSV dump — build an offline-training corpus during play.
+//
+// Env-gated: TDLEAF_DUMP_TSV=<prefix> writes one record per recorded PV-leaf
+// position to <prefix>.<pid>.tsv (per-process file, append mode), in the same
+// format as scripts/extract_quiet_positions.py:
+//     fen \t cp \t result \t ply \t depth \t gid
+// cp is the leaf's static eval (white POV) — NOTE this is the current net's
+// own output (self-distillation), so these records carry training signal in
+// the OUTCOME label only; train them at lambda ≈ 1.
+//
+// Quietness filter: a leaf is kept only when its static eval agrees with the
+// propagated root search score to within TDLEAF_DUMP_QUIET_CP centipawns
+// (default 60) — an operational quietness test (any unresolved tactics show
+// up as static-vs-search disagreement).  |eval| > TDLEAF_DUMP_MAX_CP
+// (default 1500) is also skipped, mirroring the extraction pipeline.
+// ---------------------------------------------------------------------------
+static void tdleaf_dump_game(const TDGameRecord &rec, float result)
+{
+    static FILE    *dump_f = nullptr;
+    static int      dump_quiet_cp = 60;
+    static int      dump_max_cp   = 1500;
+    static uint32_t dump_gid      = 0;
+    static bool     dump_init     = false;
+    if (!dump_init) {
+        dump_init = true;
+        const char *prefix = getenv("TDLEAF_DUMP_TSV");
+        if (prefix && *prefix) {
+            const char *v;
+            if ((v = getenv("TDLEAF_DUMP_QUIET_CP")) && *v) dump_quiet_cp = atoi(v);
+            if ((v = getenv("TDLEAF_DUMP_MAX_CP"))   && *v) dump_max_cp   = atoi(v);
+            char path[FILENAME_MAX];
+            snprintf(path, sizeof(path), "%s.%d.tsv", prefix, (int)getpid());
+            dump_f = fopen(path, "a");
+            if (dump_f) {
+                if (ftell(dump_f) == 0)
+                    fprintf(dump_f, "fen\tcp\tresult\tply\tdepth\tgid\n");
+                fprintf(stderr, "TDLeaf: dumping leaf positions to %s "
+                                "(quiet<=%d cp, max=%d cp)\n",
+                        path, dump_quiet_cp, dump_max_cp);
+            } else {
+                fprintf(stderr, "TDLeaf: cannot open leaf dump file %s\n", path);
+            }
+            // gid: unique across concurrent processes (pid in high bits).
+            dump_gid = ((uint32_t)getpid() & 0xFFF) << 20;
+        }
+    }
+    if (!dump_f) return;
+
+    dump_gid++;
+    int root_wtm = (int)rec.engine_color;   // root STM == engine color at every recorded ply
+    const char *res_str = (result > 0.75f) ? "1" : (result < 0.25f) ? "0" : "0.5";
+
+    for (int t = 0; t < rec.n_plies; t++) {
+        const TDRecord &r = rec.plies[t];
+        // Propagated root score in the leaf's POV.
+        int root_leaf_pov = ((int)r.wtm == root_wtm) ? r.score_root_stm
+                                                     : -r.score_root_stm;
+        if (abs(r.score_stm - root_leaf_pov) > dump_quiet_cp) continue;
+        int cp_white = r.wtm ? r.score_stm : -r.score_stm;
+        if (cp_white > dump_max_cp || cp_white < -dump_max_cp) continue;
+
+        // FEN board field from the stored leaf position (castling/ep are not
+        // NNUE features and the trainer's parser ignores them — write "- -").
+        char fen[90];
+        int  fi = 0;
+        for (int ry = 7; ry >= 0; ry--) {
+            int run = 0;
+            for (int rx = 0; rx < 8; rx++) {
+                int code = r.pos.sq[SQR(rx, ry)];
+                int pt = PTYPE(code);
+                if (pt == 0) { run++; continue; }
+                if (run) fen[fi++] = (char)('0' + run);
+                run = 0;
+                static const char pc[] = " pnbrqk";
+                char ch = pc[pt];
+                fen[fi++] = PSIDE(code) ? (char)(ch - 32) : ch;
+            }
+            if (run) fen[fi++] = (char)('0' + run);
+            if (ry) fen[fi++] = '/';
+        }
+        fen[fi] = '\0';
+
+        fprintf(dump_f, "%s %c - - 0 1\t%d\t%s\t%d\t0\t%u\n",
+                fen, r.wtm ? 'w' : 'b', cp_white, res_str, t + 1, dump_gid);
+    }
+    fflush(dump_f);   // survive process kills at match end
+}
+
+// ---------------------------------------------------------------------------
 // Mini-batch: accumulate gradients across TDLEAF_BATCH_SIZE games before
 // applying the Adam step.  This gives Adam a more reliable gradient signal
 // per step, reducing single-game noise.
@@ -218,6 +309,10 @@ void tdleaf_update_after_game(TDGameRecord &rec, float result, const char *save_
         fprintf(stderr, "TDLeaf: skipping short game (%d plies)\n", T);
         return;
     }
+
+    // Optional leaf-position TSV dump (env TDLEAF_DUMP_TSV) — same games
+    // that feed the TD update, so corpus and learning stay consistent.
+    tdleaf_dump_game(rec, result);
 
     tdleaf_accumulate_game(rec, result);
     td_batch_pending++;
