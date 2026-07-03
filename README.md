@@ -31,7 +31,7 @@ See [Build Options](#build-options) for all compile flags.
 
 ## History
 
-EXchess by Dan Homan (now Leaf) first released to the public in early 1998 and was one of a handful of serious open-source engines of that era.  Over two decades of on-and-off development produced a series of increasingly capable versions — from the early v2/v3 series through the v6 and v7 lines released in 2011–2017.
+EXchess by Dan Homan (now Leaf) was first released to the public in early 1998 and was one of a handful of serious open-source engines of that era.  Over two decades of on-and-off development produced a series of increasingly capable versions — from the early v2/v3 series through the v6 and v7 lines released in 2011–2017.
 
 The engine includes a classical hand-crafted evaluation function, principal variation search (PVS), null-move pruning, late move reductions, static exchange evaluation, history heuristics, and a lazy SMP implementation.  It communicates via UCI, xboard/CECP, and an interactive CLI, with protocol auto-detection.
 
