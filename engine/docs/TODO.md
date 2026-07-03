@@ -6,7 +6,37 @@ Planned investigations, improvements, and open questions.
 
 ## TDLeaf(λ) Training
 
-### Training depth curriculum (active area — 2026-04-11)
+### UPDATE 2026-07-02 — hybrid loop supersedes pure-online strategies
+
+The offline-consolidation work (see `OFFLINE_TRAINING.md`) changed the training
+picture substantially and supersedes parts of the depth-curriculum plan below:
+
+- **Confirmed:** the depth-equilibrium finding below still holds for *online*
+  learning — the d6 self-play Elo curve on run 260628 extrapolates to an
+  asymptote ~150–200 Elo below classic_eval; data quality is the binding
+  constraint.
+- **New result:** offline multi-epoch consolidation of the SAME games recovers
+  +125–140 Elo past the online endpoint (~60% of the then-remaining gap to
+  classic_eval) in ~2 h.  The hybrid loop (generate → consolidate → regenerate
+  with the stronger net) is now the primary strategy; depth increases remain the
+  quality lever *within* the generation phase (d8 recommended).
+
+Open items:
+- [ ] Iteration 2 (in progress): fresh d8 generation from the consolidated net
+      via `hybrid_loop.py`; gauntlet vs {btsp-final, 2.4e6g, classic_eval}.
+- [ ] Optimizer probe arms if a generation under-delivers: `--sync-every 128`
+      (merge staleness) before `--bt-lr 0.1` + more epochs (step size).
+- [ ] λ sweep for the blend target (0.7 vs 1.0); leaf-corpus share ablation
+      (roots-only vs roots+leaves).
+- [ ] Outcome-baseline subtraction (`e' = e − EMA(engine-POV mean e)`) — designed,
+      unimplemented; needed only if imbalanced-opponent training (score far from
+      50%) becomes a first-class mode.  See "Outcome-Imbalance Drift" in TDLEAF.md.
+- [ ] Bayeselo pool rating (not head-to-heads) once a consolidated net approaches
+      classic_eval (+598).
+- [ ] Dirty-row-only requantize (nnue_requantize_fc currently rewrites the full
+      92 MB FT array every batch — a possible single-thread trainer speedup).
+
+### Training depth curriculum (2026-04-11; see UPDATE above)
 
 Empirical findings from nn-fresh-260410 training (~1.4M games total):
 

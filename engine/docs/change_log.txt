@@ -1,5 +1,34 @@
 Changes since 2017_12_24
 
+2026_07_03 -- Documentation refresh for the offline-training / hybrid-loop
+               work.  New docs/OFFLINE_TRAINING.md: motivation and measured
+               results (+139/+127 Elo from consolidation of existing
+               self-play games), corpus TSV format and the depth-0
+               outcome-only rule, both corpus sources (PGN extraction and
+               the in-play TDLEAF_DUMP_TSV dump), the --batch-train
+               reference with snapshot/pairing rules, --bt-sync multi-
+               process parallelism, and the hybrid_loop.py workflow with
+               practical guidance (rate by gauntlet, probe arms, canaries).
+               TDLEAF.md: corrected the stale "TDLeaf only works under
+               xboard" section (UCI learns via self-adjudication since the
+               fastchess switch); documented TDRecord's score_root_stm and
+               corpus-dump fields; new "Corpus Dumping" and "Outcome-
+               Imbalance Drift" sections (collapse mechanism, rotation
+               healing, canaries, guidance); buffered-I/O performance note;
+               script list updated.  SCRIPT_USE.md: option tables for
+               extract_quiet_positions.py, diff_tdleaf_checkpoints.py, and
+               hybrid_loop.py.  Root README.md: offline training & hybrid
+               loop feature section with headline results, TDLeaf feature
+               list refresh (v11, gauge anchoring, UCI support), fastchess
+               as default match driver, hybrid_loop.py quick start.
+               engine/CLAUDE.md: same staleness fixes (UCI-inactive note,
+               v8→v11) plus nnue_batch_train.cpp in the unity-build order
+               and key-files table, two-training-modes summary, and the
+               outcome-imbalance gotcha.  TODO.md: dated update marking the
+               hybrid loop as the primary strategy (depth curriculum
+               remains the in-generation quality lever) with current open
+               items.
+
 2026_07_02 -- Batch trainer: multi-process data parallelism (--bt-sync).
                --bt-sync <file> --bt-sync-every <N> (default 256): shard the
                TSV across N trainer processes pointing at one shared

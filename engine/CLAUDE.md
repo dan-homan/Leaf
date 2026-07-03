@@ -79,7 +79,7 @@ The `.nnue` network file and `.tdleaf.bin` weights file must reside in the same 
 `main.cpp` → `protocol.cpp` → `uci.cpp` → `attacks.cpp` → `exmove.cpp` → `swap.cpp` → `moves.cpp` → `captures.cpp` →
 `captchecks.cpp` → `hash.cpp` → `smp.cpp` → `search.cpp` → `score.cpp` →
 `#if NNUE nnue.cpp` → `#if NNUE nnue_io.cpp` → `#if NNUE_EMBED nnue_embed.cpp` →
-`#if TDLEAF nnue_training.cpp` → `#if TDLEAF tdleaf.cpp` → `check.cpp` → `book.cpp` → `sort.cpp` →
+`#if TDLEAF nnue_training.cpp` → `#if TDLEAF tdleaf.cpp` → `#if TDLEAF nnue_batch_train.cpp` → `check.cpp` → `book.cpp` → `sort.cpp` →
 `util.cpp` → `support.cpp` → `setup.cpp` → `game_rec.cpp` →
 `tree_search_functions.cpp`
 
@@ -99,7 +99,8 @@ errors (unknown types, undeclared identifiers).  These are expected and can be i
 | `src/nnue.cpp` | NNUE runtime: weight arrays, accumulator init/update/delta, int8 forward pass (SIMD) |
 | `src/nnue_io.cpp` | NNUE file I/O: `.nnue` load (file + embedded), LEB128, `nnue_write_nnue` |
 | `src/nnue_training.cpp` | TDLeaf training: FP32 shadow weights, gradients, Adam optimizer, `.tdleaf.bin` I/O (TDLEAF=1 only) |
-| `src/tdleaf.cpp` | PV walking, TD error computation (with score-change clipping + ID-stability weighting), gradient backprop |
+| `src/tdleaf.cpp` | PV walking, TD error computation (with score-change clipping + ID-stability weighting), gradient backprop, leaf/root corpus dump (`TDLEAF_DUMP_TSV`) |
+| `src/nnue_batch_train.cpp` | Offline batch trainer (`--batch-train`): supervised training on quiet-position TSV corpora, λ-blend targets, multi-process `--bt-sync` (TDLEAF=1 only) |
 | `src/chess.h` | All major structs: `position`, `move`, `move_list`, `tree_search`, `game_rec` |
 | `src/define.h` | Compile-time constants and flag defaults (`NNUE`, `TDLEAF`, `MATERIAL_ONLY`, piece encodings, `MAXD`, `MAX_GAME_PLY`) |
 | `src/tdleaf.h` | TDLeaf hyperparameters, `TDRecord`, `TDGameRecord`, function declarations |
@@ -115,6 +116,8 @@ errors (unknown types, undeclared identifiers).  These are expected and can be i
 ### TDLeaf(λ) learning
 
 See `docs/TDLEAF.md` for the full algorithm reference, hyperparameters, and gradient flow.
+
+**Two training modes** — online TDLeaf(λ) (below) and offline supervised consolidation of quiet-position corpora (`--batch-train` in any TDLEAF binary; corpora from `extract_quiet_positions.py` or the in-play `TDLEAF_DUMP_TSV` dump).  Together they form the hybrid loop (online generates games, offline extracts them fully, consolidated net re-enters online play) — driven end-to-end by `scripts/hybrid_loop.py`.  See `docs/OFFLINE_TRAINING.md`.
 
 **Call flow:**
 - After each search: `tdleaf_record_ply()` snapshots the PV leaf accumulator, feature indices, and ID score history.
@@ -136,8 +139,10 @@ See `docs/TDLEAF.md` for the full algorithm reference, hyperparameters, and grad
 - PSQT must be initialized **symmetrically** (own=+V, enemy=-V).  Asymmetric init (own=+2V, enemy=0) produces the same score but causes FT biases to explode to int16 saturation during training.
 - FC0 passthrough row (output 15) is **zero-initialized**; gradient flows through it normally.
 - FT uses RMSProp (no m), not full Adam.  Session-local `t_ft_session` prevents oversized steps after restart.
-- Weights persist to `.tdleaf.bin` (v8 format); POSIX file locking + delta merging for concurrent training.
-- TDLeaf is inactive in UCI mode — hooks are in `make_move()` which UCI never calls.
+- Weights persist to `.tdleaf.bin` (v11 format: adds source-`.nnue` content hash (v10) and persisted PSQT init slot-means (v11)); POSIX file locking + delta merging for concurrent training.  The save path uses section-level buffered I/O + cached dirty-row bitmaps (learning overhead ≈ +13% wall clock at depth 6).
+- TDLeaf works under BOTH protocols: xboard/CECP gets results via the protocol `result` command (`make_move()` hooks); UCI derives outcomes via `tdleaf_self_adjudicate()` in `uci_finish_game()` (terminal-position checks + score-history fallback; ambiguous games skip learning).
+- Sustained training score far from 50% (e.g. vs a fixed stronger opponent) causes outcome-imbalance drift — the constant component of the TD outcome term is absorbed by FC output biases and other constant-capable channels, collapsing the net.  Self-play is immune and balanced play actively heals drift.  See "Outcome-Imbalance Drift" in `docs/TDLEAF.md`; canary monitor: `scripts/diff_tdleaf_checkpoints.py`.
+- Setting `TDLEAF_DUMP_TSV=<prefix>` dumps quiet leaf+root training corpora during play (see `docs/OFFLINE_TRAINING.md`).
 
 ### Protocol support
 

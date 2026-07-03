@@ -722,3 +722,129 @@ python3 scripts/analyze_calibration.py --all-stages
 | `--stage N [N …]` | `5 6` | Training stage(s) to include in analysis |
 | `--all-stages` | off | Include all stages (overrides `--stage`) |
 | `--max-lag N` | 60 | Maximum lag for autocorrelation plots |
+
+---
+
+## extract_quiet_positions.py
+
+Build an offline-training position set from existing PGNs (see
+`OFFLINE_TRAINING.md`).  Replays each game (python-chess, Chess960-aware,
+multiprocessed, ~2,300 games/s) and emits one TSV record per QUIET position:
+`fen  cp  result  ply  depth  gid` — Shredder-FEN, search eval from the move
+comment (white POV, cp), game result (white POV), ply, eval depth, and a stable
+game id so the trainer can split train/validation by game.  Eval and outcome are
+stored separately: the trainer's λ-blend keeps λ and K as training-time
+hyperparameters.
+
+Quiet filters: side-to-move in check, played move is a capture/promotion/check,
+missing or mate eval, |eval| cap, min-ply, fifty-move clock.  Duplicate control
+via polyglot Zobrist hash with a per-position record cap (FRC book openings
+repeat massively).  Requires the `python-chess` package.
+
+```sh
+# One file (d8 self-play), both sides are the learner
+python3 extract_quiet_positions.py \
+    --pgn-file pgn/nn-fresh-260628/match_nn-fresh-260628_2e6g.pgn \
+    --out quiet_d8.tsv
+
+# A directory of PGNs, keeping only positions where a named engine moved
+python3 extract_quiet_positions.py --pgn-dir rotation_segs \
+    --player Leaf_vtrain_nn-fresh-260628_a --out quiet_rotation.tsv
+
+# Random game sample for a fast pilot
+python3 extract_quiet_positions.py --pgn-file big.pgn --max-games 50000 \
+    --out quiet_sample.tsv
+```
+
+### Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--pgn-file PATH` | — | PGN file to extract from (repeatable) |
+| `--pgn-dir PATH` | — | Directory of `.pgn` files (all processed, sorted) |
+| `--out PATH` | required | Output TSV (`.gz` suffix → gzip) |
+| `--player NAME` | all | Keep only positions where this engine (header substring) is to move |
+| `--max-games N` | 0 = all | Random game sample across the whole input |
+| `--min-ply N` | 8 | Skip the first N plies of each game |
+| `--max-eval CP` | 1500 | Skip positions with \|eval\| above this |
+| `--max-fifty N` | 80 | Skip positions with halfmove clock ≥ N |
+| `--max-dups N` | 4 | Max records per unique position (0 = off; dedup table is in RAM) |
+| `--workers N` | cores−2 | Parallel parser processes |
+| `--seed N` | 42 | Sampling seed |
+
+---
+
+## diff_tdleaf_checkpoints.py
+
+Diff two `.tdleaf.bin` checkpoints section by section: piece values (raw and
+cp-equivalent), per-section FC weight/bias movement (median/mean/max |dw|),
+FT bias, and FT/PSQT rows matched by feature index.  The standard monitor for
+the outcome-imbalance drift canaries (per-stack fc2_bias, stack-0 fc2_w[13]/[27],
+FC0 passthrough-row mean, R/Q piece_val — see `TDLEAF.md`).
+
+```sh
+# From learn/: compare consecutive checkpoints
+python3 diff_tdleaf_checkpoints.py nn-fresh.tdleaf.bin-1e6g nn-fresh.tdleaf.bin-2e6g
+```
+
+Two positional arguments (old, new); no options.  Uses the
+`compare_nnue_learning.py` reader (supports `.tdleaf.bin` v2–v11).
+
+---
+
+## hybrid_loop.py
+
+One command per hybrid-loop iteration: promote a consolidated state → online
+self-play generation with leaf/root corpus dumping → checkpoint → shard →
+sharded multi-process offline training → merged-net export → gauntlet with an
+Elo table.  Non-interactive; run from `learn/`.  Helper binaries (`Leaf_vbt`,
+`Leaf_vtrain_hl_a/b`) are auto-compiled.  See `OFFLINE_TRAINING.md` for the
+concepts and the manual runbook it encodes.
+
+```sh
+# Full iteration: generate 400k d8 games, consolidate, rate
+python3 hybrid_loop.py --tag iter2 --games 400000 --depth 8 \
+    --state bt_full/bt_sp_final_ep1.tdleaf.bin \
+    --gauntlet Leaf_vbtsp-final Leaf_v260628-2.4e6g Leaf_vclassic_eval
+
+# Consolidate-only on existing corpora (e.g. an LR probe arm on the same dumps)
+python3 hybrid_loop.py --tag iter2lr --skip-online \
+    --corpus iter2_work/iter2.123.root.tsv --corpus iter2_work/iter2.123.leaf.tsv \
+    --bt-lr 0.1 --epochs 9 --gauntlet Leaf_viter2-final
+
+# Generate-only (games + corpora, no offline training)
+python3 hybrid_loop.py --tag gen3 --games 200000 --depth 8 --skip-train
+```
+
+Artifacts (named by `--tag`): `<tag>_final.nnue` (piece_val baked — compile
+rating binaries from this), `<tag>_final.tdleaf.bin` (seeds the next iteration;
+pairs with the ORIGINAL base `.nnue`), `<netbase>.tdleaf.bin-<tag>-online`
+(post-generation checkpoint), `<tag>_work/` (dumps, shards, training logs).
+
+### Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--tag NAME` | required | Iteration name; prefixes all artifacts |
+| `--net FILE` | `nn-fresh-260628.nnue` | Base `.nnue` in `learn/` (never changes across iterations) |
+| `--state FILE` | keep live | `.tdleaf.bin` to promote to the live state (backed up + hash-checked against the base) |
+| `--skip-online` | off | Consolidate-only; train on `--corpus` files |
+| `--games N` | 400000 | Games to generate |
+| `--depth N` | 8 | Fixed search depth for generation |
+| `--concurrency N` | 9 | Concurrent games |
+| `--openings FILE` | `training_openings.epd` | Opening set (FRC) |
+| `--quiet-cp N` | 60 | `TDLEAF_DUMP_QUIET_CP` for the dump |
+| `--skip-train` | off | Generate-only |
+| `--corpus TSV` | — | Extra corpus file(s) for training (repeatable) |
+| `--shards N` | 8 | Parallel trainer processes |
+| `--epochs N` | 6 | Training epochs |
+| `--bt-lr X` | 0.25 | LR scale on all category LRs |
+| `--bt-lambda X` | 0.7 | Outcome weight in the blend target |
+| `--bt-K X` | 220 | Sigmoid temperature |
+| `--bt-batch N` | 512 | Positions per Adam step |
+| `--sync-every N` | 256 | Batches between delta-merge syncs |
+| `--gauntlet OPP …` | none | Opponent binaries in `learn/` (empty = skip) |
+| `--gauntlet-games N` | 400 | Games per opponent |
+| `--tc TC` | `3+0.05` | Gauntlet time control |
+| `--force` | off | Reuse an existing `<tag>_work` directory |
+| `--recompile` | off | Force recompile of helper binaries |

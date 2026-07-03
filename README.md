@@ -64,11 +64,21 @@ Leaf includes a complete **TDLeaf(λ)** reinforcement learning system that train
 Key features:
 - PV leaf scores as the TD signal with full NNUE backpropagation
 - Sparse FT/PSQT updates (only active feature rows touched per position)
-- Adam optimizer with persistent momentum across training sessions (`.tdleaf.bin` v8 format)
+- Adam optimizer with per-section learning rates and persistent momentum across sessions (`.tdleaf.bin` v11 format)
+- Evaluation-gauge anchoring (PAWN pin + PSQT slot-mean centering) so material scale stays identifiable during training
+- Works under both xboard/CECP (protocol results) and UCI (in-engine self-adjudication of game outcomes)
 - Concurrent multi-instance training via POSIX file locking and delta merging
 - Automated training via `scripts/training_run.py` with opponent rotation, checkpointing, and train-validate loops
 
 Build with `NNUE=1 TDLEAF=1`.  See [`engine/docs/TDLEAF.md`](engine/docs/TDLEAF.md) for the full algorithm, hyperparameter reference, and training workflow.
+
+### Offline Training & the Hybrid Loop
+
+Online learning is complemented by an **offline supervised consolidation** mode: quiet positions are harvested from games the engine has already played (extracted from PGNs, or dumped directly by the engine during play via `TDLEAF_DUMP_TSV`) and trained with multi-epoch, shuffled, all-layer gradient descent on a λ-blend of game outcome and search score.  Together the two modes form the **hybrid loop** — online self-play generates games and learns as it goes; offline training extracts the full information content of those games; the consolidated net re-enters online play to generate better games.
+
+Measured on the from-scratch self-play run (2026-07): a single ~2-hour offline consolidation pass over the engine's own self-play games gained **+139 Elo over the online endpoint** (+127 measured cross-family against the classical hand-crafted eval) — no external networks and no new games.  Supports multi-process data-parallel training (`--bt-sync`) and one-command iterations via `scripts/hybrid_loop.py`.
+
+See [`engine/docs/OFFLINE_TRAINING.md`](engine/docs/OFFLINE_TRAINING.md) for the corpus format, trainer reference, and hybrid-loop workflow.
 
 ### Chess960 / Fischer Random
 
@@ -142,7 +152,7 @@ cd engine/run/
 
 ### Engine Matches
 
-Matches between engines require [cutechess-cli](https://github.com/cutechess/cutechess):
+Matches between engines use [fastchess](https://github.com/Disservin/fastchess) by default ([cutechess-cli](https://github.com/cutechess/cutechess) available via `--driver=cutechess`):
 
 ```sh
 cd engine/run/
@@ -170,6 +180,16 @@ python3 training_run.py
 
 This handles network initialization, binary compilation, opponent rotation, checkpointing, and optional train-validate loops.  See [`engine/docs/TDLEAF.md`](engine/docs/TDLEAF.md) for details.
 
+A full hybrid-loop iteration (online generation with corpus dumping → sharded offline consolidation → gauntlet) is one command:
+
+```sh
+cd engine/learn/
+python3 hybrid_loop.py --tag iter2 --games 400000 --depth 8 \
+    --state <consolidated>.tdleaf.bin --gauntlet Leaf_vclassic_eval
+```
+
+See [`engine/docs/OFFLINE_TRAINING.md`](engine/docs/OFFLINE_TRAINING.md) and [`engine/docs/SCRIPT_USE.md`](engine/docs/SCRIPT_USE.md).
+
 ---
 
 ## Directory Layout
@@ -177,7 +197,7 @@ This handles network initialization, binary compilation, opponent rotation, chec
 ```
 engine/
   src/          C++ source code (unity build via Leaf.cc)
-  docs/         Documentation (NNUE.md, TDLEAF.md, SCRIPT_USE.md, change_log.txt)
+  docs/         Documentation (NNUE.md, TDLEAF.md, OFFLINE_TRAINING.md, SCRIPT_USE.md, change_log.txt)
   scripts/      Python automation scripts
   run/          Compiled binaries + runtime data (opening book)
   learn/        Training artifacts (.nnue, .tdleaf.bin, PGN)

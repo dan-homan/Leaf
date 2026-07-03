@@ -22,8 +22,9 @@ perl comp.pl train NNUE=1 NNUE_NET=nn-leaf-260414.nnue TDLEAF=1 OVERWRITE
 # 2. Initialize a fresh random network (optional — or fine-tune an existing .nnue)
 ./Leaf_vtrain --init-nnue --write-nnue nn-fresh.nnue
 
-# 3. Run self-play matches (from run/ or learn/)
-python3 match.py Leaf_vtrain_a Leaf_vtrain_b -n 500 --proto xboard -tc 0:03+0.05
+# 3. Run self-play matches (from run/ or learn/; UCI + fastchess is the default,
+#    game outcomes reach the learner via UCI self-adjudication)
+python3 match.py Leaf_vtrain_a Leaf_vtrain_b -n 500 -tc 0:03+0.05
 ```
 
 See [Network Initialization](#network-initialization) and
@@ -46,14 +47,19 @@ perl comp.pl <version> NNUE=1 TDLEAF=1
 
 All learning code is gated by `#if TDLEAF`; when `TDLEAF=0` (default) no overhead is added.
 
-> **Protocol requirement — TDLeaf only works under xboard/CECP.**
-> The learning hooks (`tdleaf_record_ply`, `tdleaf_update_after_game`) are called
-> from inside `make_move()`, which is part of the xboard game loop.  When Leaf runs
-> under the UCI protocol the GUI drives the game externally — `make_move()` is never
-> called — so **no weights are updated and no `.tdleaf.bin` is written**, even if the
-> binary was compiled with `TDLEAF=1`.  `training_run.py` handles this automatically
-> by passing `--proto1 xboard` for the learner.  For manual matches, use
-> `match.py --proto xboard` or `--proto1 xboard`.
+> **Protocol support — both xboard/CECP and UCI.**
+> Under xboard/CECP the learning hooks run inside `make_move()` and the game
+> result arrives via the protocol `result` command.  Under UCI (the default for
+> `match.py` / fastchess training runs) there is no protocol result command;
+> `uci_finish_game()` derives the outcome via `tdleaf_self_adjudicate()` —
+> terminal-position checks (mate / stalemate / 50-move / 3-fold / insufficient
+> material) with a score-history fallback mirroring cutechess/fastchess
+> adjudication defaults.  Ambiguous outcomes (e.g. time forfeits) skip learning
+> rather than guess.
+
+Leaf also has a second, **offline** training mode — supervised consolidation of
+quiet-position corpora harvested from played games (`--batch-train`), which forms
+the "hybrid loop" with the online system.  See `OFFLINE_TRAINING.md`.
 
 ---
 
@@ -300,6 +306,8 @@ struct TDRecord {
     int16_t acc[2][NNUE_HALF_DIMS];          // accumulator at PV leaf (int16)
     int32_t psqt[2][NNUE_PSQT_BKTS];        // PSQT at PV leaf
     int     score_stm;                        // NNUE static eval at leaf, STM POV (cp)
+    int     score_root_stm;                   // root search score, root-STM POV (cp) —
+                                              //   UCI self-adjudication + root-dump label
     int     stack;                            // layer-stack index (piece_count-1)/4
     bool    wtm;                              // White to move at leaf
     float   id_score_variance;               // variance of last TD_ID_HIST ID-depth scores (cp²)
@@ -307,6 +315,10 @@ struct TDRecord {
     int8_t  n_ft[2];                          // active feature count per perspective
     int     piece_count_diff[6];              // count(stm,pt)-count(opp,pt) for dense piece_val
     position pos;                             // leaf position for Flavor A replay
+    // Corpus-dump fields (TDLEAF_DUMP_TSV — see "Corpus Dumping" below):
+    position root_pos;                        // root snapshot (filled only when dumping)
+    int      root_static;                     // root STATIC eval, STM POV (root quietness test)
+    int8_t   id_depth;                        // achieved ID depth (root-row depth column)
 };
 ```
 
@@ -674,6 +686,12 @@ freshly-initialised FT weights so the companion `.tdleaf.bin` is born consistent
 Multiple Leaf instances (e.g. several parallel self-play games) can share a single
 `.tdleaf.bin` safely via POSIX file locking and delta-based merging.
 
+Performance note (2026-07-02): the save path uses section-level buffered I/O with
+cached dirty-row bitmaps and 4 MB stream buffers.  Measured on depth-6 training
+matches, total learning overhead vs. a no-learning control is ~+13% wall clock
+(was +39% with the earlier per-element I/O); at depth 8 it amortizes to ~10%.
+Saves that find the lock busy are deferred with deltas retained.
+
 ### Design
 
 **Problem:** If two instances both read the file, apply their gradient updates to their
@@ -922,13 +940,89 @@ showed no long-term benefit after the first ~5000 games, so replay is disabled b
 
 ---
 
+## Corpus Dumping (TDLEAF_DUMP_TSV)
+
+Any TDLEAF build can emit offline-training corpora as a by-product of play — the
+raw material for the offline consolidation mode documented in
+`OFFLINE_TRAINING.md`.  When the env var `TDLEAF_DUMP_TSV=<prefix>` is set, each
+engine process writes two files at game end (append mode, per-process, format
+`fen \t cp \t result \t ply \t depth \t gid`, cp/result white-POV):
+
+| File | Position | `cp` label | `depth` column |
+|------|----------|-----------|----------------|
+| `<prefix>.<pid>.root.tsv` | played root of each recorded ply | root **search** score (search-amplified) | achieved ID depth |
+| `<prefix>.<pid>.leaf.tsv` | PV leaf of each recorded ply | leaf **static** eval (self-distillation — the outcome label carries the signal) | 0 |
+
+Quietness filters (both files): |static − search| ≤ `TDLEAF_DUMP_QUIET_CP`
+(default 60 cp — unresolved tactics show up as static-vs-search disagreement) and
+|cp| ≤ `TDLEAF_DUMP_MAX_CP` (default 1500).  Only games that feed the TD update
+are dumped, with the same outcome labels.  The batch trainer treats `depth == 0`
+records as outcome-only regardless of its λ setting, so root and leaf corpora mix
+freely in one run.
+
+When dumping is enabled, `tdleaf_record_ply` additionally snapshots the root
+position and computes its static eval (one extra `nnue_evaluate` per recorded
+ply; skipped entirely when the env var is unset).
+
+---
+
+## Outcome-Imbalance Drift (training vs. unequal opponents)
+
+**Failure mode (diagnosed 2026-07-02):** sustained training at a score far from
+50% — e.g. vs. a fixed stronger opponent — collapses the net.  In run 260628, 1M
+games vs. classic_eval took the learner from 40% to 4.5% score and cost ~570 pool
+Elo.
+
+**Mechanism:** the terminal TD term `result − d` is net-negative for a
+persistently losing learner (net-positive for a persistently winning one).  Its
+state-independent component cannot be expressed by minimax-relevant features and
+is absorbed by whatever channel can represent a constant: the FC output biases
+first (measured: mean fc2_bias drift −860 raw over the 1M games; endgame stack
+−504 → −2277 ≈ −39 cp STM-POV), and — if the biases are frozen — specific FC2
+weights on constant-ish activations, the FC0 passthrough row, and piece_val
+deflation.  Pinning channels is whack-a-mole; the source is the imbalance.
+Positive feedback (pessimistic eval → worse play → more losses) makes the drift
+monotone.  The evaluation-gauge anchors (PAWN pin, PSQT slot-means) do not cover
+this direction.
+
+**Why self-play is immune:** wins and losses balance by construction, so the DC
+term is zero-mean.  Better: **balanced play actively reverses** accumulated drift
+— the calibration equilibrium (mean prediction must match mean result) pulls the
+bias back.  Verified by a 200k-game rotation experiment (20k-game segments
+alternating classic_eval / frozen mirror): vs-classic Elo stable across all five
+classic segments, and previously accumulated drift recovered.
+
+**Guidance:**
+- Keep the aggregate training score near 50% — mix stronger opponents with
+  equal/weaker ones (opponent rotation in `training_run.py`); a ~75/25
+  self-play/classic diet is stable without mirror segments.
+- Fixed-opponent games harvest one learner trajectory per game vs. self-play's
+  two — their value is diversity, not volume.
+- Monitor the drift canaries between checkpoints with
+  `scripts/diff_tdleaf_checkpoints.py`: per-stack fc2_bias, stack-0
+  fc2_w[13]/[27], FC0 passthrough-row mean, R/Q piece_val.  Bias drift is visible
+  within ~100k games, long before Elo shows it.
+- A principled structural fix (outcome-baseline subtraction,
+  `e'[t] = e[t] − EMA(engine-POV mean e)`, a no-op in balanced regimes) is
+  designed but not implemented; adopt it if imbalanced-opponent training becomes
+  a first-class mode.
+
+---
+
 ## Self-Play Driver
 
 `scripts/training_run.py` manages the process of creating the necessary binaries
 (if needed), specifies a baseline `.nnue` file, and sets up training matches.
 
+`scripts/hybrid_loop.py` drives one full hybrid-loop iteration (online generation
+with corpus dumping → sharded offline consolidation → gauntlet); see
+`OFFLINE_TRAINING.md`.
+
 `scripts/compare_nnue_learning.py` compares a `.tdleaf.bin`
 file against the baseline `.nnue` and shows FC, FT, and PSQT weight statistics.
+
+`scripts/diff_tdleaf_checkpoints.py` diffs two `.tdleaf.bin` checkpoints section
+by section (piece values, FC/FT/PSQT movement) — the drift-canary monitor.
 
 ---
 
