@@ -21,20 +21,39 @@ picture substantially and supersedes parts of the depth-curriculum plan below:
   with the stronger net) is now the primary strategy; depth increases remain the
   quality lever *within* the generation phase (d8 recommended).
 
+**UPDATE 2026-07-04 — iteration 2 complete; gen-2+ recipe settled.**  The
+generation-2 consolidation experiment series (see "Generation 2" in
+`OFFLINE_TRAINING.md`) resolved the initial iteration-2 regression and settled
+the recipe: `--shards 1 --bt-K 220 --bt-lambda 0.3 --bt-leaf-blend`.  Best net
+is now `iter2s2` (+55 vs the gen-1 consolidation, −64 vs classic_eval; gap to
+classic down to ~64 Elo).  Findings folded into the open items below: sharded
+sync staleness destroys the subtle gen-2 signal (single-process required for
+now); λ — not K — is the knob for outcome-driven piece-value inflation; leaf
+rows need the blend anchor (`--bt-leaf-blend`, committed 2026-07-04).
+
 Open items:
-- [ ] Iteration 2 (in progress): fresh d8 generation from the consolidated net
-      via `hybrid_loop.py`; gauntlet vs {btsp-final, 2.4e6g, classic_eval}.
-- [ ] Optimizer probe arms if a generation under-delivers: `--sync-every 128`
-      (merge staleness) before `--bt-lr 0.1` + more epochs (step size).
-- [ ] λ sweep for the blend target (0.7 vs 1.0); leaf-corpus share ablation
-      (roots-only vs roots+leaves).
+- [ ] Iteration 3: long d8 online generation (~400k–1M games) from
+      `iter2s2_final.tdleaf.bin` via `hybrid_loop.py` with the settled
+      consolidation recipe; gauntlet vs {iter2s2-final, classic_eval}, plus a
+      direct promoted-net-vs-classic anchor match (family-chained Elo reads
+      ~20–30 optimistic).
+- [ ] `--bt-sync` frontier fix: sharded training currently unusable for gen-2+
+      signal (staleness).  Probe: 2 workers, `--bt-sync-every 64`; adopt only if
+      it matches the single-process gauntlet result.
+- [ ] Online `TDLEAF_K` runtime override: compile-time 220 in `tdleaf.h`, but the
+      consolidated nets' evals fit K≈165 — likely explains the mild online
+      piece-val drift (+15–34 cp/400k games).  Add an env override and test
+      online generation at the refit K.
+- [ ] λ fine-tuning around 0.3 (bracket with 0.15/0.5 on the iter3 dump corpus);
+      per-source λ (roots vs leaves) if the bracket is flat.
 - [ ] Outcome-baseline subtraction (`e' = e − EMA(engine-POV mean e)`) — designed,
       unimplemented; needed only if imbalanced-opponent training (score far from
       50%) becomes a first-class mode.  See "Outcome-Imbalance Drift" in TDLEAF.md.
 - [ ] Bayeselo pool rating (not head-to-heads) once a consolidated net approaches
-      classic_eval (+598).
+      classic_eval (+598) — iter2s2 at ~−64 is getting close.
 - [ ] Dirty-row-only requantize (nnue_requantize_fc currently rewrites the full
-      92 MB FT array every batch — a possible single-thread trainer speedup).
+      92 MB FT array every batch) — now a *priority* speedup since gen-2+
+      consolidation is single-process (~4 h per run).
 
 ### Training depth curriculum (2026-04-11; see UPDATE above)
 

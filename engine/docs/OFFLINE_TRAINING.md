@@ -44,8 +44,48 @@ Two data-scaling caveats established empirically:
   positions.  The route to more is *better games* (the hybrid loop), not more
   epochs over old ones.
 - Sharded training does **not** multiply effective LR (total Adam step mass is
-  conserved); it adds gradient staleness between syncs, visible as validation
-  oscillation but benign in the measured outcomes.
+  conserved); it adds gradient staleness between syncs.  This was benign for the
+  large generation-1 backlog signal, but **destroys the subtler generation-2
+  signal** — see below.
+
+### Generation 2 (iteration 2, 2026-07-03/04)
+
+The second loop iteration — 400k d8 online games from the consolidated net
+(`iter2-online` = +27 over the gen-1 consolidation, −79.5 vs classic measured
+directly), then re-consolidation on the 57M-position in-play dump corpus —
+initially regressed under the gen-1 settings, and a systematic arm series
+resolved why.  Final matrix (all arms trained from the iter2-online state):
+
+| Arm | Sharding | K | λ | Leaf rows | vs gen-1 net | vs classic_eval | Q piece_val drift |
+|---|---|---|---|---|---|---|---|
+| all 7 initial arms | 8-way | 165–220 | 0.3–0.7 | various | −87 … | −123 … −279 | up to +339 cp |
+| iter2s | **none** | 220 | 0.7 | blend | +39 | −90 | +254 cp |
+| iter2ks | none | 165 | 0.7 | blend | +12 | −119 | +25 cp |
+| iter2ks2 | none | 165 | 0.7 | outcome-only | +9 | −136 | +47 cp |
+| **iter2s2** | **none** | **220** | **0.3** | **blend** | **+55 ± 18** | **−64 ± 18** | +89 cp |
+
+Lessons, in order of importance:
+
+1. **Single-process training at the frontier.**  Every 8-way sharded arm regressed;
+   the identical unsharded control succeeded.  Sync-merge staleness that the large
+   gen-1 backlog signal absorbed destroys the subtle gen-2 signal.  Live tell: the
+   validation-MSE *trajectory shape* — smooth when healthy, oscillating under
+   staleness (the absolute level still doesn't map to Elo).
+2. **λ, not K, is the knob for outcome-driven piece-value inflation.**  Consolidation
+   sharpens evals, so gen-2 labels fit a smaller K (165 vs 220); training with
+   too-large K makes the outcome term inflate eval magnitudes, which lands in
+   `piece_val` (the only free material channel).  But refitting K to 165 removed
+   the overshoot *and* the productive material correction hiding inside it
+   (iter2s's minors moved toward classical values), costing 30–55 Elo.  Cutting
+   λ 0.7 → 0.3 instead tames the drift ~3× while keeping the correction.
+3. **Leaf rows need the blend anchor** (`--bt-leaf-blend`): outcome-only leaves cost
+   ~46 Elo vs leaves trained on the λ-blend with their dump-time static as a
+   magnitude anchor.
+
+**Settled gen-2+ recipe:** `--shards 1 --bt-K 220 --bt-lambda 0.3 --bt-leaf-blend`
+(~4 h single-process on a 57M corpus).  Consolidation remains gauntlet-positive
+per generation: iter2s2 is +55 over the gen-1 net and +28 over its own online
+endpoint, cross-family.
 
 ---
 
@@ -68,10 +108,13 @@ fen  cp  result  ply  depth  gid
 | `gid` | stable game id — the trainer splits train/validation **by game** |
 
 **The depth-0 rule:** records with `depth == 0` (leaf-dump rows, whose `cp` is the
-net's *own static eval* — self-distillation, no information) are trained
-**outcome-only regardless of `--bt-lambda`**.  Records with `depth > 0` carry a
-search-amplified label and get the full λ-blend.  This lets root and leaf corpora
-mix freely in one training run.
+net's *own static eval* — self-distillation) are trained **outcome-only regardless
+of `--bt-lambda`**, unless `--bt-leaf-blend` is set, in which case they get the
+normal λ-blend with the dump-time static acting as a magnitude anchor.
+`--bt-leaf-blend` is the recommended setting (worth ~46 Elo over outcome-only
+leaves in A/B, iteration 2).  Records with `depth > 0` carry a search-amplified
+label and always get the full λ-blend.  This lets root and leaf corpora mix freely
+in one training run.
 
 ---
 
@@ -122,6 +165,7 @@ session, trains on the given TSVs, writes per-epoch snapshots, and exits:
 ./Leaf_vbt --batch-train corpus_a.tsv,corpus_b.tsv --bt-out myrun \
            [--bt-epochs 3] [--bt-lambda 0.7] [--bt-K 220] [--bt-lr 0.25] \
            [--bt-batch 512] [--bt-val 0.05] [--bt-seed 42] [--bt-max 0] \
+           [--bt-leaf-blend] \
            [--bt-sync shared.tdleaf.bin] [--bt-sync-every 256]
 ```
 
@@ -169,6 +213,14 @@ effective speedup at 8 workers (153k positions/s aggregate); merged state clean
 throughout.  The final merged net is exported by a zero-LR pass over the sync file
 (automated by `hybrid_loop.py`).
 
+**Frontier caveat (iteration 2):** sync-merge staleness that was benign for the
+large generation-1 backlog signal **destroyed the subtler generation-2 signal** —
+every 8-way arm regressed while the identical single-process run gained.  Until a
+frontier-appropriate configuration is validated (fewer workers, much more frequent
+syncs — e.g. 2 workers `--bt-sync-every 64`), use `--shards 1` for gen-2+
+consolidation and accept the single-process overnight run.  Oscillating per-epoch
+validation MSE is the live symptom of staleness trouble.
+
 ---
 
 ## The Hybrid Loop — `scripts/hybrid_loop.py`
@@ -178,10 +230,14 @@ Obsidian `Hybrid_Loop_Runbook` note for the manual procedure it encodes):
 
 ```sh
 cd engine/learn/
-python3 hybrid_loop.py --tag iter2 --games 400000 --depth 8 \
+python3 hybrid_loop.py --tag iter3 --games 400000 --depth 8 \
     --state <consolidated>.tdleaf.bin \
-    --gauntlet Leaf_vbtsp-final Leaf_v260628-2.4e6g Leaf_vclassic_eval
+    --shards 1 --bt-K 220 --bt-lambda 0.3 --bt-leaf-blend \
+    --gauntlet Leaf_viter2s2-final Leaf_vclassic_eval
 ```
+
+(The `--shards 1 --bt-K 220 --bt-lambda 0.3 --bt-leaf-blend` block is the settled
+gen-2+ consolidation recipe — see Generation 2 above.)
 
 Phases: promote `--state` to the live training state (with backup and a
 content-hash pairing pre-flight) → online self-play generation with corpus dumping
@@ -200,12 +256,19 @@ Artifacts (all named by `--tag`): `<tag>_final.nnue` (rating binaries),
 
 ### Practical guidance
 
-- **Rate by gauntlet**, 300–400 games vs a fixed panel; never by validation MSE.
+- **Rate by gauntlet**, 300–400 games vs a fixed panel; never by validation-MSE
+  *level*.  The MSE trajectory *shape* is still useful live: smooth = healthy
+  optimizer, oscillating = staleness/step-size trouble.
+- Consolidation recipe (settled in iteration 2): `--shards 1 --bt-K 220
+  --bt-lambda 0.3 --bt-leaf-blend`.  Sharding is currently for gen-1-scale
+  backlogs only.
 - Depth 8 generation recommended (data-quality lever; save-I/O overhead ~10% at d8
   vs ~13% at d6 after the 2026-07-02 buffered-I/O fix).
 - Fresh-generation data first; add older corpora only as controlled arms.
-- Optimizer probe arms if a generation under-delivers: `--sync-every 128`
-  (staleness) before `--bt-lr 0.1` with more epochs (step size).
 - Check the drift canaries between checkpoints with
   `diff_tdleaf_checkpoints.py` (per-stack fc2_bias, stack-0 fc2_w[13]/[27],
-  FC0 passthrough-row mean, R/Q piece_val).
+  FC0 passthrough-row mean, R/Q piece_val).  Some piece_val movement is
+  *productive* (material learning) — judge by gauntlet, not by drift alone.
+- Measure the promoted net vs the fixed cross-family anchor **directly**:
+  Elo chained through a family member reads ~20–30 optimistic (measured twice
+  in iteration 2).

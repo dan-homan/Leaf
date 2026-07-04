@@ -802,15 +802,17 @@ Elo table.  Non-interactive; run from `learn/`.  Helper binaries (`Leaf_vbt`,
 concepts and the manual runbook it encodes.
 
 ```sh
-# Full iteration: generate 400k d8 games, consolidate, rate
-python3 hybrid_loop.py --tag iter2 --games 400000 --depth 8 \
-    --state bt_full/bt_sp_final_ep1.tdleaf.bin \
-    --gauntlet Leaf_vbtsp-final Leaf_v260628-2.4e6g Leaf_vclassic_eval
+# Full iteration: generate 400k d8 games, consolidate (settled gen-2+ recipe), rate
+python3 hybrid_loop.py --tag iter3 --games 400000 --depth 8 \
+    --state iter2s2_final.tdleaf.bin \
+    --shards 1 --bt-K 220 --bt-lambda 0.3 --bt-leaf-blend \
+    --gauntlet Leaf_viter2s2-final Leaf_vclassic_eval
 
-# Consolidate-only on existing corpora (e.g. an LR probe arm on the same dumps)
-python3 hybrid_loop.py --tag iter2lr --skip-online \
-    --corpus iter2_work/iter2.123.root.tsv --corpus iter2_work/iter2.123.leaf.tsv \
-    --bt-lr 0.1 --epochs 9 --gauntlet Leaf_viter2-final
+# Consolidate-only on existing corpora (e.g. a hyperparameter arm on the same dumps)
+python3 hybrid_loop.py --tag iter2s2 --skip-online --shards 1 \
+    --bt-K 220 --bt-lambda 0.3 --bt-leaf-blend \
+    $(for f in iter2_work/iter2.*.tsv; do echo --corpus $f; done) \
+    --gauntlet Leaf_vbtsp-final Leaf_vclassic_eval
 
 # Generate-only (games + corpora, no offline training)
 python3 hybrid_loop.py --tag gen3 --games 200000 --depth 8 --skip-train
@@ -836,12 +838,13 @@ pairs with the ORIGINAL base `.nnue`), `<netbase>.tdleaf.bin-<tag>-online`
 | `--quiet-cp N` | 60 | `TDLEAF_DUMP_QUIET_CP` for the dump |
 | `--skip-train` | off | Generate-only |
 | `--corpus TSV` | — | Extra corpus file(s) for training (repeatable) |
-| `--shards N` | 8 | Parallel trainer processes |
+| `--shards N` | 8 | Parallel trainer processes (**use 1 for gen-2+ consolidation** — sync staleness destroys subtle signal; see `OFFLINE_TRAINING.md`) |
 | `--epochs N` | 6 | Training epochs |
 | `--bt-lr X` | 0.25 | LR scale on all category LRs |
-| `--bt-lambda X` | 0.7 | Outcome weight in the blend target |
+| `--bt-lambda X` | 0.7 | Outcome weight in the blend target (0.3 recommended for gen-2+) |
 | `--bt-K X` | 220 | Sigmoid temperature |
 | `--bt-batch N` | 512 | Positions per Adam step |
+| `--bt-leaf-blend` | off | λ-blend depth-0 leaf rows (dump-time static as anchor) instead of outcome-only; recommended |
 | `--sync-every N` | 256 | Batches between delta-merge syncs |
 | `--gauntlet OPP …` | none | Opponent binaries in `learn/` (empty = skip) |
 | `--gauntlet-games N` | 400 | Games per opponent |
