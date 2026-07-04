@@ -13,7 +13,8 @@
 // and the loss is squared error in probability space, (p_target - d)^2,
 // matching the TD update form so the existing LR calibration carries over.
 // Records with depth == 0 (leaf-dump rows — their cp is the net's own static
-// eval) are trained outcome-only regardless of lambda.
+// eval at dump time, acting as a magnitude anchor) use their own outcome
+// weight, --bt-leaf-lambda (default: same as --bt-lambda; 1.0 = outcome-only).
 //
 // Invocation (requires a NNUE=1 TDLEAF=1 build; loads the .nnue and
 // .tdleaf.bin next to the binary exactly like a normal training session,
@@ -22,6 +23,8 @@
 //   ./Leaf_vbt --batch-train quiet_a.tsv[,quiet_b.tsv...] --bt-out prefix
 //              [--bt-epochs N]   epochs over the training split   (default 3)
 //              [--bt-lambda L]   outcome weight in the blend      (default 0.7)
+//              [--bt-leaf-lambda L]  outcome weight for depth-0 (leaf) rows
+//                                (default: same as --bt-lambda)
 //              [--bt-K cp]       sigmoid temperature              (default 220)
 //              [--bt-lr S]       LR scale on all category LRs     (default 0.25)
 //              [--bt-batch N]    positions per Adam step          (default 512)
@@ -247,17 +250,16 @@ static float bt_eval_record(const BTRecord &r, float K, NNUEActivations *act_out
     return d;
 }
 
-static inline float bt_target(const BTRecord &r, float lambda, float K,
-                              bool leaf_blend)
+static inline float bt_target(const BTRecord &r, float lambda,
+                              float leaf_lambda, float K)
 {
-    float outcome = 0.5f * (float)r.result2;
     // depth 0 = no search label (leaf-dump rows: cp is the net's own static
-    // eval at dump time, i.e. self-distillation) → train outcome-only
-    // regardless of lambda, UNLESS --bt-leaf-blend is set, in which case the
-    // dump-time static is used as a magnitude anchor in the normal blend.
-    if (r.depth == 0 && !leaf_blend) return outcome;
+    // eval at dump time, a magnitude anchor) → these get their own outcome
+    // weight, --bt-leaf-lambda (default: --bt-lambda; 1.0 = outcome-only).
+    float lam     = (r.depth == 0) ? leaf_lambda : lambda;
+    float outcome = 0.5f * (float)r.result2;
     float ev = 1.0f / (1.0f + expf(-(float)r.cp / K));
-    return lambda * outcome + (1.0f - lambda) * ev;
+    return lam * outcome + (1.0f - lam) * ev;
 }
 
 // ---------------------------------------------------------------------------
@@ -278,7 +280,7 @@ int nnue_batch_train(int argc, char *argv[])
     size_t max_rec = 0;
     const char *sync_path = nullptr;
     int   sync_every = 256;
-    bool  leaf_blend = false;
+    float leaf_lambda = -1.0f;   // < 0 → follow --bt-lambda
 
     for (int i = 1; i < argc; i++) {
         auto next = [&](const char *flag) -> const char* {
@@ -298,15 +300,16 @@ int nnue_batch_train(int argc, char *argv[])
         else if ((v = next("--bt-max")))     max_rec  = (size_t)atoll(v);
         else if ((v = next("--bt-sync")))    sync_path = v;
         else if ((v = next("--bt-sync-every"))) sync_every = atoi(v);
-        else if (strcmp(argv[i], "--bt-leaf-blend") == 0) leaf_blend = true;
+        else if ((v = next("--bt-leaf-lambda"))) leaf_lambda = (float)atof(v);
     }
     if (!files) { fprintf(stderr, "batch-train: no input files\n"); return 1; }
     if (batch < 1) batch = 1;
+    if (leaf_lambda < 0.0f) leaf_lambda = lambda;
 
-    fprintf(stderr, "batch-train: lambda=%.2f K=%.0f lr_scale=%.3f batch=%d "
-                    "epochs=%d val=%.3f seed=%u\n",
-            (double)lambda, (double)K, (double)lr_scale, batch, epochs,
-            (double)val_frac, seed);
+    fprintf(stderr, "batch-train: lambda=%.2f leaf_lambda=%.2f K=%.0f "
+                    "lr_scale=%.3f batch=%d epochs=%d val=%.3f seed=%u\n",
+            (double)lambda, (double)leaf_lambda, (double)K, (double)lr_scale,
+            batch, epochs, (double)val_frac, seed);
     if (sync_path)
         fprintf(stderr, "batch-train: multi-process sync → %s every %d batches\n",
                 sync_path, sync_every);
@@ -343,7 +346,7 @@ int nnue_batch_train(int argc, char *argv[])
         double se_blend = 0.0, se_outcome = 0.0;
         for (uint32_t i : val_idx) {
             float d  = bt_eval_record(recs[i], K, nullptr);
-            float tb = bt_target(recs[i], lambda, K, leaf_blend);
+            float tb = bt_target(recs[i], lambda, leaf_lambda, K);
             float to = 0.5f * (float)recs[i].result2;
             se_blend   += (double)(tb - d) * (tb - d);
             se_outcome += (double)(to - d) * (to - d);
@@ -382,7 +385,7 @@ int nnue_batch_train(int argc, char *argv[])
         for (size_t n = 0; n < train_idx.size(); n++) {
             const BTRecord &r = recs[train_idx[n]];
             float d      = bt_eval_record(r, K, &act);
-            float target = bt_target(r, lambda, K, leaf_blend);
+            float target = bt_target(r, lambda, leaf_lambda, K);
             float e      = target - d;
             se += (double)e * e;
 

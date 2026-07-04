@@ -10,10 +10,19 @@ Implements the playbook in the Hybrid_Loop_Runbook note.  Non-interactive;
 every phase is skippable, so it also covers the general "start from a given
 point and continue learning" cases:
 
-  Full iteration (generate + consolidate + rate):
-    python3 hybrid_loop.py --tag iter2 --games 400000 --depth 8 \
-        --state bt_full/bt_sp_final_ep1.tdleaf.bin \
-        --gauntlet Leaf_vbtsp-final Leaf_v260628-2.4e6g Leaf_vclassic_eval
+  Full iteration (generate + consolidate + rate; settled gen-2+ recipe):
+    python3 hybrid_loop.py --tag iter3 --games 400000 --depth 8 \
+        --state iter2s2_final.tdleaf.bin \
+        --shards 1 --bt-K 220 --bt-lambda 0.3 \
+        --gauntlet-epochs --gauntlet Leaf_viter2s2-final Leaf_vclassic_eval
+
+  Leaf rows (depth 0) default to the same lambda as roots; give them their own
+  outcome weight with --bt-leaf-lambda (1.0 = the old outcome-only behaviour).
+
+  --gauntlet-epochs (requires --shards 1) rates every epoch snapshot vs the
+  first --gauntlet opponent as soon as that epoch finishes training (default
+  1000 games at 1+0.1 — fast model selection while training continues), and
+  prints an epoch ladder table at the end.
 
   Consolidate-only (offline training on existing corpora):
     python3 hybrid_loop.py --tag redo --skip-online \
@@ -154,14 +163,26 @@ def main():
     ap.add_argument("--bt-K", type=float, default=220.0)
     ap.add_argument("--bt-batch", type=int, default=512)
     ap.add_argument("--sync-every", type=int, default=256)
-    ap.add_argument("--bt-leaf-blend", action="store_true",
-                    help="Give depth-0 (leaf) rows the normal lambda blend "
-                         "(dump-time static as anchor) instead of outcome-only")
+    ap.add_argument("--bt-leaf-lambda", type=float, default=None,
+                    help="Outcome weight for depth-0 (leaf) rows "
+                         "(default: same as --bt-lambda; 1.0 = outcome-only)")
     # gauntlet
     ap.add_argument("--gauntlet", nargs="*", default=[],
                     help="Opponent binaries in learn/ (empty = skip gauntlet)")
     ap.add_argument("--gauntlet-games", type=int, default=400)
     ap.add_argument("--tc", default="3+0.05")
+    ap.add_argument("--gauntlet-epochs", action="store_true",
+                    help="Fast per-epoch ladder: after each epoch's training, "
+                         "rate that snapshot vs the first --gauntlet opponent "
+                         "(requires --shards 1)")
+    ap.add_argument("--epoch-games", type=int, default=1000,
+                    help="Games per epoch-ladder match (default 1000)")
+    ap.add_argument("--epoch-tc", default="1+0.1",
+                    help="Epoch-ladder time control (default 1+0.1)")
+    ap.add_argument("--no-final-gauntlet", action="store_true",
+                    help="Skip the final full gauntlet (with --gauntlet-epochs: "
+                         "ladder-only runs, --gauntlet names just the ladder "
+                         "opponent)")
     ap.add_argument("--force", action="store_true",
                     help="Reuse an existing <tag>_work directory")
     ap.add_argument("--recompile", action="store_true",
@@ -170,6 +191,14 @@ def main():
 
     if Path.cwd().resolve() != LEARN_DIR.resolve():
         die(f"run from {LEARN_DIR} (cwd is {Path.cwd()})")
+
+    if args.gauntlet_epochs:
+        if args.shards != 1:
+            die("--gauntlet-epochs requires --shards 1 (per-shard snapshots "
+                "are partial views of the merged state)")
+        if not args.gauntlet:
+            die("--gauntlet-epochs needs at least one --gauntlet opponent "
+                "(the first is used for the epoch ladder)")
 
     net_path = LEARN_DIR / args.net
     if not net_path.is_file():
@@ -287,19 +316,81 @@ def main():
                "--bt-lr", str(args.bt_lr), "--bt-lambda", str(args.bt_lambda),
                "--bt-K", str(args.bt_K), "--bt-batch", str(args.bt_batch),
                "--bt-seed", str(1000 + n)]
-        if args.bt_leaf_blend:
-            cmd.append("--bt-leaf-blend")
+        if args.bt_leaf_lambda is not None:
+            cmd += ["--bt-leaf-lambda", str(args.bt_leaf_lambda)]
         p = subprocess.Popen(cmd, cwd=str(tdir),
                              stdout=subprocess.DEVNULL, stderr=logf)
         procs.append((p, logf))
-    fail = 0
-    for p, logf in procs:
-        rc = p.wait()
+
+    # Per-epoch ladder: rate each epoch snapshot as soon as its epoch's
+    # training finishes, while the trainer keeps running.  The trainer writes
+    # _epN.nnue then _epN.tdleaf.bin, so the .tdleaf.bin appearing means the
+    # .nnue is complete.
+    def rate_epoch(ep, opp):
+        snap = tdir / f"{args.tag}_p0_ep{ep}.nnue"
+        ver = f"{args.tag}-ep{ep}"
+        shutil.copy2(snap, RUN_DIR / snap.name)
+        b = compile_binary(ver, snap.name, tdleaf=False, force=True)
+        shutil.copy2(b, LEARN_DIR / b.name)
+        shutil.copy2(snap, LEARN_DIR / snap.name)   # net resolves next to binary
+        (RUN_DIR / snap.name).unlink()
+        pgn = LEARN_DIR / f"match_{ver}_vs_{opp.replace('Leaf_v', '')}.pgn"
+        log(f"epoch ladder: epoch {ep} vs {opp} "
+            f"({args.epoch_games} games at {args.epoch_tc})")
+        sh(["python3", SCRIPT_DIR / "match.py", b.name, opp,
+            "-n", args.epoch_games, "-c", 8, "-tc", args.epoch_tc,
+            "--openings", args.openings, "--fischer-random",
+            "--pgn-out", pgn], cwd=LEARN_DIR)
+        W, L, D, elo, err = pgn_score(pgn, ver)
+        log(f"epoch ladder: epoch {ep}  W/L/D {W}/{L}/{D}  Elo {elo:+.0f} ± {err:.0f}")
+        return (W, L, D, elo, err)
+
+    epoch_results = []
+    if args.gauntlet_epochs:
+        opp = args.gauntlet[0]
+        if not (LEARN_DIR / opp).is_file():
+            die(f"epoch-ladder opponent {opp} not found in learn/")
+        proc, logf = procs[0]
+        rated = 0
+        while True:
+            if rated < args.epochs and \
+                    (tdir / f"{args.tag}_p0_ep{rated + 1}.tdleaf.bin").exists():
+                rated += 1
+                epoch_results.append((rated, rate_epoch(rated, opp)))
+                # Auto-decider hook: to stop a run that is going poorly,
+                # decide on epoch_results here, then proc.terminate() + break.
+                continue
+            if proc.poll() is not None:
+                break
+            time.sleep(10)
+        rc = proc.wait()
         logf.close()
         if rc != 0:
-            fail += 1
-    if fail:
-        die(f"{fail} trainer process(es) failed — see {tdir}/p*.log")
+            die(f"trainer process failed (rc={rc}) — see {tdir}/p0.log")
+        # Sweep snapshots that landed between the last check and process exit.
+        while rated < args.epochs and \
+                (tdir / f"{args.tag}_p0_ep{rated + 1}.tdleaf.bin").exists():
+            rated += 1
+            epoch_results.append((rated, rate_epoch(rated, args.gauntlet[0])))
+    else:
+        fail = 0
+        for p, logf in procs:
+            rc = p.wait()
+            logf.close()
+            if rc != 0:
+                fail += 1
+        if fail:
+            die(f"{fail} trainer process(es) failed — see {tdir}/p*.log")
+
+    if epoch_results:
+        print(f"\n=== Epoch ladder: {args.tag} vs {args.gauntlet[0]} "
+              f"({args.epoch_games} games at {args.epoch_tc}) ===")
+        for ep, (W, L, D, elo, err) in epoch_results:
+            n = W + L + D
+            s = 100 * (W + 0.5 * D) / max(n, 1)
+            print(f"  epoch {ep}:  W/L/D {W}/{L}/{D}  score {s:5.1f}%  "
+                  f"Elo {elo:+.0f} ± {err:.0f}")
+        print()
 
     # export merged final via a zero-LR pass over the sync file
     log("exporting merged final net ...")
@@ -327,6 +418,9 @@ def main():
     # ---- Phase 6: gauntlet -------------------------------------------------
     if not args.gauntlet:
         log("no --gauntlet opponents given: done.")
+        return
+    if args.no_final_gauntlet:
+        log("--no-final-gauntlet: done.")
         return
     shutil.copy2(out_nnue, RUN_DIR / out_nnue.name)
     rate_bin = compile_binary(f"{args.tag}-final", out_nnue.name,
