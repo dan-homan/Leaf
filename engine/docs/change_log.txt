@@ -38,7 +38,7 @@ Changes since 2017_12_24
                root/leaf lambda sweeps.  hybrid_loop.py: new --gauntlet-epochs
                mode (requires --shards 1) — after each epoch's training
                completes, the epoch snapshot is compiled and rated vs the
-               first --gauntlet opponent (default 1000 games at 1+0.1,
+               first --gauntlet opponent (default 1000 games at 1+0.01,
                --epoch-games/--epoch-tc to change) while training continues,
                with an epoch-ladder table at the end; the interleaved watcher
                leaves a hook for a future auto-decider that terminates a run
@@ -47,7 +47,7 @@ Changes since 2017_12_24
                Motivated by the iter2s2 per-epoch ladder result: gen-2
                consolidation peaked at epoch 4 of 6 in-family (gen-1 was
                still improving at 6) — epoch selection now matters and the
-               1+0.1 ladder makes it ~6 min per epoch.  Direct classic
+               1+0.01 ladder makes it ~6 min per epoch.  Direct classic
                anchor: ep4 -62 +/- 30 vs ep6 -64 +/- 18 (statistically
                identical cross-family; the ladder pick costs nothing).
 

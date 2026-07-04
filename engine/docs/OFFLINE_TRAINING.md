@@ -89,7 +89,7 @@ remains gauntlet-positive per generation: iter2s2 is +55 over the gen-1 net and
 +28 over its own online endpoint, cross-family.  Epoch count matters at gen-2+:
 iter2s2 peaked at **epoch 4** of 6 in the in-family ladder (gen-1 was still
 improving at 6) — select the epoch by a fast ladder (`hybrid_loop.py
---gauntlet-epochs`: 1000 games at 1+0.1 per epoch snapshot, ±19, minutes each)
+--gauntlet-epochs`: 1000 games at 1+0.01 per epoch snapshot, ±19, minutes each)
 rather than assuming the last epoch.  Direct classic anchor: ep4 −62 ± 30 vs
 ep6 −64 ± 18 — statistically identical cross-family (the +24 in-family edge is
 inside the error bars at 400 games), so the ladder pick costs nothing and may
@@ -97,7 +97,7 @@ gain; ep4 seeds iteration 3.
 
 ### The λ sweep and the distance-decayed result weight (2026-07-04)
 
-A single-epoch λ × leaf-λ ladder sweep (1000 games at 1+0.1 each, vs a shared
+A single-epoch λ × leaf-λ ladder sweep (1000 games at 1+0.01 each, vs a shared
 anchor) showed that **the corpus-mean outcome weight is the knob, not the
 root/leaf split**: arms with the same mean `0.43·λ_root + 0.57·λ_leaf` (the
 corpus is 43% roots / 57% leaves) were statistically identical, with a plateau
@@ -136,8 +136,12 @@ fen  cp  result  ply  depth  gid  [endply]
 own move — the same per-TD-step scale the online `TDLEAF_LAMBDA` trace uses),
 while PGN extraction counts *game plies* (every half-move).  Each corpus is
 internally consistent, but the result decay runs ~2× faster per game on
-PGN-extracted corpora — avoid mixing the two sources in one decayed training
-run without accounting for that.
+PGN-extracted corpora — for those, the scale-matched value is
+`--bt-td-lambda ≈ √0.98 ≈ 0.99`.  Avoid mixing the two sources in one decayed
+training run.  (The K/λ calibration pipeline — `extract_positions.py` /
+`analyze_calibration.py` — also fits λ per *game ply*: its 0.986–0.995 band
+equals the engine's 0.98-per-recorded-ply ≈ 0.990-per-game-ply, so online λ
+matches the calibration exactly in consistent units.)
 
 **The depth-0 rule:** records with `depth == 0` (leaf-dump rows, whose `cp` is the
 net's *own static eval* at dump time, acting as a magnitude anchor) get their own
@@ -284,7 +288,7 @@ python3 hybrid_loop.py --tag iter3 --games 400000 --depth 8 \
 (`--shards 1 --bt-K 220 --bt-lambda 0.3` is the settled gen-2+ consolidation
 recipe — see Generation 2 above.  `--gauntlet-epochs` rates each epoch snapshot
 vs the first gauntlet opponent as soon as that epoch finishes training — 1000
-games at 1+0.1 by default, `--epoch-games`/`--epoch-tc` to change — and prints
+games at 1+0.01 by default, `--epoch-games`/`--epoch-tc` to change — and prints
 an epoch-ladder table; requires `--shards 1`.  The interleaved design leaves a
 hook for a future auto-decider that stops a run whose ladder is trending down.)
 

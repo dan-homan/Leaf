@@ -856,7 +856,7 @@ pairs with the ORIGINAL base `.nnue`), `<netbase>.tdleaf.bin-<tag>-online`
 | `--tc TC` | `3+0.05` | Gauntlet time control |
 | `--gauntlet-epochs` | off | Per-epoch ladder: rate each epoch snapshot vs the first `--gauntlet` opponent as soon as its epoch finishes training; prints an epoch table (requires `--shards 1`) |
 | `--epoch-games N` | 1000 | Games per epoch-ladder match |
-| `--epoch-tc TC` | `1+0.1` | Epoch-ladder time control |
+| `--epoch-tc TC` | `1+0.01` | Epoch-ladder time control |
 | `--no-final-gauntlet` | off | Skip the final full gauntlet (ladder-only runs; `--gauntlet` then names just the ladder opponent) |
 | `--force` | off | Reuse an existing `<tag>_work` directory |
 | `--recompile` | off | Force recompile of helper binaries |

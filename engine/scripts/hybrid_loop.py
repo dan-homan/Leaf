@@ -21,7 +21,7 @@ point and continue learning" cases:
 
   --gauntlet-epochs (requires --shards 1) rates every epoch snapshot vs the
   first --gauntlet opponent as soon as that epoch finishes training (default
-  1000 games at 1+0.1 — fast model selection while training continues), and
+  1000 games at 1+0.01 — fast model selection while training continues), and
   prints an epoch ladder table at the end.
 
   Consolidate-only (offline training on existing corpora):
@@ -180,8 +180,8 @@ def main():
                          "(requires --shards 1)")
     ap.add_argument("--epoch-games", type=int, default=1000,
                     help="Games per epoch-ladder match (default 1000)")
-    ap.add_argument("--epoch-tc", default="1+0.1",
-                    help="Epoch-ladder time control (default 1+0.1)")
+    ap.add_argument("--epoch-tc", default="1+0.01",
+                    help="Epoch-ladder time control (default 1+0.01)")
     ap.add_argument("--no-final-gauntlet", action="store_true",
                     help="Skip the final full gauntlet (with --gauntlet-epochs: "
                          "ladder-only runs, --gauntlet names just the ladder "
