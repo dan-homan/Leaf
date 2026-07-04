@@ -946,7 +946,9 @@ Any TDLEAF build can emit offline-training corpora as a by-product of play — t
 raw material for the offline consolidation mode documented in
 `OFFLINE_TRAINING.md`.  When the env var `TDLEAF_DUMP_TSV=<prefix>` is set, each
 engine process writes two files at game end (append mode, per-process, format
-`fen \t cp \t result \t ply \t depth \t gid`, cp/result white-POV):
+`fen \t cp \t result \t ply \t depth \t gid \t endply`, cp/result white-POV;
+`endply` = the game's final recorded ply, used by the batch trainer's
+distance-decayed result weight):
 
 | File | Position | `cp` label | `depth` column |
 |------|----------|-----------|----------------|
@@ -956,9 +958,9 @@ engine process writes two files at game end (append mode, per-process, format
 Quietness filters (both files): |static − search| ≤ `TDLEAF_DUMP_QUIET_CP`
 (default 60 cp — unresolved tactics show up as static-vs-search disagreement) and
 |cp| ≤ `TDLEAF_DUMP_MAX_CP` (default 1500).  Only games that feed the TD update
-are dumped, with the same outcome labels.  The batch trainer treats `depth == 0`
-records as outcome-only regardless of its λ setting, so root and leaf corpora mix
-freely in one run.
+are dumped, with the same outcome labels.  The batch trainer gives `depth == 0`
+records their own outcome-weight ceiling (`--bt-leaf-lambda`, default = the root
+λ), so root and leaf corpora mix freely in one run.
 
 When dumping is enabled, `tdleaf_record_ply` additionally snapshots the root
 position and computes its static eval (one extra `nnue_evaluate` per recorded

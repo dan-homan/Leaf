@@ -164,8 +164,11 @@ def main():
     ap.add_argument("--bt-batch", type=int, default=512)
     ap.add_argument("--sync-every", type=int, default=256)
     ap.add_argument("--bt-leaf-lambda", type=float, default=None,
-                    help="Outcome weight for depth-0 (leaf) rows "
-                         "(default: same as --bt-lambda; 1.0 = outcome-only)")
+                    help="Outcome-weight ceiling for depth-0 (leaf) rows "
+                         "(default: same as --bt-lambda)")
+    ap.add_argument("--bt-td-lambda", type=float, default=None,
+                    help="Result decay per ply from the game end "
+                         "(default: trainer's TDLEAF_LAMBDA; 1.0 = flat blend)")
     # gauntlet
     ap.add_argument("--gauntlet", nargs="*", default=[],
                     help="Opponent binaries in learn/ (empty = skip gauntlet)")
@@ -318,6 +321,8 @@ def main():
                "--bt-seed", str(1000 + n)]
         if args.bt_leaf_lambda is not None:
             cmd += ["--bt-leaf-lambda", str(args.bt_leaf_lambda)]
+        if args.bt_td_lambda is not None:
+            cmd += ["--bt-td-lambda", str(args.bt_td_lambda)]
         p = subprocess.Popen(cmd, cwd=str(tdir),
                              stdout=subprocess.DEVNULL, stderr=logf)
         procs.append((p, logf))

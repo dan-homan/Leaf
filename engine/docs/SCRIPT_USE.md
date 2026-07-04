@@ -730,11 +730,14 @@ python3 scripts/analyze_calibration.py --all-stages
 Build an offline-training position set from existing PGNs (see
 `OFFLINE_TRAINING.md`).  Replays each game (python-chess, Chess960-aware,
 multiprocessed, ~2,300 games/s) and emits one TSV record per QUIET position:
-`fen  cp  result  ply  depth  gid` — Shredder-FEN, search eval from the move
-comment (white POV, cp), game result (white POV), ply, eval depth, and a stable
-game id so the trainer can split train/validation by game.  Eval and outcome are
-stored separately: the trainer's λ-blend keeps λ and K as training-time
-hyperparameters.
+`fen  cp  result  ply  depth  gid  endply` — Shredder-FEN, search eval from the
+move comment (white POV, cp), game result (white POV), ply, eval depth, a stable
+game id so the trainer can split train/validation by game, and the game's true
+final ply (distance base for the trainer's result decay).  Eval and outcome are
+stored separately: the trainer's decayed λ-blend keeps λ, td_λ, and K as
+training-time hyperparameters.  Note: `ply`/`endply` here count game plies
+(every half-move), vs recorded engine plies in the in-engine dump — see the ply
+scale caveat in `OFFLINE_TRAINING.md`.
 
 Quiet filters: side-to-move in check, played move is a capture/promotion/check,
 missing or mate eval, |eval| cap, min-ply, fifty-move clock.  Duplicate control
@@ -845,7 +848,8 @@ pairs with the ORIGINAL base `.nnue`), `<netbase>.tdleaf.bin-<tag>-online`
 | `--bt-lambda X` | 0.7 | Outcome weight in the blend target (0.3 recommended for gen-2+) |
 | `--bt-K X` | 220 | Sigmoid temperature |
 | `--bt-batch N` | 512 | Positions per Adam step |
-| `--bt-leaf-lambda X` | = `--bt-lambda` | Outcome weight for depth-0 leaf rows (1.0 = outcome-only; default follows the root λ, the recommended setting) |
+| `--bt-leaf-lambda X` | = `--bt-lambda` | Outcome-weight ceiling for depth-0 leaf rows (default follows the root λ, the recommended setting) |
+| `--bt-td-lambda X` | trainer default (`TDLEAF_LAMBDA`) | Result decay per ply from the game end: `w = λ_eff·td_λ^(N−ply)`; `1.0` = flat blend |
 | `--sync-every N` | 256 | Batches between delta-merge syncs |
 | `--gauntlet OPP …` | none | Opponent binaries in `learn/` (empty = skip) |
 | `--gauntlet-games N` | 400 | Games per opponent |

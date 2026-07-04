@@ -5,7 +5,7 @@ extract_quiet_positions.py — build an offline-training position set from Leaf 
 Replays each game (python-chess, Chess960-aware) and emits one TSV record per
 QUIET position:
 
-    fen \t cp \t result \t ply \t depth \t gid
+    fen \t cp \t result \t ply \t depth \t gid \t endply
 
     fen     Shredder-FEN of the position BEFORE the recorded move
     cp      search eval of that position, WHITE POV, centipawns (from the PGN
@@ -180,7 +180,7 @@ def _extract_batch(game_texts):
                                     cp_white, ply, depth))
                     stats['kept'] += 1
                 board.push(move)
-            out.append((result, records))
+            out.append((result, ply, records))
         except Exception:
             stats['parse_fail'] += 1
             continue
@@ -255,7 +255,7 @@ def main():
     out.write(f'# filters: min_ply={args.min_ply} max_eval={args.max_eval} '
               f'max_fifty={args.max_fifty} max_dups={args.max_dups} '
               f'player={args.player} max_games={args.max_games} seed={args.seed}\n')
-    out.write('fen\tcp\tresult\tply\tdepth\tgid\n')
+    out.write('fen\tcp\tresult\tply\tdepth\tgid\tendply\n')
 
     rng = random.Random(args.seed)
     dup_count = {} if args.max_dups > 0 else None
@@ -283,7 +283,7 @@ def main():
         for games, stats in pool.imap(_extract_batch, batches()):
             for k, v in stats.items():
                 totals[k] = totals.get(k, 0) + v
-            for result, records in games:
+            for result, endply, records in games:
                 gid += 1
                 for zob, fen, cp_white, ply, depth in records:
                     if dup_count is not None:
@@ -292,7 +292,7 @@ def main():
                             dup_skipped += 1
                             continue
                         dup_count[zob] = c + 1
-                    out.write(f'{fen}\t{cp_white}\t{result}\t{ply}\t{depth}\t{gid}\n')
+                    out.write(f'{fen}\t{cp_white}\t{result}\t{ply}\t{depth}\t{gid}\t{endply}\n')
                     written += 1
             if totals.get('games', 0) % REPORT_EVERY < BATCH_GAMES:
                 el = time.time() - t0

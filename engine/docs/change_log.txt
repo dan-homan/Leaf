@@ -1,5 +1,35 @@
 Changes since 2017_12_24
 
+2026_07_04 -- Batch trainer: distance-decayed result weight.  The offline
+               target is now p = w*result + (1-w)*sigmoid(cp/K) with
+               w = lambda_eff * td_lambda^(N-ply): the outcome's credibility
+               decays with distance from the game end (the TD(lambda)
+               forward-view lambda-return weighting), and the freed weight
+               returns to the eval bootstrap so the two weights always sum
+               to 1.  --bt-td-lambda defaults to TDLEAF_LAMBDA (0.98,
+               tdleaf.h) so offline targets reconstruct the lambda-returns
+               the online games were trained on; 1.0 reproduces the old
+               flat blend bit-for-bit (regression-verified).  N per game
+               comes from a new optional 7th TSV column, endply (the true
+               final ply), now written by both corpus producers — the
+               tdleaf.cpp in-play dump (endply = final recorded ply) and
+               extract_quiet_positions.py (game plies; note the 2x ply-
+               scale difference between the two sources, documented in
+               OFFLINE_TRAINING.md) — with a per-gid corpus-max fallback
+               for older corpora (short by the quiet-filtered game tail).
+               BTRecord stores the row ply (fits the former pad bytes);
+               decay uses a precomputed pow table; the trainer echoes the
+               corpus mean decay at startup (iter2 corpus: 0.502, mean gap
+               ~42 recorded plies — nominal lambda ceilings under decay run
+               ~2x the flat-blend equivalents).  hybrid_loop.py passes
+               --bt-td-lambda through.  Motivated by the flat lambda x
+               leaf-lambda ladder sweep: arms with equal corpus-mean
+               outcome weight (0.43*root + 0.57*leaf) were statistically
+               identical (plateau at mean ~0.2-0.3), i.e. a flat lambda
+               only sets the mean — the decay makes the per-position
+               weight follow distance-to-end as TD(lambda) prescribes.
+               Ceiling sweep under decay: learn/sweep_td.sh.
+
 2026_07_04 -- Batch trainer: --bt-leaf-blend generalized to --bt-leaf-lambda
                (nnue_batch_train.cpp + hybrid_loop.py): depth-0 leaf rows get
                their own outcome weight, defaulting to --bt-lambda (the

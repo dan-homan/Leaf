@@ -95,6 +95,22 @@ ep6 −64 ± 18 — statistically identical cross-family (the +24 in-family edge
 inside the error bars at 400 games), so the ladder pick costs nothing and may
 gain; ep4 seeds iteration 3.
 
+### The λ sweep and the distance-decayed result weight (2026-07-04)
+
+A single-epoch λ × leaf-λ ladder sweep (1000 games at 1+0.1 each, vs a shared
+anchor) showed that **the corpus-mean outcome weight is the knob, not the
+root/leaf split**: arms with the same mean `0.43·λ_root + 0.57·λ_leaf` (the
+corpus is 43% roots / 57% leaves) were statistically identical, with a plateau
+at mean weight ≈ 0.2–0.3 and falloff on both sides.  A flat λ can only set that
+mean; TD(λ) says the *per-position* weight should depend on distance from the
+game end.  That motivated the decayed target above (`--bt-td-lambda`, default
+`TDLEAF_LAMBDA`): near-terminal positions trust the result, early positions
+lean on the eval bootstrap.  Under decay the nominal ceilings roughly double
+(mean decay 0.502 on the iter2 corpus), so the plateau maps to diagonal
+ceilings λ ≈ 0.4–0.65 — swept before iteration 3 (`learn/sweep_td.sh`:
+diagonal λ = leaf-λ ∈ {0.3, 0.5, 0.7, 1.0} plus two crossed arms that test
+whether the mean-is-the-knob result still holds under decay).
+
 ---
 
 ## Corpus Format
@@ -103,7 +119,7 @@ Tab-separated text, one quiet position per row (produced by both corpus sources
 below; `#` comment lines and a `fen`-prefixed header are skipped by consumers):
 
 ```
-fen  cp  result  ply  depth  gid
+fen  cp  result  ply  depth  gid  [endply]
 ```
 
 | Column | Meaning |
@@ -114,6 +130,14 @@ fen  cp  result  ply  depth  gid
 | `ply` | 1-based ply index within the game |
 | `depth` | search depth of the eval label; **0 = no search label** (see below) |
 | `gid` | stable game id — the trainer splits train/validation **by game** |
+| `endply` | *(optional)* the game's true final ply — exact distance base for the result decay.  When absent, the trainer falls back to the per-`gid` max ply seen in the corpus (short by the quiet-filtered game tail, a mild ~uniform over-weighting of the result).  Both corpus producers write it since 2026-07-04. |
+
+**Ply scale caveat:** the in-engine dump counts *recorded engine plies* (one per
+own move — the same per-TD-step scale the online `TDLEAF_LAMBDA` trace uses),
+while PGN extraction counts *game plies* (every half-move).  Each corpus is
+internally consistent, but the result decay runs ~2× faster per game on
+PGN-extracted corpora — avoid mixing the two sources in one decayed training
+run without accounting for that.
 
 **The depth-0 rule:** records with `depth == 0` (leaf-dump rows, whose `cp` is the
 net's *own static eval* at dump time, acting as a magnitude anchor) get their own
@@ -172,7 +196,7 @@ session, trains on the given TSVs, writes per-epoch snapshots, and exits:
 ```sh
 ./Leaf_vbt --batch-train corpus_a.tsv,corpus_b.tsv --bt-out myrun \
            [--bt-epochs 3] [--bt-lambda 0.7] [--bt-leaf-lambda <λ>] \
-           [--bt-K 220] [--bt-lr 0.25] \
+           [--bt-td-lambda 0.98] [--bt-K 220] [--bt-lr 0.25] \
            [--bt-batch 512] [--bt-val 0.05] [--bt-seed 42] [--bt-max 0] \
            [--bt-sync shared.tdleaf.bin] [--bt-sync-every 256]
 ```
@@ -185,9 +209,22 @@ Design principles:
   requantize.  The gradient-scale formula mirrors `tdleaf_accumulate_game`, so the
   online LR calibration and evaluation-gauge anchors (PAWN pin, PSQT slot-means)
   carry over unchanged.
-- **Target:** `p = λ·result + (1−λ)·sigmoid(cp/K)`, squared error in probability
-  space (the same update form as the TD rule).  λ and K are training-time
-  hyperparameters — never baked into the data.
+- **Target:** `p = w·result + (1−w)·sigmoid(cp/K)` with the distance-decayed
+  result weight `w = λ_eff · td_λ^(N−ply)` — the outcome's credibility decays
+  with distance from the game end, exactly as the terminal outcome's weight
+  decays in the TD(λ) forward-view λ-return, and the freed weight returns to
+  the eval bootstrap so the two weights always sum to 1 (targets stay
+  calibrated at any decay).  `λ_eff` is `--bt-lambda` for root rows and
+  `--bt-leaf-lambda` for leaf rows; `N` is the game's final ply (`endply`
+  column, or per-game corpus max as fallback); `--bt-td-lambda` defaults to
+  `TDLEAF_LAMBDA` (0.98, `tdleaf.h`) so offline targets reconstruct the same
+  λ-returns the online games were trained on, and `1.0` reproduces the flat
+  blend `p = λ·result + (1−λ)·σ` bit-for-bit.  Squared error in probability
+  space (the same update form as the TD rule); all of λ/td_λ/K are
+  training-time hyperparameters — never baked into the data.  Measured on the
+  iter2 corpus: mean decay 0.502 (mean gap ~42 recorded plies), i.e. a nominal
+  ceiling λ delivers about half its flat-blend outcome mass — nominal λ values
+  under decay run ~2× the flat-blend equivalents.
 - **Packed records** (occupancy bitboard + piece nibbles, ~40 B each): a 200M-
   position corpus fits in ~8 GB RAM.
 - **Validation split by game** (hashed `gid`), reported per epoch — but see the

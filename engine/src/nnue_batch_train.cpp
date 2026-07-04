@@ -2,19 +2,30 @@
 // Compiled only when NNUE=1 && TDLEAF=1 (included by Leaf.cc after tdleaf.cpp).
 //
 // Consumes TSV files produced by scripts/extract_quiet_positions.py
-// (columns: fen  cp  result  ply  depth  gid; cp and result are WHITE POV)
+// (columns: fen  cp  result  ply  depth  gid  [endply]; cp and result are
+// WHITE POV; endply — the game's true final ply — is optional)
 // and trains all layers (FT / PSQT / FC / piece_val) with the same FP32
 // gradient machinery, per-section Adam LRs, and gauge anchors (PSQT
 // mean-centering, PAWN pin) as online TDLeaf.  The per-position target is
-// the lambda blend
+// the distance-decayed blend
 //
-//     p_target = lambda * result + (1 - lambda) * sigmoid(cp_label / K)
+//     p_target = w * result + (1 - w) * sigmoid(cp_label / K)
+//     w        = lambda_eff * td_lambda^(N_game - ply)
 //
-// and the loss is squared error in probability space, (p_target - d)^2,
-// matching the TD update form so the existing LR calibration carries over.
-// Records with depth == 0 (leaf-dump rows — their cp is the net's own static
-// eval at dump time, acting as a magnitude anchor) use their own outcome
-// weight, --bt-leaf-lambda (default: same as --bt-lambda; 1.0 = outcome-only).
+// i.e. the outcome's credibility decays with distance from the game end
+// (the TD(lambda) forward view: the terminal outcome carries weight
+// lambda^(N-t) in the lambda-return, with the remainder on bootstrapped
+// values — here approximated by the position's own eval).  The two weights
+// always sum to 1, so targets stay calibrated at any decay.  N_game comes
+// from the corpus's optional 7th column (endply, exact) or the per-gid max
+// ply (fallback; short by the quiet-filtered game tail).  --bt-td-lambda
+// defaults to TDLEAF_LAMBDA (tdleaf.h) so offline targets match the
+// lambda-returns the online games were trained on; 1.0 = flat blend (the
+// pre-decay behaviour).  The loss is squared error in probability space,
+// (p_target - d)^2, matching the TD update form so the existing LR
+// calibration carries over.  Records with depth == 0 (leaf-dump rows —
+// their cp is the net's own static eval at dump time, acting as a magnitude
+// anchor) use their own ceiling, --bt-leaf-lambda (default: --bt-lambda).
 //
 // Invocation (requires a NNUE=1 TDLEAF=1 build; loads the .nnue and
 // .tdleaf.bin next to the binary exactly like a normal training session,
@@ -22,9 +33,11 @@
 //
 //   ./Leaf_vbt --batch-train quiet_a.tsv[,quiet_b.tsv...] --bt-out prefix
 //              [--bt-epochs N]   epochs over the training split   (default 3)
-//              [--bt-lambda L]   outcome weight in the blend      (default 0.7)
-//              [--bt-leaf-lambda L]  outcome weight for depth-0 (leaf) rows
-//                                (default: same as --bt-lambda)
+//              [--bt-lambda L]   outcome-weight ceiling (root rows) (default 0.7)
+//              [--bt-leaf-lambda L]  outcome-weight ceiling for depth-0 (leaf)
+//                                rows              (default: same as --bt-lambda)
+//              [--bt-td-lambda L]  result decay per ply from the game end
+//                                (default TDLEAF_LAMBDA; 1.0 = flat blend)
 //              [--bt-K cp]       sigmoid temperature              (default 220)
 //              [--bt-lr S]       LR scale on all category LRs     (default 0.25)
 //              [--bt-batch N]    positions per Adam step          (default 512)
@@ -69,10 +82,11 @@ struct BTRecord {
     int16_t  cp;        // eval label, WHITE POV, centipawns
     uint8_t  result2;   // 2 × white result: 0 / 1 / 2
     uint8_t  wtm;       // 1 = White to move
-    uint32_t gid;       // game id (validation split key)
+    uint32_t gid;       // game id (validation split key + per-game N lookup)
     uint8_t  depth;     // search depth of the cp label; 0 = no search label
-                        // (e.g. leaf-dump rows) → trained outcome-only
-    uint8_t  pad[3];
+                        // (leaf-dump rows) → weighted by --bt-leaf-lambda
+    uint8_t  pad;
+    uint16_t ply;       // 1-based ply of the position (result-decay distance)
 };
 
 // ---------------------------------------------------------------------------
@@ -151,7 +165,8 @@ static void bt_decode(const BTRecord &r, position &pos)
 // TSV loader
 // ---------------------------------------------------------------------------
 static bool bt_load_file(const char *path, std::vector<BTRecord> &out,
-                         uint32_t gid_base, uint32_t &gid_max, size_t max_records)
+                         uint32_t gid_base, uint32_t &gid_max, size_t max_records,
+                         std::vector<uint16_t> &gid_N)
 {
     FILE *f = fopen(path, "r");
     if (!f) { fprintf(stderr, "batch-train: cannot open %s\n", path); return false; }
@@ -174,12 +189,16 @@ static bool bt_load_file(const char *path, std::vector<BTRecord> &out,
         else if (p[0] == '0' && p[1] == '.'){ result2 = 1; }
         else if (p[0] == '0')               { result2 = 0; }
         else { skipped++; continue; }
-        // skip to ply, then read depth and gid
+        // read ply, depth, gid (+ optional 7th column: true final ply of the
+        // game — corpora that carry it get an exact result-decay distance;
+        // older corpora fall back to the per-gid max ply seen, see below)
         p = strchr(p, '\t'); if (!p) { skipped++; continue; }
-        p = strchr(p + 1, '\t'); if (!p) { skipped++; continue; }   // past ply
+        long ply = strtol(p + 1, &p, 10);
+        if (*p != '\t') { skipped++; continue; }
         long depth = strtol(p + 1, &p, 10);
         if (*p != '\t') { skipped++; continue; }
-        unsigned long gid = strtoul(p + 1, nullptr, 10);
+        unsigned long gid = strtoul(p + 1, &p, 10);
+        long endply = (*p == '\t') ? strtol(p + 1, nullptr, 10) : 0;
 
         BTRecord r;
         if (!bt_parse_fen(line, r)) { skipped++; continue; }
@@ -190,6 +209,13 @@ static bool bt_load_file(const char *path, std::vector<BTRecord> &out,
         r.depth   = (uint8_t)((depth < 0) ? 0 : (depth > 255) ? 255 : depth);
         r.gid     = gid_base + (uint32_t)gid;
         if (r.gid > gid_max) gid_max = r.gid;
+        r.ply     = (uint16_t)((ply < 0) ? 0 : (ply > 65535) ? 65535 : ply);
+        // Per-game final ply: exact from the endply column when present, else
+        // the max ply seen in the corpus (short by the quiet-filtered tail).
+        uint16_t np = (uint16_t)((endply > 65535) ? 65535
+                                : (endply > r.ply) ? endply : r.ply);
+        if (r.gid >= gid_N.size()) gid_N.resize(r.gid + 1, 0);
+        if (np > gid_N[r.gid]) gid_N[r.gid] = np;
         out.push_back(r);
         rows++;
     }
@@ -251,15 +277,21 @@ static float bt_eval_record(const BTRecord &r, float K, NNUEActivations *act_out
 }
 
 static inline float bt_target(const BTRecord &r, float lambda,
-                              float leaf_lambda, float K)
+                              float leaf_lambda, float K, float decay)
 {
+    // Result weight w = lambda_eff * td_lambda^(N - ply): the outcome's
+    // credibility decays with distance from the game end (the TD(lambda)
+    // forward view); the freed weight returns to the eval bootstrap so the
+    // two weights always sum to 1.  `decay` = td_lambda^(N - ply), 1.0 at
+    // the final ply (and everywhere when --bt-td-lambda 1.0 = flat blend).
     // depth 0 = no search label (leaf-dump rows: cp is the net's own static
-    // eval at dump time, a magnitude anchor) → these get their own outcome
-    // weight, --bt-leaf-lambda (default: --bt-lambda; 1.0 = outcome-only).
-    float lam     = (r.depth == 0) ? leaf_lambda : lambda;
+    // eval at dump time, a magnitude anchor) → these get their own ceiling,
+    // --bt-leaf-lambda (default: --bt-lambda; 1.0 at td_lambda 1.0 =
+    // outcome-only).
+    float w       = ((r.depth == 0) ? leaf_lambda : lambda) * decay;
     float outcome = 0.5f * (float)r.result2;
     float ev = 1.0f / (1.0f + expf(-(float)r.cp / K));
-    return lam * outcome + (1.0f - lam) * ev;
+    return w * outcome + (1.0f - w) * ev;
 }
 
 // ---------------------------------------------------------------------------
@@ -281,6 +313,7 @@ int nnue_batch_train(int argc, char *argv[])
     const char *sync_path = nullptr;
     int   sync_every = 256;
     float leaf_lambda = -1.0f;   // < 0 → follow --bt-lambda
+    float td_lambda   = TDLEAF_LAMBDA;   // result-decay per ply from game end
 
     for (int i = 1; i < argc; i++) {
         auto next = [&](const char *flag) -> const char* {
@@ -301,21 +334,27 @@ int nnue_batch_train(int argc, char *argv[])
         else if ((v = next("--bt-sync")))    sync_path = v;
         else if ((v = next("--bt-sync-every"))) sync_every = atoi(v);
         else if ((v = next("--bt-leaf-lambda"))) leaf_lambda = (float)atof(v);
+        else if ((v = next("--bt-td-lambda")))   td_lambda   = (float)atof(v);
     }
     if (!files) { fprintf(stderr, "batch-train: no input files\n"); return 1; }
     if (batch < 1) batch = 1;
     if (leaf_lambda < 0.0f) leaf_lambda = lambda;
+    if (td_lambda < 0.0f || td_lambda > 1.0f) {
+        fprintf(stderr, "batch-train: --bt-td-lambda must be in [0,1]\n");
+        return 1;
+    }
 
-    fprintf(stderr, "batch-train: lambda=%.2f leaf_lambda=%.2f K=%.0f "
-                    "lr_scale=%.3f batch=%d epochs=%d val=%.3f seed=%u\n",
-            (double)lambda, (double)leaf_lambda, (double)K, (double)lr_scale,
-            batch, epochs, (double)val_frac, seed);
+    fprintf(stderr, "batch-train: lambda=%.2f leaf_lambda=%.2f td_lambda=%.3f "
+                    "K=%.0f lr_scale=%.3f batch=%d epochs=%d val=%.3f seed=%u\n",
+            (double)lambda, (double)leaf_lambda, (double)td_lambda, (double)K,
+            (double)lr_scale, batch, epochs, (double)val_frac, seed);
     if (sync_path)
         fprintf(stderr, "batch-train: multi-process sync → %s every %d batches\n",
                 sync_path, sync_every);
 
     // ---- Load data ------------------------------------------------------
     std::vector<BTRecord> recs;
+    std::vector<uint16_t> gid_N;   // per-game final ply (see bt_load_file)
     recs.reserve(max_rec ? max_rec : (1u << 25));
     {
         char buf[4096];
@@ -323,11 +362,36 @@ int nnue_batch_train(int argc, char *argv[])
         buf[sizeof(buf) - 1] = '\0';
         uint32_t gid_base = 0, gid_max = 0;
         for (char *tok = strtok(buf, ","); tok; tok = strtok(nullptr, ",")) {
-            if (!bt_load_file(tok, recs, gid_base, gid_max, max_rec)) return 1;
+            if (!bt_load_file(tok, recs, gid_base, gid_max, max_rec, gid_N))
+                return 1;
             gid_base = gid_max + 1;   // keep gids unique across files
         }
     }
     if (recs.empty()) { fprintf(stderr, "batch-train: no records\n"); return 1; }
+
+    // ---- Result-decay lookup: decay(r) = td_lambda^(N_game - ply) --------
+    // Precomputed per integer gap (gaps span 0..max game length, a few
+    // hundred) so the epoch loop pays one table load, not a powf.
+    int max_gap = 0;
+    for (const BTRecord &r : recs) {
+        int g = (int)gid_N[r.gid] - (int)r.ply;
+        if (g > max_gap) max_gap = g;
+    }
+    std::vector<float> powtab(max_gap + 1);
+    for (int g = 0; g <= max_gap; g++)
+        powtab[g] = powf(td_lambda, (float)g);
+    auto decay = [&](const BTRecord &r) {
+        int g = (int)gid_N[r.gid] - (int)r.ply;
+        return powtab[g < 0 ? 0 : g];
+    };
+    {
+        double dsum = 0.0;
+        for (const BTRecord &r : recs) dsum += (double)decay(r);
+        fprintf(stderr, "batch-train: result decay td_lambda=%.3f — mean "
+                        "decay %.3f over %zu positions (max gap %d)\n",
+                (double)td_lambda, dsum / (double)recs.size(), recs.size(),
+                max_gap);
+    }
 
     // ---- Train/validation split BY GAME ---------------------------------
     // Knuth-hash the gid so the split is stable across runs with the same data.
@@ -346,7 +410,7 @@ int nnue_batch_train(int argc, char *argv[])
         double se_blend = 0.0, se_outcome = 0.0;
         for (uint32_t i : val_idx) {
             float d  = bt_eval_record(recs[i], K, nullptr);
-            float tb = bt_target(recs[i], lambda, leaf_lambda, K);
+            float tb = bt_target(recs[i], lambda, leaf_lambda, K, decay(recs[i]));
             float to = 0.5f * (float)recs[i].result2;
             se_blend   += (double)(tb - d) * (tb - d);
             se_outcome += (double)(to - d) * (to - d);
@@ -385,7 +449,7 @@ int nnue_batch_train(int argc, char *argv[])
         for (size_t n = 0; n < train_idx.size(); n++) {
             const BTRecord &r = recs[train_idx[n]];
             float d      = bt_eval_record(r, K, &act);
-            float target = bt_target(r, lambda, leaf_lambda, K);
+            float target = bt_target(r, lambda, leaf_lambda, K, decay(r));
             float e      = target - d;
             se += (double)e * e;
 

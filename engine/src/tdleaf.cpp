@@ -300,7 +300,7 @@ static void tdleaf_dump_game(const TDGameRecord &rec, float result)
                 FILE *f = fopen(path, "a");
                 if (f) {
                     if (ftell(f) == 0)
-                        fprintf(f, "fen\tcp\tresult\tply\tdepth\tgid\n");
+                        fprintf(f, "fen\tcp\tresult\tply\tdepth\tgid\tendply\n");
                 } else {
                     fprintf(stderr, "TDLeaf: cannot open dump file %s\n", path);
                 }
@@ -334,8 +334,9 @@ static void tdleaf_dump_game(const TDGameRecord &rec, float result)
                 int cp_white = r.wtm ? r.score_stm : -r.score_stm;
                 if (cp_white <= dump_max_cp && cp_white >= -dump_max_cp) {
                     tdleaf_dump_fen(r.pos, r.wtm, fen);
-                    fprintf(leaf_f, "%s\t%d\t%s\t%d\t0\t%u\n",
-                            fen, cp_white, res_str, t + 1, dump_gid);
+                    fprintf(leaf_f, "%s\t%d\t%s\t%d\t0\t%u\t%d\n",
+                            fen, cp_white, res_str, t + 1, dump_gid,
+                            rec.n_plies);
                 }
             }
         }
@@ -346,8 +347,9 @@ static void tdleaf_dump_game(const TDGameRecord &rec, float result)
                 int cp_white = root_wtm ? r.score_root_stm : -r.score_root_stm;
                 if (cp_white <= dump_max_cp && cp_white >= -dump_max_cp) {
                     tdleaf_dump_fen(r.root_pos, (bool)root_wtm, fen);
-                    fprintf(root_f, "%s\t%d\t%s\t%d\t%d\t%u\n",
-                            fen, cp_white, res_str, t + 1, (int)r.id_depth, dump_gid);
+                    fprintf(root_f, "%s\t%d\t%s\t%d\t%d\t%u\t%d\n",
+                            fen, cp_white, res_str, t + 1, (int)r.id_depth,
+                            dump_gid, rec.n_plies);
                 }
             }
         }
