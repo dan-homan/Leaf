@@ -78,14 +78,22 @@ Lessons, in order of importance:
    the overshoot *and* the productive material correction hiding inside it
    (iter2s's minors moved toward classical values), costing 30–55 Elo.  Cutting
    λ 0.7 → 0.3 instead tames the drift ~3× while keeping the correction.
-3. **Leaf rows need the blend anchor** (`--bt-leaf-blend`): outcome-only leaves cost
-   ~46 Elo vs leaves trained on the λ-blend with their dump-time static as a
-   magnitude anchor.
+3. **Leaf rows need the blend anchor**: outcome-only leaves cost ~46 Elo vs
+   leaves trained on the λ-blend with their dump-time static as a magnitude
+   anchor.  (Blended leaves are now the trainer default; the run-time knob is
+   `--bt-leaf-lambda`, with 1.0 recovering outcome-only.)
 
-**Settled gen-2+ recipe:** `--shards 1 --bt-K 220 --bt-lambda 0.3 --bt-leaf-blend`
-(~4 h single-process on a 57M corpus).  Consolidation remains gauntlet-positive
-per generation: iter2s2 is +55 over the gen-1 net and +28 over its own online
-endpoint, cross-family.
+**Settled gen-2+ recipe:** `--shards 1 --bt-K 220 --bt-lambda 0.3` (leaf rows
+follow λ by default; ~4 h single-process on a 57M corpus).  Consolidation
+remains gauntlet-positive per generation: iter2s2 is +55 over the gen-1 net and
++28 over its own online endpoint, cross-family.  Epoch count matters at gen-2+:
+iter2s2 peaked at **epoch 4** of 6 in the in-family ladder (gen-1 was still
+improving at 6) — select the epoch by a fast ladder (`hybrid_loop.py
+--gauntlet-epochs`: 1000 games at 1+0.1 per epoch snapshot, ±19, minutes each)
+rather than assuming the last epoch.  Direct classic anchor: ep4 −62 ± 30 vs
+ep6 −64 ± 18 — statistically identical cross-family (the +24 in-family edge is
+inside the error bars at 400 games), so the ladder pick costs nothing and may
+gain; ep4 seeds iteration 3.
 
 ---
 
@@ -108,13 +116,13 @@ fen  cp  result  ply  depth  gid
 | `gid` | stable game id — the trainer splits train/validation **by game** |
 
 **The depth-0 rule:** records with `depth == 0` (leaf-dump rows, whose `cp` is the
-net's *own static eval* — self-distillation) are trained **outcome-only regardless
-of `--bt-lambda`**, unless `--bt-leaf-blend` is set, in which case they get the
-normal λ-blend with the dump-time static acting as a magnitude anchor.
-`--bt-leaf-blend` is the recommended setting (worth ~46 Elo over outcome-only
-leaves in A/B, iteration 2).  Records with `depth > 0` carry a search-amplified
-label and always get the full λ-blend.  This lets root and leaf corpora mix freely
-in one training run.
+net's *own static eval* at dump time, acting as a magnitude anchor) get their own
+outcome weight, `--bt-leaf-lambda` — **default: the same λ as roots** (the
+recommended setting, worth ~46 Elo over outcome-only leaves in A/B, iteration 2).
+Set `--bt-leaf-lambda 1.0` for the old outcome-only behaviour, or any other value
+to sweep the leaf blend independently of the root blend.  Records with `depth > 0`
+carry a search-amplified label and always use `--bt-lambda`.  This lets root and
+leaf corpora mix freely in one training run.
 
 ---
 
@@ -163,9 +171,9 @@ session, trains on the given TSVs, writes per-epoch snapshots, and exits:
 
 ```sh
 ./Leaf_vbt --batch-train corpus_a.tsv,corpus_b.tsv --bt-out myrun \
-           [--bt-epochs 3] [--bt-lambda 0.7] [--bt-K 220] [--bt-lr 0.25] \
+           [--bt-epochs 3] [--bt-lambda 0.7] [--bt-leaf-lambda <λ>] \
+           [--bt-K 220] [--bt-lr 0.25] \
            [--bt-batch 512] [--bt-val 0.05] [--bt-seed 42] [--bt-max 0] \
-           [--bt-leaf-blend] \
            [--bt-sync shared.tdleaf.bin] [--bt-sync-every 256]
 ```
 
@@ -232,12 +240,16 @@ Obsidian `Hybrid_Loop_Runbook` note for the manual procedure it encodes):
 cd engine/learn/
 python3 hybrid_loop.py --tag iter3 --games 400000 --depth 8 \
     --state <consolidated>.tdleaf.bin \
-    --shards 1 --bt-K 220 --bt-lambda 0.3 --bt-leaf-blend \
-    --gauntlet Leaf_viter2s2-final Leaf_vclassic_eval
+    --shards 1 --bt-K 220 --bt-lambda 0.3 \
+    --gauntlet-epochs --gauntlet Leaf_viter2s2-final Leaf_vclassic_eval
 ```
 
-(The `--shards 1 --bt-K 220 --bt-lambda 0.3 --bt-leaf-blend` block is the settled
-gen-2+ consolidation recipe — see Generation 2 above.)
+(`--shards 1 --bt-K 220 --bt-lambda 0.3` is the settled gen-2+ consolidation
+recipe — see Generation 2 above.  `--gauntlet-epochs` rates each epoch snapshot
+vs the first gauntlet opponent as soon as that epoch finishes training — 1000
+games at 1+0.1 by default, `--epoch-games`/`--epoch-tc` to change — and prints
+an epoch-ladder table; requires `--shards 1`.  The interleaved design leaves a
+hook for a future auto-decider that stops a run whose ladder is trending down.)
 
 Phases: promote `--state` to the live training state (with backup and a
 content-hash pairing pre-flight) → online self-play generation with corpus dumping
@@ -260,8 +272,10 @@ Artifacts (all named by `--tag`): `<tag>_final.nnue` (rating binaries),
   *level*.  The MSE trajectory *shape* is still useful live: smooth = healthy
   optimizer, oscillating = staleness/step-size trouble.
 - Consolidation recipe (settled in iteration 2): `--shards 1 --bt-K 220
-  --bt-lambda 0.3 --bt-leaf-blend`.  Sharding is currently for gen-1-scale
-  backlogs only.
+  --bt-lambda 0.3` (leaf rows follow λ by default).  Sharding is currently for
+  gen-1-scale backlogs only.
+- Select the epoch by ladder (`--gauntlet-epochs`), not by assuming the last
+  epoch: gen-2 peaked at epoch 4 of 6.
 - Depth 8 generation recommended (data-quality lever; save-I/O overhead ~10% at d8
   vs ~13% at d6 after the 2026-07-02 buffered-I/O fix).
 - Fresh-generation data first; add older corpora only as controlled arms.

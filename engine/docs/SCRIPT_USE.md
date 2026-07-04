@@ -802,15 +802,16 @@ Elo table.  Non-interactive; run from `learn/`.  Helper binaries (`Leaf_vbt`,
 concepts and the manual runbook it encodes.
 
 ```sh
-# Full iteration: generate 400k d8 games, consolidate (settled gen-2+ recipe), rate
+# Full iteration: generate 400k d8 games, consolidate (settled gen-2+ recipe),
+# rate every epoch as it completes, then the final full gauntlet
 python3 hybrid_loop.py --tag iter3 --games 400000 --depth 8 \
     --state iter2s2_final.tdleaf.bin \
-    --shards 1 --bt-K 220 --bt-lambda 0.3 --bt-leaf-blend \
-    --gauntlet Leaf_viter2s2-final Leaf_vclassic_eval
+    --shards 1 --bt-K 220 --bt-lambda 0.3 \
+    --gauntlet-epochs --gauntlet Leaf_viter2s2-final Leaf_vclassic_eval
 
 # Consolidate-only on existing corpora (e.g. a hyperparameter arm on the same dumps)
 python3 hybrid_loop.py --tag iter2s2 --skip-online --shards 1 \
-    --bt-K 220 --bt-lambda 0.3 --bt-leaf-blend \
+    --bt-K 220 --bt-lambda 0.3 \
     $(for f in iter2_work/iter2.*.tsv; do echo --corpus $f; done) \
     --gauntlet Leaf_vbtsp-final Leaf_vclassic_eval
 
@@ -844,10 +845,14 @@ pairs with the ORIGINAL base `.nnue`), `<netbase>.tdleaf.bin-<tag>-online`
 | `--bt-lambda X` | 0.7 | Outcome weight in the blend target (0.3 recommended for gen-2+) |
 | `--bt-K X` | 220 | Sigmoid temperature |
 | `--bt-batch N` | 512 | Positions per Adam step |
-| `--bt-leaf-blend` | off | λ-blend depth-0 leaf rows (dump-time static as anchor) instead of outcome-only; recommended |
+| `--bt-leaf-lambda X` | = `--bt-lambda` | Outcome weight for depth-0 leaf rows (1.0 = outcome-only; default follows the root λ, the recommended setting) |
 | `--sync-every N` | 256 | Batches between delta-merge syncs |
 | `--gauntlet OPP …` | none | Opponent binaries in `learn/` (empty = skip) |
 | `--gauntlet-games N` | 400 | Games per opponent |
 | `--tc TC` | `3+0.05` | Gauntlet time control |
+| `--gauntlet-epochs` | off | Per-epoch ladder: rate each epoch snapshot vs the first `--gauntlet` opponent as soon as its epoch finishes training; prints an epoch table (requires `--shards 1`) |
+| `--epoch-games N` | 1000 | Games per epoch-ladder match |
+| `--epoch-tc TC` | `1+0.1` | Epoch-ladder time control |
+| `--no-final-gauntlet` | off | Skip the final full gauntlet (ladder-only runs; `--gauntlet` then names just the ladder opponent) |
 | `--force` | off | Reuse an existing `<tag>_work` directory |
 | `--recompile` | off | Force recompile of helper binaries |
