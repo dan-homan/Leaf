@@ -1,5 +1,27 @@
 Changes since 2017_12_24
 
+2026_07_04 -- Batch trainer: --bt-leaf-blend flag (nnue_batch_train.cpp,
+               passed through by hybrid_loop.py).  Gives depth-0 leaf-dump
+               rows the normal lambda blend — the dump-time static eval
+               acts as a magnitude anchor — instead of the outcome-only
+               rule.  Outcome-only leaves lose ~46 Elo vs blended leaves
+               (iter2ks vs iter2ks2 A/B).  Settles the gen-2 consolidation
+               recipe from the iteration-2 experiment series (all arms
+               unsharded, from the iter2-online state, 57M-position dump
+               corpus): --shards 1, --bt-K 220, --bt-lambda 0.3,
+               --bt-leaf-blend.  Winning arm iter2s2: +55 +/- 18 vs
+               btsp-final, -64 +/- 18 vs classic_eval — best net to date
+               on both axes (iter2-online measured directly at -79.5 vs
+               classic).  Key findings: (1) sharded --bt-sync sync-merge
+               staleness destroys the subtle gen-2 signal (every 8-way arm
+               regressed; the single-process control succeeded — val-MSE
+               trajectory smoothness is the live tell); (2) lambda, not K,
+               is the right knob for outcome-driven piece-value inflation:
+               lambda 0.7->0.3 tames Q drift ~3x (+254cp -> +89cp) while
+               keeping K=220's productive material correction, whereas
+               refitting K to 165 removed the overshoot AND the correction,
+               costing 30-55 Elo.
+
 2026_07_03 -- Documentation refresh for the offline-training / hybrid-loop
                work.  New docs/OFFLINE_TRAINING.md: motivation and measured
                results (+139/+127 Elo from consolidation of existing

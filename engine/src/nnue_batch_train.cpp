@@ -247,12 +247,15 @@ static float bt_eval_record(const BTRecord &r, float K, NNUEActivations *act_out
     return d;
 }
 
-static inline float bt_target(const BTRecord &r, float lambda, float K)
+static inline float bt_target(const BTRecord &r, float lambda, float K,
+                              bool leaf_blend)
 {
     float outcome = 0.5f * (float)r.result2;
     // depth 0 = no search label (leaf-dump rows: cp is the net's own static
-    // eval, i.e. self-distillation) → train outcome-only regardless of lambda.
-    if (r.depth == 0) return outcome;
+    // eval at dump time, i.e. self-distillation) → train outcome-only
+    // regardless of lambda, UNLESS --bt-leaf-blend is set, in which case the
+    // dump-time static is used as a magnitude anchor in the normal blend.
+    if (r.depth == 0 && !leaf_blend) return outcome;
     float ev = 1.0f / (1.0f + expf(-(float)r.cp / K));
     return lambda * outcome + (1.0f - lambda) * ev;
 }
@@ -275,6 +278,7 @@ int nnue_batch_train(int argc, char *argv[])
     size_t max_rec = 0;
     const char *sync_path = nullptr;
     int   sync_every = 256;
+    bool  leaf_blend = false;
 
     for (int i = 1; i < argc; i++) {
         auto next = [&](const char *flag) -> const char* {
@@ -294,6 +298,7 @@ int nnue_batch_train(int argc, char *argv[])
         else if ((v = next("--bt-max")))     max_rec  = (size_t)atoll(v);
         else if ((v = next("--bt-sync")))    sync_path = v;
         else if ((v = next("--bt-sync-every"))) sync_every = atoi(v);
+        else if (strcmp(argv[i], "--bt-leaf-blend") == 0) leaf_blend = true;
     }
     if (!files) { fprintf(stderr, "batch-train: no input files\n"); return 1; }
     if (batch < 1) batch = 1;
@@ -338,7 +343,7 @@ int nnue_batch_train(int argc, char *argv[])
         double se_blend = 0.0, se_outcome = 0.0;
         for (uint32_t i : val_idx) {
             float d  = bt_eval_record(recs[i], K, nullptr);
-            float tb = bt_target(recs[i], lambda, K);
+            float tb = bt_target(recs[i], lambda, K, leaf_blend);
             float to = 0.5f * (float)recs[i].result2;
             se_blend   += (double)(tb - d) * (tb - d);
             se_outcome += (double)(to - d) * (to - d);
@@ -377,7 +382,7 @@ int nnue_batch_train(int argc, char *argv[])
         for (size_t n = 0; n < train_idx.size(); n++) {
             const BTRecord &r = recs[train_idx[n]];
             float d      = bt_eval_record(r, K, &act);
-            float target = bt_target(r, lambda, K);
+            float target = bt_target(r, lambda, K, leaf_blend);
             float e      = target - d;
             se += (double)e * e;
 

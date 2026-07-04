@@ -154,6 +154,9 @@ def main():
     ap.add_argument("--bt-K", type=float, default=220.0)
     ap.add_argument("--bt-batch", type=int, default=512)
     ap.add_argument("--sync-every", type=int, default=256)
+    ap.add_argument("--bt-leaf-blend", action="store_true",
+                    help="Give depth-0 (leaf) rows the normal lambda blend "
+                         "(dump-time static as anchor) instead of outcome-only")
     # gauntlet
     ap.add_argument("--gauntlet", nargs="*", default=[],
                     help="Opponent binaries in learn/ (empty = skip gauntlet)")
@@ -277,15 +280,17 @@ def main():
     procs = []
     for n in range(args.shards):
         logf = open(tdir / f"p{n}.log", "w")
-        p = subprocess.Popen(
-            ["./Leaf_vbt", "--batch-train", f"../shard_{n}.tsv",
-             "--bt-epochs", str(args.epochs), "--bt-out", f"{args.tag}_p{n}",
-             "--bt-sync", f"{args.tag}_sync.tdleaf.bin",
-             "--bt-sync-every", str(args.sync_every),
-             "--bt-lr", str(args.bt_lr), "--bt-lambda", str(args.bt_lambda),
-             "--bt-K", str(args.bt_K), "--bt-batch", str(args.bt_batch),
-             "--bt-seed", str(1000 + n)],
-            cwd=str(tdir), stdout=subprocess.DEVNULL, stderr=logf)
+        cmd = ["./Leaf_vbt", "--batch-train", f"../shard_{n}.tsv",
+               "--bt-epochs", str(args.epochs), "--bt-out", f"{args.tag}_p{n}",
+               "--bt-sync", f"{args.tag}_sync.tdleaf.bin",
+               "--bt-sync-every", str(args.sync_every),
+               "--bt-lr", str(args.bt_lr), "--bt-lambda", str(args.bt_lambda),
+               "--bt-K", str(args.bt_K), "--bt-batch", str(args.bt_batch),
+               "--bt-seed", str(1000 + n)]
+        if args.bt_leaf_blend:
+            cmd.append("--bt-leaf-blend")
+        p = subprocess.Popen(cmd, cwd=str(tdir),
+                             stdout=subprocess.DEVNULL, stderr=logf)
         procs.append((p, logf))
     fail = 0
     for p, logf in procs:
