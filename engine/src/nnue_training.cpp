@@ -826,7 +826,7 @@ void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
     // Runs in both live and replay paths: piece_val is an output-side additive
     // term (see nnue_dense_piece_val) and does NOT feed into nnue_init_accumulator,
     // so replay updates do not create the FT/PSQT/ft_bias feedback loop below.
-    if (piece_val_active) {
+    if (piece_val_active && !TDLEAF_FREEZE_MATERIAL) {
         float g_pv = grad_scale * 0.5f;
         for (int pt = 0; pt < 6; pt++) {
             if (act.piece_count_diff[pt] != 0)
@@ -897,8 +897,9 @@ void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
             float *gfw = grad_ft_w + (size_t)fi * NNUE_HALF_DIMS;
             for (int d = 0; d < NNUE_HALF_DIMS; d++)
                 gfw[d] += g_a[d];
-            grad_psqt_w[fi * NNUE_PSQT_BKTS + s] +=
-                g_psqt_diff * psqt_sign;
+            if (!TDLEAF_FREEZE_MATERIAL)
+                grad_psqt_w[fi * NNUE_PSQT_BKTS + s] +=
+                    g_psqt_diff * psqt_sign;
         }
     }
 
@@ -989,6 +990,7 @@ static const TDLeafLRMultipliers &tdleaf_lr_multipliers()
 // ---------------------------------------------------------------------------
 void nnue_mean_center_psqt_gradients()
 {
+    if (TDLEAF_FREEZE_MATERIAL) return;  // no PSQT gradients exist to center
     if (!piece_val_active || !grad_psqt_w || !ft_dirty) return;
 
     // Per-slot aggregate (summed across all NNUE_PSQT_BKTS buckets): zeros only
@@ -1071,6 +1073,9 @@ void nnue_capture_psqt_init_slot_means()
 // ---------------------------------------------------------------------------
 void nnue_recenter_psqt_slot_means()
 {
+    // Frozen material gauge: PSQT never moves, so there is no drift to snap
+    // back.  Skipping also avoids touching the int32 inference array on load.
+    if (TDLEAF_FREEZE_MATERIAL) return;
     if (!psqt_init_slot_means_valid || !psqt_weights_f32) return;
 
     float cur_means[11][NNUE_PSQT_BKTS];
@@ -1485,22 +1490,25 @@ void nnue_apply_gradients(float lr_scale)
                 }
             }
             // PSQT weights — full Adam per-weight (only 8 buckets per row).
-            float    *pw   = psqt_weights_f32 + (size_t)fi * NNUE_PSQT_BKTS;
-            float    *gpw  = grad_psqt_w      + (size_t)fi * NNUE_PSQT_BKTS;
-            uint32_t *pcnt = psqt_weights_cnt + (size_t)fi * NNUE_PSQT_BKTS;
-            float    *pd   = psqt_delta_f32 ? psqt_delta_f32 + (size_t)fi * NNUE_PSQT_BKTS : nullptr;
-            for (int b = 0; b < NNUE_PSQT_BKTS; b++) {
-                if (gpw[b] != 0.0f && m_psqt_w && v_psqt_w) {
-                    size_t vi = (size_t)fi * NNUE_PSQT_BKTS + b;
-                    float dw = do_step_psqt(gpw[b], m_psqt_w[vi], v_psqt_w[vi], pcnt[b]);
-                    pw[b] -= dw;  if (pd) pd[b] -= dw;
-                    pcnt[b]++;
-                    if (delta_psqt_cnt) delta_psqt_cnt[(size_t)fi * NNUE_PSQT_BKTS + b]++;
-                    psqt_dw_total[slot] += dw;
-                    gpw[b] = 0.0f;
+            // Skipped entirely under TDLEAF_FREEZE_MATERIAL (frozen prior).
+            if (!TDLEAF_FREEZE_MATERIAL) {
+                float    *pw   = psqt_weights_f32 + (size_t)fi * NNUE_PSQT_BKTS;
+                float    *gpw  = grad_psqt_w      + (size_t)fi * NNUE_PSQT_BKTS;
+                uint32_t *pcnt = psqt_weights_cnt + (size_t)fi * NNUE_PSQT_BKTS;
+                float    *pd   = psqt_delta_f32 ? psqt_delta_f32 + (size_t)fi * NNUE_PSQT_BKTS : nullptr;
+                for (int b = 0; b < NNUE_PSQT_BKTS; b++) {
+                    if (gpw[b] != 0.0f && m_psqt_w && v_psqt_w) {
+                        size_t vi = (size_t)fi * NNUE_PSQT_BKTS + b;
+                        float dw = do_step_psqt(gpw[b], m_psqt_w[vi], v_psqt_w[vi], pcnt[b]);
+                        pw[b] -= dw;  if (pd) pd[b] -= dw;
+                        pcnt[b]++;
+                        if (delta_psqt_cnt) delta_psqt_cnt[(size_t)fi * NNUE_PSQT_BKTS + b]++;
+                        psqt_dw_total[slot] += dw;
+                        gpw[b] = 0.0f;
+                    }
                 }
+                psqt_dirty_count[slot]++;
             }
-            psqt_dirty_count[slot]++;
             // ft_dirty[fi] not cleared yet — Pass 2 needs to find dirty rows.
         }
         // Pass 2: post-Adam aggregate centering.  Spread the per-slot mean dw
@@ -1513,7 +1521,7 @@ void nnue_apply_gradients(float lr_scale)
         for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
             if (!ft_dirty[fi]) continue;
             int slot = (fi % 704) / 64;
-            if (psqt_dirty_count[slot] >= 2) {
+            if (!TDLEAF_FREEZE_MATERIAL && psqt_dirty_count[slot] >= 2) {
                 float corr = (float)(psqt_dw_total[slot]
                                      / ((double)psqt_dirty_count[slot]
                                         * NNUE_PSQT_BKTS));
@@ -1556,7 +1564,9 @@ void nnue_apply_gradients(float lr_scale)
 
     // Dense piece value update — full Adam, no weight decay.
     // Uses TDLEAF_ADAM_PV_LR0 (same scale as PSQT).
-    if (piece_val_active) {
+    // Skipped under TDLEAF_FREEZE_MATERIAL: piece_val stays at its init/loaded
+    // value (0 on a fresh net — material lives in the frozen PSQT prior).
+    if (piece_val_active && !TDLEAF_FREEZE_MATERIAL) {
         const float pv_lr = lr_mul.pv * lr_scale * warmup_factor * TDLEAF_ADAM_PV_LR0;
         auto do_step_pv = [&](float g, float &m, float &v, uint32_t cnt) -> float {
             m = TDLEAF_ADAM_BETA1 * m + (1.0f - TDLEAF_ADAM_BETA1) * g;

@@ -146,6 +146,18 @@ static const float TDLEAF_ADAM_PV_LR0      = 13.0f;   // dense piece values (int
 // affects downstream code that consumes it as cp (SEE, endgame draw detection,
 // UCI score display, this file's SCORE_CLIP_PAWNS multiplier).
 static const bool  TDLEAF_PIN_PAWN_VALUE = true;
+// Freeze the entire material gauge: PSQT weights AND all piece_val entries
+// receive no training updates (gradients are not accumulated, Adam steps are
+// skipped, mean-centering / slot-mean recentering become no-ops).  The PSQT
+// channel becomes a fixed material + piece-square prior (set at --init-nnue
+// time; use --init-nnue-classical so it matches the classical eval and the
+// search constants in value[]), and ALL learning lives in the FC / FT layers.
+// This supersedes TDLEAF_PIN_PAWN_VALUE and the whole gauge-anchoring
+// apparatus: with no trainable material channel there is no PSQT/piece_val
+// redundancy, no slot-mean drift for the multi-writer merge to amplify, and
+// no piece_val death-spiral failure mode.  nnue_extract_piece_values() still
+// derives value[] from the (frozen) PSQT, reproducing the classical values.
+static const bool  TDLEAF_FREEZE_MATERIAL = true;
 static const float TDLEAF_ADAM_BETA1    = 0.9f;    // first-moment decay  (FC + FT bias + PSQT)
 static const float TDLEAF_ADAM_BETA2    = 0.999f;  // second-moment decay (all layers)
 static const float TDLEAF_ADAM_EPS      = 1e-8f;   // numerical floor
