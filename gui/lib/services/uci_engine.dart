@@ -248,6 +248,7 @@ class UciEngine {
     final tokens = line.split(' ');
     int? depth, seldepth, score, time, nodes, nps, multiPv;
     bool? isMate;
+    bool isBound = false;
     List<String>? pv;
 
     for (int i = 1; i < tokens.length; i++) {
@@ -268,6 +269,10 @@ class UciEngine {
             isMate = true;
           }
           break;
+        case 'lowerbound':
+        case 'upperbound':
+          isBound = true;
+          break;
         case 'time':
           time = int.tryParse(tokens[++i]);
           break;
@@ -286,6 +291,10 @@ class UciEngine {
           break;
       }
     }
+
+    // Aspiration fail-high/low lines carry a bound, not a final score —
+    // don't surface them as eval updates.
+    if (isBound) return;
 
     if (depth != null) {
       _infoController.add(UciInfo(

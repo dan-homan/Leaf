@@ -78,7 +78,14 @@ class GameNotifier extends StateNotifier<GameState> {
   /// Watchdog timer for engine-vs-engine stalls.
   Timer? _eveWatchdog;
 
-  GameNotifier(this.ref) : super(GameState(bp.Game(variant: bp.Variant.standard()), 0));
+  GameNotifier(this.ref) : super(GameState(bp.Game(variant: bp.Variant.standard()), 0)) {
+    _initialFen = state.game.fen;
+  }
+
+  /// FEN of the game's starting position. Sent with the full move list in
+  /// every `position` command so the engine can rebuild its repetition
+  /// history (a bare FEN leaves its threefold detection blind).
+  late String _initialFen;
 
   bp.Game get game => state.game;
 
@@ -134,6 +141,7 @@ class GameNotifier extends StateNotifier<GameState> {
     }
 
     final newGame = bp.Game(variant: variant, startPosSeed: seed);
+    _initialFen = newGame.fen;
 
     // Set player orientation.
     final playerColor = options.playerColor == PlayerColor.white
@@ -195,12 +203,13 @@ class GameNotifier extends StateNotifier<GameState> {
     } else {
       engine.setOption('UCI_Chess960', 'false');
     }
+    engine.setOption('UCI_AnalyseMode', 'false');
 
     await engine.newGame();
     // Clear stale flags — engine is now fresh and ready.
     _ignoreNextBestMove = false;
     _ignoreNextBestMove2 = false;
-    engine.setPosition(fen: game.fen);
+    _sendPosition(engine);
 
     final humanIsWhite = options.playerColor == PlayerColor.white;
     if (!humanIsWhite) {
@@ -257,6 +266,8 @@ class GameNotifier extends StateNotifier<GameState> {
       engine1.setOption('UCI_Chess960', 'false');
       engine2.setOption('UCI_Chess960', 'false');
     }
+    engine1.setOption('UCI_AnalyseMode', 'false');
+    engine2.setOption('UCI_AnalyseMode', 'false');
 
     await engine1.newGame();
     if (_gameId != initGameId) return;
@@ -266,8 +277,6 @@ class GameNotifier extends StateNotifier<GameState> {
     // Clear stale flags — both engines are now fresh and ready.
     _ignoreNextBestMove = false;
     _ignoreNextBestMove2 = false;
-
-    engine1.setPosition(fen: game.fen);
 
     // Start the clock and tell engine 1 (white) to go.
     if (options.timeControl.type == TimeControlType.gameTime) {
@@ -311,7 +320,6 @@ class GameNotifier extends StateNotifier<GameState> {
             _ignoreNextBestMove = true;
             engine.stopSearch();
           }
-          engine.setPosition(fen: game.fen);
           _engineGo(engine);
         }
       }
@@ -468,6 +476,7 @@ class GameNotifier extends StateNotifier<GameState> {
 
     final engine = ref.read(engineProvider);
     if (engine != null && engine.isRunning) {
+      engine.setOption('UCI_AnalyseMode', 'true');
       _restartAnalysis(engine);
     }
   }
@@ -482,7 +491,7 @@ class GameNotifier extends StateNotifier<GameState> {
       }
       await engine.isReady();
       if (ref.read(gameModeProvider) != GameMode.analysis) return;
-      engine.setPosition(fen: game.fen);
+      _sendPosition(engine);
       engine.go(infinite: true);
     } finally {
       _analysisRestarting = false;
@@ -495,6 +504,9 @@ class GameNotifier extends StateNotifier<GameState> {
     if (engine != null && engine.state != UciEngineState.idle) {
       _ignoreNextBestMove = true;
       engine.stopSearch();
+    }
+    if (engine != null && engine.isRunning) {
+      engine.setOption('UCI_AnalyseMode', 'false');
     }
 
     if (_redoStack.isNotEmpty) {
@@ -520,10 +532,19 @@ class GameNotifier extends StateNotifier<GameState> {
     _stopEngine2IfRunning();
     final variant = chess960 ? bp.Variant.chess960() : bp.Variant.standard();
     final newGame = bp.Game(variant: variant, fen: fen);
+    _initialFen = newGame.fen;
     ref.read(chess960Provider.notifier).state = chess960;
     ref.read(gameModeProvider.notifier).state = GameMode.analysis;
     _version++;
     state = GameState(newGame, _version, totalPlies: 0, viewPly: 0);
+
+    // Start analyzing the loaded position, same as enterAnalysis().
+    final engine = ref.read(engineProvider);
+    if (engine != null && engine.isRunning) {
+      engine.setOption('UCI_Chess960', chess960 ? 'true' : 'false');
+      engine.setOption('UCI_AnalyseMode', 'true');
+      _restartAnalysis(engine);
+    }
   }
 
   String get fen => game.fen;
@@ -617,7 +638,7 @@ class GameNotifier extends StateNotifier<GameState> {
     if (ref.read(ponderEnabledProvider) && ponderMove != null) {
       final engine = ref.read(engineProvider);
       if (engine != null && engine.isRunning) {
-        engine.setPosition(fen: game.fen, moves: [ponderMove]);
+        _sendPosition(engine, extraMoves: [ponderMove]);
         final tc = ref.read(timeControlProvider);
         if (tc.type == TimeControlType.gameTime) {
           engine.goPonder(
@@ -705,9 +726,44 @@ class GameNotifier extends StateNotifier<GameState> {
         : ref.read(engine2Provider);
     if (engine != null && engine.isRunning) {
       engine.sync();
-      engine.setPosition(fen: game.fen);
       _engineGo(engine);
       _resetEveWatchdog();
+    }
+  }
+
+  /// Stop engine 1's current search, discarding the resulting bestmove.
+  /// Used by the settings dialog: a bare `stop` would deliver a stale
+  /// bestmove that onEngineBestMove could play as a real move.
+  void stopEngine1Search() {
+    final engine = ref.read(engineProvider);
+    if (engine != null && engine.state != UciEngineState.idle) {
+      _ignoreNextBestMove = true;
+      engine.stopSearch();
+    }
+  }
+
+  /// Restart engine 1 appropriately after the settings dialog stopped or
+  /// restarted it: resume analysis, or search again if it's the engine's
+  /// turn in play mode. (In engine-vs-engine the watchdog re-goes the
+  /// idle engine on its own.)
+  void resumeEngineAfterSettings() {
+    final engine = ref.read(engineProvider);
+    if (engine == null || !engine.isRunning || game.gameOver) return;
+
+    // Re-send game-scoped options in case the engine process was restarted.
+    engine.setOption(
+        'UCI_Chess960', ref.read(chess960Provider) ? 'true' : 'false');
+
+    final mode = ref.read(gameModeProvider);
+    if (mode == GameMode.analysis) {
+      engine.setOption('UCI_AnalyseMode', 'true');
+      _restartAnalysis(engine);
+    } else if (mode == GameMode.play) {
+      engine.setOption('UCI_AnalyseMode', 'false');
+      if (game.turn != ref.read(playerColorProvider) &&
+          engine.state == UciEngineState.idle) {
+        _engineGo(engine);
+      }
     }
   }
 
@@ -764,8 +820,25 @@ class GameNotifier extends StateNotifier<GameState> {
     // If the engine is actively thinking, do nothing — it's working normally.
   }
 
+  /// Send the current position as initial FEN + full move list, and record
+  /// the side to move of the searched position for white-POV eval display.
+  /// [extraMoves] extends beyond the game history (e.g. the ponder move).
+  void _sendPosition(UciEngine engine, {List<String> extraMoves = const []}) {
+    final moves = [...moveHistory, ...extraMoves];
+    engine.setPosition(fen: _initialFen, moves: moves);
+
+    final fenParts = _initialFen.split(' ');
+    var stm = (fenParts.length > 1 && fenParts[1] == 'b') ? 1 : 0;
+    if (moves.length.isOdd) stm = 1 - stm;
+    final isEngine2 = identical(engine, ref.read(engine2Provider));
+    ref
+        .read((isEngine2 ? engine2SearchStmProvider : engineSearchStmProvider)
+            .notifier)
+        .state = stm;
+  }
+
   void _engineGo(UciEngine engine) {
-    engine.setPosition(fen: game.fen);
+    _sendPosition(engine);
     final tc = ref.read(timeControlProvider);
     switch (tc.type) {
       case TimeControlType.gameTime:

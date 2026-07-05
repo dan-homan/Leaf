@@ -35,6 +35,7 @@ class EngineOutputPanel extends ConsumerWidget {
                   infoProvider: engineInfoProvider,
                   stateProvider: engineStateProvider,
                   skillProvider: skillLevelProvider,
+                  stmProvider: engineSearchStmProvider,
                 ),
                 const Divider(color: Color(0xFF333333), height: 16),
                 _EngineSection(
@@ -43,6 +44,7 @@ class EngineOutputPanel extends ConsumerWidget {
                   infoProvider: engine2InfoProvider,
                   stateProvider: engine2StateProvider,
                   skillProvider: engine2SkillLevelProvider,
+                  stmProvider: engine2SearchStmProvider,
                 ),
               ],
             )
@@ -51,6 +53,7 @@ class EngineOutputPanel extends ConsumerWidget {
               infoProvider: engineInfoProvider,
               stateProvider: engineStateProvider,
               skillProvider: skillLevelProvider,
+              stmProvider: engineSearchStmProvider,
             ),
     );
   }
@@ -63,6 +66,7 @@ class _EngineSection extends ConsumerWidget {
   final StateProvider<UciInfo> infoProvider;
   final StateProvider<UciEngineState> stateProvider;
   final StateProvider<int> skillProvider;
+  final StateProvider<int> stmProvider;
 
   const _EngineSection({
     required this.label,
@@ -70,6 +74,7 @@ class _EngineSection extends ConsumerWidget {
     required this.infoProvider,
     required this.stateProvider,
     required this.skillProvider,
+    required this.stmProvider,
   });
 
   @override
@@ -77,6 +82,7 @@ class _EngineSection extends ConsumerWidget {
     final info = ref.watch(infoProvider);
     final engineState = ref.watch(stateProvider);
     final skill = ref.watch(skillProvider);
+    final searchStm = ref.watch(stmProvider);
 
     String stateLabel;
     if (engineState == UciEngineState.thinking) {
@@ -154,7 +160,7 @@ class _EngineSection extends ConsumerWidget {
           runSpacing: 4,
           children: [
             _InfoChip(label: 'D', value: _depthString(info)),
-            _InfoChip(label: 'Eval', value: info.scoreString),
+            _InfoChip(label: 'Eval', value: _whitePovEval(info, searchStm)),
             _InfoChip(label: 'N', value: info.nodesString),
             _InfoChip(label: 'NPS', value: info.npsString),
           ],
@@ -179,6 +185,17 @@ class _EngineSection extends ConsumerWidget {
     final fen = ref.read(gameProvider.notifier).fen;
     final chess960 = ref.read(chess960Provider);
     return formatPv(info.pv!, fen, chess960: chess960);
+  }
+
+  /// UCI scores are from the side to move's perspective; normalize to
+  /// white's point of view so the sign doesn't flip every move.
+  String _whitePovEval(UciInfo info, int searchStm) {
+    if (info.score == null) return '';
+    var s = info.score!;
+    if (searchStm == 1) s = -s; // black to move in the searched position
+    if (info.isMate == true) return s < 0 ? '-M${-s}' : 'M$s';
+    final str = (s / 100).toStringAsFixed(2);
+    return s > 0 ? '+$str' : str;
   }
 
   String _depthString(UciInfo info) {

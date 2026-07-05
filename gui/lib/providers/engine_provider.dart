@@ -27,6 +27,11 @@ final skillLevelProvider = StateProvider<int>((ref) => 100);
 /// Engine 1 name (from UCI "id name" response).
 final engineNameProvider = StateProvider<String?>((ref) => null);
 
+/// Side to move of the position engine 1 is currently searching
+/// (0 = white, 1 = black). Set whenever a position is sent; used to
+/// normalize the STM-relative UCI score to white's point of view.
+final engineSearchStmProvider = StateProvider<int>((ref) => 0);
+
 /// The engine 1 instance provider. Manages the engine lifecycle.
 final engineProvider =
     StateNotifierProvider<EngineNotifier, UciEngine?>((ref) {
@@ -52,6 +57,9 @@ final engine2SkillLevelProvider = StateProvider<int>((ref) => 100);
 
 /// Engine 2 name.
 final engine2NameProvider = StateProvider<String?>((ref) => null);
+
+/// Side to move of the position engine 2 is currently searching.
+final engine2SearchStmProvider = StateProvider<int>((ref) => 0);
 
 /// Engine 2 instance provider.
 final engine2Provider =
@@ -102,7 +110,10 @@ class EngineNotifier extends StateNotifier<UciEngine?> {
     engine.setOption('Hash', config.hashMb);
     engine.setOption('Threads', config.threads);
     if (!isEngine2) {
-      engine.setOption('Ponder', 'true');
+      // Mirror the GUI ponder setting so the engine's time management
+      // knows whether ponder hits are possible.
+      final ponder = ref.read(ponderEnabledProvider);
+      engine.setOption('Ponder', ponder ? 'true' : 'false');
     }
     final skill = ref.read(_skillProvider);
     if (skill < 100) {

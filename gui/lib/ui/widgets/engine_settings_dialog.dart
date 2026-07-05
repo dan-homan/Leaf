@@ -199,7 +199,8 @@ class _EngineSettingsDialogState extends ConsumerState<EngineSettingsDialog> {
     final oldConfig = ref.read(engineConfigProvider);
     final pathChanged = _enginePath != oldConfig.path;
 
-    // Update config.
+    // Update config. Set ponder first so a restarted engine picks it up.
+    ref.read(ponderEnabledProvider.notifier).state = _ponder;
     ref.read(engineConfigProvider.notifier).state = EngineConfig(
       path: _enginePath,
       hashMb: _hashMb,
@@ -213,20 +214,24 @@ class _EngineSettingsDialogState extends ConsumerState<EngineSettingsDialog> {
       // Send options to running engine.
       final engine = ref.read(engineProvider);
       if (engine != null && engine.isRunning) {
-        final wasSearching = engine.state != UciEngineState.idle;
-        if (wasSearching) {
-          engine.stopSearch();
+        if (engine.state != UciEngineState.idle) {
+          // Stop via the game notifier so the stale bestmove is discarded
+          // instead of being played as a move.
+          ref.read(gameProvider.notifier).stopEngine1Search();
           await engine.isReady();
         }
         engine.setOption('Hash', _hashMb);
         engine.setOption('Threads', _threads);
+        engine.setOption('Ponder', _ponder ? 'true' : 'false');
         await engine.isReady();
       }
     }
 
-    // Update skill and ponder.
+    // Update skill.
     ref.read(engineProvider.notifier).setSkillLevel(_skillLevel);
-    ref.read(ponderEnabledProvider.notifier).state = _ponder;
+
+    // Resume whatever the engine was doing (analysis / its move).
+    ref.read(gameProvider.notifier).resumeEngineAfterSettings();
 
     if (mounted) Navigator.pop(context);
   }
