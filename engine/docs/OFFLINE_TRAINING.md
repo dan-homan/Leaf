@@ -93,7 +93,8 @@ improving at 6) — select the epoch by a fast ladder (`hybrid_loop.py
 rather than assuming the last epoch.  Direct classic anchor: ep4 −62 ± 30 vs
 ep6 −64 ± 18 — statistically identical cross-family (the +24 in-family edge is
 inside the error bars at 400 games), so the ladder pick costs nothing and may
-gain; ep4 seeds iteration 3.
+gain.  (Superseded as the iteration-3 seed by the decayed λ-return net below,
+which edged it on the direct anchor.)
 
 ### The λ sweep and the distance-decayed result weight (2026-07-04)
 
@@ -110,6 +111,36 @@ lean on the eval bootstrap.  Under decay the nominal ceilings roughly double
 ceilings λ ≈ 0.4–0.65 — swept before iteration 3 (`learn/sweep_td.sh`:
 diagonal λ = leaf-λ ∈ {0.3, 0.5, 0.7, 1.0} plus two crossed arms that test
 whether the mean-is-the-knob result still holds under decay).
+
+### Sweep results: the pure λ-return is the settled gen-3+ recipe (2026-07-05)
+
+The decay sweep's winner was the **pure λ-return end**: λ = leaf-λ = 1.0, all
+moderation supplied by the td_λ = 0.98 distance decay.  Decay *shape* beats the
+flat mean — the decayed arm at corpus-mean weight 0.50 won where the flat family
+was already declining at 0.44 — and the crossed arms were again inert (root/leaf
+split doesn't matter under decay either).  A 3000-game head-to-head vs the
+λ = 0.5 diagonal arm was a tie (+3 ± 10), so 1.0 wins on simplicity.  A 6-epoch
+confirmation run (`tdL10F10x6`, per-epoch ladder) showed **no multi-epoch
+rollover** and **self-limiting piece-value drift**: per-epoch Q increments
++57/+49/+34/+25/+19/+15 cp — geometric convergence (~×0.73/epoch, asymptote
+≈ +240 cp) toward a new material equilibrium, not iter2's compounding spiral.
+The ladder peaked at **epoch 4** again (second time, after iter2s2), and the
+direct classic anchor on ep4 measured **−58.6 ± 20** (1000 games at 3+0.05) —
+the best of any net, vs iter2s2-ep4's −62 ± 30.  **`tdL10F10x6_p0_ep4.tdleaf.bin`
+seeds iteration 3.**
+
+**Settled gen-3+ recipe:** `--shards 1 --bt-K 220` — `--bt-lambda` now
+*defaults to 1.0* (trainer and hybrid_loop), so **`--bt-td-lambda` (default
+`TDLEAF_LAMBDA` = 0.98) is the single knob of record**.  The λ ceilings remain
+as dormant scale knobs: they decouple overall outcome weight from decay shape
+(useful when a corpus's ply-gap distribution differs from iter2's mean decay of
+0.502, e.g. different dump depth or PGN-extracted game plies) and keep past
+runs reproducible.
+
+Measurement note, learned the hard way: a single 1000-game ladder point can
+swing ~±30 Elo (the *bit-identical* ep1 net measured +29 at 1+0.1 and −5 at
+1+0.01 vs the same opponent).  Read ladders by shape, replicate before trusting
+any single-point peak.
 
 ---
 
@@ -280,17 +311,19 @@ Obsidian `Hybrid_Loop_Runbook` note for the manual procedure it encodes):
 ```sh
 cd engine/learn/
 python3 hybrid_loop.py --tag iter3 --games 400000 --depth 8 \
-    --state <consolidated>.tdleaf.bin \
-    --shards 1 --bt-K 220 --bt-lambda 0.3 \
-    --gauntlet-epochs --gauntlet Leaf_viter2s2-final Leaf_vclassic_eval
+    --state <consolidated>.tdleaf.bin --recompile \
+    --shards 1 --bt-K 220 \
+    --gauntlet-epochs --gauntlet Leaf_vtdL10F10x6-ep4 Leaf_vclassic_eval
 ```
 
-(`--shards 1 --bt-K 220 --bt-lambda 0.3` is the settled gen-2+ consolidation
-recipe — see Generation 2 above.  `--gauntlet-epochs` rates each epoch snapshot
+(`--shards 1 --bt-K 220` with the default pure λ-return target is the settled
+gen-3+ consolidation recipe — see the sweep-results section above.  `--gauntlet-epochs` rates each epoch snapshot
 vs the first gauntlet opponent as soon as that epoch finishes training — 1000
 games at 1+0.01 by default, `--epoch-games`/`--epoch-tc` to change — and prints
-an epoch-ladder table; requires `--shards 1`.  The interleaved design leaves a
-hook for a future auto-decider that stops a run whose ladder is trending down.)
+an epoch-ladder table; requires `--shards 1`.  The trainer is paused (SIGSTOP/
+SIGCONT) while each ladder match runs, so training never contends with the
+games for cores.  The interleaved design leaves a hook for a future
+auto-decider that stops a run whose ladder is trending down.)
 
 Phases: promote `--state` to the live training state (with backup and a
 content-hash pairing pre-flight) → online self-play generation with corpus dumping
@@ -312,11 +345,13 @@ Artifacts (all named by `--tag`): `<tag>_final.nnue` (rating binaries),
 - **Rate by gauntlet**, 300–400 games vs a fixed panel; never by validation-MSE
   *level*.  The MSE trajectory *shape* is still useful live: smooth = healthy
   optimizer, oscillating = staleness/step-size trouble.
-- Consolidation recipe (settled in iteration 2): `--shards 1 --bt-K 220
-  --bt-lambda 0.3` (leaf rows follow λ by default).  Sharding is currently for
-  gen-1-scale backlogs only.
+- Consolidation recipe (settled 2026-07-05): `--shards 1 --bt-K 220` with the
+  default pure λ-return target — `--bt-td-lambda` (0.98) is the knob of record;
+  `--bt-lambda`/`--bt-leaf-lambda` default to 1.0 and stay dormant.  Sharding
+  is currently for gen-1-scale backlogs only.
 - Select the epoch by ladder (`--gauntlet-epochs`), not by assuming the last
-  epoch: gen-2 peaked at epoch 4 of 6.
+  epoch: both gen-2 multi-epoch runs peaked at epoch 4 of 6.  A single
+  1000-game ladder point can swing ~±30 — read the shape, replicate peaks.
 - Depth 8 generation recommended (data-quality lever; save-I/O overhead ~10% at d8
   vs ~13% at d6 after the 2026-07-02 buffered-I/O fix).
 - Fresh-generation data first; add older corpora only as controlled arms.

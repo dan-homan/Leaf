@@ -805,16 +805,17 @@ Elo table.  Non-interactive; run from `learn/`.  Helper binaries (`Leaf_vbt`,
 concepts and the manual runbook it encodes.
 
 ```sh
-# Full iteration: generate 400k d8 games, consolidate (settled gen-2+ recipe),
-# rate every epoch as it completes, then the final full gauntlet
+# Full iteration: generate 400k d8 games, consolidate (settled gen-3+ recipe:
+# pure λ-return defaults, td_λ decay is the knob of record), rate every epoch
+# as it completes, then the final full gauntlet
 python3 hybrid_loop.py --tag iter3 --games 400000 --depth 8 \
-    --state iter2s2_final.tdleaf.bin \
-    --shards 1 --bt-K 220 --bt-lambda 0.3 \
-    --gauntlet-epochs --gauntlet Leaf_viter2s2-final Leaf_vclassic_eval
+    --state tdL10F10x6_p0_ep4.tdleaf.bin --recompile \
+    --shards 1 --bt-K 220 \
+    --gauntlet-epochs --gauntlet Leaf_vtdL10F10x6-ep4 Leaf_vclassic_eval
 
 # Consolidate-only on existing corpora (e.g. a hyperparameter arm on the same dumps)
-python3 hybrid_loop.py --tag iter2s2 --skip-online --shards 1 \
-    --bt-K 220 --bt-lambda 0.3 \
+python3 hybrid_loop.py --tag arm1 --skip-online --shards 1 \
+    --bt-K 220 \
     $(for f in iter2_work/iter2.*.tsv; do echo --corpus $f; done) \
     --gauntlet Leaf_vbtsp-final Leaf_vclassic_eval
 
@@ -845,7 +846,7 @@ pairs with the ORIGINAL base `.nnue`), `<netbase>.tdleaf.bin-<tag>-online`
 | `--shards N` | 8 | Parallel trainer processes (**use 1 for gen-2+ consolidation** — sync staleness destroys subtle signal; see `OFFLINE_TRAINING.md`) |
 | `--epochs N` | 6 | Training epochs |
 | `--bt-lr X` | 0.25 | LR scale on all category LRs |
-| `--bt-lambda X` | 0.7 | Outcome weight in the blend target (0.3 recommended for gen-2+) |
+| `--bt-lambda X` | 1.0 | Outcome-weight ceiling in the decayed blend target (`w = λ_eff·td_λ^(N−ply)`).  Default 1.0 = pure λ-return, the settled gen-3+ recipe: `--bt-td-lambda` is the knob of record; this stays a dormant scale knob (decouples overall outcome weight from decay shape across corpora with different ply-gap distributions) |
 | `--bt-K X` | 220 | Sigmoid temperature |
 | `--bt-batch N` | 512 | Positions per Adam step |
 | `--bt-leaf-lambda X` | = `--bt-lambda` | Outcome-weight ceiling for depth-0 leaf rows (default follows the root λ, the recommended setting) |
@@ -854,7 +855,7 @@ pairs with the ORIGINAL base `.nnue`), `<netbase>.tdleaf.bin-<tag>-online`
 | `--gauntlet OPP …` | none | Opponent binaries in `learn/` (empty = skip) |
 | `--gauntlet-games N` | 400 | Games per opponent |
 | `--tc TC` | `3+0.05` | Gauntlet time control |
-| `--gauntlet-epochs` | off | Per-epoch ladder: rate each epoch snapshot vs the first `--gauntlet` opponent as soon as its epoch finishes training; prints an epoch table (requires `--shards 1`) |
+| `--gauntlet-epochs` | off | Per-epoch ladder: rate each epoch snapshot vs the first `--gauntlet` opponent as soon as its epoch finishes training; the trainer is paused (SIGSTOP/SIGCONT) during each match so games never contend with training for cores; prints an epoch table (requires `--shards 1`) |
 | `--epoch-games N` | 1000 | Games per epoch-ladder match |
 | `--epoch-tc TC` | `1+0.01` | Epoch-ladder time control |
 | `--no-final-gauntlet` | off | Skip the final full gauntlet (ladder-only runs; `--gauntlet` then names just the ladder opponent) |

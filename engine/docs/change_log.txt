@@ -1,5 +1,36 @@
 Changes since 2017_12_24
 
+2026_07_05 -- Pure lambda-return settled as the gen-3+ consolidation recipe;
+               --bt-lambda defaults 0.7 -> 1.0 (trainer + hybrid_loop.py).
+               The decay sweep (6 arms over the ceilings, td_lambda 0.98
+               fixed) was won by the lambda = leaf-lambda = 1.0 end: the
+               decay SHAPE beats any flat mean (the decayed arm at corpus-
+               mean outcome weight 0.50 won where the flat family already
+               declined at 0.44), and the root/leaf split was inert again.
+               A 6-epoch confirmation run showed no multi-epoch rollover
+               and SELF-LIMITING piece-value drift (per-epoch Q increments
+               +57/+49/+34/+25/+19/+15 cp — geometric convergence to a new
+               material equilibrium, not iteration 2's compounding spiral),
+               peaked at epoch 4 (second multi-epoch run to do so), and its
+               ep4 posted the best direct classic anchor yet: -58.6 +/- 20
+               (1000 games at 3+0.05; gap to classic ~59 Elo, from 214 at
+               the start of the hybrid loop).  --bt-td-lambda (default
+               TDLEAF_LAMBDA = 0.98) is now the single knob of record; the
+               lambda ceilings stay as dormant scale knobs (they decouple
+               overall outcome weight from decay shape across corpora with
+               different ply-gap distributions, and keep past runs
+               reproducible).  tdL10F10x6_p0_ep4.tdleaf.bin seeds
+               iteration 3.  Also: hybrid_loop.py --gauntlet-epochs now
+               SIGSTOPs the trainer while each epoch-ladder match runs and
+               SIGCONTs it after, so the next epoch's training never
+               contends with the games for cores (the final epoch's ladder
+               previously ran uncontended after trainer exit, flattering it
+               relative to the others).  Measurement note recorded in
+               OFFLINE_TRAINING.md: a single 1000-game ladder point can
+               swing ~+/-30 Elo (one bit-identical net measured +29 and -5
+               vs the same opponent at different TCs) — read ladder shapes,
+               replicate single-point peaks.
+
 2026_07_04 -- Batch trainer: distance-decayed result weight.  The offline
                target is now p = w*result + (1-w)*sigmoid(cp/K) with
                w = lambda_eff * td_lambda^(N-ply): the outcome's credibility

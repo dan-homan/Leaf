@@ -31,12 +31,23 @@ sync staleness destroys the subtle gen-2 signal (single-process required for
 now); λ — not K — is the knob for outcome-driven piece-value inflation; leaf
 rows need the blend anchor (`--bt-leaf-blend`, committed 2026-07-04).
 
+**UPDATE 2026-07-05 — pure λ-return settled as the gen-3+ recipe.**  The
+distance-decayed result weight (`w = λ_eff·td_λ^(N−ply)`, committed 5ce7714)
+sweep found the λ = leaf-λ = 1.0 end best: decay shape beats any flat mean,
+piece-value drift self-limits (geometric convergence, no multi-epoch rollover),
+and `tdL10F10x6-ep4` posted the best direct classic anchor yet (**−58.6 ± 20**;
+gap ~59 Elo).  `--bt-lambda` now defaults to 1.0 (trainer + hybrid_loop);
+`--bt-td-lambda` (= `TDLEAF_LAMBDA` 0.98) is the single knob of record.  The
+λ-fine-tuning item below is superseded by td_λ calibration.
+
 Open items:
 - [ ] Iteration 3: long d8 online generation (~400k–1M games) from
-      `iter2s2_final.tdleaf.bin` via `hybrid_loop.py` with the settled
-      consolidation recipe; gauntlet vs {iter2s2-final, classic_eval}, plus a
-      direct promoted-net-vs-classic anchor match (family-chained Elo reads
-      ~20–30 optimistic).
+      `tdL10F10x6_p0_ep4.tdleaf.bin` via `hybrid_loop.py` (needs `--recompile`
+      so the dump binaries emit the exact `endply` column); gauntlet vs
+      {tdL10F10x6-ep4, classic_eval}, plus a direct promoted-net-vs-classic
+      anchor match (family-chained Elo reads ~20–30 optimistic).
+- [ ] td_λ calibration on a larger corpus (sweep around 0.98 once iter3's
+      exact-endply corpus exists; PGN-scale equivalent ≈ 0.99/game-ply).
 - [ ] `--bt-sync` frontier fix: sharded training currently unusable for gen-2+
       signal (staleness).  Probe: 2 workers, `--bt-sync-every 64`; adopt only if
       it matches the single-process gauntlet result.
@@ -44,8 +55,9 @@ Open items:
       consolidated nets' evals fit K≈165 — likely explains the mild online
       piece-val drift (+15–34 cp/400k games).  Add an env override and test
       online generation at the refit K.
-- [ ] λ fine-tuning around 0.3 (bracket with 0.15/0.5 on the iter3 dump corpus);
-      per-source λ (roots vs leaves) if the bracket is flat.
+- [x] ~~λ fine-tuning around 0.3; per-source λ (roots vs leaves)~~ — resolved
+      2026-07-05: root/leaf split is inert (confirmed twice); flat λ superseded
+      by the pure λ-return with td_λ decay (see UPDATE above).
 - [ ] Outcome-baseline subtraction (`e' = e − EMA(engine-POV mean e)`) — designed,
       unimplemented; needed only if imbalanced-opponent training (score far from
       50%) becomes a first-class mode.  See "Outcome-Imbalance Drift" in TDLEAF.md.

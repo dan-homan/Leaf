@@ -21,7 +21,12 @@
 // ply (fallback; short by the quiet-filtered game tail).  --bt-td-lambda
 // defaults to TDLEAF_LAMBDA (tdleaf.h) so offline targets match the
 // lambda-returns the online games were trained on; 1.0 = flat blend (the
-// pre-decay behaviour).  The loss is squared error in probability space,
+// pre-decay behaviour).  The settled recipe (2026-07-05) is the pure
+// lambda-return: --bt-lambda 1.0 (the default) so td_lambda supplies all
+// the moderation and is the single knob of record; the lambda ceilings
+// remain as dormant scale knobs (decoupled from decay shape, e.g. to
+// renormalize across corpora with different ply-gap distributions).
+// The loss is squared error in probability space,
 // (p_target - d)^2, matching the TD update form so the existing LR
 // calibration carries over.  Records with depth == 0 (leaf-dump rows —
 // their cp is the net's own static eval at dump time, acting as a magnitude
@@ -33,7 +38,7 @@
 //
 //   ./Leaf_vbt --batch-train quiet_a.tsv[,quiet_b.tsv...] --bt-out prefix
 //              [--bt-epochs N]   epochs over the training split   (default 3)
-//              [--bt-lambda L]   outcome-weight ceiling (root rows) (default 0.7)
+//              [--bt-lambda L]   outcome-weight ceiling (root rows) (default 1.0)
 //              [--bt-leaf-lambda L]  outcome-weight ceiling for depth-0 (leaf)
 //                                rows              (default: same as --bt-lambda)
 //              [--bt-td-lambda L]  result decay per ply from the game end
@@ -303,7 +308,7 @@ int nnue_batch_train(int argc, char *argv[])
     const char *files   = nullptr;
     const char *out_pfx = "bt";
     int   epochs   = 3;
-    float lambda   = 0.7f;
+    float lambda   = 1.0f;   // full lambda-return; td_lambda decay is the knob of record
     float K        = 220.0f;
     float lr_scale = 0.25f;
     int   batch    = 512;

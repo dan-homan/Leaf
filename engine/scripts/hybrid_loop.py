@@ -10,19 +10,25 @@ Implements the playbook in the Hybrid_Loop_Runbook note.  Non-interactive;
 every phase is skippable, so it also covers the general "start from a given
 point and continue learning" cases:
 
-  Full iteration (generate + consolidate + rate; settled gen-2+ recipe):
+  Full iteration (generate + consolidate + rate; settled gen-3 recipe —
+  pure lambda-return: --bt-lambda defaults to 1.0, the --bt-td-lambda
+  distance decay (default TDLEAF_LAMBDA = 0.98) supplies all the outcome
+  moderation and is the single knob of record):
     python3 hybrid_loop.py --tag iter3 --games 400000 --depth 8 \
-        --state iter2s2_final.tdleaf.bin \
-        --shards 1 --bt-K 220 --bt-lambda 0.3 \
-        --gauntlet-epochs --gauntlet Leaf_viter2s2-final Leaf_vclassic_eval
+        --state tdL10F10x6_p0_ep4.tdleaf.bin --recompile \
+        --shards 1 --bt-K 220 \
+        --gauntlet-epochs --gauntlet Leaf_vtdL10F10x6-ep4 Leaf_vclassic_eval
 
   Leaf rows (depth 0) default to the same lambda as roots; give them their own
-  outcome weight with --bt-leaf-lambda (1.0 = the old outcome-only behaviour).
+  outcome weight with --bt-leaf-lambda.  Both lambda ceilings are dormant
+  scale knobs in the settled recipe (kept to renormalize across corpora with
+  different ply-gap distributions, and for reproducing past runs).
 
   --gauntlet-epochs (requires --shards 1) rates every epoch snapshot vs the
   first --gauntlet opponent as soon as that epoch finishes training (default
-  1000 games at 1+0.01 — fast model selection while training continues), and
-  prints an epoch ladder table at the end.
+  1000 games at 1+0.01), and prints an epoch ladder table at the end.  The
+  trainer is SIGSTOPped while each ladder match runs so training never
+  contends with the games for cores, then SIGCONTed to resume.
 
   Consolidate-only (offline training on existing corpora):
     python3 hybrid_loop.py --tag redo --skip-online \
@@ -48,6 +54,7 @@ import math
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -159,7 +166,7 @@ def main():
     ap.add_argument("--shards", type=int, default=8)
     ap.add_argument("--epochs", type=int, default=6)
     ap.add_argument("--bt-lr", type=float, default=0.25)
-    ap.add_argument("--bt-lambda", type=float, default=0.7)
+    ap.add_argument("--bt-lambda", type=float, default=1.0)
     ap.add_argument("--bt-K", type=float, default=220.0)
     ap.add_argument("--bt-batch", type=int, default=512)
     ap.add_argument("--sync-every", type=int, default=256)
@@ -361,7 +368,15 @@ def main():
             if rated < args.epochs and \
                     (tdir / f"{args.tag}_p0_ep{rated + 1}.tdleaf.bin").exists():
                 rated += 1
-                epoch_results.append((rated, rate_epoch(rated, opp)))
+                # Freeze the trainer while the ladder match runs: the next
+                # epoch's training must not contend for cores with the games.
+                if proc.poll() is None:
+                    proc.send_signal(signal.SIGSTOP)
+                try:
+                    epoch_results.append((rated, rate_epoch(rated, opp)))
+                finally:
+                    if proc.poll() is None:
+                        proc.send_signal(signal.SIGCONT)
                 # Auto-decider hook: to stop a run that is going poorly,
                 # decide on epoch_results here, then proc.terminate() + break.
                 continue
