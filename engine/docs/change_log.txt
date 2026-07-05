@@ -1,5 +1,13 @@
 Changes since 2017_12_24
 
+2026_07_05 -- Fixed stack buffer overflow in book.cpp: both opening_book()
+               and the main-book function declared local char book_file[100]
+               but strcpy exec_path + book name into it.  With the engine
+               bundled inside LeafGUI.app the absolute path is ~104 chars,
+               overflowing the buffer -> __stack_chk_fail SIGABRT on the
+               first book probe (engine appeared to hang at 'idle' in the
+               GUI).  Buffers are now FILENAME_MAX, matching exec_path.
+
 2026_07_05 -- Pure lambda-return settled as the gen-3+ consolidation recipe;
                --bt-lambda defaults 0.7 -> 1.0 (trainer + hybrid_loop.py).
                The decay sweep (6 arms over the ceilings, td_lambda 0.98

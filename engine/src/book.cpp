@@ -386,7 +386,7 @@ move opening_book(h_code hash_code, position p, game_rec *gr)
   int candidates = 0, total_score = 0;
   move_list list;
   move nomove; nomove.t = 0;
-  char book_file[100];          // file name for the book
+  char book_file[FILENAME_MAX]; // file name for the book (exec_path prefix can be long)
   book_rec book_record;         // record of move considered
   int file_pos = 0;                 // file position of record
   fstream book_f;               // actual file handle for book
@@ -574,7 +574,7 @@ int edit_book(h_code hash_code, position *p)
   int search_time = 0, total_score = 0;
   move_list list;
   char resp[2];
-  char book_file[100];   // file name for the book
+  char book_file[FILENAME_MAX]; // file name for the book (exec_path prefix can be long)
   book_rec book_record;         // record of move considered
   int file_pos;                 // file position of record
   fstream book_f;               // actual file handle for book
