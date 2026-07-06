@@ -161,7 +161,19 @@ static const bool  TDLEAF_PIN_PAWN_VALUE = true;
 // With PSQT frozen there is no PSQT/piece_val redundancy, so the gauge is
 // identifiable via the pawn pin alone and the whole mean-centering /
 // post-Adam recentering / persisted slot-means apparatus stays retired.
-static const bool  TDLEAF_FREEZE_PSQT = true;
+static const bool  TDLEAF_FREEZE_PSQT = false;
+// Pure-PSQT experiment (2026-07-06): ONE trainable material channel.
+// piece_val receives no training updates (stays 0 on a fresh net, so it
+// contributes nothing to the eval), gradient mean-centering, post-Adam dw
+// centering, and slot-mean recentering are all disabled, and the PAWN pin
+// is moot.  With no redundant second channel there is no gauge null
+// direction for the multi-writer merge to amplify; the absolute eval scale
+// is anchored by the outcome term through TDLEAF_K (outcome-dominated
+// lambda-return targets force sigmoid(v/K) to match empirical win rates).
+// Search is decoupled from the eval scale: NNUE_FIXED_PIECE_VALUES in
+// define.h keeps value[] at the classical constants, so SEE, pruning
+// margins, and TDLEAF_SCORE_CLIP cannot be perturbed by scale drift.
+static const bool  TDLEAF_PURE_PSQT = true;
 static const float TDLEAF_ADAM_BETA1    = 0.9f;    // first-moment decay  (FC + FT bias + PSQT)
 static const float TDLEAF_ADAM_BETA2    = 0.999f;  // second-moment decay (all layers)
 static const float TDLEAF_ADAM_EPS      = 1e-8f;   // numerical floor

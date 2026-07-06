@@ -826,7 +826,7 @@ void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
     // Runs in both live and replay paths: piece_val is an output-side additive
     // term (see nnue_dense_piece_val) and does NOT feed into nnue_init_accumulator,
     // so replay updates do not create the FT/PSQT/ft_bias feedback loop below.
-    if (piece_val_active) {
+    if (piece_val_active && !TDLEAF_PURE_PSQT) {
         float g_pv = grad_scale * 0.5f;
         for (int pt = 0; pt < 6; pt++) {
             if (act.piece_count_diff[pt] != 0)
@@ -991,6 +991,7 @@ static const TDLeafLRMultipliers &tdleaf_lr_multipliers()
 void nnue_mean_center_psqt_gradients()
 {
     if (TDLEAF_FREEZE_PSQT) return;  // no PSQT gradients exist to center
+    if (TDLEAF_PURE_PSQT) return;    // single channel: no gauge to fix, let PSQT move freely
     if (!piece_val_active || !grad_psqt_w || !ft_dirty) return;
 
     // Per-slot aggregate (summed across all NNUE_PSQT_BKTS buckets): zeros only
@@ -1076,6 +1077,9 @@ void nnue_recenter_psqt_slot_means()
     // Frozen PSQT: it never moves, so there is no drift to snap back.
     // Skipping also avoids touching the int32 inference array on load.
     if (TDLEAF_FREEZE_PSQT) return;
+    // Pure-PSQT: deliberately unanchored — scale is loss-anchored via
+    // TDLEAF_K; recentering would fight the calibration we want to observe.
+    if (TDLEAF_PURE_PSQT) return;
     if (!psqt_init_slot_means_valid || !psqt_weights_f32) return;
 
     float cur_means[11][NNUE_PSQT_BKTS];
@@ -1521,7 +1525,8 @@ void nnue_apply_gradients(float lr_scale)
         for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
             if (!ft_dirty[fi]) continue;
             int slot = (fi % 704) / 64;
-            if (!TDLEAF_FREEZE_PSQT && psqt_dirty_count[slot] >= 2) {
+            if (!TDLEAF_FREEZE_PSQT && !TDLEAF_PURE_PSQT
+                && psqt_dirty_count[slot] >= 2) {
                 float corr = (float)(psqt_dw_total[slot]
                                      / ((double)psqt_dirty_count[slot]
                                         * NNUE_PSQT_BKTS));
@@ -1564,9 +1569,9 @@ void nnue_apply_gradients(float lr_scale)
 
     // Dense piece value update — full Adam, no weight decay.
     // Uses TDLEAF_ADAM_PV_LR0 (same scale as PSQT).
-    // Trainable even under TDLEAF_FREEZE_PSQT: piece_val is the designated
-    // dense absorber for the material-level gradient component (PAWN pinned).
-    if (piece_val_active) {
+    // Disabled under TDLEAF_PURE_PSQT: the bucketed PSQT is the sole
+    // material channel; piece_val stays at its init value (0 on fresh nets).
+    if (piece_val_active && !TDLEAF_PURE_PSQT) {
         const float pv_lr = lr_mul.pv * lr_scale * warmup_factor * TDLEAF_ADAM_PV_LR0;
         auto do_step_pv = [&](float g, float &m, float &v, uint32_t cnt) -> float {
             m = TDLEAF_ADAM_BETA1 * m + (1.0f - TDLEAF_ADAM_BETA1) * g;
