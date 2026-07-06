@@ -826,7 +826,7 @@ void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
     // Runs in both live and replay paths: piece_val is an output-side additive
     // term (see nnue_dense_piece_val) and does NOT feed into nnue_init_accumulator,
     // so replay updates do not create the FT/PSQT/ft_bias feedback loop below.
-    if (piece_val_active && !TDLEAF_FREEZE_MATERIAL) {
+    if (piece_val_active) {
         float g_pv = grad_scale * 0.5f;
         for (int pt = 0; pt < 6; pt++) {
             if (act.piece_count_diff[pt] != 0)
@@ -897,7 +897,7 @@ void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
             float *gfw = grad_ft_w + (size_t)fi * NNUE_HALF_DIMS;
             for (int d = 0; d < NNUE_HALF_DIMS; d++)
                 gfw[d] += g_a[d];
-            if (!TDLEAF_FREEZE_MATERIAL)
+            if (!TDLEAF_FREEZE_PSQT)
                 grad_psqt_w[fi * NNUE_PSQT_BKTS + s] +=
                     g_psqt_diff * psqt_sign;
         }
@@ -990,7 +990,7 @@ static const TDLeafLRMultipliers &tdleaf_lr_multipliers()
 // ---------------------------------------------------------------------------
 void nnue_mean_center_psqt_gradients()
 {
-    if (TDLEAF_FREEZE_MATERIAL) return;  // no PSQT gradients exist to center
+    if (TDLEAF_FREEZE_PSQT) return;  // no PSQT gradients exist to center
     if (!piece_val_active || !grad_psqt_w || !ft_dirty) return;
 
     // Per-slot aggregate (summed across all NNUE_PSQT_BKTS buckets): zeros only
@@ -1073,9 +1073,9 @@ void nnue_capture_psqt_init_slot_means()
 // ---------------------------------------------------------------------------
 void nnue_recenter_psqt_slot_means()
 {
-    // Frozen material gauge: PSQT never moves, so there is no drift to snap
-    // back.  Skipping also avoids touching the int32 inference array on load.
-    if (TDLEAF_FREEZE_MATERIAL) return;
+    // Frozen PSQT: it never moves, so there is no drift to snap back.
+    // Skipping also avoids touching the int32 inference array on load.
+    if (TDLEAF_FREEZE_PSQT) return;
     if (!psqt_init_slot_means_valid || !psqt_weights_f32) return;
 
     float cur_means[11][NNUE_PSQT_BKTS];
@@ -1490,8 +1490,8 @@ void nnue_apply_gradients(float lr_scale)
                 }
             }
             // PSQT weights — full Adam per-weight (only 8 buckets per row).
-            // Skipped entirely under TDLEAF_FREEZE_MATERIAL (frozen prior).
-            if (!TDLEAF_FREEZE_MATERIAL) {
+            // Skipped entirely under TDLEAF_FREEZE_PSQT (frozen prior).
+            if (!TDLEAF_FREEZE_PSQT) {
                 float    *pw   = psqt_weights_f32 + (size_t)fi * NNUE_PSQT_BKTS;
                 float    *gpw  = grad_psqt_w      + (size_t)fi * NNUE_PSQT_BKTS;
                 uint32_t *pcnt = psqt_weights_cnt + (size_t)fi * NNUE_PSQT_BKTS;
@@ -1521,7 +1521,7 @@ void nnue_apply_gradients(float lr_scale)
         for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
             if (!ft_dirty[fi]) continue;
             int slot = (fi % 704) / 64;
-            if (!TDLEAF_FREEZE_MATERIAL && psqt_dirty_count[slot] >= 2) {
+            if (!TDLEAF_FREEZE_PSQT && psqt_dirty_count[slot] >= 2) {
                 float corr = (float)(psqt_dw_total[slot]
                                      / ((double)psqt_dirty_count[slot]
                                         * NNUE_PSQT_BKTS));
@@ -1564,9 +1564,9 @@ void nnue_apply_gradients(float lr_scale)
 
     // Dense piece value update — full Adam, no weight decay.
     // Uses TDLEAF_ADAM_PV_LR0 (same scale as PSQT).
-    // Skipped under TDLEAF_FREEZE_MATERIAL: piece_val stays at its init/loaded
-    // value (0 on a fresh net — material lives in the frozen PSQT prior).
-    if (piece_val_active && !TDLEAF_FREEZE_MATERIAL) {
+    // Trainable even under TDLEAF_FREEZE_PSQT: piece_val is the designated
+    // dense absorber for the material-level gradient component (PAWN pinned).
+    if (piece_val_active) {
         const float pv_lr = lr_mul.pv * lr_scale * warmup_factor * TDLEAF_ADAM_PV_LR0;
         auto do_step_pv = [&](float g, float &m, float &v, uint32_t cnt) -> float {
             m = TDLEAF_ADAM_BETA1 * m + (1.0f - TDLEAF_ADAM_BETA1) * g;
