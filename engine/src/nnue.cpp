@@ -95,19 +95,9 @@ static void nnue_update_content_hash()
     nnue_content_hash = nnue_fnv1a_u32(ft_weights, ft_bytes);
 }
 
-// Forward declarations for TDLeaf weight arrays defined later in this file
-// (referenced by nnue_write_nnue to bake piece_val into exported PSQT).
-// Defined as static at their declaration site ~1300 lines below.
+// Forward declaration for the PSQT FP32 shadow weights (the sole trainable
+// material channel under pure-PSQT).  Defined as static ~1300 lines below.
 static float *psqt_weights_f32 = nullptr;
-static float  piece_val_f32[6] = {};    // one value per piece type (PAWN..KING), PSQT raw units
-static bool   piece_val_active = false;
-// Per-(slot, bucket) PSQT slot-means snapshotted at init time and persisted in
-// .tdleaf.bin (v11+).  nnue_recenter_psqt_slot_means() pins the current shadow
-// to these values after every .tdleaf.bin load, neutralising any drift the
-// multi-writer merge protocol may have introduced.  Slots match the layout in
-// nnue_mean_center_psqt_gradients(): 11 slots × 8 buckets.
-static float  psqt_init_slot_means[11][8] = {};
-static bool   psqt_init_slot_means_valid = false;
 
 // ---------------------------------------------------------------------------
 // HalfKAv2_hm lookup tables
@@ -802,8 +792,8 @@ int nnue_evaluate(const NNUEAccumulator &acc, int stm, int piece_count)
 // Averages own-perspective PSQT weights across all squares and all 8 material
 // buckets for each piece type.  In a well-trained symmetric network the enemy
 // features are ≈ −own, so avg_own × 100/5776 gives the correct cp contribution.
-// In TDLEAF builds the piece_val correction (÷2, ±sign) is folded in so that
-// the extracted value reflects the full effective material knowledge.
+// Under NNUE_FIXED_PIECE_VALUES the result is report-only (value[] is not
+// overwritten); it is the drift canary for the pure-PSQT material scale.
 //
 // value[0] is unused; value[6] (king sentinel = 10000) is not touched.
 // ---------------------------------------------------------------------------
@@ -825,11 +815,10 @@ void nnue_extract_piece_values(bool verbose)
 
 #if TDLEAF
         if (psqt_weights_f32) {
-            // Use float shadow for accuracy; add piece_val correction if active.
-            float pv_add = piece_val_active ? piece_val_f32[ps_slot] * 0.5f : 0.0f;
+            // Use the FP32 PSQT shadow for accuracy when it is allocated.
             const float *pf = psqt_weights_f32 + (size_t)fi * NNUE_PSQT_BKTS;
             for (int b = 0; b < NNUE_PSQT_BKTS; b++)
-                sum[ps_slot] += pf[b] + pv_add;
+                sum[ps_slot] += pf[b];
             cnt[ps_slot] += NNUE_PSQT_BKTS;
             continue;
         }

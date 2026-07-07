@@ -8,11 +8,12 @@ Usage (from learn/ or run/ directory):
     python3 compare_nnue_learning.py nn-fresh.nnue nn-fresh.tdleaf.bin --save
     python3 compare_nnue_learning.py nn-fresh.nnue nn-fresh.tdleaf.bin --ft-weights
 
-Supports .tdleaf.bin versions 2–11.  Version 10 prepends a 4-byte FNV-1a
-hash of the source .nnue FT weights immediately after the version field;
-version 11 appends a per-(slot, bucket) PSQT slot-means section after the
-sparse FT v section (used by the engine for load-time gauge re-centering)
-(for load-time pairing checks in the engine; this script just skips it).
+Supports .tdleaf.bin versions 2–12.  Version 12 (pure-PSQT) removed the dense
+piece_val sections (weights + Adam v/m) and the v11 PSQT slot-means block — the
+bucketed PSQT is now the sole material channel.  Version 10 prepends a 4-byte
+FNV-1a hash of the source .nnue FT weights immediately after the version field;
+version 11 appended a per-(slot, bucket) PSQT slot-means section after the
+sparse FT v section (this script just skips it).
 Version 9 changed piece_val from [6][8]
 (one per piece type × 8 PSQT buckets) to [6] (one per piece type); older files
 are transparently averaged on read.
@@ -61,6 +62,7 @@ TDLEAF_VERSION8 = 8            # adds sparse FT v (second moment) section
 TDLEAF_VERSION9 = 9            # piece_val simplified: [6][8] → [6] (one value per piece type)
 TDLEAF_VERSION10 = 10          # adds 4-byte source-.nnue content hash after magic+version
 TDLEAF_VERSION11 = 11          # adds PSQT init slot-means section (11×PSQT_BKTS floats)
+TDLEAF_VERSION12 = 12          # pure-PSQT: drops piece_val (weights + Adam v/m) and slot-means
 TDLEAF_SCALE    = 128.0        # v2+: file stores w_f32 × TDLEAF_SCALE
 
 # ---------------------------------------------------------------------------
@@ -290,7 +292,7 @@ def read_tdleaf_fc(path):
         if version >= TDLEAF_VERSION10:
             data['nnue_content_hash'] = struct.unpack('<I', f.read(4))[0]
 
-        if version in (TDLEAF_VERSION2, TDLEAF_VERSION3, TDLEAF_VERSION4, TDLEAF_VERSION5, TDLEAF_VERSION6, TDLEAF_VERSION7, TDLEAF_VERSION8, TDLEAF_VERSION9, TDLEAF_VERSION10, TDLEAF_VERSION11):
+        if version in (TDLEAF_VERSION2, TDLEAF_VERSION3, TDLEAF_VERSION4, TDLEAF_VERSION5, TDLEAF_VERSION6, TDLEAF_VERSION7, TDLEAF_VERSION8, TDLEAF_VERSION9, TDLEAF_VERSION10, TDLEAF_VERSION11, TDLEAF_VERSION12):
             data['_has_counts'] = True
             for _ in range(N_STACKS):
                 def rf(n, fh=f):
@@ -336,10 +338,10 @@ def read_tdleaf_fc(path):
             # no counts for v1
         else:
             sys.exit(f"Error: unknown .tdleaf.bin version {version} in {path} "
-                     f"(supported: 1–11)")
+                     f"(supported: 1–12)")
 
-        # v3/v4/v5: sparse FT/PSQT section after FC stacks
-        if version in (TDLEAF_VERSION3, TDLEAF_VERSION4, TDLEAF_VERSION5, TDLEAF_VERSION6, TDLEAF_VERSION7, TDLEAF_VERSION8, TDLEAF_VERSION9, TDLEAF_VERSION10, TDLEAF_VERSION11):
+        # v3+: sparse FT/PSQT section after FC stacks
+        if version in (TDLEAF_VERSION3, TDLEAF_VERSION4, TDLEAF_VERSION5, TDLEAF_VERSION6, TDLEAF_VERSION7, TDLEAF_VERSION8, TDLEAF_VERSION9, TDLEAF_VERSION10, TDLEAF_VERSION11, TDLEAF_VERSION12):
             n_ft_rows = struct.unpack('<I', f.read(4))[0]
             if n_ft_rows > 0:
                 fi_arr   = np.empty(n_ft_rows, dtype=np.uint32)
@@ -362,8 +364,8 @@ def read_tdleaf_fc(path):
                 data['ft_fi'] = np.empty(0, dtype=np.uint32)
             data['n_ft_rows'] = n_ft_rows
 
-            # v4/v5: FT bias section (appended after sparse FT/PSQT rows)
-            if version in (TDLEAF_VERSION4, TDLEAF_VERSION5, TDLEAF_VERSION6, TDLEAF_VERSION7, TDLEAF_VERSION8, TDLEAF_VERSION9, TDLEAF_VERSION10, TDLEAF_VERSION11):
+            # v4+: FT bias section (appended after sparse FT/PSQT rows)
+            if version in (TDLEAF_VERSION4, TDLEAF_VERSION5, TDLEAF_VERSION6, TDLEAF_VERSION7, TDLEAF_VERSION8, TDLEAF_VERSION9, TDLEAF_VERSION10, TDLEAF_VERSION11, TDLEAF_VERSION12):
                 ft_b_raw = np.frombuffer(f.read(HALF_DIMS * 4), dtype=np.float32).copy()
                 ft_b_cnt = np.frombuffer(f.read(HALF_DIMS * 4), dtype=np.uint32).copy()
                 if ft_b_raw.shape == (HALF_DIMS,) and ft_b_cnt.shape == (HALF_DIMS,):
@@ -392,8 +394,8 @@ def read_tdleaf_fc(path):
                         data['piece_val']     = pv2d.mean(axis=1)
                         data['piece_val_cnt'] = cnt2d.mean(axis=1).astype(np.uint32)
 
-            # v6: Adam v (second moment) section — skip it (not displayed)
-            if version in (TDLEAF_VERSION6, TDLEAF_VERSION7, TDLEAF_VERSION8, TDLEAF_VERSION9, TDLEAF_VERSION10, TDLEAF_VERSION11):
+            # v6+: Adam v (second moment) section — skip it (not displayed)
+            if version in (TDLEAF_VERSION6, TDLEAF_VERSION7, TDLEAF_VERSION8, TDLEAF_VERSION9, TDLEAF_VERSION10, TDLEAF_VERSION11, TDLEAF_VERSION12):
                 t_adam = struct.unpack('<I', f.read(4))[0]
                 data['t_adam'] = t_adam
                 # Skip FC v arrays: 8 stacks × (L0_SIZE + L0_SIZE*L0_INPUT + L1_SIZE +
@@ -402,38 +404,39 @@ def read_tdleaf_fc(path):
                                L1_SIZE + L1_SIZE * L1_PADDED +
                                1 + L2_PADDED)
                 f.read(N_STACKS * fc_v_floats * 4)
-                # Skip FT bias v and piece_val v (v9: 6 floats; v6-v8: 48 floats)
                 f.read(HALF_DIMS * 4)                                          # v_ft_bias
-                f.read((6 if version >= TDLEAF_VERSION9 else 6 * PSQT_BKTS) * 4)  # v_piece_val
+                # piece_val v (v9: 6 floats; v6-v8: 48 floats) — removed in v12
+                if version <= TDLEAF_VERSION11:
+                    f.read((6 if version >= TDLEAF_VERSION9 else 6 * PSQT_BKTS) * 4)
                 # Skip sparse PSQT v rows
                 n_pv_rows = struct.unpack('<I', f.read(4))[0]
                 f.read(n_pv_rows * (4 + PSQT_BKTS * 4))
 
             # v7+: Adam m (first moment) section — skip it (not displayed)
-            if version in (TDLEAF_VERSION7, TDLEAF_VERSION8, TDLEAF_VERSION9, TDLEAF_VERSION10, TDLEAF_VERSION11):
+            if version in (TDLEAF_VERSION7, TDLEAF_VERSION8, TDLEAF_VERSION9, TDLEAF_VERSION10, TDLEAF_VERSION11, TDLEAF_VERSION12):
                 # Skip FC m arrays: same layout as FC v
                 fc_m_floats = (L0_SIZE + L0_SIZE * L0_INPUT +
                                L1_SIZE + L1_SIZE * L1_PADDED +
                                1 + L2_PADDED)
                 f.read(N_STACKS * fc_m_floats * 4)
-                # Skip m_ft_bias and m_piece_val (v9: 6 floats; v7-v8: 48 floats)
                 f.read(HALF_DIMS * 4)                                          # m_ft_bias
-                f.read((6 if version >= TDLEAF_VERSION9 else 6 * PSQT_BKTS) * 4)  # m_piece_val
+                # piece_val m (v9: 6 floats; v7-v8: 48 floats) — removed in v12
+                if version <= TDLEAF_VERSION11:
+                    f.read((6 if version >= TDLEAF_VERSION9 else 6 * PSQT_BKTS) * 4)
                 # Skip sparse PSQT m rows
                 n_pm_rows = struct.unpack('<I', f.read(4))[0]
                 f.read(n_pm_rows * (4 + PSQT_BKTS * 4))
                 data['adam_m_loaded'] = True
 
             # v8+: sparse FT v section — skip (not displayed)
-            if version in (TDLEAF_VERSION8, TDLEAF_VERSION9, TDLEAF_VERSION10, TDLEAF_VERSION11):
+            if version in (TDLEAF_VERSION8, TDLEAF_VERSION9, TDLEAF_VERSION10, TDLEAF_VERSION11, TDLEAF_VERSION12):
                 n_ftv_rows = struct.unpack('<I', f.read(4))[0]
                 f.read(n_ftv_rows * (4 + HALF_DIMS * 4))
                 data['adam_ft_v_loaded'] = True
 
-            # v11+: PSQT init slot-means (11 slots × PSQT_BKTS floats) used by
-            # the engine's nnue_recenter_psqt_slot_means at load.  Skip — not
-            # displayed by this script.
-            if version >= TDLEAF_VERSION11:
+            # v11 ONLY: PSQT init slot-means (11 slots × PSQT_BKTS floats).
+            # Removed in v12.  Skip — not displayed by this script.
+            if version == TDLEAF_VERSION11:
                 f.read(11 * PSQT_BKTS * 4)
                 data['psqt_init_slot_means_loaded'] = True
 

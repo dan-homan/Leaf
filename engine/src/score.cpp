@@ -66,9 +66,6 @@ int position::score_pos(game_rec *gr, ts_thread_data *tdata NNUE_ACC_DEF)
        for (int pt = PAWN; pt <= QUEEN; pt++)
          pc += plist[s][pt][0];
      int score = nnue_evaluate(*nnue_acc, wtm, pc);
-#if TDLEAF
-     score += nnue_dense_piece_val(*this, wtm, pc);
-#endif
      // qchecks: classical king-safety eval is skipped under NNUE, but the
      // search relies on this signal to drive check extensions (search.cpp:1671)
      // and qsearch-with-checks (search.cpp:2164).  Recompute the king-tropism

@@ -30,7 +30,7 @@ from pathlib import Path
 
 # Constants matching nnue.cpp / nnue.h
 TDLEAF_MAGIC   = 0x544D4C46  # "TMLF"
-TDLEAF_VERSION = 11
+TDLEAF_VERSION = 12
 TDLEAF_SCALE   = 128.0
 FNV_OFFSET     = 0xcbf29ce484222325
 FNV_PRIME      = 0x100000001b3
@@ -218,7 +218,7 @@ class TDLeafFile:
             version = read_u32(f)
             if magic != TDLEAF_MAGIC:
                 raise ValueError(f"{path}: bad magic 0x{magic:08X} (expected 0x{TDLEAF_MAGIC:08X})")
-            if version not in (2, 3, 4, 5, 6, 7, 8, 9, 10, 11):
+            if version not in (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12):
                 raise ValueError(f"{path}: unsupported version {version}")
             obj.version = version
 
@@ -245,31 +245,25 @@ class TDLeafFile:
                 obj.ft_bias_w = read_f32_array(f, HALF_DIMS)
                 obj.ft_bias_c = read_u32_array(f, HALF_DIMS)
 
-            # Dense piece values (v5+).  v9+: float32[6] + uint32[6].
-            # v5-v8: float32[6][8] + uint32[6][8] → collapse to [6] by averaging
-            # across PSQT buckets (matches engine load semantics in
-            # nnue_training.cpp).
-            if version >= 5:
+            # Dense piece values (v5-v11 only; removed in v12).  v9+: float32[6]
+            # + uint32[6].  v5-v8: float32[6][8] + uint32[6][8].  Read and discard
+            # to stay byte-aligned when reading an older file.
+            if 5 <= version <= 11:
                 if version >= 9:
-                    obj.piece_val_w = read_f32_array(f, 6)
-                    obj.piece_val_c = read_u32_array(f, 6)
+                    read_f32_array(f, 6)
+                    read_u32_array(f, 6)
                 else:
-                    pv_w_48 = read_f32_array(f, 6 * PSQT_BKTS).reshape(6, PSQT_BKTS)
-                    pv_c_48 = read_u32_array(f, 6 * PSQT_BKTS).reshape(6, PSQT_BKTS)
-                    obj.piece_val_w = (pv_w_48.sum(axis=1) / PSQT_BKTS).astype(np.float32)
-                    obj.piece_val_c = (pv_c_48.sum(axis=1) // PSQT_BKTS).astype(np.uint32)
+                    read_f32_array(f, 6 * PSQT_BKTS)
+                    read_u32_array(f, 6 * PSQT_BKTS)
 
             if version >= 6:
                 obj.t_adam = read_u32(f)
                 for s in range(LAYER_STACKS):
                     obj.fc[s].read_v(f)
                 obj.v_ft_bias = read_f32_array(f, HALF_DIMS)
-                # v_piece_val: max-per-piece-type when collapsing v6-v8.
-                if version >= 9:
-                    obj.v_piece_val = read_f32_array(f, 6)
-                else:
-                    v_pv_48 = read_f32_array(f, 6 * PSQT_BKTS).reshape(6, PSQT_BKTS)
-                    obj.v_piece_val = v_pv_48.max(axis=1).astype(np.float32)
+                # piece_val v (v6-v11 only; removed in v12) — read and discard.
+                if version <= 11:
+                    read_f32_array(f, 6 if version >= 9 else 6 * PSQT_BKTS)
                 n_pv_rows = read_u32(f)
                 for _ in range(n_pv_rows):
                     fi = read_u32(f)
@@ -281,12 +275,9 @@ class TDLeafFile:
                 for s in range(LAYER_STACKS):
                     obj.fc[s].read_m(f)
                 obj.m_ft_bias = read_f32_array(f, HALF_DIMS)
-                # m_piece_val: mean-per-piece-type when collapsing v7-v8.
-                if version >= 9:
-                    obj.m_piece_val = read_f32_array(f, 6)
-                else:
-                    m_pv_48 = read_f32_array(f, 6 * PSQT_BKTS).reshape(6, PSQT_BKTS)
-                    obj.m_piece_val = m_pv_48.mean(axis=1).astype(np.float32)
+                # piece_val m (v7-v11 only; removed in v12) — read and discard.
+                if version <= 11:
+                    read_f32_array(f, 6 if version >= 9 else 6 * PSQT_BKTS)
                 n_pm_rows = read_u32(f)
                 for _ in range(n_pm_rows):
                     fi = read_u32(f)
@@ -302,11 +293,9 @@ class TDLeafFile:
                         break
                     obj.ft_v_rows[fi] = read_f32_array(f, HALF_DIMS)
 
-            # v11+: PSQT init slot-means used by engine load-time re-centering.
-            if version >= 11:
-                arr = read_f32_array(f, 11 * PSQT_BKTS)
-                obj.psqt_init_slot_means = arr.reshape(11, PSQT_BKTS).astype(np.float32).copy()
-                obj.psqt_init_slot_means_loaded = True
+            # v11 ONLY: PSQT init slot-means (removed in v12) — read and discard.
+            if version == 11:
+                read_f32_array(f, 11 * PSQT_BKTS)
 
         return obj
 
@@ -334,16 +323,14 @@ class TDLeafFile:
             write_f32_array(f, self.ft_bias_w)
             write_u32_array(f, self.ft_bias_c)
 
-            # Dense piece values (v9+: float32[6] + uint32[6])
-            write_f32_array(f, self.piece_val_w)
-            write_u32_array(f, self.piece_val_c)
+            # (v12: dense piece_val weight section removed.)
 
             # Adam v section (v6)
             f.write(struct.pack('<I', self.t_adam))
             for s in range(LAYER_STACKS):
                 self.fc[s].write_v(f)
             write_f32_array(f, self.v_ft_bias)
-            write_f32_array(f, self.v_piece_val)
+            # (v12: piece_val v removed.)
             # Sparse PSQT v — same dirty rows as FT weights
             sorted_pv_fi = sorted(self.psqt_v_rows.keys())
             f.write(struct.pack('<I', len(sorted_pv_fi)))
@@ -355,7 +342,7 @@ class TDLeafFile:
             for s in range(LAYER_STACKS):
                 self.fc[s].write_m(f)
             write_f32_array(f, self.m_ft_bias)
-            write_f32_array(f, self.m_piece_val)
+            # (v12: piece_val m removed.)
             # Sparse PSQT m
             sorted_pm_fi = sorted(self.psqt_m_rows.keys())
             f.write(struct.pack('<I', len(sorted_pm_fi)))
@@ -370,8 +357,7 @@ class TDLeafFile:
                 f.write(struct.pack('<I', fi))
                 write_f32_array(f, self.ft_v_rows[fi])
 
-            # PSQT init slot-means (v11): 11 × PSQT_BKTS floats.
-            write_f32_array(f, self.psqt_init_slot_means.astype(np.float32).reshape(-1))
+            # (v12: PSQT init slot-means block removed.)
 
 
 # ---------------------------------------------------------------------------

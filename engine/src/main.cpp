@@ -152,16 +152,19 @@ int main(int argc, char *argv[])
   {
     // --init-nnue: create a fresh random-initialised .nnue without reading an existing one.
     //   PSQT = classical material (own=+V, enemy=-V; P=100 N=377 B=399 R=596 Q=1197 cp,
-    //   same across all 8 buckets); piece_val = 0 (learns corrections).
+    //   same across all 8 buckets).  Pure-PSQT: the bucketed PSQT is the sole material
+    //   channel (no dense piece_val).
     // --init-nnue-noprior: PSQT = uniform 100 cp (own=+V, enemy=-V; P=N=B=R=Q=100 cp,
-    //   same across all 8 buckets); piece_val = 0.  Materially blind from move 1 but
-    //   value[PAWN] stays anchored at 100 cp; N/B/R/Q learn from a 100 cp baseline.
+    //   same across all 8 buckets).  Materially blind from move 1 but value[PAWN] stays
+    //   anchored at 100 cp; N/B/R/Q learn from a 100 cp baseline.
     // --init-nnue-classical: PSQT = classical material + 4-stage piece-square tables
-    //   (gstage-interpolated across the 8 NNUE buckets); piece_val = 0.  Use to bootstrap
-    //   training from the classical hand-tuned positional prior; lets FC/FT learn finer
-    //   patterns instead of re-deriving piece values and positional shape.
-    // All require --write-nnue <filename>; write the .nnue AND a companion .tdleaf.bin
-    // (piece_val is stored in .tdleaf.bin, not in the .nnue format), then exit.
+    //   (gstage-interpolated across the 8 NNUE buckets).  Use to bootstrap training from
+    //   the classical hand-tuned positional prior; lets FC/FT learn finer patterns
+    //   instead of re-deriving piece values and positional shape.
+    // All require --write-nnue <filename>; write the .nnue AND a fresh companion
+    // .tdleaf.bin (the FP32 training shadow), then exit.  Refuses to run if the
+    // companion .tdleaf.bin already exists (the save path is a MERGE-save, so writing
+    // over an existing file would blend the fresh init with stale trained weights).
     bool init_nnue_mode = false;
     int  init_nnue_prior = NNUE_PRIOR_MATERIAL;
     for (int ai = 1; ai < argc; ai++) {
@@ -183,6 +186,25 @@ int main(int argc, char *argv[])
         fprintf(stderr, "--init-nnue requires --write-nnue <filename>\n");
         return 1;
       }
+      // Refuse if the companion .tdleaf.bin already exists.  nnue_save_fc_weights()
+      // is a MERGE-save: writing a fresh init over an existing file would blend the
+      // new init with stale trained weights rather than resetting.  Fail fast (before
+      // writing the .nnue) so the caller removes the old file first.
+      {
+        char tdbin[FILENAME_MAX];
+        snprintf(tdbin, sizeof(tdbin), "%s", write_nnue_path);
+        char *dot = strrchr(tdbin, '.');
+        if (dot && strcmp(dot, ".nnue") == 0) strcpy(dot, ".tdleaf.bin");
+        else strncat(tdbin, ".tdleaf.bin", sizeof(tdbin) - strlen(tdbin) - 1);
+        FILE *ex = fopen(tdbin, "rb");
+        if (ex) {
+          fclose(ex);
+          fprintf(stderr, "--init-nnue: companion '%s' already exists; refusing to "
+                          "merge-save a fresh init over it.  Remove it first "
+                          "(rm '%s') then re-run.\n", tdbin, tdbin);
+          return 1;
+        }
+      }
       // Allocate arrays, init float shadows, then fill with random distributions.
       nnue_alloc_arrays();
       nnue_init_fp32_weights();
@@ -192,9 +214,8 @@ int main(int argc, char *argv[])
         fprintf(stderr, "--write-nnue: failed to write %s\n", write_nnue_path);
         return 1;
       }
-      // Write companion .tdleaf.bin so piece_val (classical material prior) survives
-      // into the first training session.  piece_val is not part of the .nnue format;
-      // without this file the training binary starts with piece_val=0 (no material).
+      // Write a fresh companion .tdleaf.bin (the FP32 training shadow + Adam state)
+      // so the first training session resumes exactly from this init.
       {
         char tdbin[FILENAME_MAX];
         snprintf(tdbin, sizeof(tdbin), "%s", write_nnue_path);

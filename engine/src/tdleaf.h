@@ -41,9 +41,9 @@ static const int   TDLEAF_MIN_PLIES_REP   = 40;     // skip 3-rep draws shorter 
 // When the white-POV score change between consecutive moves exceeds
 // TDLEAF_SCORE_CLIP_PAWNS × max(value[PAWN], 100 cp), the (d[t+1]−d[t])
 // contribution to the eligibility trace is scaled down proportionally.
-// With TDLEAF_PIN_PAWN_VALUE the threshold is effectively constant at
-// TDLEAF_SCORE_CLIP_PAWNS × 100 cp; the floor on value[PAWN] is retained
-// as belt-and-braces against any future configuration that disables the pin.
+// Under NNUE_FIXED_PIECE_VALUES the threshold is constant at
+// TDLEAF_SCORE_CLIP_PAWNS × 100 cp (value[PAWN] stays at the classical 100);
+// the max() floor is belt-and-braces only.
 // Set to a large value to disable.
 static const float TDLEAF_SCORE_CLIP_PAWNS = 1.0f;
 // Approach 2 — iterative-deepening score stability weight.
@@ -58,7 +58,7 @@ static const float TDLEAF_GRAD_CLIP_NORM = 1.0f;
 // |g / sqrt(v_hat)| for the RMSProp FT path) to this value before multiplying
 // by the category LR.  Targets the rare-feature pathology where a low running
 // v makes a normal gradient produce an oversized parameter change.  Uniform
-// across FC / FT / FT-bias / PSQT / piece_val because the Adam step is scale-
+// across FC / FT / FT-bias / PSQT because the Adam step is scale-
 // normalised by design.  Set to a large value to disable.
 static const float TDLEAF_ADAM_STEP_CLIP = 30.0f; 
 
@@ -101,30 +101,12 @@ static const float TDLEAF_ADAM_STEP_CLIP = 30.0f;
 // their own LR.  FC biases are int32-scale and need a different LR than
 // the int8-scale FC weights.
 //
-// PSQT / piece_val subspace nuance: nnue_mean_center_psqt_gradients()
-// constrains PSQT updates to the per-piece-slot deviation subspace; the
-// slot-mean (material) component flows to piece_val instead.  In that
-// active subspace median(|deviation|) ≈ 665, not 13319 — so PSQT_LR0 = 13
-// is sized to the raw weight magnitude, not the subspace PSQT actually
-// moves in.  Effective Adam step is ~2% of typical deviation magnitude
-// per step (the 0.001 × median(|w|) rule applied to the subspace would
-// give PSQT_LR0 ≈ 0.67).  Empirically stable; flag for any future LR
-// sweep.  piece_val now absorbs the slot-mean component (median ~12 901)
-// and PV_LR0 = 13 ≈ 0.001 × 12.9k is correctly aligned with its active
-// subspace.
-//
-// Gradient mean-centering alone does NOT preserve the slot-total invariant
-// across an Adam step: per-weight 1/sqrt(v_hat) makes the applied dw
-// non-zero-sum within a slot (sparse features take proportionally larger
-// steps).  nnue_apply_gradients adds a post-Adam pass that re-centers the
-// applied dw per slot (aggregated across all NNUE_PSQT_BKTS buckets).  Both
-// gradient and dw centering use the per-slot AGGREGATE (sum over buckets),
-// not per-(slot, bucket) — only the slot's absolute material level is
-// anchored; the bucket structure is left free so PSQT can learn
-// phase-dependent piece values (e.g. "pawn is worth more in deep endgame"),
-// which is the entire reason HalfKAv2_hm uses 8 PSQT buckets.  Without
-// post-Adam centering, PSQT pawn-slot mean drifted +13% over 50k games even
-// with piece_val[PAWN] hard-pinned at 0.
+// PSQT_LR0 = 13 is sized to the raw weight magnitude (median ~13 319).  Under
+// pure-PSQT the bucketed PSQT is the sole material channel and moves freely —
+// its full range (material level + spatial deviation + phase-dependent per-bucket
+// structure) is learnable; the 8 PSQT buckets are what let it encode e.g. "pawn
+// worth more in deep endgame".  No gradient mean-centering or post-Adam dw
+// centering is applied.
 static const float TDLEAF_ADAM_LR0         = 0.005f;  // FC0/FC1 weights (int8, median ~5)
 static const float TDLEAF_ADAM_FC2_LR0     = 0.07f;   // FC2 weights (int8, median ~68 — final 32→1 layer)
 static const float TDLEAF_ADAM_FC_BIAS_LR0 = 1.5f;    // FC biases (int32, median ~1500 across stacks)
@@ -133,47 +115,17 @@ static const float TDLEAF_ADAM_FT_BIAS_LR0 = 0.02f;   // FT biases  (int16, medi
                                                        // 0.001×median to limit dying-ReLU risk)
 static const float TDLEAF_ADAM_PSQT_LR0    = 13.0f;   // PSQT (int32; sized to raw ~13 319 — active
                                                        // post-centering subspace is ~665, see note above)
-static const float TDLEAF_ADAM_PV_LR0      = 13.0f;   // dense piece values (int32; absorbs PSQT slot-mean
-                                                       // ~12 901 after mean-centering, well calibrated)
-// Pin piece_val[PAWN] at its init value (skip its Adam update).  Together with
-// nnue_mean_center_psqt_gradients() (which zeroes the slot-mean PSQT gradient),
-// this completes the gauge fix: PSQT carries spatial deviation, piece_val
-// carries per-piece material, and PAWN is the unit reference — fixing the
-// overall material scale that TDLEAF_K=220 would otherwise leave free.  N/B/R/Q
-// piece_val still adapt freely (their values become ratios to the pinned pawn).
-// Without this pin, piece_val[PAWN] climbs without ceiling because the loss has
-// no anchor for absolute material magnitude; the resulting value[PAWN] drift
-// affects downstream code that consumes it as cp (SEE, endgame draw detection,
-// UCI score display, this file's SCORE_CLIP_PAWNS multiplier).
-static const bool  TDLEAF_PIN_PAWN_VALUE = true;
-// Freeze the PSQT channel: PSQT weights receive no training updates
-// (gradients are not accumulated, Adam steps are skipped, mean-centering /
-// slot-mean recentering become no-ops).  The PSQT channel becomes a fixed
-// material + piece-square prior (set at --init-nnue time; use
-// --init-nnue-classical so it matches the classical eval and the search
-// constants in value[]).  piece_val REMAINS TRAINABLE (with the PAWN pin
-// above): it is the designated dense absorber for the aggregate
-// material-level / outcome-scale gradient component.  The 500k-game
-// frozen-everything experiment (2026-07-05) showed that freezing piece_val
-// too leaves that pressure with no linear sink — it leaks into the FC
-// stacks and biases, blowing out per-bucket output scale (won endgames
-// evaluated at +40 pawns) and costing ~200+ Elo vs the unfrozen reference.
-// With PSQT frozen there is no PSQT/piece_val redundancy, so the gauge is
-// identifiable via the pawn pin alone and the whole mean-centering /
-// post-Adam recentering / persisted slot-means apparatus stays retired.
-static const bool  TDLEAF_FREEZE_PSQT = false;
-// Pure-PSQT experiment (2026-07-06): ONE trainable material channel.
-// piece_val receives no training updates (stays 0 on a fresh net, so it
-// contributes nothing to the eval), gradient mean-centering, post-Adam dw
-// centering, and slot-mean recentering are all disabled, and the PAWN pin
-// is moot.  With no redundant second channel there is no gauge null
-// direction for the multi-writer merge to amplify; the absolute eval scale
-// is anchored by the outcome term through TDLEAF_K (outcome-dominated
-// lambda-return targets force sigmoid(v/K) to match empirical win rates).
-// Search is decoupled from the eval scale: NNUE_FIXED_PIECE_VALUES in
-// define.h keeps value[] at the classical constants, so SEE, pruning
-// margins, and TDLEAF_SCORE_CLIP cannot be perturbed by scale drift.
-static const bool  TDLEAF_PURE_PSQT = true;
+// Material representation: pure-PSQT — the bucketed PSQT is the SOLE trainable
+// material channel.  There is no dense piece_val channel and no gauge machinery
+// (pin / gradient mean-centering / post-Adam dw centering / persisted slot-mean
+// recentering) — with a single material channel there is no gauge null direction
+// for the multi-writer merge to amplify.  Absolute eval scale is anchored by the
+// outcome term through TDLEAF_K (outcome-dominated lambda-return targets force
+// sigmoid(v/K) to match empirical win rates).  Search is decoupled from the eval
+// scale by NNUE_FIXED_PIECE_VALUES (define.h): value[] stays at the classical
+// constants, so SEE, pruning margins, and TDLEAF_SCORE_CLIP are unaffected by any
+// slow PSQT scale drift.  DO NOT reintroduce a second material channel or freeze
+// PSQT — see docs/TDLEAF.md "Evaluation Gauge — Pure-PSQT" for why both fail.
 static const float TDLEAF_ADAM_BETA1    = 0.9f;    // first-moment decay  (FC + FT bias + PSQT)
 static const float TDLEAF_ADAM_BETA2    = 0.999f;  // second-moment decay (all layers)
 static const float TDLEAF_ADAM_EPS      = 1e-8f;   // numerical floor

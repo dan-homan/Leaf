@@ -412,22 +412,20 @@ bool nnue_write_nnue(const char *dst_path)
         switch (nnue_init_prior_mode) {
             case NNUE_PRIOR_NOPRIOR:
                 prior_desc = "PSQT=symmetric uniform 100 cp (own=+V,enemy=-V; "
-                             "P=N=B=R=Q=100 cp); piece_val=0 (noprior)";
+                             "P=N=B=R=Q=100 cp; noprior)";
                 break;
             case NNUE_PRIOR_CLASSICAL:
                 prior_desc = "PSQT=classical material + 4-stage piece-square tables "
-                             "(gstage-interpolated across 8 buckets); piece_val baked into PSQT";
+                             "(gstage-interpolated across 8 buckets)";
                 break;
             case NNUE_PRIOR_MATERIAL:
             default:
                 prior_desc = "PSQT=symmetric classical material (own=+V,enemy=-V; "
-                             "P=100 N=377 B=399 R=596 Q=1197 cp); piece_val baked into PSQT";
+                             "P=100 N=377 B=399 R=596 Q=1197 cp)";
                 break;
         }
         snprintf(new_desc, sizeof(new_desc), "Random init; %s", prior_desc);
     }
-    else if (piece_val_active)
-        snprintf(new_desc, sizeof(new_desc), "%s Trained by Leaf TDLeaf; piece_val baked into PSQT", orig_desc);
     else
         snprintf(new_desc, sizeof(new_desc), "%s Trained by Leaf TDLeaf", orig_desc);
     uint32_t new_desc_size = (uint32_t)strlen(new_desc);
@@ -453,47 +451,21 @@ bool nnue_write_nnue(const char *dst_path)
     write_leb128_i16(dst, ft_biases, NNUE_HALF_DIMS);
     printf("NNUE: writing FT weights (23M values, may take a moment)...\n");
     write_leb128_i16(dst, ft_weights, (size_t)NNUE_FT_INPUTS * NNUE_HALF_DIMS);
-    // Bake piece_val into PSQT so the exported .nnue is self-contained.
-    // Without this, engines using the .nnue without the matching .tdleaf.bin
-    // would be missing all learned material corrections.
-    //
-    // Formula (matches nnue_dense_piece_val scoring):
-    //   ps_slot = (fi % PS_NB) / 128        — piece type 0-5
-    //   is_own  = (fi % PS_NB) % 128 < 64   — own vs. enemy perspective
-    //   own:   psqt_baked[fi][b] = psqt_weights_f32[fi][b] + piece_val_f32[ps_slot][b] / 2
-    //   enemy: psqt_baked[fi][b] = psqt_weights_f32[fi][b] - piece_val_f32[ps_slot][b] / 2
-    //
-    // WARNING: if the matching .tdleaf.bin is still active with these weights,
-    // piece_val will be double-counted (once baked, once from nnue_dense_piece_val).
-    // After exporting a baked .nnue, piece_val in .tdleaf.bin should be zeroed
-    // or the .tdleaf.bin should not be loaded alongside this .nnue.
-    printf("NNUE: writing PSQT weights (baking piece_val)...\n");
+    // Write PSQT.  Under pure-PSQT the FP32 shadow IS the trained material
+    // channel (all material lives in PSQT), so it is written directly with no
+    // piece_val baking — the exported .nnue is fully self-contained.
+    printf("NNUE: writing PSQT weights...\n");
     if (psqt_weights_f32 == nullptr) {
         // Non-TDLEAF build: float shadow never allocated.  Write the int32
         // PSQT array directly (always allocated by nnue_alloc_arrays).
         write_leb128_i32(dst, psqt_weights, (size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS);
     } else {
         const size_t n_psqt = (size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS;
-        int32_t *psqt_baked = new int32_t[n_psqt];
-        const int PS_NB = 704;  // HalfKAv2_hm: 11 piece-square slots × 64 squares
-        for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
-            int fi_in_bkt = fi % PS_NB;
-            int ps_slot   = fi_in_bkt / 128;       // 0-5: pawn…king
-            bool is_own   = (fi_in_bkt % 128) < 64;
-            const float *pf = psqt_weights_f32 + (size_t)fi * NNUE_PSQT_BKTS;
-            int32_t     *pb = psqt_baked        + (size_t)fi * NNUE_PSQT_BKTS;
-            if (piece_val_active) {
-                float sign = is_own ? +1.0f : -1.0f;
-                float pv_add = sign * piece_val_f32[ps_slot] * 0.5f;
-                for (int b = 0; b < NNUE_PSQT_BKTS; b++)
-                    pb[b] = (int32_t)roundf(pf[b] + pv_add);
-            } else {
-                for (int b = 0; b < NNUE_PSQT_BKTS; b++)
-                    pb[b] = (int32_t)roundf(pf[b]);
-            }
-        }
-        write_leb128_i32(dst, psqt_baked, n_psqt);
-        delete[] psqt_baked;
+        int32_t *psqt_i32 = new int32_t[n_psqt];
+        for (size_t i = 0; i < n_psqt; i++)
+            psqt_i32[i] = (int32_t)roundf(psqt_weights_f32[i]);
+        write_leb128_i32(dst, psqt_i32, n_psqt);
+        delete[] psqt_i32;
     }
 
     // Write each FC stack with current weights, reversing the vdotq reordering.

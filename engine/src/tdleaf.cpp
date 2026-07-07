@@ -83,8 +83,7 @@ void tdleaf_record_ply(TDGameRecord &rec,
     // This ensures d[t] is computed from what nnue_forward_fp32 actually produces
     // at that position, making the gradient self-consistent.
     // (The propagated search score includes quiescence and may differ.)
-    int leaf_score_stm = nnue_evaluate(acc_a, (int)leaf_wtm, pc)
-                       + nnue_dense_piece_val(cur, (int)leaf_wtm, pc);
+    int leaf_score_stm = nnue_evaluate(acc_a, (int)leaf_wtm, pc);
 
 #if TDLEAF_CHECK_SCORE
     {
@@ -131,8 +130,7 @@ void tdleaf_record_ply(TDGameRecord &rec,
             for (int pt = PAWN; pt <= KING; pt++)
                 pc_root += root_pos.plist[sd][pt][0];
         pc_root = (pc_root < 1) ? 1 : (pc_root > 32) ? 32 : pc_root;
-        r.root_static = nnue_evaluate(root_acc, (int)root_pos.wtm, pc_root)
-                      + nnue_dense_piece_val(root_pos, (int)root_pos.wtm, pc_root);
+        r.root_static = nnue_evaluate(root_acc, (int)root_pos.wtm, pc_root);
     }
 
     // Enumerate active features at the leaf position for FT/PSQT backprop.
@@ -172,12 +170,9 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result,
 
     // 2. Compute TD errors backward
     const float lambda = TDLEAF_LAMBDA;
-    // With TDLEAF_PIN_PAWN_VALUE on and noprior anchoring value[PAWN] at 100 cp,
-    // value[PAWN] is stable at ~100 throughout training, so this threshold is
-    // effectively constant at SCORE_CLIP_PAWNS × 100 cp.  The 100 cp floor on
-    // value[PAWN] is retained as belt-and-braces against any future config that
-    // disables the pin or otherwise lets value[PAWN] sag below the classical
-    // default.
+    // Under NNUE_FIXED_PIECE_VALUES value[PAWN] stays at the classical 100 cp,
+    // so this threshold is constant at SCORE_CLIP_PAWNS × 100 cp.  The 100 cp
+    // floor is belt-and-braces only.
     const float score_clip_cp =
         TDLEAF_SCORE_CLIP_PAWNS * std::max((float)value[PAWN], 100.0f);
 
@@ -384,7 +379,6 @@ void tdleaf_update_after_game(TDGameRecord &rec, float result, const char *save_
     td_batch_pending++;
 
     if (td_batch_pending >= TDLEAF_BATCH_SIZE) {
-        nnue_mean_center_psqt_gradients();
         nnue_clip_gradients(TDLEAF_GRAD_CLIP_NORM);
         nnue_apply_gradients();
         nnue_requantize_fc();
@@ -456,8 +450,7 @@ static void tdleaf_refresh_scores(TDGameRecord &rec)
         // Re-evaluate score from rebuilt accumulator.
         int pc = r.stack * 4 + 2;
         pc = (pc < 1) ? 1 : (pc > 32) ? 32 : pc;
-        r.score_stm = nnue_evaluate_acc_raw(r.acc, r.psqt, (int)r.wtm, pc)
-                     + nnue_dense_piece_val(r.pos, (int)r.wtm, pc);
+        r.score_stm = nnue_evaluate_acc_raw(r.acc, r.psqt, (int)r.wtm, pc);
     }
 }
 
@@ -497,15 +490,14 @@ void tdleaf_replay(TDGameRecord &rec, float result, const char *save_path)
             tdleaf_refresh_scores(entry.rec);
             // replay_mode: suppress FT/PSQT/FT-bias gradients (those feed into
             // nnue_init_accumulator so updating them would race the next
-            // refresh).  FC weights and piece_val are still updated because
-            // they do not feed into the accumulator rebuild.
+            // refresh).  FC weights are still updated because they do not feed
+            // into the accumulator rebuild.
             tdleaf_accumulate_game(entry.rec, entry.result, /*replay_mode=*/true);
         }
         // Apply the summed replay gradients, then requantize so the next
         // pass's tdleaf_refresh_scores() sees the updated weights.
         // LR scaled down via TDLEAF_REPLAY_LR_SCALE to soften overfitting to
         // the small replay buffer.
-        nnue_mean_center_psqt_gradients();
         nnue_clip_gradients(TDLEAF_GRAD_CLIP_NORM);
         nnue_apply_gradients(TDLEAF_REPLAY_LR_SCALE);
         nnue_requantize_fc();
@@ -528,7 +520,6 @@ void tdleaf_flush_batch(const char *save_path)
 {
     if (td_batch_pending <= 0) return;
 
-    nnue_mean_center_psqt_gradients();
     nnue_clip_gradients(TDLEAF_GRAD_CLIP_NORM);
     nnue_apply_gradients();
     nnue_requantize_fc();

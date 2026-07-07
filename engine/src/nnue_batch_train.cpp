@@ -4,10 +4,10 @@
 // Consumes TSV files produced by scripts/extract_quiet_positions.py
 // (columns: fen  cp  result  ply  depth  gid  [endply]; cp and result are
 // WHITE POV; endply — the game's true final ply — is optional)
-// and trains all layers (FT / PSQT / FC / piece_val) with the same FP32
-// gradient machinery, per-section Adam LRs, and gauge anchors (PSQT
-// mean-centering, PAWN pin) as online TDLeaf.  The per-position target is
-// the distance-decayed blend
+// and trains all layers (FT / PSQT / FC) with the same FP32 gradient
+// machinery and per-section Adam LRs as online TDLeaf (pure-PSQT: the
+// bucketed PSQT is the sole material channel, no gauge machinery).  The
+// per-position target is the distance-decayed blend
 //
 //     p_target = w * result + (1 - w) * sigmoid(cp_label / K)
 //     w        = lambda_eff * td_lambda^(N_game - ply)
@@ -249,8 +249,7 @@ static float bt_eval_record(const BTRecord &r, float K, NNUEActivations *act_out
             pc += pos.plist[sd][pt][0];
     pc = (pc < 1) ? 1 : (pc > 32) ? 32 : pc;
 
-    int score_stm = nnue_evaluate_acc_raw(acc.acc, acc.psqt, (int)pos.wtm, pc)
-                  + nnue_dense_piece_val(pos, (int)pos.wtm, pc);
+    int score_stm = nnue_evaluate_acc_raw(acc.acc, acc.psqt, (int)pos.wtm, pc);
     float score_w = pos.wtm ? (float)score_stm : -(float)score_stm;
     float d = 1.0f / (1.0f + expf(-score_w / K));
 
@@ -467,7 +466,6 @@ int nnue_batch_train(int argc, char *argv[])
                 nnue_accumulate_gradients(act, grad_scale, false);
 
             if (++in_batch >= batch) {
-                nnue_mean_center_psqt_gradients();
                 nnue_clip_gradients(TDLEAF_GRAD_CLIP_NORM);
                 nnue_apply_gradients(lr_scale);
                 nnue_requantize_fc();
@@ -483,7 +481,6 @@ int nnue_batch_train(int argc, char *argv[])
             }
         }
         if (in_batch > 0) {   // flush the tail batch
-            nnue_mean_center_psqt_gradients();
             nnue_clip_gradients(TDLEAF_GRAD_CLIP_NORM);
             nnue_apply_gradients(lr_scale);
             nnue_requantize_fc();

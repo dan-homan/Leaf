@@ -201,24 +201,11 @@ void nnue_forward_fp32(const int16_t acc[2][NNUE_HALF_DIMS],
 // Accumulate per-weight gradients for one position into the static grad arrays.
 // grad_scale = alpha * e_t * sigmoid_gradient — applied inside.
 // replay_mode: skip parameters that feed back into nnue_init_accumulator
-// (FT weights, PSQT, FT biases).  FC weights and piece_val are still updated
-// because they do not feed into accumulator rebuilds.  Used by replay passes
-// where accumulators are re-derived from stored positions against current FT.
+// (FT weights, PSQT, FT biases).  FC weights are still updated because they do
+// not feed into accumulator rebuilds.  Used by replay passes where accumulators
+// are re-derived from stored positions against current FT.
 void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
                                bool replay_mode = false);
-
-// Subtract the per-(slot, bucket) mean from PSQT gradients.  Removes the
-// material-scale (uniform) component so PSQT learns only positional
-// corrections; piece_val absorbs the material shift instead.  Call BEFORE
-// nnue_clip_gradients() so the slot-mean does not inflate the L2 norm.
-// No-op when piece_val is not being trained.
-void nnue_mean_center_psqt_gradients();
-// Snapshot the current PSQT slot-means as the persisted re-centering target.
-// Called at --init-nnue time and as a fallback for pre-v11 .tdleaf.bin loads.
-void nnue_capture_psqt_init_slot_means();
-// Pin per-(slot, bucket) PSQT slot-mean back to its persisted target.  Called
-// after every .tdleaf.bin load to neutralise multi-writer merge drift.
-void nnue_recenter_psqt_slot_means();
 
 // Clip gradients by global L2 norm.  Returns pre-clip norm (0 if disabled).
 float nnue_clip_gradients(float max_norm);
@@ -230,7 +217,7 @@ float nnue_clip_gradients(float max_norm);
 void nnue_clip_gradient_stats_report();
 
 // Apply accumulated gradients (zero them afterwards).
-// lr_scale multiplies all category LRs (fc/ft/ft_bias/psqt/piece_val) before
+// lr_scale multiplies all category LRs (fc/ft/ft_bias/psqt) before
 // the Adam step.  Replay passes pass <1.0 to reduce overfitting to the small
 // replay buffer.  Adam is scale-invariant w.r.t. the gradient, so the LR is
 // the only effective knob for softening replay updates.
@@ -252,12 +239,6 @@ bool nnue_load_fc_weights(const char *path);
 int nnue_evaluate_acc_raw(const int16_t acc[2][NNUE_HALF_DIMS],
                            const int32_t psqt[2][NNUE_PSQT_BKTS],
                            int stm, int piece_count);
-
-// Dense piece value contribution (centipawns, stm POV).
-// Returns the correction from trained piece_val parameters.  Add to
-// nnue_evaluate() result for the total score.  Zero if piece_val is
-// uninitialised (loading a pre-existing .nnue without .tdleaf.bin).
-int nnue_dense_piece_val(const struct position &pos, int stm, int piece_count);
 
 // Offline batch trainer (nnue_batch_train.cpp) — supervised training on
 // quiet-position TSV sets from scripts/extract_quiet_positions.py.

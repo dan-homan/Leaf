@@ -60,7 +60,6 @@ static uint32_t delta_l1_b_cnt[NNUE_LAYER_STACKS][NNUE_L1_SIZE];
 static uint32_t delta_l2_w_cnt[NNUE_LAYER_STACKS][NNUE_L2_PADDED];
 static uint32_t delta_l2_b_cnt[NNUE_LAYER_STACKS];
 static uint32_t delta_ft_bias_cnt[NNUE_HALF_DIMS];
-static uint32_t delta_piece_val_cnt[6];
 // PSQT delta counts: heap-allocated (~720 KB), parallels psqt_weights_cnt.
 static uint32_t *delta_psqt_cnt = nullptr;
 
@@ -85,20 +84,6 @@ static float    ft_biases_f32 [NNUE_HALF_DIMS] = {};
 static float    grad_ft_bias  [NNUE_HALF_DIMS] = {};
 static uint32_t ft_bias_cnt   [NNUE_HALF_DIMS] = {};
 static float    ft_bias_delta [NNUE_HALF_DIMS] = {};
-
-// ---------------------------------------------------------------------------
-// Dense piece values: shared material parameters per piece type per PSQT bucket.
-// 6 piece types (PAWN..KING, index = pt-1) × 8 buckets = 48 floats.
-// Receives dense gradient updates from every position in every game (unlike
-// per-feature PSQT which is sparse).  In NNUE internal units (cp × 5776/100).
-// ---------------------------------------------------------------------------
-// piece_val_f32 forward-declared near top of file (used in nnue_write_nnue)
-static float    grad_piece_val  [6] = {};
-static float    m_piece_val     [6] = {};
-static float    v_piece_val     [6] = {};
-static uint32_t piece_val_cnt   [6] = {};
-static float    delta_piece_val [6] = {};
-// piece_val_active forward-declared near top of file (used in nnue_write_nnue)
 
 // ---------------------------------------------------------------------------
 // Adam moment arrays — session-local (process memory only; not saved to .tdleaf.bin).
@@ -148,12 +133,10 @@ static float step_max_fc      = 0.0f;
 static float step_max_ft      = 0.0f;
 static float step_max_ft_bias = 0.0f;
 static float step_max_psqt    = 0.0f;
-static float step_max_pv      = 0.0f;
 static uint64_t step_clips_fc      = 0;
 static uint64_t step_clips_ft      = 0;
 static uint64_t step_clips_ft_bias = 0;
 static uint64_t step_clips_psqt    = 0;
-static uint64_t step_clips_pv      = 0;
 
 // Clip the unit-less Adam step and update the per-category max / clip-count.
 // Returns the (possibly scaled-down) step.  Symmetric about zero.
@@ -277,7 +260,7 @@ void nnue_init_zero_weights(int prior_mode)
         // directly to the final score as fwdOut = fc0_raw[15] * 9600/8128.  With random
         // weights this creates ~81 cp score noise at init (std 4 × √1024 inputs ×
         // SqrCReLU mean ≈ 20 → fc0_raw std ≈ 4 000; scaled: ≈ 81 cp), overwhelming the
-        // 100 cp/pawn piece_val signal and preventing material-aware play from game 1.
+        // 100 cp/pawn PSQT material signal and preventing material-aware play from game 1.
         // Starting at zero eliminates this noise; gradient still flows through the
         // passthrough (g_fc0_raw[15] += g_pos × 9600/8128) so it learns normally.
         for (int i = 0; i < NNUE_L0_INPUT; i++)
@@ -312,7 +295,6 @@ void nnue_init_zero_weights(int prior_mode)
     memset(delta_l2_w_cnt, 0, sizeof(delta_l2_w_cnt));
     memset(delta_l2_b_cnt, 0, sizeof(delta_l2_b_cnt));
     memset(delta_ft_bias_cnt,   0, sizeof(delta_ft_bias_cnt));
-    memset(delta_piece_val_cnt, 0, sizeof(delta_piece_val_cnt));
 
     // Adam moment arrays — session-local, reset to zero for fresh network.
     memset(v_l0_w,    0, sizeof(v_l0_w));
@@ -354,20 +336,19 @@ void nnue_init_zero_weights(int prior_mode)
     // material features erode.  A partial material signal persists until FC/FT learns
     // enough chess to provide recovery (~7000 games).
     //
-    // Contrast with dense piece_val as the material source: 48 global scalars, updated
-    // ~200×/game.  Once corrosive gradient drives them negative the entire material
-    // evaluation inverts, the engine plays to lose pieces, and FC/FT training is corrupted
-    // by abnormal game positions — no recovery is possible.
+    // Under pure-PSQT the bucketed PSQT is the ONLY material channel; there is no
+    // dense piece_val to invert, so material is as robust as the sparse-but-many
+    // PSQT feature rows above.
     //
     // PSQT scale: own-piece features set to 2 × cp × 5776/100 so that
     //   (psqt_diff / 2) × 100/5776 = cp contribution to the score.
     // Enemy-piece features stay at zero: psqt_diff = own_val − 0 = own_val, giving the
     // correct one-sided material contribution without double-counting.
     //
-    // noprior: PSQT = uniform 100 cp per piece type (P=N=B=R=Q=100), piece_val = 0.
+    // noprior: PSQT = uniform 100 cp per piece type (P=N=B=R=Q=100).
     // Materially blind from move 1 but value[PAWN] stays at 100 cp, preserving
     // SEE/material-accounting semantics; N/B/R/Q differentiate from 100 cp via
-    // piece_val updates during training.
+    // PSQT updates during training.
     if (ft_weights_f32) {
         size_t ft_sz   = (size_t)NNUE_FT_INPUTS * NNUE_HALF_DIMS;
         size_t psqt_sz = (size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS;
@@ -394,11 +375,9 @@ void nnue_init_zero_weights(int prior_mode)
         // NOPRIOR uses uniform 100 cp across all pieces: a minimal material
         // prior that anchors value[PAWN] = value[N] = value[B] = value[R]
         // = value[Q] = 100 cp from the start.  This preserves the SEE /
-        // material-accounting semantics that consume value[PAWN] as cp and
-        // works with the PAWN-pinned gauge fix (TDLEAF_PIN_PAWN_VALUE in
-        // tdleaf.h).  N/B/R/Q differentiate via piece_val_f32 updates during
-        // training; the engine is materially blind from move 1 but never
-        // sees value[PAWN] clamp to 1.
+        // material-accounting semantics that consume value[PAWN] as cp.
+        // N/B/R/Q differentiate via PSQT updates during training; the engine is
+        // materially blind from move 1 but never sees value[PAWN] clamp to 1.
         static const float MATERIAL_CP_NORMAL[6] = {
             100.f, 377.f, 399.f, 596.f, 1197.f, 0.f,
         };
@@ -410,12 +389,11 @@ void nnue_init_zero_weights(int prior_mode)
 
         // Classical PST mean-centering: classical piece-square tables have
         // non-zero mean across the 64 squares (e.g. pawns favour the centre,
-        // knights penalise edges).  Without centering, that bias contaminates
-        // the slot-mean target persisted in .tdleaf.bin (v11+) and the engine
-        // would treat the positional bias as part of the material level.  We
-        // pre-compute the per-(slot, bucket) PST mean and subtract it, leaving
-        // the slot-mean target as MATERIAL_CP[slot] (pure material) and the
-        // PST contribution as zero-mean positional deviation only.
+        // knights penalise edges).  We pre-compute the per-(slot, bucket) PST
+        // mean and subtract it, so each piece type's init material level is
+        // exactly MATERIAL_CP[slot] and the PST contributes zero-mean positional
+        // deviation only.  (Retained for init reproducibility with the pure-PSQT
+        // reference nets; the old slot-mean recenter that consumed this is gone.)
         float pst_mean[5][NNUE_PSQT_BKTS] = {};
         if (classical) {
             for (int slot = 0; slot < 5; slot++) {
@@ -475,18 +453,6 @@ void nnue_init_zero_weights(int prior_mode)
         memset(delta_psqt_cnt, 0, psqt_sz * sizeof(uint32_t));
     }
 
-    // Dense piece values: start at zero — learns corrections on top of PSQT material.
-    // piece_val handles fast-converging material corrections via dense updates (~200/game);
-    // PSQT provides the base material prior and all positional knowledge.
-    // Clamped >= 0 in nnue_apply_gradients to prevent anti-material death spiral.
-    memset(piece_val_f32,   0, sizeof(piece_val_f32));
-    memset(grad_piece_val,  0, sizeof(grad_piece_val));
-    memset(m_piece_val,     0, sizeof(m_piece_val));
-    memset(v_piece_val,     0, sizeof(v_piece_val));
-    memset(piece_val_cnt,   0, sizeof(piece_val_cnt));
-    memset(delta_piece_val, 0, sizeof(delta_piece_val));
-    piece_val_active = true;
-
     // Sync all int8/int16/int32 inference arrays from the zeroed float shadows.
     nnue_requantize_fc();
 
@@ -496,12 +462,6 @@ void nnue_init_zero_weights(int prior_mode)
 
     nnue_zero_initialized = true;
     nnue_init_prior_mode  = prior_mode;
-
-    // Snapshot per-(slot, bucket) init PSQT slot-means.  These are persisted in
-    // .tdleaf.bin (v11+) and used as the re-centering target at every subsequent
-    // load — keeps PSQT slot-mean (= material level) invariant against
-    // multi-writer merge drift and accumulated numerical error.
-    nnue_capture_psqt_init_slot_means();
 
     const char *psqt_desc;
     if (noprior)         psqt_desc = "symmetric uniform 100 cp "
@@ -513,7 +473,7 @@ void nnue_init_zero_weights(int prior_mode)
                                      "(own=+V,enemy=-V; P=100 N=377 B=399 R=596 Q=1197 cp)";
     printf("NNUE TDLeaf: FC weights=N(0,{%.0f,%.0f,%.0f}) passthrough[15]=0; "
            "FT weights=N(0,%.0f); biases=zero; "
-           "PSQT=%s; piece_val=zero (learns corrections)\n",
+           "PSQT=%s (sole material channel)\n",
            INIT_FC0_W_STD, INIT_FC1_W_STD, INIT_FC2_W_STD, INIT_FT_W_STD,
            psqt_desc);
 }
@@ -614,7 +574,6 @@ void nnue_init_fp32_weights()
     memset(delta_l2_w_cnt, 0, sizeof(delta_l2_w_cnt));
     memset(delta_l2_b_cnt, 0, sizeof(delta_l2_b_cnt));
     memset(delta_ft_bias_cnt, 0, sizeof(delta_ft_bias_cnt));
-    memset(delta_piece_val_cnt, 0, sizeof(delta_piece_val_cnt));
     if (!delta_psqt_cnt) delta_psqt_cnt = new uint32_t[psqt_sz]();
     memset(delta_psqt_cnt, 0, psqt_sz * sizeof(uint32_t));
     if (ft_delta_f32)   memset(ft_delta_f32,   0, ft_sz   * sizeof(float));
@@ -645,16 +604,6 @@ void nnue_init_fp32_weights()
     if (v_psqt_w)  memset(v_psqt_w,  0, psqt_sz * sizeof(float));
     if (m_psqt_w)  memset(m_psqt_w,  0, psqt_sz * sizeof(float));
     t_adam = 0;
-
-    // Dense piece values: zero for pre-existing .nnue (material is in per-feature PSQT).
-    // Will be overridden from .tdleaf.bin v5+ if present.
-    memset(piece_val_f32,   0, sizeof(piece_val_f32));
-    memset(grad_piece_val,  0, sizeof(grad_piece_val));
-    memset(m_piece_val,     0, sizeof(m_piece_val));
-    memset(v_piece_val,     0, sizeof(v_piece_val));
-    memset(piece_val_cnt,   0, sizeof(piece_val_cnt));
-    memset(delta_piece_val, 0, sizeof(delta_piece_val));
-    piece_val_active = false;  // activated by init_zero_weights or v5+ load
 
     printf("NNUE TDLeaf: FP32 weights initialised (%d stacks + FT/PSQT + FT biases)\n", NNUE_LAYER_STACKS);
 
@@ -819,21 +768,6 @@ void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
         grad_l0_b[s][o] += g_fc0_raw[o];
     }
 
-    // Dense piece value gradient:
-    //   piece_val_diff = Σ_pt piece_val[pt] × (stm_count[pt] − opp_count[pt])
-    //   ∂score/∂piece_val[pt] = count_diff[pt] × (100/5776) × 0.5
-    //   grad_scale already includes cp_factor = 100/5776.
-    // Runs in both live and replay paths: piece_val is an output-side additive
-    // term (see nnue_dense_piece_val) and does NOT feed into nnue_init_accumulator,
-    // so replay updates do not create the FT/PSQT/ft_bias feedback loop below.
-    if (piece_val_active && !TDLEAF_PURE_PSQT) {
-        float g_pv = grad_scale * 0.5f;
-        for (int pt = 0; pt < 6; pt++) {
-            if (act.piece_count_diff[pt] != 0)
-                grad_piece_val[pt] += g_pv * (float)act.piece_count_diff[pt];
-        }
-    }
-
     // Replay mode: skip FT weights, PSQT, and FT biases.  These three feed
     // into nnue_init_accumulator (ft_biases directly, ft_weights/psqt via
     // add_feat) — updating them during replay would change what the next
@@ -897,9 +831,8 @@ void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
             float *gfw = grad_ft_w + (size_t)fi * NNUE_HALF_DIMS;
             for (int d = 0; d < NNUE_HALF_DIMS; d++)
                 gfw[d] += g_a[d];
-            if (!TDLEAF_FREEZE_PSQT)
-                grad_psqt_w[fi * NNUE_PSQT_BKTS + s] +=
-                    g_psqt_diff * psqt_sign;
+            grad_psqt_w[fi * NNUE_PSQT_BKTS + s] +=
+                g_psqt_diff * psqt_sign;
         }
     }
 
@@ -912,10 +845,8 @@ void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
 // ---------------------------------------------------------------------------
 // Runtime LR overrides (read once from environment).
 //
-// TDLEAF_LR_{FC,FT,FT_BIAS,PSQT,PV} multiply the corresponding TDLEAF_ADAM_*_LR0
-// constant.  TDLEAF_FREEZE_PSQT=1 forces the PSQT multiplier to 0 (PSQT weights
-// don't move; Adam state still advances, so a later session without the freeze
-// resumes normally).  TDLEAF_FREEZE_PASSTHROUGH=1 holds the FC0 passthrough row
+// TDLEAF_LR_{FC,FT,FT_BIAS,PSQT} multiply the corresponding TDLEAF_ADAM_*_LR0
+// constant.  TDLEAF_FREEZE_PASSTHROUGH=1 holds the FC0 passthrough row
 // (output NNUE_L0_DIRECT = 15, weights + bias) at its init value — gradient and
 // Adam state for those weights are zeroed before clipping/apply, so they stay
 // exactly stationary.  Defaults are all 1.0 (no override).
@@ -925,7 +856,7 @@ void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
 //   TDLEAF_FREEZE_PASSTHROUGH=1 ./Leaf_vtrain ...
 // ---------------------------------------------------------------------------
 struct TDLeafLRMultipliers {
-    float fc, fc2, fc_bias, ft, ft_bias, psqt, pv;
+    float fc, fc2, fc_bias, ft, ft_bias, psqt;
     bool  freeze_passthrough;   // FC0 row NNUE_L0_DIRECT (15) weights+bias held at init
 };
 static const TDLeafLRMultipliers &tdleaf_lr_multipliers()
@@ -949,13 +880,10 @@ static const TDLeafLRMultipliers &tdleaf_lr_multipliers()
         x.ft      = read_env("TDLEAF_LR_FT",      1.0f);
         x.ft_bias = read_env("TDLEAF_LR_FT_BIAS", 1.0f);
         x.psqt    = read_env("TDLEAF_LR_PSQT",    1.0f);
-        x.pv      = read_env("TDLEAF_LR_PV",      1.0f);
-        bool freeze_psqt = read_bool_env("TDLEAF_FREEZE_PSQT");
-        if (freeze_psqt) x.psqt = 0.0f;
         x.freeze_passthrough = read_bool_env("TDLEAF_FREEZE_PASSTHROUGH");
         bool any = (x.fc != 1.0f || x.fc2 != 1.0f || x.fc_bias != 1.0f
                     || x.ft != 1.0f || x.ft_bias != 1.0f
-                    || x.psqt != 1.0f || x.pv != 1.0f || x.freeze_passthrough);
+                    || x.psqt != 1.0f || x.freeze_passthrough);
         if (any) {
             fprintf(stderr, "TDLeaf LR overrides:");
             if (x.fc      != 1.0f) fprintf(stderr, " FC=%.4g",      (double)x.fc);
@@ -963,157 +891,13 @@ static const TDLeafLRMultipliers &tdleaf_lr_multipliers()
             if (x.fc_bias != 1.0f) fprintf(stderr, " FC_BIAS=%.4g", (double)x.fc_bias);
             if (x.ft      != 1.0f) fprintf(stderr, " FT=%.4g",      (double)x.ft);
             if (x.ft_bias != 1.0f) fprintf(stderr, " FT_BIAS=%.4g", (double)x.ft_bias);
-            if (x.psqt    != 1.0f) fprintf(stderr, " PSQT=%.4g%s",  (double)x.psqt,
-                                                                    freeze_psqt ? " (frozen)" : "");
-            if (x.pv      != 1.0f) fprintf(stderr, " PV=%.4g",      (double)x.pv);
+            if (x.psqt    != 1.0f) fprintf(stderr, " PSQT=%.4g",  (double)x.psqt);
             if (x.freeze_passthrough) fprintf(stderr, " PASSTHROUGH=frozen");
             fprintf(stderr, "\n");
         }
         return x;
     }();
     return m;
-}
-
-// ---------------------------------------------------------------------------
-// nnue_mean_center_psqt_gradients — subtract the per-(slot, bucket) mean from
-// PSQT gradients so PSQT learns only positional (per-square) corrections; the
-// uniform slot-mean component is the material-scale shift and belongs to
-// dense piece_val instead.
-//
-// Slots (from halfkav2_feature index structure):
-//   fi % 704 / 64 → 0=own pawn, 1=opp pawn, 2=own knight, ...
-//                    8=own queen, 9=opp queen, 10=king (both)
-//
-// Run before nnue_clip_gradients() so the about-to-be-removed slot-mean does
-// not inflate the global L2 norm and throttle other layers' updates.  No-op
-// when piece_val is not being trained or when PSQT gradients are absent.
-// ---------------------------------------------------------------------------
-void nnue_mean_center_psqt_gradients()
-{
-    if (TDLEAF_FREEZE_PSQT) return;  // no PSQT gradients exist to center
-    if (TDLEAF_PURE_PSQT) return;    // single channel: no gauge to fix, let PSQT move freely
-    if (!piece_val_active || !grad_psqt_w || !ft_dirty) return;
-
-    // Per-slot aggregate (summed across all NNUE_PSQT_BKTS buckets): zeros only
-    // the slot's total gradient, leaving per-bucket relative drift free.  This
-    // is what lets the bucketed PSQT learn phase-dependent piece values
-    // (e.g. "pawn is more valuable in deep endgame") — the absolute material
-    // level (slot total) is anchored, but the distribution across buckets is
-    // unconstrained.
-    double slot_total[11] = {};
-    int    slot_count[11] = {};
-    for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
-        if (!ft_dirty[fi]) continue;
-        int slot = (fi % 704) / 64;
-        slot_count[slot]++;
-        const float *gpw = grad_psqt_w + (size_t)fi * NNUE_PSQT_BKTS;
-        for (int b = 0; b < NNUE_PSQT_BKTS; b++)
-            slot_total[slot] += gpw[b];
-    }
-    for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
-        if (!ft_dirty[fi]) continue;
-        int slot = (fi % 704) / 64;
-        if (slot_count[slot] < 2) continue;
-        float corr = (float)(slot_total[slot]
-                             / ((double)slot_count[slot] * NNUE_PSQT_BKTS));
-        float *gpw = grad_psqt_w + (size_t)fi * NNUE_PSQT_BKTS;
-        for (int b = 0; b < NNUE_PSQT_BKTS; b++)
-            gpw[b] -= corr;
-    }
-}
-
-// ---------------------------------------------------------------------------
-// nnue_compute_psqt_slot_means — fill means[11][8] with the average value of
-// psqt_weights_f32 across all features in each (slot, bucket) cell.
-// ---------------------------------------------------------------------------
-static void nnue_compute_psqt_slot_means(float means[11][NNUE_PSQT_BKTS])
-{
-    if (!psqt_weights_f32) return;
-    double  sum  [11][NNUE_PSQT_BKTS] = {};
-    int     n    [11] = {};
-    for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
-        int slot = (fi % 704) / 64;
-        n[slot]++;
-        const float *pw = psqt_weights_f32 + (size_t)fi * NNUE_PSQT_BKTS;
-        for (int b = 0; b < NNUE_PSQT_BKTS; b++)
-            sum[slot][b] += pw[b];
-    }
-    for (int slot = 0; slot < 11; slot++) {
-        float inv_n = n[slot] > 0 ? 1.0f / (float)n[slot] : 0.0f;
-        for (int b = 0; b < NNUE_PSQT_BKTS; b++)
-            means[slot][b] = (float)(sum[slot][b] * (double)inv_n);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// nnue_capture_psqt_init_slot_means — snapshot the current PSQT slot-means as
-// the persisted re-centering target.  Called once at --init-nnue time, and as
-// a fallback when loading a pre-v11 .tdleaf.bin file (which has no target).
-// ---------------------------------------------------------------------------
-void nnue_capture_psqt_init_slot_means()
-{
-    if (!psqt_weights_f32) return;
-    nnue_compute_psqt_slot_means(psqt_init_slot_means);
-    psqt_init_slot_means_valid = true;
-}
-
-// ---------------------------------------------------------------------------
-// nnue_recenter_psqt_slot_means — pin the per-slot AGGREGATE PSQT mean (summed
-// across all NNUE_PSQT_BKTS buckets) back to its persisted init target by
-// subtracting the per-slot drift uniformly across every feature × bucket cell.
-// Per-bucket distribution within a slot is left free, so the bucketed PSQT
-// can learn phase-dependent piece values (e.g. pawn worth more in deep
-// endgame) — only the absolute material level (slot total) is gauge-anchored.
-//
-// Touches psqt_weights_f32 only — NOT psqt_delta_f32.  The correction is a
-// gauge restoration, not a user-applied delta: if we baked it into pd it would
-// be re-applied at every subsequent merge cycle (since the merge protocol does
-// pw = file_value + pd), causing geometric error growth.  pw is always set
-// directly to the gauge-correct value; pd continues to track only the actual
-// per-batch updates.  Also syncs the int32 inference array.
-// ---------------------------------------------------------------------------
-void nnue_recenter_psqt_slot_means()
-{
-    // Frozen PSQT: it never moves, so there is no drift to snap back.
-    // Skipping also avoids touching the int32 inference array on load.
-    if (TDLEAF_FREEZE_PSQT) return;
-    // Pure-PSQT: deliberately unanchored — scale is loss-anchored via
-    // TDLEAF_K; recentering would fight the calibration we want to observe.
-    if (TDLEAF_PURE_PSQT) return;
-    if (!psqt_init_slot_means_valid || !psqt_weights_f32) return;
-
-    float cur_means[11][NNUE_PSQT_BKTS];
-    nnue_compute_psqt_slot_means(cur_means);
-
-    // Per-slot mean across all buckets (= total / NNUE_PSQT_BKTS).
-    float corr[11];
-    bool  any_corr = false;
-    for (int slot = 0; slot < 11; slot++) {
-        double init_total = 0.0;
-        double cur_total  = 0.0;
-        for (int b = 0; b < NNUE_PSQT_BKTS; b++) {
-            init_total += psqt_init_slot_means[slot][b];
-            cur_total  += cur_means[slot][b];
-        }
-        // corr is added per cell; total drift per slot = corr × NNUE_PSQT_BKTS.
-        corr[slot] = (float)((init_total - cur_total) / NNUE_PSQT_BKTS);
-        if (corr[slot] != 0.0f) any_corr = true;
-    }
-    if (!any_corr) return;
-
-    for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
-        int slot = (fi % 704) / 64;
-        float c = corr[slot];
-        if (c == 0.0f) continue;
-        float *pw = psqt_weights_f32 + (size_t)fi * NNUE_PSQT_BKTS;
-        for (int b = 0; b < NNUE_PSQT_BKTS; b++)
-            pw[b] += c;
-    }
-    // Resync the int32 inference array.
-    if (psqt_weights) {
-        for (size_t i = 0; i < (size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS; i++)
-            psqt_weights[i] = (int32_t)roundf(psqt_weights_f32[i]);
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1229,11 +1013,6 @@ float nnue_clip_gradients(float max_norm)
     // FT bias gradients.
     for (int d = 0; d < NNUE_HALF_DIMS; d++)
         sum_sq += (double)grad_ft_bias[d] * grad_ft_bias[d];
-    // Dense piece value gradients.
-    if (piece_val_active) {
-        for (int pt = 0; pt < 6; pt++)
-            sum_sq += (double)grad_piece_val[pt] * grad_piece_val[pt];
-    }
 
     float norm = (float)sqrt(sum_sq);
 
@@ -1279,10 +1058,6 @@ float nnue_clip_gradients(float max_norm)
         }
     }
     for (int d = 0; d < NNUE_HALF_DIMS; d++) grad_ft_bias[d] *= scale;
-    if (piece_val_active) {
-        for (int pt = 0; pt < 6; pt++)
-            grad_piece_val[pt] *= scale;
-    }
 
     return norm;
 }
@@ -1446,25 +1221,12 @@ void nnue_apply_gradients(float lr_scale)
     memset(grad_l2_w, 0, sizeof(grad_l2_w));
     memset(grad_l2_b, 0, sizeof(grad_l2_b));
 
-    // FT/PSQT: only iterate over dirty feature rows (sparse update).
-    // PSQT mean-centering runs in nnue_mean_center_psqt_gradients() before
-    // nnue_clip_gradients() so the slot-total does not enter the L2 norm.
-    // That zeros the gradient slot-total but is NOT sufficient: Adam's
-    // per-weight 1/sqrt(v_hat) normalisation makes the applied step (dw) not
-    // zero-sum within a slot, since sparse features (low v) take
-    // proportionally larger steps than dense ones.  Pass 2 below post-corrects
-    // by spreading the per-slot mean dw back across every (dirty fi, bucket),
-    // restoring the slot-total invariant exactly while leaving the per-bucket
-    // distribution unconstrained (allows phase-dependent piece-value drift).
-    // Without this, PSQT pawn slot drifted ~+13% over 50k games even with
-    // piece_val[PAWN] hard-pinned at 0.
+    // FT/PSQT: only iterate over dirty feature rows (sparse update).  Under
+    // pure-PSQT the bucketed PSQT is the sole material channel and moves freely
+    // — no gradient mean-centering or post-Adam dw centering is applied.
     if (ft_dirty) {
-        double psqt_dw_total[11] = {};
-        int    psqt_dirty_count[11] = {};
-        // Pass 1: apply FT + PSQT Adam steps; accumulate per-slot PSQT dw.
         for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
             if (!ft_dirty[fi]) continue;
-            int slot = (fi % 704) / 64;
             // FT weights — per-weight RMSProp (no m; FT rows are too sparse for
             // first-moment to carry useful directional signal).
             float    *fw  = ft_weights_f32 + (size_t)fi * NNUE_HALF_DIMS;
@@ -1494,8 +1256,7 @@ void nnue_apply_gradients(float lr_scale)
                 }
             }
             // PSQT weights — full Adam per-weight (only 8 buckets per row).
-            // Skipped entirely under TDLEAF_FREEZE_PSQT (frozen prior).
-            if (!TDLEAF_FREEZE_PSQT) {
+            {
                 float    *pw   = psqt_weights_f32 + (size_t)fi * NNUE_PSQT_BKTS;
                 float    *gpw  = grad_psqt_w      + (size_t)fi * NNUE_PSQT_BKTS;
                 uint32_t *pcnt = psqt_weights_cnt + (size_t)fi * NNUE_PSQT_BKTS;
@@ -1507,34 +1268,8 @@ void nnue_apply_gradients(float lr_scale)
                         pw[b] -= dw;  if (pd) pd[b] -= dw;
                         pcnt[b]++;
                         if (delta_psqt_cnt) delta_psqt_cnt[(size_t)fi * NNUE_PSQT_BKTS + b]++;
-                        psqt_dw_total[slot] += dw;
                         gpw[b] = 0.0f;
                     }
-                }
-                psqt_dirty_count[slot]++;
-            }
-            // ft_dirty[fi] not cleared yet — Pass 2 needs to find dirty rows.
-        }
-        // Pass 2: post-Adam aggregate centering.  Spread the per-slot mean dw
-        // (summed across all NNUE_PSQT_BKTS buckets) back to every dirty
-        // feature × bucket cell so Σ_{fi dirty in slot S, b}(Δpw) = 0.  Buckets
-        // can drift relative to each other (which is what lets PSQT learn
-        // phase-dependent piece values via the HalfKAv2_hm bucket structure);
-        // only the slot's absolute material level is anchored.  Slots with < 2
-        // dirty features are skipped — their drift is bounded by O(1/2048).
-        for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
-            if (!ft_dirty[fi]) continue;
-            int slot = (fi % 704) / 64;
-            if (!TDLEAF_FREEZE_PSQT && !TDLEAF_PURE_PSQT
-                && psqt_dirty_count[slot] >= 2) {
-                float corr = (float)(psqt_dw_total[slot]
-                                     / ((double)psqt_dirty_count[slot]
-                                        * NNUE_PSQT_BKTS));
-                float *pw = psqt_weights_f32 + (size_t)fi * NNUE_PSQT_BKTS;
-                float *pd = psqt_delta_f32 ? psqt_delta_f32 + (size_t)fi * NNUE_PSQT_BKTS : nullptr;
-                for (int b = 0; b < NNUE_PSQT_BKTS; b++) {
-                    pw[b] += corr;
-                    if (pd) pd[b] += corr;
                 }
             }
             ft_dirty[fi] = false;
@@ -1567,54 +1302,6 @@ void nnue_apply_gradients(float lr_scale)
                                 std::min( 32767.0f, roundf(ft_biases_f32[d])));
     }
 
-    // Dense piece value update — full Adam, no weight decay.
-    // Uses TDLEAF_ADAM_PV_LR0 (same scale as PSQT).
-    // Disabled under TDLEAF_PURE_PSQT: the bucketed PSQT is the sole
-    // material channel; piece_val stays at its init value (0 on fresh nets).
-    if (piece_val_active && !TDLEAF_PURE_PSQT) {
-        const float pv_lr = lr_mul.pv * lr_scale * warmup_factor * TDLEAF_ADAM_PV_LR0;
-        auto do_step_pv = [&](float g, float &m, float &v, uint32_t cnt) -> float {
-            m = TDLEAF_ADAM_BETA1 * m + (1.0f - TDLEAF_ADAM_BETA1) * g;
-            v = TDLEAF_ADAM_BETA2 * v + (1.0f - TDLEAF_ADAM_BETA2) * g * g;
-            uint32_t eff_t = cnt + 1;
-            float m_hat = (eff_t >= 20) ? m
-                : m / (1.0f - powf(TDLEAF_ADAM_BETA1, (float)eff_t));
-            float v_hat = v / (1.0f - powf(TDLEAF_ADAM_BETA2, (float)eff_t));
-            float step  = m_hat / (sqrtf(v_hat) + TDLEAF_ADAM_EPS);
-            step = clip_adam_step(step, step_max_pv, step_clips_pv);
-            return pv_lr * step;
-        };
-        bool pv_changed = false;
-        for (int pt = 0; pt < 6; pt++) {
-            // Gauge fix: piece_val[PAWN] is pinned at its init value (see
-            // TDLEAF_PIN_PAWN_VALUE in tdleaf.h).  Discard the accumulated
-            // pawn gradient so it doesn't leak into telemetry or the next
-            // batch; leave moments (m, v) untouched.
-            if (TDLEAF_PIN_PAWN_VALUE && pt == PAWN - 1) {
-                grad_piece_val[pt] = 0.0f;
-                continue;
-            }
-            if (grad_piece_val[pt] == 0.0f) continue;
-            float dw = do_step_pv(grad_piece_val[pt],
-                                  m_piece_val[pt], v_piece_val[pt],
-                                  piece_val_cnt[pt]);
-            float old_val = piece_val_f32[pt];
-            // Clamp piece_val >= 0: negative piece values invert material
-            // evaluation (engine plays to lose material), creating an
-            // unrecoverable death spiral.  At zero, the engine has neutral
-            // material knowledge (same as noprior), which FC/FT can recover
-            // from.  The Adam moments continue to advance so the clamp is
-            // lifted as soon as the gradient turns constructive.
-            piece_val_f32[pt] = std::max(0.0f, old_val - dw);
-            delta_piece_val[pt] += piece_val_f32[pt] - old_val;
-            piece_val_cnt[pt]++;  delta_piece_val_cnt[pt]++;
-            grad_piece_val[pt] = 0.0f;
-            pv_changed = true;
-        }
-        if (pv_changed)
-            nnue_extract_piece_values(false); // silent — called every batch during training
-    }
-
     // Step-clip telemetry — write one line per batch to <engine_cfg.exec_path>tdleaf_telemetry.log.
     // Written to a file (not stderr) because cutechess-cli captures engine stderr
     // internally; our telemetry would otherwise be invisible.  Multiple concurrent
@@ -1638,22 +1325,21 @@ void nnue_apply_gradients(float lr_scale)
         }
         if (tele_fp) {
             fprintf(tele_fp,
-                    "[tdleaf step-clip] t_adam=%u  max|step| FC=%.2f FT=%.2f FTB=%.2f PSQT=%.2f PV=%.2f  "
-                    "clips FC=%llu FT=%llu FTB=%llu PSQT=%llu PV=%llu  (clip=%.1f)\n",
+                    "[tdleaf step-clip] t_adam=%u  max|step| FC=%.2f FT=%.2f FTB=%.2f PSQT=%.2f  "
+                    "clips FC=%llu FT=%llu FTB=%llu PSQT=%llu  (clip=%.1f)\n",
                     (unsigned)t_adam,
-                    step_max_fc, step_max_ft, step_max_ft_bias, step_max_psqt, step_max_pv,
+                    step_max_fc, step_max_ft, step_max_ft_bias, step_max_psqt,
                     (unsigned long long)step_clips_fc,
                     (unsigned long long)step_clips_ft,
                     (unsigned long long)step_clips_ft_bias,
                     (unsigned long long)step_clips_psqt,
-                    (unsigned long long)step_clips_pv,
                     (double)TDLEAF_ADAM_STEP_CLIP);
             fflush(tele_fp);
         }
     }
 #endif
-    step_max_fc = step_max_ft = step_max_ft_bias = step_max_psqt = step_max_pv = 0.0f;
-    step_clips_fc = step_clips_ft = step_clips_ft_bias = step_clips_psqt = step_clips_pv = 0;
+    step_max_fc = step_max_ft = step_max_ft_bias = step_max_psqt = 0.0f;
+    step_clips_fc = step_clips_ft = step_clips_ft_bias = step_clips_psqt = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -1840,10 +1526,22 @@ void nnue_requantize_fc()
 //   weights written against a different .nnue.
 //   v5–v9 files have no hash and are accepted without a check; saving promotes
 //   them to v10 with the current .nnue's hash.
+//
+// Version 11 (legacy): added persisted PSQT init slot-means (11×PSQT_BKTS
+//   floats) for the old gauge-anchoring recenter step.
+//
+// Version 12 additions (current): pure-PSQT — the dense piece_val channel and
+//   the gauge machinery were removed.  The DROPPED sections are:
+//     - the piece_val weight section (float32[6] + uint32[6], v5+)
+//     - piece_val v inside the Adam v section (float32[6], v6+)
+//     - piece_val m inside the Adam m section (float32[6], v7+)
+//     - the v11 PSQT init slot-means block (11×PSQT_BKTS floats)
+//   The writer emits v12 only.  The loader still accepts v2–v11: it reads and
+//   discards the dropped bytes to stay aligned, then upgrades to v12 on save.
 // ---------------------------------------------------------------------------
 static const float    TDLEAF_SCALE   = 128.0f;
 static const uint32_t TDLEAF_MAGIC   = 0x544D4C46u; // "TMLF"
-static const uint32_t TDLEAF_VERSION = 11u;
+static const uint32_t TDLEAF_VERSION = 12u;
 
 // ---------------------------------------------------------------------------
 // tdleaf_acquire_lock / tdleaf_release_lock
@@ -1914,7 +1612,7 @@ bool nnue_save_fc_weights(const char *path)
         bool ok = (fread(&magic, 4, 1, cur) == 1 &&
                    fread(&version, 4, 1, cur) == 1 &&
                    magic == TDLEAF_MAGIC &&
-                   (version == TDLEAF_VERSION || version == 10u || version == 9u || version == 8u || version == 7u || version == 6u || version == 5u || version == 4u || version == 3u || version == 2u));
+                   (version == TDLEAF_VERSION || version == 11u || version == 10u || version == 9u || version == 8u || version == 7u || version == 6u || version == 5u || version == 4u || version == 3u || version == 2u));
         if (ok && version >= 10u) {
             // v10+: header carries the source-.nnue content hash.  If another
             // worker wrote the file against a different .nnue, abort the save
@@ -2026,41 +1724,17 @@ bool nnue_save_fc_weights(const char *path)
                         }
                     }
                 }
-                // Dense piece value section (v5+).
-                // v9+: float32[6] + uint32[6] (one value per piece type).
-                // v5-v8: float32[6][8] + uint32[6][8] (per-bucket; collapse by averaging).
-                if (version >= 5u) {
+                // Dense piece value section (v5-v11 only; removed in v12).
+                // Read and discard to stay byte-aligned when merging an older file.
+                if (version >= 5u && version <= 11u) {
                     if (version >= 9u) {
                         float tmp_pv[6]; uint32_t tmp_pvc[6];
-                        if (fread(tmp_pv,  sizeof(float),    6, cur) == 6 &&
-                            fread(tmp_pvc, sizeof(uint32_t), 6, cur) == 6) {
-                            for (int pt = 0; pt < 6; pt++) {
-                                // Clamp ≥ 0: a negative merge result inverts material
-                                // evaluation (death spiral); see nnue_apply_gradients.
-                                piece_val_f32[pt] = std::max(0.0f,
-                                    tmp_pv[pt] / TDLEAF_SCALE + delta_piece_val[pt]);
-                                delta_piece_val[pt] = 0.0f;
-                                piece_val_cnt[pt] = tmp_pvc[pt] + delta_piece_val_cnt[pt];
-                                delta_piece_val_cnt[pt] = 0;
-                            }
-                            piece_val_active = true;
-                        }
+                        (void)fread(tmp_pv,  sizeof(float),    6, cur);
+                        (void)fread(tmp_pvc, sizeof(uint32_t), 6, cur);
                     } else {
-                        // v5-v8: collapse [6][8] to [6] by averaging across buckets.
                         float tmp_pv[6][NNUE_PSQT_BKTS]; uint32_t tmp_pvc[6][NNUE_PSQT_BKTS];
-                        if (fread(tmp_pv,  sizeof(float),    6*NNUE_PSQT_BKTS, cur) == (size_t)(6*NNUE_PSQT_BKTS) &&
-                            fread(tmp_pvc, sizeof(uint32_t), 6*NNUE_PSQT_BKTS, cur) == (size_t)(6*NNUE_PSQT_BKTS)) {
-                            for (int pt = 0; pt < 6; pt++) {
-                                float sum = 0.0f; uint32_t cnt_sum = 0;
-                                for (int b = 0; b < NNUE_PSQT_BKTS; b++) { sum += tmp_pv[pt][b]; cnt_sum += tmp_pvc[pt][b]; }
-                                piece_val_f32[pt] = std::max(0.0f,
-                                    sum / NNUE_PSQT_BKTS / TDLEAF_SCALE + delta_piece_val[pt]);
-                                delta_piece_val[pt] = 0.0f;
-                                piece_val_cnt[pt] = cnt_sum / NNUE_PSQT_BKTS + delta_piece_val_cnt[pt];
-                                delta_piece_val_cnt[pt] = 0;
-                            }
-                            piece_val_active = true;
-                        }
+                        (void)fread(tmp_pv,  sizeof(float),    6*NNUE_PSQT_BKTS, cur);
+                        (void)fread(tmp_pvc, sizeof(uint32_t), 6*NNUE_PSQT_BKTS, cur);
                     }
                 }
                 // Adam v section (v6+): max-merge per element.
@@ -2085,18 +1759,11 @@ bool nnue_save_fc_weights(const char *path)
                         merge_v(v_l2_w[s], NNUE_L2_PADDED);
                     }
                     merge_v(v_ft_bias, NNUE_HALF_DIMS);
-                    if (version >= 9u)
-                        merge_v(v_piece_val, 6);
-                    else {
-                        // v6-v8: 48 floats → take max per piece type across 8 buckets.
-                        float tmp_v8[6][NNUE_PSQT_BKTS] = {};
-                        for (int i = 0; i < 6 * NNUE_PSQT_BKTS; i++) {
-                            float tmp; if (fread(&tmp, sizeof(float), 1, cur) != 1) break;
-                            ((float*)tmp_v8)[i] = tmp;
-                        }
-                        for (int pt = 0; pt < 6; pt++)
-                            for (int b = 0; b < NNUE_PSQT_BKTS; b++)
-                                if (tmp_v8[pt][b] > v_piece_val[pt]) v_piece_val[pt] = tmp_v8[pt][b];
+                    // piece_val v (v6-v11 only; removed in v12) — read and discard.
+                    if (version <= 11u) {
+                        int n_pv = (version >= 9u) ? 6 : 6 * NNUE_PSQT_BKTS;
+                        float tmp[6 * NNUE_PSQT_BKTS];
+                        (void)fread(tmp, sizeof(float), n_pv, cur);
                     }
                     // Sparse PSQT v.
                     uint32_t n_pv_rows = 0;
@@ -2133,20 +1800,11 @@ bool nnue_save_fc_weights(const char *path)
                         merge_m(m_l2_w[s], NNUE_L2_PADDED);
                     }
                     merge_m(m_ft_bias, NNUE_HALF_DIMS);
-                    if (version >= 9u)
-                        merge_m(m_piece_val, 6);
-                    else {
-                        // v7-v8: 48 floats → average per piece type across 8 buckets.
-                        float tmp_m8[6][NNUE_PSQT_BKTS] = {};
-                        for (int i = 0; i < 6 * NNUE_PSQT_BKTS; i++) {
-                            float tmp; if (fread(&tmp, sizeof(float), 1, cur) != 1) break;
-                            ((float*)tmp_m8)[i] = tmp;
-                        }
-                        for (int pt = 0; pt < 6; pt++) {
-                            float avg = 0.0f;
-                            for (int b = 0; b < NNUE_PSQT_BKTS; b++) avg += tmp_m8[pt][b];
-                            m_piece_val[pt] = 0.5f * (m_piece_val[pt] + avg / NNUE_PSQT_BKTS);
-                        }
+                    // piece_val m (v7-v11 only; removed in v12) — read and discard.
+                    if (version <= 11u) {
+                        int n_pm = (version >= 9u) ? 6 : 6 * NNUE_PSQT_BKTS;
+                        float tmp[6 * NNUE_PSQT_BKTS];
+                        (void)fread(tmp, sizeof(float), n_pm, cur);
                     }
                     // Sparse PSQT m.
                     uint32_t n_pm_rows = 0;
@@ -2201,7 +1859,6 @@ bool nnue_save_fc_weights(const char *path)
             memset(delta_l2_w_cnt, 0, sizeof(delta_l2_w_cnt));
             memset(delta_l2_b_cnt, 0, sizeof(delta_l2_b_cnt));
             memset(delta_ft_bias_cnt,   0, sizeof(delta_ft_bias_cnt));
-            memset(delta_piece_val_cnt, 0, sizeof(delta_piece_val_cnt));
             if (delta_psqt_cnt) memset(delta_psqt_cnt, 0, (size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS * sizeof(uint32_t));
         }
     } else {
@@ -2219,29 +1876,11 @@ bool nnue_save_fc_weights(const char *path)
         memset(delta_l2_w_cnt, 0, sizeof(delta_l2_w_cnt));
         memset(delta_l2_b_cnt, 0, sizeof(delta_l2_b_cnt));
         memset(delta_ft_bias_cnt,   0, sizeof(delta_ft_bias_cnt));
-        memset(delta_piece_val_cnt, 0, sizeof(delta_piece_val_cnt));
         if (delta_psqt_cnt) memset(delta_psqt_cnt, 0, (size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS * sizeof(uint32_t));
         if (ft_delta_f32)   memset(ft_delta_f32,   0, (size_t)NNUE_FT_INPUTS * NNUE_HALF_DIMS  * sizeof(float));
         if (psqt_delta_f32) memset(psqt_delta_f32, 0, (size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS * sizeof(float));
         memset(ft_bias_delta,   0, sizeof(ft_bias_delta));
-        memset(delta_piece_val, 0, sizeof(delta_piece_val));
     }
-
-    // ---- Restore PSQT slot-mean gauge after merge ----
-    // The merge above replaced our in-memory shadow with (file_value + pd),
-    // which doesn't preserve the per-slot-aggregate gauge invariant (each
-    // worker's pd has zero slot-total per the per-batch centering, but the
-    // file_value carries whatever gauge state the previous writers left it
-    // in — possibly drifted from accumulated multi-worker merge artifacts).
-    // Re-anchor the slot totals to the persisted init targets before writing,
-    // so the file we emit has gauge-correct dirty rows.  Without this, drift
-    // compounds geometrically across merge cycles and causes catastrophic
-    // piece-value blow-ups (observed: piece_val[Bishop] +515 cp in 571 batches).
-    nnue_recenter_psqt_slot_means();
-
-    // Sync value[] with the (possibly co-worker-updated) piece_val.
-    if (piece_val_active)
-        nnue_extract_piece_values(false);
 
     // ---- Write merged content to a temp file, then atomically rename ----
     char tmp_path[FILENAME_MAX];
@@ -2336,16 +1975,9 @@ bool nnue_save_fc_weights(const char *path)
         fwrite(ft_bias_cnt, sizeof(uint32_t), NNUE_HALF_DIMS, f);
     }
 
-    // Dense piece value section (v9): float32[6] × TDLEAF_SCALE + uint32[6] counts.
-    {
-        float tmp_pv[6];
-        for (int pt = 0; pt < 6; pt++)
-            tmp_pv[pt] = piece_val_f32[pt] * TDLEAF_SCALE;
-        fwrite(tmp_pv,        sizeof(float),    6, f);
-        fwrite(piece_val_cnt, sizeof(uint32_t), 6, f);
-    }
+    // (v12: the dense piece_val weight section was removed.)
 
-    // Adam v section (v6+): t_adam + FC v + FT bias v + piece_val v + sparse PSQT v.
+    // Adam v section (v6+): t_adam + FC v + FT bias v + sparse PSQT v.
     // Raw float32 (no TDLEAF_SCALE — v values are always non-negative and can be
     // large; scaling would lose precision without benefit).
     fwrite(&t_adam, sizeof(uint32_t), 1, f);
@@ -2358,7 +1990,7 @@ bool nnue_save_fc_weights(const char *path)
         fwrite(v_l2_w[s], sizeof(float), NNUE_L2_PADDED, f);
     }
     fwrite(v_ft_bias, sizeof(float), NNUE_HALF_DIMS, f);
-    fwrite(v_piece_val, sizeof(float), 6, f);
+    // (v12: piece_val v removed.)
     // Sparse PSQT v: write v for each dirty row (same dirty-row set as weights).
     {
         uint32_t n_pv_rows = v_psqt_w ? n_ft_rows : 0u;
@@ -2373,7 +2005,7 @@ bool nnue_save_fc_weights(const char *path)
         }
     }
 
-    // Adam m section (v7): FC m + FT bias m + piece_val m + sparse PSQT m.
+    // Adam m section (v7): FC m + FT bias m + sparse PSQT m.
     // Raw float32 (signed; m can be positive or negative).
     for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
         fwrite(m_l0_b[s], sizeof(float), NNUE_L0_SIZE, f);
@@ -2384,7 +2016,7 @@ bool nnue_save_fc_weights(const char *path)
         fwrite(m_l2_w[s], sizeof(float), NNUE_L2_PADDED, f);
     }
     fwrite(m_ft_bias, sizeof(float), NNUE_HALF_DIMS, f);
-    fwrite(m_piece_val, sizeof(float), 6, f);
+    // (v12: piece_val m removed.)
     // Sparse PSQT m: same dirty rows as weights/v.
     {
         uint32_t n_pm_rows = m_psqt_w ? n_ft_rows : 0u;
@@ -2432,20 +2064,7 @@ bool nnue_save_fc_weights(const char *path)
         }
     }
 
-    // v11: PSQT init slot-means (11 slots × NNUE_PSQT_BKTS).  Used by
-    // nnue_recenter_psqt_slot_means() at load time to pin slot-means against
-    // merge drift.  If the in-memory targets are not valid (extremely unusual:
-    // a save called before any init or load populated them), fall back to the
-    // current PSQT slot-means so the file is self-consistent.
-    {
-        float means[11][NNUE_PSQT_BKTS];
-        if (psqt_init_slot_means_valid) {
-            memcpy(means, psqt_init_slot_means, sizeof(means));
-        } else {
-            nnue_compute_psqt_slot_means(means);
-        }
-        fwrite(means, sizeof(float), 11 * NNUE_PSQT_BKTS, f);
-    }
+    // (v12: the v11 PSQT init slot-means block was removed.)
 
     fclose(f);
 
@@ -2502,7 +2121,7 @@ bool nnue_load_fc_weights(const char *path)
     }
 
     // ---- Version 2 / 3 / 4 / 5 / 6 / 7 / 8 / 9 / 10: float32 × TDLEAF_SCALE + uint32 counts ----
-    if (version != 2u && version != 3u && version != 4u && version != 5u && version != 6u && version != 7u && version != 8u && version != 9u && version != 10u && version != TDLEAF_VERSION) {
+    if (version != 2u && version != 3u && version != 4u && version != 5u && version != 6u && version != 7u && version != 8u && version != 9u && version != 10u && version != 11u && version != TDLEAF_VERSION) {
         fprintf(stderr, "TDLeaf: unsupported version %u in %s\n", version, path);
         fclose(f); tdleaf_release_lock(lock_fd); return false;
     }
@@ -2610,34 +2229,17 @@ bool nnue_load_fc_weights(const char *path)
         }
     }
 
-    // Dense piece value section (v5+).
-    // v9+: float32[6] + uint32[6].  v5-v8: float32[6][8] + uint32[6][8] → collapse by avg.
-    if (ok && version >= 5u) {
+    // Dense piece value section (v5-v11 only; removed in v12).
+    // Read and discard to stay byte-aligned when loading an older file.
+    if (ok && version >= 5u && version <= 11u) {
         if (version >= 9u) {
             float tmp_pv[6]; uint32_t tmp_pvc[6];
-            if (fread(tmp_pv,  sizeof(float),    6, f) == 6 &&
-                fread(tmp_pvc, sizeof(uint32_t), 6, f) == 6) {
-                for (int pt = 0; pt < 6; pt++) {
-                    // Clamp ≥ 0: defensive against a corrupted file written
-                    // before the merge-side clamp existed.
-                    piece_val_f32[pt] = std::max(0.0f, tmp_pv[pt] / TDLEAF_SCALE);
-                    piece_val_cnt[pt] = tmp_pvc[pt];
-                }
-                piece_val_active = true;
-            } else { ok = false; }
+            if (fread(tmp_pv,  sizeof(float),    6, f) != 6 ||
+                fread(tmp_pvc, sizeof(uint32_t), 6, f) != 6) ok = false;
         } else {
-            // v5-v8: collapse [6][8] to [6] by averaging.
             float tmp_pv[6][NNUE_PSQT_BKTS]; uint32_t tmp_pvc[6][NNUE_PSQT_BKTS];
-            if (fread(tmp_pv,  sizeof(float),    6*NNUE_PSQT_BKTS, f) == (size_t)(6*NNUE_PSQT_BKTS) &&
-                fread(tmp_pvc, sizeof(uint32_t), 6*NNUE_PSQT_BKTS, f) == (size_t)(6*NNUE_PSQT_BKTS)) {
-                for (int pt = 0; pt < 6; pt++) {
-                    float sum = 0.0f; uint32_t cnt_sum = 0;
-                    for (int b = 0; b < NNUE_PSQT_BKTS; b++) { sum += tmp_pv[pt][b]; cnt_sum += tmp_pvc[pt][b]; }
-                    piece_val_f32[pt] = std::max(0.0f, sum / NNUE_PSQT_BKTS / TDLEAF_SCALE);
-                    piece_val_cnt[pt] = cnt_sum / NNUE_PSQT_BKTS;
-                }
-                piece_val_active = true;
-            } else { ok = false; }
+            if (fread(tmp_pv,  sizeof(float),    6*NNUE_PSQT_BKTS, f) != (size_t)(6*NNUE_PSQT_BKTS) ||
+                fread(tmp_pvc, sizeof(uint32_t), 6*NNUE_PSQT_BKTS, f) != (size_t)(6*NNUE_PSQT_BKTS)) ok = false;
         }
     }
 
@@ -2660,19 +2262,11 @@ bool nnue_load_fc_weights(const char *path)
                    && rf(v_l2_w[s], NNUE_L2_PADDED);
             }
             if (vok) vok = rf(v_ft_bias, NNUE_HALF_DIMS);
-            if (vok) {
-                if (version >= 9u) {
-                    vok = rf(v_piece_val, 6);
-                } else {
-                    // v6-v8: 48 floats → take max per piece type.
-                    float tmp_v8[6][NNUE_PSQT_BKTS];
-                    vok = rf(&tmp_v8[0][0], 6 * NNUE_PSQT_BKTS);
-                    if (vok) for (int pt = 0; pt < 6; pt++) {
-                        float mx = 0.0f;
-                        for (int b = 0; b < NNUE_PSQT_BKTS; b++) if (tmp_v8[pt][b] > mx) mx = tmp_v8[pt][b];
-                        v_piece_val[pt] = mx;
-                    }
-                }
+            // piece_val v (v6-v11 only; removed in v12) — read and discard.
+            if (vok && version <= 11u) {
+                int n_pv = (version >= 9u) ? 6 : 6 * NNUE_PSQT_BKTS;
+                float tmp[6 * NNUE_PSQT_BKTS];
+                vok = rf(tmp, n_pv);
             }
             // Sparse PSQT v.
             uint32_t n_pv_rows = 0;
@@ -2708,19 +2302,11 @@ bool nnue_load_fc_weights(const char *path)
                && rf(m_l2_w[s], NNUE_L2_PADDED);
         }
         if (mok) mok = rf(m_ft_bias, NNUE_HALF_DIMS);
-        if (mok) {
-            if (version >= 9u) {
-                mok = rf(m_piece_val, 6);
-            } else {
-                // v7-v8: 48 floats → average per piece type.
-                float tmp_m8[6][NNUE_PSQT_BKTS];
-                mok = rf(&tmp_m8[0][0], 6 * NNUE_PSQT_BKTS);
-                if (mok) for (int pt = 0; pt < 6; pt++) {
-                    float avg = 0.0f;
-                    for (int b = 0; b < NNUE_PSQT_BKTS; b++) avg += tmp_m8[pt][b];
-                    m_piece_val[pt] = avg / NNUE_PSQT_BKTS;
-                }
-            }
+        // piece_val m (v7-v11 only; removed in v12) — read and discard.
+        if (mok && version <= 11u) {
+            int n_pm = (version >= 9u) ? 6 : 6 * NNUE_PSQT_BKTS;
+            float tmp[6 * NNUE_PSQT_BKTS];
+            mok = rf(tmp, n_pm);
         }
         // Sparse PSQT m.
         uint32_t n_pm_rows = 0;
@@ -2757,20 +2343,10 @@ bool nnue_load_fc_weights(const char *path)
         // Non-fatal if FT v section is truncated; unloaded rows use t_ft_session bc2.
     }
 
-    // v11: PSQT init slot-means used by nnue_recenter_psqt_slot_means().
-    // Pre-v11 files have no targets stored — fall back to a snapshot of the
-    // currently loaded PSQT slot-means (locks in whatever drift the older file
-    // carried; subsequent training preserves that anchor and prevents further
-    // drift).  Re-init via --init-nnue is the clean way to reset the targets.
-    bool slot_means_loaded = false;
-    if (ok && version >= 11u) {
+    // v11 PSQT init slot-means block (removed in v12) — read and discard.
+    if (ok && version == 11u) {
         float means[11][NNUE_PSQT_BKTS];
-        if (fread(means, sizeof(float), 11 * NNUE_PSQT_BKTS, f)
-            == (size_t)(11 * NNUE_PSQT_BKTS)) {
-            memcpy(psqt_init_slot_means, means, sizeof(means));
-            psqt_init_slot_means_valid = true;
-            slot_means_loaded = true;
-        }
+        (void)fread(means, sizeof(float), 11 * NNUE_PSQT_BKTS, f);
     }
 
     fclose(f);
@@ -2799,53 +2375,23 @@ bool nnue_load_fc_weights(const char *path)
     memset(delta_l2_w_cnt, 0, sizeof(delta_l2_w_cnt));
     memset(delta_l2_b_cnt, 0, sizeof(delta_l2_b_cnt));
     memset(delta_ft_bias_cnt,   0, sizeof(delta_ft_bias_cnt));
-    memset(delta_piece_val_cnt, 0, sizeof(delta_piece_val_cnt));
     if (delta_psqt_cnt) memset(delta_psqt_cnt, 0, (size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS * sizeof(uint32_t));
     if (ft_delta_f32)   memset(ft_delta_f32,   0, (size_t)NNUE_FT_INPUTS * NNUE_HALF_DIMS  * sizeof(float));
     if (psqt_delta_f32) memset(psqt_delta_f32, 0, (size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS * sizeof(float));
     memset(grad_ft_bias,    0, sizeof(grad_ft_bias));
     memset(ft_bias_delta,   0, sizeof(ft_bias_delta));
-    memset(grad_piece_val,  0, sizeof(grad_piece_val));
-    memset(delta_piece_val, 0, sizeof(delta_piece_val));
     // ft_bias_cnt and ft_biases_f32 are populated from file in v4+; leave them.
     // For v2/v3 files, ft_biases_f32 was already initialised by nnue_init_fp32_weights.
     nnue_requantize_fc();
 
-    // Pin PSQT slot-means to the persisted target after merging-in this file's
-    // dirty rows.  For pre-v11 files (no targets persisted), snapshot the
-    // current slot-means here as the going-forward anchor; this preserves the
-    // loaded state but prevents future drift.
-    if (!slot_means_loaded)
-        nnue_capture_psqt_init_slot_means();
-    nnue_recenter_psqt_slot_means();
-
     if (version == TDLEAF_VERSION)
-        printf("TDLeaf: loaded v%u weights from %s (%d FT rows, %d FT-v rows, piece_val=%s, adam_v=%s, adam_m=%s, t_adam=%u, content_hash=0x%08X)\n",
-               TDLEAF_VERSION, path, n_ft_loaded, n_ft_v_loaded, piece_val_active ? "yes" : "no",
+        printf("TDLeaf: loaded v%u weights from %s (%d FT rows, %d FT-v rows, adam_v=%s, adam_m=%s, t_adam=%u, content_hash=0x%08X)\n",
+               TDLEAF_VERSION, path, n_ft_loaded, n_ft_v_loaded,
                adam_v_loaded ? "yes" : "no", adam_m_loaded ? "yes" : "no", t_adam, nnue_content_hash);
-    else if (version == 10u)
-        printf("TDLeaf: loaded v10 weights from %s (%d FT rows, %d FT-v rows, piece_val=%s, adam_v=%s, adam_m=%s, t_adam=%u, will upgrade to v%u on next save — slot-mean targets snapshotted from loaded state)\n",
-               path, n_ft_loaded, n_ft_v_loaded, piece_val_active ? "yes" : "no",
+    else if (version >= 5u)
+        printf("TDLeaf: loaded v%u weights from %s (%d FT rows, adam_v=%s, adam_m=%s, t_adam=%u, will upgrade to v%u on next save — piece_val/slot-mean fields discarded)\n",
+               version, path, n_ft_loaded,
                adam_v_loaded ? "yes" : "no", adam_m_loaded ? "yes" : "no", t_adam, TDLEAF_VERSION);
-    else if (version == 9u)
-        printf("TDLeaf: loaded v9 weights from %s (%d FT rows, %d FT-v rows, piece_val=%s, adam_v=%s, adam_m=%s, t_adam=%u, will upgrade to v%u on next save)\n",
-               path, n_ft_loaded, n_ft_v_loaded, piece_val_active ? "yes" : "no",
-               adam_v_loaded ? "yes" : "no", adam_m_loaded ? "yes" : "no", t_adam, TDLEAF_VERSION);
-    else if (version == 8u)
-        printf("TDLeaf: loaded v8 weights from %s (%d FT rows, piece_val=%s, adam_v=%s, adam_m=%s, t_adam=%u, will upgrade to v%u on next save)\n",
-               path, n_ft_loaded, piece_val_active ? "yes" : "no",
-               adam_v_loaded ? "yes" : "no", adam_m_loaded ? "yes" : "no", t_adam, TDLEAF_VERSION);
-    else if (version == 7u)
-        printf("TDLeaf: loaded v7 weights from %s (%d FT rows, piece_val=%s, adam_v=%s, adam_m=%s, t_adam=%u, will upgrade to v%u on next save)\n",
-               path, n_ft_loaded, piece_val_active ? "yes" : "no",
-               adam_v_loaded ? "yes" : "no", adam_m_loaded ? "yes" : "no", t_adam, TDLEAF_VERSION);
-    else if (version == 6u)
-        printf("TDLeaf: loaded v6 weights from %s (%d FT rows, piece_val=%s, adam_v=%s, will upgrade to v%u on next save)\n",
-               path, n_ft_loaded, piece_val_active ? "yes" : "no",
-               adam_v_loaded ? "yes" : "no", TDLEAF_VERSION);
-    else if (version == 5u)
-        printf("TDLeaf: loaded v5 weights from %s (%d FT rows, piece_val=%s, will upgrade to v%u on next save)\n",
-               path, n_ft_loaded, piece_val_active ? "yes" : "no", TDLEAF_VERSION);
     else if (version == 4u)
         printf("TDLeaf: loaded v4 weights from %s (%d FT rows, will upgrade to v%u on next save)\n",
                path, n_ft_loaded, TDLEAF_VERSION);
@@ -2855,26 +2401,6 @@ bool nnue_load_fc_weights(const char *path)
     else
         printf("TDLeaf: loaded v2 FC weights from %s (will upgrade to v%u on next save)\n", path, TDLEAF_VERSION);
     return true;
-}
-
-// ---------------------------------------------------------------------------
-// nnue_dense_piece_val — dense piece value contribution (centipawns, stm POV)
-//
-// Computes Σ_pt piece_val[pt] × (stm_count[pt] − opp_count[pt]),
-// converted to centipawns via the same (pv_diff/2) × 100/5776 formula as PSQT.
-// Returns 0 if piece_val is uninitialised (pre-existing .nnue without .tdleaf.bin).
-// ---------------------------------------------------------------------------
-int nnue_dense_piece_val(const position &pos, int stm, int piece_count)
-{
-    (void)piece_count;
-    if (!piece_val_active) return 0;
-    int32_t pv_diff = 0;
-    for (int pt = PAWN; pt <= QUEEN; pt++) {
-        int diff = pos.plist[stm][pt][0] - pos.plist[stm ^ 1][pt][0];
-        if (diff != 0)
-            pv_diff += (int32_t)roundf(piece_val_f32[pt - 1]) * diff;
-    }
-    return (int)((int64_t)(pv_diff / 2) * 100 / 5776);
 }
 
 // ---------------------------------------------------------------------------
