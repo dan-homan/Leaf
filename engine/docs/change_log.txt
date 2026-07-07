@@ -1,5 +1,27 @@
 Changes since 2017_12_24
 
+2026_07_07 -- Phase B: deleted the gauge machinery and cut .tdleaf.bin format
+               v12.  Pure-PSQT is now the only mode.  Removed the dense
+               piece_val training channel (eval term, gradient, Adam moments,
+               >=0 clamp, TDLEAF_LR_PV), the gauge machinery (gradient
+               mean-centering, post-Adam dw centering, slot-mean recentering
+               + persisted slot-means, pawn pin), and the flags
+               TDLEAF_PURE_PSQT / TDLEAF_FREEZE_PSQT / TDLEAF_FREEZE_MATERIAL
+               (net -585 lines).  Format v12 drops the piece_val weight
+               section, piece_val Adam v/m, and the v11 slot-means block;
+               loader accepts v2-v11 (reads+discards dropped bytes) and v12,
+               writer emits v12.  scripts/compare_nnue_learning.py and
+               merge_tdleaf.py handle v12 (engine<->script layout verified
+               byte-identical).  --init-nnue now refuses if the companion
+               .tdleaf.bin exists (avoids merge-saving a fresh init over a
+               trained file).  Drift canary added to hybrid_loop.py: logs
+               extracted piece values at the online checkpoint, warns if pawn
+               leaves [85,130] cp (report-only; no scale regularizer — the
+               scale is loss-anchored by TDLEAF_K, and TDLEAF_SCORE_CLIP_PAWNS
+               stays 100 cp under NNUE_FIXED_PIECE_VALUES).  Validated: static
+               eval bit-identical (piece_val removal is a no-op), v11 load +
+               v12 round-trip, fresh init emits v12, training advances.
+
 2026_07_07 -- Mainstreamed pure-PSQT as the TDLeaf material recipe (Phase A
                of docs/MAINSTREAM_PLAN.md).  Merged the frozen-psqt branch:
                the bucketed PSQT is now the SOLE trainable material channel

@@ -114,6 +114,31 @@ def tdleaf_content_hash(path):
         return None
 
 
+def piece_value_canary(binary, cwd, label):
+    """Drift canary for pure-PSQT: run BINARY (which loads its .nnue + .tdleaf.bin
+    companion) and log the extracted PSQT piece values.  Warns loudly if the
+    extracted pawn value leaves [85, 130] cp — the pure-PSQT material scale is
+    only loss-anchored, so slow drift is expected but a large excursion signals
+    the outcome-imbalance pathology (see docs/TDLEAF.md).  Report-only under
+    NNUE_FIXED_PIECE_VALUES; never constrains training."""
+    try:
+        out = subprocess.run([f"./{binary}"], cwd=str(cwd), input="quit\n",
+                             capture_output=True, text=True, timeout=60).stdout
+    except (OSError, subprocess.SubprocessError) as e:
+        log(f"piece-value canary ({label}): could not run {binary}: {e}")
+        return
+    m = re.search(r"piece values from PSQT[^:]*: "
+                  r"P=(-?\d+) N=(-?\d+) B=(-?\d+) R=(-?\d+) Q=(-?\d+) cp", out)
+    if not m:
+        log(f"piece-value canary ({label}): banner not found")
+        return
+    p, n, b, r, q = (int(x) for x in m.groups())
+    log(f"piece-value canary ({label}): P={p} N={n} B={b} R={r} Q={q} cp")
+    if not (85 <= p <= 130):
+        log(f"  *** WARNING: extracted pawn {p} cp is outside [85, 130] — "
+            f"possible material-scale drift; investigate before trusting this net ***")
+
+
 def pgn_score(pgn_path, name_substr):
     """W/L/D and Elo for the engine whose name contains name_substr."""
     W = L = D = 0
@@ -276,6 +301,9 @@ def main():
         ckpt = LEARN_DIR / f"{netbase}.tdleaf.bin-{args.tag}-online"
         log(f"checkpointing post-generation state -> {ckpt.name}")
         shutil.copy2(live_td, ckpt)
+
+        # Drift canary: Leaf_vtrain_hl_a loads the just-checkpointed live state.
+        piece_value_canary("Leaf_vtrain_hl_a", LEARN_DIR, f"{args.tag}-online")
 
         dump_files = sorted(work.glob(f"{args.tag}.*.tsv"))
         if not dump_files:
