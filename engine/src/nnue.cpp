@@ -841,14 +841,19 @@ void nnue_extract_piece_values(bool verbose)
         cnt[ps_slot] += NNUE_PSQT_BKTS;
     }
 
+    int ext[5] = {};                      // extracted cp per piece (diagnostic)
     for (int pt = 0; pt < 5; pt++) {      // pt 0-4 → PAWN-QUEEN → value[1-5]
         if (cnt[pt] == 0) continue;
         int cp = (int)round(sum[pt] / cnt[pt] * 100.0 / 5776.0);
         if (cp < 1) cp = 1;              // never allow non-positive piece values in search
+        ext[pt] = cp;
+#if !NNUE_FIXED_PIECE_VALUES
         value[pt + 1] = cp;
+#endif
     }
 
     if (verbose)
-        printf("NNUE: piece values from PSQT: P=%d N=%d B=%d R=%d Q=%d cp\n",
-               value[1], value[2], value[3], value[4], value[5]);
+        printf("NNUE: piece values from PSQT%s: P=%d N=%d B=%d R=%d Q=%d cp\n",
+               NNUE_FIXED_PIECE_VALUES ? " (report only; search uses classical)" : "",
+               ext[0], ext[1], ext[2], ext[3], ext[4]);
 }

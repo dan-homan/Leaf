@@ -66,6 +66,16 @@
  #define NNUE_TDLEAF_BIN "nn-leaf-260414.tdleaf.bin"
 #endif
 
+// Fixed classical piece values for search: when 1, nnue_extract_piece_values()
+// reports the net's implied material values but does NOT overwrite value[] —
+// SEE, pruning margins, and TDLEAF_SCORE_CLIP keep the classical constants
+// from score.h regardless of the net's internal eval scale.  Decouples search
+// calibration from eval-scale drift (pure-PSQT experiment; Stockfish does the
+// equivalent with fixed SEE constants).
+#ifndef NNUE_FIXED_PIECE_VALUES
+ #define NNUE_FIXED_PIECE_VALUES 1
+#endif
+
 // Embed the .nnue file directly into the binary (via incbin).
 // Compile with -D NNUE_EMBED=1; also requires NNUE_NET_PATH to be set.
 #ifndef NNUE_EMBED

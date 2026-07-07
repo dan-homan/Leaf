@@ -146,6 +146,34 @@ static const float TDLEAF_ADAM_PV_LR0      = 13.0f;   // dense piece values (int
 // affects downstream code that consumes it as cp (SEE, endgame draw detection,
 // UCI score display, this file's SCORE_CLIP_PAWNS multiplier).
 static const bool  TDLEAF_PIN_PAWN_VALUE = true;
+// Freeze the PSQT channel: PSQT weights receive no training updates
+// (gradients are not accumulated, Adam steps are skipped, mean-centering /
+// slot-mean recentering become no-ops).  The PSQT channel becomes a fixed
+// material + piece-square prior (set at --init-nnue time; use
+// --init-nnue-classical so it matches the classical eval and the search
+// constants in value[]).  piece_val REMAINS TRAINABLE (with the PAWN pin
+// above): it is the designated dense absorber for the aggregate
+// material-level / outcome-scale gradient component.  The 500k-game
+// frozen-everything experiment (2026-07-05) showed that freezing piece_val
+// too leaves that pressure with no linear sink — it leaks into the FC
+// stacks and biases, blowing out per-bucket output scale (won endgames
+// evaluated at +40 pawns) and costing ~200+ Elo vs the unfrozen reference.
+// With PSQT frozen there is no PSQT/piece_val redundancy, so the gauge is
+// identifiable via the pawn pin alone and the whole mean-centering /
+// post-Adam recentering / persisted slot-means apparatus stays retired.
+static const bool  TDLEAF_FREEZE_PSQT = false;
+// Pure-PSQT experiment (2026-07-06): ONE trainable material channel.
+// piece_val receives no training updates (stays 0 on a fresh net, so it
+// contributes nothing to the eval), gradient mean-centering, post-Adam dw
+// centering, and slot-mean recentering are all disabled, and the PAWN pin
+// is moot.  With no redundant second channel there is no gauge null
+// direction for the multi-writer merge to amplify; the absolute eval scale
+// is anchored by the outcome term through TDLEAF_K (outcome-dominated
+// lambda-return targets force sigmoid(v/K) to match empirical win rates).
+// Search is decoupled from the eval scale: NNUE_FIXED_PIECE_VALUES in
+// define.h keeps value[] at the classical constants, so SEE, pruning
+// margins, and TDLEAF_SCORE_CLIP cannot be perturbed by scale drift.
+static const bool  TDLEAF_PURE_PSQT = true;
 static const float TDLEAF_ADAM_BETA1    = 0.9f;    // first-moment decay  (FC + FT bias + PSQT)
 static const float TDLEAF_ADAM_BETA2    = 0.999f;  // second-moment decay (all layers)
 static const float TDLEAF_ADAM_EPS      = 1e-8f;   // numerical floor
