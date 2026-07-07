@@ -1,5 +1,31 @@
 Changes since 2017_12_24
 
+2026_07_07 -- Mainstreamed pure-PSQT as the TDLeaf material recipe (Phase A
+               of docs/MAINSTREAM_PLAN.md).  Merged the frozen-psqt branch:
+               the bucketed PSQT is now the SOLE trainable material channel
+               (TDLEAF_PURE_PSQT=true), piece_val and the gauge machinery
+               (pawn pin, gradient mean-centering, Pass-2 dw centering,
+               slot-mean recentering) are gated off, and search keeps fixed
+               classical piece values (NNUE_FIXED_PIECE_VALUES=1; extracted
+               PSQT values are report-only).  One material channel = no
+               gauge null direction = nothing for the multi-writer merge to
+               amplify; absolute scale is loss-anchored by TDLEAF_K=220.
+               Validated with an 8000-game two-concurrent-writer merge smoke
+               test (the path 500k single-lineage never exercised): extracted
+               pawn pinned at 100 cp across all merge cycles, FC bias means
+               converged/plateaued, PSQT per-cycle movement collapsed toward
+               zero -- no accelerating drift, so the merge path needs no
+               restored centering.  DO NOT freeze PSQT: phases 1/1b (freeze
+               PSQT +/- piece_val) failed ~-200 Elo because outcome-scaling
+               pressure is phase-dependent per bucket and only the bucketed
+               PSQT can absorb it linearly (piece_val is bucket-independent);
+               with PSQT frozen the pressure blows out the int8 FC output
+               scale.  Docs: TDLEAF.md gains an "Evaluation Gauge --
+               Pure-PSQT" section, the piece_val/gauge sections marked
+               HISTORICAL/INACTIVE; engine CLAUDE.md updated.  Code deletion
+               of the dormant machinery + .tdleaf.bin v12 is deferred to
+               Phase B.
+
 2026_07_05 -- Fixed stack buffer overflow in book.cpp: both opening_book()
                and the main-book function declared local char book_file[100]
                but strcpy exec_path + book name into it.  With the engine

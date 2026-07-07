@@ -19,8 +19,10 @@ Manual workflow:
 # 1. Build a training binary
 perl comp.pl train NNUE=1 NNUE_NET=nn-leaf-260414.nnue TDLEAF=1 OVERWRITE
 
-# 2. Initialize a fresh random network (optional — or fine-tune an existing .nnue)
-./Leaf_vtrain --init-nnue --write-nnue nn-fresh.nnue
+# 2. Initialize a fresh network (pure-PSQT recipe: classical material baked into PSQT).
+#    Use --init-nnue-noprior for uniform 100 cp instead.  Delete any stale companion
+#    .tdleaf.bin FIRST — --init-nnue over an existing one merge-saves, not resets.
+./Leaf_vtrain --init-nnue-classical --write-nnue nn-fresh.nnue
 
 # 3. Run self-play matches (from run/ or learn/; UCI + fastchess is the default,
 #    game outcomes reach the learner via UCI self-adjudication)
@@ -60,6 +62,72 @@ All learning code is gated by `#if TDLEAF`; when `TDLEAF=0` (default) no overhea
 Leaf also has a second, **offline** training mode — supervised consolidation of
 quiet-position corpora harvested from played games (`--batch-train`), which forms
 the "hybrid loop" with the online system.  See `OFFLINE_TRAINING.md`.
+
+---
+
+## Evaluation Gauge — Pure-PSQT (Current Recipe)
+
+**The default and recommended material representation is pure-PSQT: a single trainable
+material channel (the bucketed PSQT), with the dense `piece_val` channel and all gauge
+machinery disabled.**  Defaults (`src/tdleaf.h`, `src/define.h`):
+
+- `TDLEAF_PURE_PSQT = true` — `piece_val` is not trained; the bucketed PSQT is the sole
+  material channel.
+- `NNUE_FIXED_PIECE_VALUES 1` — search keeps classical `value[]`
+  (`P=100 N=377 B=399 R=596 Q=1197`).  `nnue_extract_piece_values()` still computes the
+  PSQT-implied values for the startup banner, but **report-only**; it does not overwrite
+  `value[]`.
+
+Seed a run with `--init-nnue-classical` (classical material + phase-interpolated
+piece-square tables baked into PSQT) or `--init-nnue-noprior` (uniform 100 cp).
+
+### Why this is safe without the gauge machinery
+
+The gauge machinery (pin + mean-centering + dw-centering + slot-mean recentering) existed
+because PSQT and `piece_val` **redundantly** encode material level — a gauge null
+direction that the multi-writer merge protocol can amplify geometrically.  Remove
+`piece_val` as a training channel and there is exactly **one** material channel: no null
+direction, nothing for the merge to amplify.  Absolute scale is loss-anchored via
+`TDLEAF_K = 220 cp` under outcome-dominated λ-return targets.
+
+**Validation (multi-writer merge smoke test, 2026-07-07):** the pure run was effectively
+single-lineage, so the one thing 500k games never exercised was the concurrent merge path
+that historically drove gauge blow-ups.  8000 games of two concurrent writers sharing one
+`.tdleaf.bin` (depth 6, balanced self-play) showed the extracted pawn value pinned at
+100 cp across every merge cycle (sub-cp drift, below rounding), FC bias means converging
+and plateauing rather than accumulating, PSQT per-cycle movement collapsing toward zero,
+and `piece_val` staying exactly 0.  No accelerating drift → the merge path needs no
+restored centering.
+
+Measured *cosmetic* drift over long training: extracted pawn 100→107 cp per 500k online
+games (+7 cp more per 4 offline epochs) — slow, and cosmetic because search piece values
+are fixed by `NNUE_FIXED_PIECE_VALUES`.  Note `TDLEAF_SCORE_CLIP_PAWNS` is in units of
+`max(value[PAWN], 100 cp)`; with fixed classical values this stays 100 cp exactly, so the
+clip does **not** stretch as extracted pawn drifts.
+
+### ⚠️ Do NOT freeze PSQT — the phase-1/1b failure mechanism
+
+Freezing PSQT was tested and **fails catastrophically (~−200 Elo)**.  Do not re-attempt it.
+
+- **Phase 1** (freeze PSQT + `piece_val`, all material channels pinned to the classical
+  prior) and **Phase 1b** (freeze PSQT only, `piece_val` trainable with the pawn pin) both
+  collapsed to roughly −200 Elo vs the full-gauge reference.
+- **Mechanism:** the outcome-scaling pressure that TDLeaf applies is **phase-dependent**
+  (it differs per material bucket).  The bucketed PSQT is the only **linear** absorber for
+  it.  `piece_val` cannot substitute — it is bucket-**independent** (one value per piece
+  type, no phase dependence), which phase-1b proved directly.  With PSQT frozen, the
+  pressure instead routes through the int8-clipped FC stacks and blows out per-bucket
+  output scale (a won KQP-vs-K endgame evaluated +4033 cp vs the reference +1286 cp;
+  gauntlet draw rates collapsed).
+- The takeaway that makes pure-PSQT work is the same one that makes freezing fail: the
+  bucketed PSQT must stay **free** so it can absorb phase-dependent outcome scaling.
+  Pure-PSQT keeps it free and simply removes the *redundant* second channel.
+
+> The gauge machinery described under [Dense Piece Values](#dense-piece-values) and
+> [Evaluation Anchoring (Gauge Fix)](#evaluation-anchoring-gauge-fix) below is retained in
+> the code but **inactive** under the pure-PSQT default (gated off by `TDLEAF_PURE_PSQT`).
+> It is documented there for historical context and is slated for removal in a planned
+> cleanup (see `docs/MAINSTREAM_PLAN.md`, Phase B).
 
 ---
 
@@ -132,6 +200,12 @@ game vs ~8 per 5000 games for sparse PSQT features.  See
 ---
 
 ## Dense Piece Values
+
+> **HISTORICAL / INACTIVE under the pure-PSQT default.**  The dense `piece_val` channel
+> and its gauge machinery are gated off by `TDLEAF_PURE_PSQT = true` (see
+> [Evaluation Gauge — Pure-PSQT](#evaluation-gauge--pure-psqt-current-recipe)).  This
+> section documents how the second material channel worked and why it needed anchoring;
+> it is kept for context and is slated for removal (`docs/MAINSTREAM_PLAN.md`, Phase B).
 
 ### Motivation
 
@@ -210,6 +284,13 @@ when the gradient turns constructive) — negative piece values invert material
 evaluation and create an unrecoverable death spiral.
 
 ### Evaluation Anchoring (Gauge Fix)
+
+> **HISTORICAL / INACTIVE under the pure-PSQT default.**  Every mechanism in this
+> subsection (pawn pin, gradient mean-centering, post-Adam dw centering, persisted
+> slot-mean re-centering) is gated off when `TDLEAF_PURE_PSQT = true`.  With a single
+> material channel there is no gauge null direction to fix.  Retained for context; see
+> [Evaluation Gauge — Pure-PSQT](#evaluation-gauge--pure-psqt-current-recipe) for why it
+> is no longer needed and `docs/MAINSTREAM_PLAN.md` Phase B for removal.
 
 Both PSQT and `piece_val` can encode material-scale corrections, and `TDLEAF_K = 220 cp`
 is the only term in the loss that fixes the absolute score scale — so without
