@@ -19,6 +19,10 @@ scripts/*
 !CLAUDE.md
 engine/.DS_Store
 
+# Local-only, machine-specific (not tracked)
+engine/.claude/settings.local.json
+engine/config.json
+
 # Within engine/run/, only track scripts, config, and the opening book (not binaries)
 engine/run/*
 !engine/run/*.py
