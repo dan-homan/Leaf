@@ -117,6 +117,7 @@ void tdleaf_record_ply(TDGameRecord &rec,
     r.score_stm         = leaf_score_stm;
     r.score_root_stm    = score_root_stm;   // engine-POV root score (cp) for adjudication
     r.wtm               = leaf_wtm;
+    r.root_wtm          = (bool)root_pos.wtm;  // per-record root STM (POV for the dump)
     r.stack             = (pc - 1) / 4;
     r.id_score_variance = id_var;
     r.pos               = cur;  // store leaf position for Flavor A replay
@@ -314,12 +315,14 @@ static void tdleaf_dump_game(const TDGameRecord &rec, float result)
     if (!leaf_f && !root_f) return;
 
     dump_gid++;
-    int root_wtm = (int)rec.engine_color;   // root STM == engine color at every recorded ply
     const char *res_str = (result > 0.75f) ? "1" : (result < 0.25f) ? "0" : "0.5";
     char fen[110];
 
     for (int t = 0; t < rec.n_plies; t++) {
         const TDRecord &r = rec.plies[t];
+        // Per-record root STM.  In harness mode this equals rec.engine_color for
+        // every record; under internal self-play it alternates.
+        int root_wtm = (int)r.root_wtm;
 
         // ---- Leaf row: static-eval label, depth 0 (outcome-only) ---------
         if (leaf_f) {

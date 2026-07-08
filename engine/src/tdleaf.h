@@ -158,6 +158,10 @@ struct TDRecord {
                                         // TDLeaf gradients (those use score_stm at leaf).
     int     stack;                     // layer stack index used (piece_count-1)/4
     bool    wtm;                       // White to move at the leaf position
+    bool    root_wtm;                  // White to move at the ROOT (recorded) position.
+                                        // In harness mode == engine_color for every
+                                        // record; per-record (alternates) under internal
+                                        // self-play.  Used by the TSV dump for POV.
     float   id_score_variance;         // variance of last N ID depth scores (cp²); 0 if < 2 depths
     // Active feature indices at the leaf position (indexed by actual perspective 0=BLACK,1=WHITE).
     // Used for FT and PSQT gradient backprop.
