@@ -1,5 +1,13 @@
 Changes since 2017_12_24
 
+2026_07_08 -- hybrid_loop.py: --init-nnue [material|classical|noprior] Phase 0.
+               Creates a fresh --net and its companion .tdleaf.bin from scratch
+               (via the trainer binary's --init-nnue* / --write-nnue path) before
+               generation, turning the script into a complete start-to-finish
+               training pipeline (init -> online self-play -> consolidate ->
+               gauntlet).  Bare flag = material prior; refuses to clobber an
+               existing net; incompatible with --state.
+
 2026_07_08 -- Batch trainer: within-batch thread parallelism (--bt-threads N),
                and removal of the failed multi-process --bt-sync sharding.
                Each batch's positions are split contiguously across N worker

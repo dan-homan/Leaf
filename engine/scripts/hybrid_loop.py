@@ -44,6 +44,13 @@ point and continue learning" cases:
   Generate-only (online games + corpus dump, no offline training):
     python3 hybrid_loop.py --tag gen3 --games 200000 --depth 8 --skip-train
 
+  Start-to-finish from scratch (--init-nnue creates --net + its companion
+  .tdleaf.bin, then the same generate -> consolidate -> gauntlet pipeline runs;
+  prior = material|classical|noprior, bare flag = material):
+    python3 hybrid_loop.py --tag scratch --net nn-scratch.nnue \
+        --init-nnue --games 400000 --depth 8 --bt-threads 8 \
+        --gauntlet Leaf_vclassic_eval
+
 Run from engine/learn/.  Artifacts land in learn/:
     <netbase>.tdleaf.bin-pre<tag>      backup of the live state (if --state)
     <netbase>.tdleaf.bin-<tag>-online  post-generation online checkpoint
@@ -211,6 +218,14 @@ def main():
                     help="Iteration name (prefixes all artifacts)")
     ap.add_argument("--net", default="nn-fresh-260628.nnue",
                     help="Base .nnue in learn/ (default nn-fresh-260628.nnue)")
+    ap.add_argument("--init-nnue", nargs="?", const="material", default=None,
+                    choices=["material", "classical", "noprior"],
+                    help="Initialise a fresh --net (and its companion .tdleaf.bin) "
+                         "before generating — turns this into a start-to-finish run. "
+                         "'material' (bare flag default) = classical material-only "
+                         "PSQT prior; 'classical' = material + phase-interpolated "
+                         "piece-square tables; 'noprior' = uniform 100 cp PSQT "
+                         "(materially blind). Fails if --net already exists.")
     ap.add_argument("--state", default=None,
                     help="Promote this .tdleaf.bin to the live training state "
                          "before generating (default: keep the live state)")
@@ -273,8 +288,6 @@ def main():
                 "(the first is used for the epoch ladder)")
 
     net_path = LEARN_DIR / args.net
-    if not net_path.is_file():
-        die(f"base net not found: {net_path}")
     netbase = args.net[:-5] if args.net.endswith(".nnue") else args.net
     live_td = LEARN_DIR / f"{netbase}.tdleaf.bin"
 
@@ -282,6 +295,34 @@ def main():
     if work.exists() and not args.force:
         die(f"{work} exists — use --force to reuse it")
     work.mkdir(exist_ok=True)
+
+    # ---- Phase 0: initialise a fresh network -----------------------------
+    # Turns the loop into a start-to-finish run: create --net (+ its companion
+    # .tdleaf.bin, which becomes the live training state) from scratch, then fall
+    # through into online generation exactly as if the net had been provided.
+    if args.init_nnue:
+        if args.state:
+            die("--init-nnue creates a fresh training state; don't also pass --state")
+        # Refuse to clobber existing artifacts.  The engine's --init-nnue also
+        # refuses to merge-save over an existing companion, but a pre-existing
+        # .nnue would be silently overwritten, so guard both here.
+        if net_path.is_file() or live_td.is_file():
+            die(f"--init-nnue would overwrite existing {net_path.name} or "
+                f"{live_td.name} — remove them first")
+        # Any TDLeaf binary can init; reuse the trainer binary (compiled against
+        # --net, but --init-nnue writes a fresh net rather than reading one, so
+        # the not-yet-existing net file is fine at compile time without EMBED).
+        init_bin = compile_binary("bt", args.net, tdleaf=True, force=args.recompile)
+        flag = {"material":  "--init-nnue",
+                "classical": "--init-nnue-classical",
+                "noprior":   "--init-nnue-noprior"}[args.init_nnue]
+        log(f"initialising fresh net {net_path.name} (prior={args.init_nnue})")
+        sh([f"./{init_bin.name}", flag, "--write-nnue", net_path], cwd=RUN_DIR)
+        if not net_path.is_file() or not live_td.is_file():
+            die(f"--init-nnue did not produce {net_path.name} + {live_td.name}")
+
+    if not net_path.is_file():
+        die(f"base net not found: {net_path}")
 
     # ---- Binaries --------------------------------------------------------
     bt_bin = compile_binary("bt", args.net, tdleaf=True, force=args.recompile)
