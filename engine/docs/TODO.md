@@ -6,6 +6,34 @@ Planned investigations, improvements, and open questions.
 
 ## TDLeaf(λ) Training
 
+### Internal self-play — Phases D & E (deferred; tackle together)
+
+**Full spec:** `docs/MAINSTREAM_PLAN.md` (Phases D and E).  Original design:
+`~/.claude/projects/-Users-homand-Leaf/memory/single-process-selfplay-tdleaf-plan.md`.
+
+Phases A–C of that roadmap are **done** (pure-PSQT mainstreamed + format v12; the
+gauge machinery deleted; per-record STM + game-ply λ^Δ landed and gated in the
+two-process harness).  The remaining phases are the payoff — the first code that
+actually exercises the alternating-STM / `dply=1` paths C1/C2 built:
+
+- **Phase D — internal self-play (single board).**  One process plays whole games
+  against itself, records *every* ply (per-record STM, `dply=1`), and learns at
+  game end.  Benefits: 1-ply TD bootstrapping, true full-game traces, ½ the
+  processes, own the result (clean mate/rep/50-move detection, no
+  `tdleaf_self_adjudicate`), maximal outcome symmetry, and it retires the
+  FT-session-warmup-per-invocation trap.  **Decisive gate D2 first:** run internal
+  mode WITHOUT decorrelation and measure the |TD error| distribution +
+  bootstrap-vs-outcome split vs the two-process baseline — that decides whether
+  the TT salt (D3) is needed at all before spending the 500k rig (D4).
+
+- **Phase E — multi-board (contingent).**  N games in one process, one Adam
+  stream, retiring the multi-writer `.tdleaf.bin` merge protocol entirely.  Gated
+  on a bounded globals audit first (`GameContext` refactor feasibility).
+
+Reuse: `tdleaf_record_ply` (now takes per-record STM + `game_ply`),
+`tdleaf_update_after_game`, opening EPDs, and (for N processes) the merge
+protocol.  See MAINSTREAM_PLAN.md for the exact gates and sequencing.
+
 ### UPDATE 2026-07-02 — hybrid loop supersedes pure-online strategies
 
 The offline-consolidation work (see `OFFLINE_TRAINING.md`) changed the training
