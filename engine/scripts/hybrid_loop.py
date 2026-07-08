@@ -259,23 +259,29 @@ def main():
         state = Path(args.state)
         if not state.is_file():
             die(f"--state not found: {state}")
-        # Pairing pre-flight: the state must have been trained against the
-        # SAME base .nnue (--net).  The engine refuses a mismatched pair at
-        # load but then falls back to the raw .nnue and keeps running — this
-        # check fails loudly up front instead.  Compared via the v10 content
-        # hash stored in the live (known-paired) .tdleaf.bin.
-        sh_state = tdleaf_content_hash(state)
-        sh_live  = tdleaf_content_hash(live_td) if live_td.is_file() else None
-        if sh_state is not None and sh_live is not None and sh_state != sh_live:
-            die(f"--state {state} was trained against a different base .nnue "
-                f"(state hash 0x{sh_state:08X} != live 0x{sh_live:08X} for "
-                f"{args.net}).  Wrong --net or wrong --state.")
-        if live_td.is_file():
-            backup = LEARN_DIR / f"{netbase}.tdleaf.bin-pre{args.tag}"
-            log(f"backing up live state -> {backup.name}")
-            shutil.copy2(live_td, backup)
-        log(f"promoting {state} -> {live_td.name}")
-        shutil.copy2(state, live_td)
+        # If --state already IS the live companion, it's already promoted — skip
+        # the copy (shutil.copy2 raises SameFileError on a self-copy).
+        if state.resolve() == live_td.resolve():
+            log(f"--state is already the live state ({live_td.name}) — "
+                f"starting from it as-is")
+        else:
+            # Pairing pre-flight: the state must have been trained against the
+            # SAME base .nnue (--net).  The engine refuses a mismatched pair at
+            # load but then falls back to the raw .nnue and keeps running — this
+            # check fails loudly up front instead.  Compared via the v10 content
+            # hash stored in the live (known-paired) .tdleaf.bin.
+            sh_state = tdleaf_content_hash(state)
+            sh_live  = tdleaf_content_hash(live_td) if live_td.is_file() else None
+            if sh_state is not None and sh_live is not None and sh_state != sh_live:
+                die(f"--state {state} was trained against a different base .nnue "
+                    f"(state hash 0x{sh_state:08X} != live 0x{sh_live:08X} for "
+                    f"{args.net}).  Wrong --net or wrong --state.")
+            if live_td.is_file():
+                backup = LEARN_DIR / f"{netbase}.tdleaf.bin-pre{args.tag}"
+                log(f"backing up live state -> {backup.name}")
+                shutil.copy2(live_td, backup)
+            log(f"promoting {state} -> {live_td.name}")
+            shutil.copy2(state, live_td)
 
     dump_files = []
 
