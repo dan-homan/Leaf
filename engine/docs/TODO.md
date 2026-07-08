@@ -76,9 +76,11 @@ Open items:
       anchor match (family-chained Elo reads ~20–30 optimistic).
 - [ ] td_λ calibration on a larger corpus (sweep around 0.98 once iter3's
       exact-endply corpus exists; PGN-scale equivalent ≈ 0.99/game-ply).
-- [ ] `--bt-sync` frontier fix: sharded training currently unusable for gen-2+
-      signal (staleness).  Probe: 2 workers, `--bt-sync-every 64`; adopt only if
-      it matches the single-process gauntlet result.
+- [x] ~~`--bt-sync` frontier fix~~ — resolved 2026-07-08 by *removing* sharding:
+      replaced with within-batch thread parallelism (`--bt-threads`, single
+      process, staleness-free — mathematically identical to 1 thread up to float
+      summation order; measured ~2.85× on 8 cores).  See `OFFLINE_TRAINING.md`
+      "Threaded training" and `docs/BT_PARALLEL_PLAN.md`.
 - [ ] Online `TDLEAF_K` runtime override: compile-time 220 in `tdleaf.h`, but the
       consolidated nets' evals fit K≈165 — likely explains the mild online
       piece-val drift (+15–34 cp/400k games).  Add an env override and test

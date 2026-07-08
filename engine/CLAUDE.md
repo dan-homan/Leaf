@@ -100,7 +100,7 @@ errors (unknown types, undeclared identifiers).  These are expected and can be i
 | `src/nnue_io.cpp` | NNUE file I/O: `.nnue` load (file + embedded), LEB128, `nnue_write_nnue` |
 | `src/nnue_training.cpp` | TDLeaf training: FP32 shadow weights, gradients, Adam optimizer, `.tdleaf.bin` I/O (TDLEAF=1 only) |
 | `src/tdleaf.cpp` | PV walking, TD error computation (with score-change clipping + ID-stability weighting), gradient backprop, leaf/root corpus dump (`TDLEAF_DUMP_TSV`) |
-| `src/nnue_batch_train.cpp` | Offline batch trainer (`--batch-train`): supervised training on quiet-position TSV corpora, λ-blend targets, multi-process `--bt-sync` (TDLEAF=1 only) |
+| `src/nnue_batch_train.cpp` | Offline batch trainer (`--batch-train`): supervised training on quiet-position TSV corpora, λ-blend targets, within-batch thread parallelism (`--bt-threads`) (TDLEAF=1 only) |
 | `src/chess.h` | All major structs: `position`, `move`, `move_list`, `tree_search`, `game_rec` |
 | `src/define.h` | Compile-time constants and flag defaults (`NNUE`, `TDLEAF`, `MATERIAL_ONLY`, piece encodings, `MAXD`, `MAX_GAME_PLY`) |
 | `src/tdleaf.h` | TDLeaf hyperparameters, `TDRecord`, `TDGameRecord`, function declarations |

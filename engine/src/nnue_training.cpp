@@ -7,6 +7,7 @@
 #if TDLEAF
 
 #include <cmath>
+#include <vector>
 #include <sys/file.h>   // flock, LOCK_EX, LOCK_SH, LOCK_UN
 #include <fcntl.h>      // open, O_RDONLY, O_RDWR, O_CREAT
 #include <unistd.h>     // close
@@ -32,13 +33,39 @@ static uint32_t l1_biases_cnt [NNUE_LAYER_STACKS][NNUE_L1_SIZE];
 static uint32_t l2_weights_cnt[NNUE_LAYER_STACKS][NNUE_L2_PADDED];
 static uint32_t l2_bias_cnt   [NNUE_LAYER_STACKS];
 
-// Gradient accumulators (zeroed before each game, filled by nnue_accumulate_gradients)
-static float grad_l0_w[NNUE_LAYER_STACKS][NNUE_L0_SIZE * NNUE_L0_INPUT];
-static float grad_l0_b[NNUE_LAYER_STACKS][NNUE_L0_SIZE];
-static float grad_l1_w[NNUE_LAYER_STACKS][NNUE_L1_SIZE * NNUE_L1_PADDED];
-static float grad_l1_b[NNUE_LAYER_STACKS][NNUE_L1_SIZE];
-static float grad_l2_w[NNUE_LAYER_STACKS][NNUE_L2_PADDED];
-static float grad_l2_b[NNUE_LAYER_STACKS];
+// Gradient accumulators (zeroed before each apply, filled by
+// nnue_accumulate_gradients).  Grouped into NNUEGradBuf so the offline batch
+// trainer can give each worker thread a private accumulation target and reduce
+// them into the global instance (see the nnue_gradbuf_* helpers below and
+// docs/BT_PARALLEL_PLAN.md).  The online TDLeaf path always uses g_grad.
+struct NNUEGradBuf {
+    float grad_l0_w[NNUE_LAYER_STACKS][NNUE_L0_SIZE * NNUE_L0_INPUT];
+    float grad_l0_b[NNUE_LAYER_STACKS][NNUE_L0_SIZE];
+    float grad_l1_w[NNUE_LAYER_STACKS][NNUE_L1_SIZE * NNUE_L1_PADDED];
+    float grad_l1_b[NNUE_LAYER_STACKS][NNUE_L1_SIZE];
+    float grad_l2_w[NNUE_LAYER_STACKS][NNUE_L2_PADDED];
+    float grad_l2_b[NNUE_LAYER_STACKS];
+    float grad_ft_bias[NNUE_HALF_DIMS];
+    float *grad_ft_w   = nullptr;  // heap [FT_INPUTS × HALF_DIMS] ~92 MB
+    float *grad_psqt_w = nullptr;  // heap [FT_INPUTS × PSQT_BKTS] ~720 KB
+    bool  *ft_dirty    = nullptr;  // heap [FT_INPUTS] — feature rows with non-zero grad
+    int   *dirty_list  = nullptr;  // heap [FT_INPUTS] — worker buffers: list of dirty
+                                   // rows for O(dirty) reduce/clear (nullptr on g_grad,
+                                   // whose serial tail full-scans ft_dirty instead)
+    int    dirty_n     = 0;        // number of valid entries in dirty_list
+};
+static NNUEGradBuf g_grad;         // online / reduce-target instance
+
+// Back-compat aliases: the clip/apply/requantize/init code addresses the global
+// accumulators by their historical names.  Only nnue_accumulate_gradients is
+// parameterized by target buffer (gb->...); every other function operates on
+// g_grad, so these aliases keep that code byte-for-byte unchanged.
+static float (&grad_l0_w)[NNUE_LAYER_STACKS][NNUE_L0_SIZE * NNUE_L0_INPUT] = g_grad.grad_l0_w;
+static float (&grad_l0_b)[NNUE_LAYER_STACKS][NNUE_L0_SIZE]                 = g_grad.grad_l0_b;
+static float (&grad_l1_w)[NNUE_LAYER_STACKS][NNUE_L1_SIZE * NNUE_L1_PADDED] = g_grad.grad_l1_w;
+static float (&grad_l1_b)[NNUE_LAYER_STACKS][NNUE_L1_SIZE]                 = g_grad.grad_l1_b;
+static float (&grad_l2_w)[NNUE_LAYER_STACKS][NNUE_L2_PADDED]               = g_grad.grad_l2_w;
+static float (&grad_l2_b)[NNUE_LAYER_STACKS]                               = g_grad.grad_l2_b;
 
 // Per-session delta accumulators: Σ of gradient changes applied to float shadows since the
 // last file sync.  On write, merged = re_read_file_value + our_delta, which correctly
@@ -72,16 +99,18 @@ static float    *ft_weights_f32   = nullptr;
 // psqt_weights_f32 forward-declared near top of file (used in nnue_write_nnue)
 static uint32_t *ft_weights_cnt   = nullptr;  // update count per FT weight
 static uint32_t *psqt_weights_cnt = nullptr;  // update count per PSQT weight
-static float    *grad_ft_w        = nullptr;  // FT weight gradients
-static float    *grad_psqt_w      = nullptr;  // PSQT weight gradients
-static bool     *ft_dirty         = nullptr;  // which feature rows are non-zero
+// grad_ft_w / grad_psqt_w / ft_dirty now live in g_grad (see NNUEGradBuf above);
+// aliased back to their historical names so the code below is unchanged.
+static float    *&grad_ft_w       = g_grad.grad_ft_w;    // FT weight gradients
+static float    *&grad_psqt_w     = g_grad.grad_psqt_w;  // PSQT weight gradients
+static bool      *&ft_dirty       = g_grad.ft_dirty;     // which feature rows are non-zero
 static float    *ft_delta_f32     = nullptr;  // FT delta since last file sync [FT_INPUTS×HALF_DIMS]
 static float    *psqt_delta_f32   = nullptr;  // PSQT delta since last file sync [FT_INPUTS×PSQT_BKTS]
 
 // FT bias float shadow, gradient accumulator, update count, and delta (all NNUE_HALF_DIMS).
 // Static (16 KB total) — no heap allocation needed.
 static float    ft_biases_f32 [NNUE_HALF_DIMS] = {};
-static float    grad_ft_bias  [NNUE_HALF_DIMS] = {};
+static float    (&grad_ft_bias)[NNUE_HALF_DIMS] = g_grad.grad_ft_bias;  // lives in g_grad
 static uint32_t ft_bias_cnt   [NNUE_HALF_DIMS] = {};
 static float    ft_bias_delta [NNUE_HALF_DIMS] = {};
 
@@ -122,6 +151,14 @@ static float    *m_psqt_w  = nullptr;  // [NNUE_FT_INPUTS × PSQT_BKTS] — PSQT
 // bias correction survive session restarts.
 static uint32_t  t_adam    = 0;
 
+// FT/PSQT feature rows updated by the most recent nnue_apply_gradients call.
+// nnue_requantize_fc_applied() re-quantizes only these rows (plus the small FC
+// layers) instead of the full 22,528-row FT array — the batch trainer's serial
+// tail was otherwise dominated by a full O(23M-weight) requantize every batch.
+// Untouched rows keep an int16 value that already matches their FP32 shadow, so
+// the targeted requantize is bit-identical to the full one.
+static std::vector<int> g_applied_ft_rows;
+
 // ---------------------------------------------------------------------------
 // Adam step-clip telemetry — one line to stderr per batch, reset after log.
 // Tracks the max unit-less Adam step magnitude (|m_hat/sqrt(v_hat)| or, for
@@ -157,6 +194,33 @@ static inline float clip_adam_step(float step, float &max_track, uint64_t &clip_
 // for ft_bc2 gives the standard Adam bias-correction formula (v / (1-β²^T)) for
 // the freshly-zeroed v, preventing 31×-oversized FT steps on the first batch.
 static uint32_t  t_ft_session = 0;
+
+// Full per-weight Adam step (bias-corrected), returns the LR-scaled update dw.
+// Shared by FC weights/biases, FC2, PSQT, and FT biases — only the LR and the
+// telemetry accumulators differ.  Was three identical `do_step*` lambdas inside
+// nnue_apply_gradients; hoisted to a free function so the per-stack / per-row
+// apply bodies can be shared between the serial and parallel apply paths.
+static inline float nnue_adam_step(float g, float &m, float &v, uint32_t cnt,
+                                   float lr, float &smax, uint64_t &sclip)
+{
+    m = TDLEAF_ADAM_BETA1 * m + (1.0f - TDLEAF_ADAM_BETA1) * g;
+    v = TDLEAF_ADAM_BETA2 * v + (1.0f - TDLEAF_ADAM_BETA2) * g * g;
+    uint32_t eff_t = cnt + 1;
+    float m_hat = (eff_t >= 20) ? m
+        : m / (1.0f - powf(TDLEAF_ADAM_BETA1, (float)eff_t));
+    float v_hat = v / (1.0f - powf(TDLEAF_ADAM_BETA2, (float)eff_t));
+    float step  = m_hat / (sqrtf(v_hat) + TDLEAF_ADAM_EPS);
+    step = clip_adam_step(step, smax, sclip);
+    return lr * step;
+}
+
+// Per-step LR constants + FT bias-corrections, computed once per apply and
+// passed to the per-stack / per-row helpers (below) so the batch trainer can
+// parallelize apply across the 8 FC stacks and the FT row space.
+struct NNUEApplyParams {
+    float fc_lr, fc2_lr, fc_bias_lr, ft_lr, ft_bias_lr, psqt_lr;
+    float ft_bc2_cold, ft_bc2_warm;
+};
 
 // ---------------------------------------------------------------------------
 // nnue_init_zero_weights — fresh-start FC/FT initialisation + classical PSQT
@@ -703,8 +767,9 @@ void nnue_forward_fp32(const int16_t acc[2][NNUE_HALF_DIMS],
 // grad_scale = alpha * e_t * d_t * (1-d_t) / K * (100 / 5776)
 // ---------------------------------------------------------------------------
 void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
-                               bool replay_mode)
+                               bool replay_mode, NNUEGradBuf *gb)
 {
+    if (!gb) gb = &g_grad;   // online / single-buffer default
     int s = act.stack;
 
     // 7. ∂loss/∂positional = grad_scale  (d_score_cp/d_positional = 100/5776 absorbed)
@@ -714,8 +779,8 @@ void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
     float g_fc2_raw = g_pos;
     // grad w.r.t. FC2 weights and bias
     for (int i = 0; i < NNUE_L2_PADDED; i++)
-        grad_l2_w[s][i] += g_fc2_raw * act.fc2_in[i];
-    grad_l2_b[s] += g_fc2_raw;
+        gb->grad_l2_w[s][i] += g_fc2_raw * act.fc2_in[i];
+    gb->grad_l2_b[s] += g_fc2_raw;
     // grad w.r.t. fc2_in[i]
     float g_fc2_in[NNUE_L2_PADDED];
     for (int i = 0; i < NNUE_L2_PADDED; i++)
@@ -732,8 +797,8 @@ void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
     for (int o = 0; o < NNUE_L1_SIZE; o++) {
         if (g_fc1_raw[o] == 0.0f) continue;
         for (int i = 0; i < NNUE_L1_PADDED; i++)
-            grad_l1_w[s][o * NNUE_L1_PADDED + i] += g_fc1_raw[o] * act.fc1_in[i];
-        grad_l1_b[s][o] += g_fc1_raw[o];
+            gb->grad_l1_w[s][o * NNUE_L1_PADDED + i] += g_fc1_raw[o] * act.fc1_in[i];
+        gb->grad_l1_b[s][o] += g_fc1_raw[o];
     }
     // grad w.r.t. fc1_in[i]
     float g_fc1_in[NNUE_L1_PADDED] = {};
@@ -764,8 +829,8 @@ void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
     for (int o = 0; o < NNUE_L0_SIZE; o++) {
         if (g_fc0_raw[o] == 0.0f) continue;
         for (int i = 0; i < NNUE_L0_INPUT; i++)
-            grad_l0_w[s][o * NNUE_L0_INPUT + i] += g_fc0_raw[o] * act.l0_in[i];
-        grad_l0_b[s][o] += g_fc0_raw[o];
+            gb->grad_l0_w[s][o * NNUE_L0_INPUT + i] += g_fc0_raw[o] * act.l0_in[i];
+        gb->grad_l0_b[s][o] += g_fc0_raw[o];
     }
 
     // Replay mode: skip FT weights, PSQT, and FT biases.  These three feed
@@ -827,11 +892,14 @@ void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
         for (int k = 0; k < (int)act.n_ft[persp]; k++) {
             int fi = act.ft_idx[persp][k];
             if (fi < 0 || fi >= NNUE_FT_INPUTS) continue;
-            ft_dirty[fi] = true;
-            float *gfw = grad_ft_w + (size_t)fi * NNUE_HALF_DIMS;
+            if (!gb->ft_dirty[fi]) {          // first touch of this row this batch/game
+                gb->ft_dirty[fi] = true;
+                if (gb->dirty_list) gb->dirty_list[gb->dirty_n++] = fi;
+            }
+            float *gfw = gb->grad_ft_w + (size_t)fi * NNUE_HALF_DIMS;
             for (int d = 0; d < NNUE_HALF_DIMS; d++)
                 gfw[d] += g_a[d];
-            grad_psqt_w[fi * NNUE_PSQT_BKTS + s] +=
+            gb->grad_psqt_w[fi * NNUE_PSQT_BKTS + s] +=
                 g_psqt_diff * psqt_sign;
         }
     }
@@ -839,7 +907,95 @@ void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
     // FT bias gradient: ∂loss/∂ft_biases[d] = Σ_persp g_acc[persp][d]
     // Both perspectives share the same bias vector, so gradients sum across them.
     for (int d = 0; d < NNUE_HALF_DIMS; d++)
-        grad_ft_bias[d] += (g_acc[0][d] + g_acc[1][d]);
+        gb->grad_ft_bias[d] += (g_acc[0][d] + g_acc[1][d]);
+}
+
+// ---------------------------------------------------------------------------
+// NNUEGradBuf helpers — used by the offline batch trainer for within-batch
+// thread parallelism (docs/BT_PARALLEL_PLAN.md).  Each worker accumulates its
+// slice of a batch into a private buffer (nnue_accumulate_gradients(..., wbuf));
+// the reduce phase sums the workers into g_grad in worker index order (so a
+// fixed thread count is deterministic), and the existing serial tail runs the
+// usual clip/apply/requantize on g_grad.  apply zeroes g_grad, so it re-enters
+// each batch clean; workers are re-zeroed via nnue_gradbuf_clear.
+// ---------------------------------------------------------------------------
+NNUEGradBuf *nnue_global_gradbuf() { return &g_grad; }
+
+NNUEGradBuf *nnue_gradbuf_alloc()
+{
+    NNUEGradBuf *g = new NNUEGradBuf();   // FC grads + ft_bias zero-inited
+    size_t ft_sz   = (size_t)NNUE_FT_INPUTS * NNUE_HALF_DIMS;
+    size_t psqt_sz = (size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS;
+    g->grad_ft_w   = new float[ft_sz]();
+    g->grad_psqt_w = new float[psqt_sz]();
+    g->ft_dirty    = new bool [NNUE_FT_INPUTS]();
+    g->dirty_list  = new int  [NNUE_FT_INPUTS];
+    g->dirty_n     = 0;
+    return g;
+}
+
+void nnue_gradbuf_free(NNUEGradBuf *g)
+{
+    if (!g) return;
+    delete[] g->grad_ft_w;
+    delete[] g->grad_psqt_w;
+    delete[] g->ft_dirty;
+    delete[] g->dirty_list;
+    delete g;
+}
+
+// Zero a worker buffer for the next batch: FT/PSQT rows via its dirty_list
+// (O(dirty) — never a 92 MB memset), plus the dense FC grads and FT bias.
+void nnue_gradbuf_clear(NNUEGradBuf *g)
+{
+    for (int k = 0; k < g->dirty_n; k++) {
+        int fi = g->dirty_list[k];
+        memset(g->grad_ft_w   + (size_t)fi * NNUE_HALF_DIMS, 0, NNUE_HALF_DIMS * sizeof(float));
+        memset(g->grad_psqt_w + (size_t)fi * NNUE_PSQT_BKTS, 0, NNUE_PSQT_BKTS * sizeof(float));
+        g->ft_dirty[fi] = false;
+    }
+    g->dirty_n = 0;
+    memset(g->grad_l0_w,    0, sizeof(g->grad_l0_w));
+    memset(g->grad_l0_b,    0, sizeof(g->grad_l0_b));
+    memset(g->grad_l1_w,    0, sizeof(g->grad_l1_w));
+    memset(g->grad_l1_b,    0, sizeof(g->grad_l1_b));
+    memset(g->grad_l2_w,    0, sizeof(g->grad_l2_w));
+    memset(g->grad_l2_b,    0, sizeof(g->grad_l2_b));
+    memset(g->grad_ft_bias, 0, sizeof(g->grad_ft_bias));
+}
+
+// Reduce (dense): add a worker's FC grads + FT bias into g_grad.  Call over all
+// workers in index order from a single thread.
+void nnue_gradbuf_merge_dense(const NNUEGradBuf *w)
+{
+    for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
+        for (int i = 0; i < NNUE_L0_SIZE * NNUE_L0_INPUT; i++)  g_grad.grad_l0_w[s][i] += w->grad_l0_w[s][i];
+        for (int i = 0; i < NNUE_L0_SIZE; i++)                  g_grad.grad_l0_b[s][i] += w->grad_l0_b[s][i];
+        for (int i = 0; i < NNUE_L1_SIZE * NNUE_L1_PADDED; i++) g_grad.grad_l1_w[s][i] += w->grad_l1_w[s][i];
+        for (int i = 0; i < NNUE_L1_SIZE; i++)                  g_grad.grad_l1_b[s][i] += w->grad_l1_b[s][i];
+        for (int i = 0; i < NNUE_L2_PADDED; i++)                g_grad.grad_l2_w[s][i] += w->grad_l2_w[s][i];
+        g_grad.grad_l2_b[s] += w->grad_l2_b[s];
+    }
+    for (int d = 0; d < NNUE_HALF_DIMS; d++) g_grad.grad_ft_bias[d] += w->grad_ft_bias[d];
+}
+
+// Reduce (FT/PSQT): add a worker's dirty rows whose feature index is in
+// [lo, hi) into g_grad, marking g_grad.ft_dirty.  Row-range partitioned across
+// reducer threads (disjoint g_grad rows → no races); call over all workers in
+// index order within each range for deterministic summation.
+void nnue_gradbuf_merge_ft_rows(const NNUEGradBuf *w, int lo, int hi)
+{
+    for (int k = 0; k < w->dirty_n; k++) {
+        int fi = w->dirty_list[k];
+        if (fi < lo || fi >= hi) continue;
+        const float *sw = w->grad_ft_w      + (size_t)fi * NNUE_HALF_DIMS;
+        float       *dw = g_grad.grad_ft_w  + (size_t)fi * NNUE_HALF_DIMS;
+        for (int d = 0; d < NNUE_HALF_DIMS; d++) dw[d] += sw[d];
+        const float *sp = w->grad_psqt_w      + (size_t)fi * NNUE_PSQT_BKTS;
+        float       *dp = g_grad.grad_psqt_w  + (size_t)fi * NNUE_PSQT_BKTS;
+        for (int b = 0; b < NNUE_PSQT_BKTS; b++) dp[b] += sp[b];
+        g_grad.ft_dirty[fi] = true;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1224,6 +1380,9 @@ void nnue_apply_gradients(float lr_scale)
     // FT/PSQT: only iterate over dirty feature rows (sparse update).  Under
     // pure-PSQT the bucketed PSQT is the sole material channel and moves freely
     // — no gradient mean-centering or post-Adam dw centering is applied.
+    // Record the touched rows so nnue_requantize_fc_applied() can re-quantize
+    // only these (the batch trainer's fast path).
+    g_applied_ft_rows.clear();
     if (ft_dirty) {
         for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
             if (!ft_dirty[fi]) continue;
@@ -1273,6 +1432,7 @@ void nnue_apply_gradients(float lr_scale)
                 }
             }
             ft_dirty[fi] = false;
+            g_applied_ft_rows.push_back(fi);
         }
     }
 
@@ -1342,10 +1502,220 @@ void nnue_apply_gradients(float lr_scale)
     step_clips_fc = step_clips_ft = step_clips_ft_bias = step_clips_psqt = 0;
 }
 
+// ===========================================================================
+// Parallel apply (offline batch trainer only).  The FC-layer Adam over the 8
+// material-bucket stacks and the FT/PSQT row Adam are the dominant per-batch
+// cost, and both are embarrassingly parallel — the 8 stacks touch disjoint
+// weight/moment arrays, and the FT rows partition by feature index.  The
+// helpers below mirror the per-stack / per-row bodies of nnue_apply_gradients
+// (which is left untouched, so the online path and --bt-threads 1 keep its
+// exact, tested behaviour) and are driven by nnue_apply_gradients_parallel
+// through a caller-supplied parallel-for.  Each weight's update is independent
+// of the thread that performs it, so the result is bit-identical to the serial
+// path for the same input gradients — only telemetry maxima/counts are merged.
+// ===========================================================================
+
+// Advance the Adam step counters and compute this step's LR constants.
+static NNUEApplyParams nnue_apply_compute_params(float lr_scale)
+{
+    t_adam++;
+    t_ft_session++;
+    const uint32_t ft_t       = std::min(t_adam, t_ft_session);
+    const float warmup_factor = (TDLEAF_ADAM_WARMUP > 0 && t_adam <= (uint32_t)TDLEAF_ADAM_WARMUP)
+        ? (float)t_adam / (float)TDLEAF_ADAM_WARMUP : 1.0f;
+    const float ft_session_factor =
+        (TDLEAF_FT_SESSION_WARMUP > 0 && t_ft_session <= (uint32_t)TDLEAF_FT_SESSION_WARMUP)
+        ? (float)t_ft_session / (float)TDLEAF_FT_SESSION_WARMUP : 1.0f;
+    const auto &lr_mul = tdleaf_lr_multipliers();
+    NNUEApplyParams p;
+    p.fc_lr       = lr_mul.fc      * lr_scale * warmup_factor * TDLEAF_ADAM_LR0;
+    p.fc2_lr      = lr_mul.fc2     * lr_scale * warmup_factor * TDLEAF_ADAM_FC2_LR0;
+    p.fc_bias_lr  = lr_mul.fc_bias * lr_scale * warmup_factor * TDLEAF_ADAM_FC_BIAS_LR0;
+    p.ft_lr       = lr_mul.ft      * lr_scale * warmup_factor * ft_session_factor * TDLEAF_ADAM_FT_LR0;
+    p.ft_bias_lr  = lr_mul.ft_bias * lr_scale * warmup_factor * TDLEAF_ADAM_FT_BIAS_LR0;
+    p.psqt_lr     = lr_mul.psqt    * lr_scale * warmup_factor * TDLEAF_ADAM_PSQT_LR0;
+    p.ft_bc2_cold = 1.0f - powf(TDLEAF_ADAM_BETA2, (float)ft_t);
+    p.ft_bc2_warm = 1.0f - powf(TDLEAF_ADAM_BETA2, (float)t_adam);
+    return p;
+}
+
+// One FC stack: FC0/FC1/FC2 weights + biases (mirrors the serial FC loop body).
+static void nnue_apply_fc_stack(int s, const NNUEApplyParams &p,
+                                float &smax, uint64_t &sclip)
+{
+    for (int i = 0; i < NNUE_L0_SIZE * NNUE_L0_INPUT; i++)
+        if (grad_l0_w[s][i] != 0.0f) {
+            float dw = nnue_adam_step(grad_l0_w[s][i], m_l0_w[s][i], v_l0_w[s][i], l0_weights_cnt[s][i], p.fc_lr, smax, sclip);
+            float wd = TDLEAF_WEIGHT_DECAY * p.fc_lr * l0_weights_f32[s][i];
+            l0_weights_f32[s][i] -= dw + wd;  delta_l0_w[s][i] -= dw + wd;
+            if (l0_weights_f32[s][i] >  127.0f) l0_weights_f32[s][i] =  127.0f;
+            if (l0_weights_f32[s][i] < -127.0f) l0_weights_f32[s][i] = -127.0f;
+            l0_weights_cnt[s][i]++;  delta_l0_w_cnt[s][i]++;
+        }
+    for (int i = 0; i < NNUE_L0_SIZE; i++)
+        if (grad_l0_b[s][i] != 0.0f) {
+            float dw = nnue_adam_step(grad_l0_b[s][i], m_l0_b[s][i], v_l0_b[s][i], l0_biases_cnt[s][i], p.fc_bias_lr, smax, sclip);
+            l0_biases_f32[s][i] -= dw;  delta_l0_b[s][i] -= dw;
+            l0_biases_cnt[s][i]++;  delta_l0_b_cnt[s][i]++;
+        }
+    for (int i = 0; i < NNUE_L1_SIZE * NNUE_L1_PADDED; i++)
+        if (grad_l1_w[s][i] != 0.0f) {
+            float dw = nnue_adam_step(grad_l1_w[s][i], m_l1_w[s][i], v_l1_w[s][i], l1_weights_cnt[s][i], p.fc_lr, smax, sclip);
+            float wd = TDLEAF_WEIGHT_DECAY * p.fc_lr * l1_weights_f32[s][i];
+            l1_weights_f32[s][i] -= dw + wd;  delta_l1_w[s][i] -= dw + wd;
+            if (l1_weights_f32[s][i] >  127.0f) l1_weights_f32[s][i] =  127.0f;
+            if (l1_weights_f32[s][i] < -127.0f) l1_weights_f32[s][i] = -127.0f;
+            l1_weights_cnt[s][i]++;  delta_l1_w_cnt[s][i]++;
+        }
+    for (int i = 0; i < NNUE_L1_SIZE; i++)
+        if (grad_l1_b[s][i] != 0.0f) {
+            float dw = nnue_adam_step(grad_l1_b[s][i], m_l1_b[s][i], v_l1_b[s][i], l1_biases_cnt[s][i], p.fc_bias_lr, smax, sclip);
+            l1_biases_f32[s][i] -= dw;  delta_l1_b[s][i] -= dw;
+            l1_biases_cnt[s][i]++;  delta_l1_b_cnt[s][i]++;
+        }
+    for (int i = 0; i < NNUE_L2_PADDED; i++)
+        if (grad_l2_w[s][i] != 0.0f) {
+            float dw = nnue_adam_step(grad_l2_w[s][i], m_l2_w[s][i], v_l2_w[s][i], l2_weights_cnt[s][i], p.fc2_lr, smax, sclip);
+            float wd = TDLEAF_WEIGHT_DECAY * p.fc2_lr * l2_weights_f32[s][i];
+            l2_weights_f32[s][i] -= dw + wd;  delta_l2_w[s][i] -= dw + wd;
+            if (l2_weights_f32[s][i] >  127.0f) l2_weights_f32[s][i] =  127.0f;
+            if (l2_weights_f32[s][i] < -127.0f) l2_weights_f32[s][i] = -127.0f;
+            l2_weights_cnt[s][i]++;  delta_l2_w_cnt[s][i]++;
+        }
+    if (grad_l2_b[s] != 0.0f) {
+        float dw = nnue_adam_step(grad_l2_b[s], m_l2_b[s], v_l2_b[s], l2_bias_cnt[s], p.fc_bias_lr, smax, sclip);
+        l2_bias_f32[s] -= dw;  delta_l2_b[s] -= dw;
+        l2_bias_cnt[s]++;  delta_l2_b_cnt[s]++;
+    }
+}
+
+// FT weight + PSQT Adam for the dirty rows rows[lo..hi) (mirrors the serial
+// FT-row loop).  The caller partitions the dirty-row LIST (not the feature-index
+// space) so work is balanced even when dirty rows cluster by king-bucket.
+// Clears ft_dirty and appends handled rows to `applied`.
+static void nnue_apply_ft_rows(const int *rows, int lo, int hi, const NNUEApplyParams &p,
+                               std::vector<int> &applied,
+                               float &smax_ft, uint64_t &sclip_ft,
+                               float &smax_psqt, uint64_t &sclip_psqt)
+{
+    for (int k = lo; k < hi; k++) {
+        int fi = rows[k];
+        float    *fw  = ft_weights_f32 + (size_t)fi * NNUE_HALF_DIMS;
+        float    *gw  = grad_ft_w      + (size_t)fi * NNUE_HALF_DIMS;
+        uint32_t *cnt = ft_weights_cnt + (size_t)fi * NNUE_HALF_DIMS;
+        float    *fd  = ft_delta_f32 ? ft_delta_f32 + (size_t)fi * NNUE_HALF_DIMS : nullptr;
+        if (v_ft_w) {
+            const float ft_bc2 = (ft_v_warmed && ft_v_warmed[fi]) ? p.ft_bc2_warm : p.ft_bc2_cold;
+            float *vw = v_ft_w + (size_t)fi * NNUE_HALF_DIMS;
+            for (int d = 0; d < NNUE_HALF_DIMS; d++)
+                if (gw[d] != 0.0f) {
+                    vw[d] = TDLEAF_ADAM_BETA2 * vw[d] + (1.0f - TDLEAF_ADAM_BETA2) * gw[d] * gw[d];
+                    float sv   = sqrtf(vw[d] / ft_bc2) + TDLEAF_ADAM_EPS;
+                    float step = gw[d] / sv;
+                    step = clip_adam_step(step, smax_ft, sclip_ft);
+                    float dw = p.ft_lr * step;
+                    float wd = TDLEAF_WEIGHT_DECAY * p.ft_lr * fw[d];
+                    fw[d] -= dw + wd;  if (fd) fd[d] -= dw + wd;
+                    cnt[d]++;
+                    gw[d] = 0.0f;
+                }
+        }
+        {
+            float    *pw   = psqt_weights_f32 + (size_t)fi * NNUE_PSQT_BKTS;
+            float    *gpw  = grad_psqt_w      + (size_t)fi * NNUE_PSQT_BKTS;
+            uint32_t *pcnt = psqt_weights_cnt + (size_t)fi * NNUE_PSQT_BKTS;
+            float    *pd   = psqt_delta_f32 ? psqt_delta_f32 + (size_t)fi * NNUE_PSQT_BKTS : nullptr;
+            for (int b = 0; b < NNUE_PSQT_BKTS; b++)
+                if (gpw[b] != 0.0f && m_psqt_w && v_psqt_w) {
+                    size_t vi = (size_t)fi * NNUE_PSQT_BKTS + b;
+                    float dw = nnue_adam_step(gpw[b], m_psqt_w[vi], v_psqt_w[vi], pcnt[b], p.psqt_lr, smax_psqt, sclip_psqt);
+                    pw[b] -= dw;  if (pd) pd[b] -= dw;
+                    pcnt[b]++;
+                    if (delta_psqt_cnt) delta_psqt_cnt[(size_t)fi * NNUE_PSQT_BKTS + b]++;
+                    gpw[b] = 0.0f;
+                }
+        }
+        ft_dirty[fi] = false;
+        applied.push_back(fi);
+    }
+}
+
+// FT bias Adam (all dims; mirrors the serial FT-bias loop).  Serial and cheap.
+static void nnue_apply_ft_bias(const NNUEApplyParams &p, float &smax, uint64_t &sclip)
+{
+    for (int d = 0; d < NNUE_HALF_DIMS; d++) {
+        if (grad_ft_bias[d] == 0.0f) continue;
+        float dw = nnue_adam_step(grad_ft_bias[d], m_ft_bias[d], v_ft_bias[d], ft_bias_cnt[d], p.ft_bias_lr, smax, sclip);
+        ft_biases_f32[d] -= dw;
+        ft_bias_delta[d] -= dw;
+        ft_bias_cnt[d]++;  delta_ft_bias_cnt[d]++;
+        grad_ft_bias[d] = 0.0f;
+        ft_biases[d] = (int16_t)std::max(-32767.0f, std::min(32767.0f, roundf(ft_biases_f32[d])));
+    }
+}
+
+// Parallel apply for the batch trainer.  `run(fn)` must execute fn(tid) for
+// tid in [0, nthreads) and join.  Bit-identical to nnue_apply_gradients for the
+// same input gradients (each weight's Adam is thread-independent; nthreads==1
+// runs everything on tid 0).  The online path and --bt-threads 1 keep using the
+// serial nnue_apply_gradients above.
+void nnue_apply_gradients_parallel(float lr_scale, int nthreads,
+        const std::function<void(const std::function<void(int)>&)> &run)
+{
+    NNUEApplyParams p = nnue_apply_compute_params(lr_scale);
+    g_applied_ft_rows.clear();
+    // Collect the dirty rows once (cheap bitmap scan) so FT-row work can be
+    // partitioned by row COUNT — dirty rows cluster by king-bucket, so an
+    // index-range split would badly imbalance the threads.
+    static std::vector<int> dirty;   // reused across batches (serial call site)
+    dirty.clear();
+    if (ft_dirty)
+        for (int fi = 0; fi < NNUE_FT_INPUTS; fi++)
+            if (ft_dirty[fi]) dirty.push_back(fi);
+    const int ndirty = (int)dirty.size();
+    // Per-thread telemetry [fc, ft, _, psqt] and applied-row lists.
+    std::vector<float>    tmax(nthreads * 4, 0.0f);
+    std::vector<uint64_t> tclip(nthreads * 4, 0);
+    std::vector<std::vector<int>> tapplied(nthreads);
+    run([&](int tid) {
+        float    *mx = &tmax[tid * 4];
+        uint64_t *cl = &tclip[tid * 4];
+        for (int s = tid; s < NNUE_LAYER_STACKS; s += nthreads)   // FC stacks, strided
+            nnue_apply_fc_stack(s, p, mx[0], cl[0]);
+        int lo = (int)((long)tid * ndirty / nthreads);            // FT rows, even by count
+        int hi = (int)((long)(tid + 1) * ndirty / nthreads);
+        nnue_apply_ft_rows(dirty.data(), lo, hi, p, tapplied[tid], mx[1], cl[1], mx[3], cl[3]);
+    });
+    // Serial tail: zero FC grads, FT bias, merge telemetry + applied rows.
+    memset(grad_l0_w, 0, sizeof(grad_l0_w));
+    memset(grad_l0_b, 0, sizeof(grad_l0_b));
+    memset(grad_l1_w, 0, sizeof(grad_l1_w));
+    memset(grad_l1_b, 0, sizeof(grad_l1_b));
+    memset(grad_l2_w, 0, sizeof(grad_l2_w));
+    memset(grad_l2_b, 0, sizeof(grad_l2_b));
+    nnue_apply_ft_bias(p, step_max_ft_bias, step_clips_ft_bias);
+    for (int t = 0; t < nthreads; t++) {
+        if (tmax[t*4+0] > step_max_fc)   step_max_fc   = tmax[t*4+0];
+        if (tmax[t*4+1] > step_max_ft)   step_max_ft   = tmax[t*4+1];
+        if (tmax[t*4+3] > step_max_psqt) step_max_psqt = tmax[t*4+3];
+        step_clips_fc   += tclip[t*4+0];
+        step_clips_ft   += tclip[t*4+1];
+        step_clips_psqt += tclip[t*4+3];
+        for (int fi : tapplied[t]) g_applied_ft_rows.push_back(fi);
+    }
+    step_max_fc = step_max_ft = step_max_ft_bias = step_max_psqt = 0.0f;
+    step_clips_fc = step_clips_ft = step_clips_ft_bias = step_clips_psqt = 0;
+}
+
 // ---------------------------------------------------------------------------
-// nnue_requantize_fc — FP32 → int8 for the live inference arrays
+// nnue_requantize_fc — FP32 → int8/int16/int32 for the live inference arrays
+//
+// The FC-layer requantize (small) and a single-FT-row requantize are factored
+// out so nnue_requantize_fc_applied() can re-quantize just the rows the last
+// Adam step touched — see g_applied_ft_rows.  The full version below re-rounds
+// every FT row and is used after load / init (all rows changed).
 // ---------------------------------------------------------------------------
-void nnue_requantize_fc()
+static void nnue_requantize_fc_layers()
 {
     // Weights are stored at raw int8/int32 scale, so requantise by simply
     // rounding — no multiplication by q_scale or b_scale needed.
@@ -1386,26 +1756,51 @@ void nnue_requantize_fc()
             out_weights[s][i] = (int8_t)q;
         }
     }
-    // FT/PSQT weights: round float → int16/int32.
-    // ft_weights_f32 tracks raw int16 scale (same units as ft_weights).
-    if (ft_weights_f32) {
-        for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
-            const float *fw = ft_weights_f32 + (size_t)fi * NNUE_HALF_DIMS;
-            int16_t     *iw = ft_weights      + (size_t)fi * NNUE_HALF_DIMS;
-            for (int d = 0; d < NNUE_HALF_DIMS; d++) {
-                int v = (int)roundf(fw[d]);
-                if (v < -32767) v = -32767;
-                if (v >  32767) v =  32767;
-                iw[d] = (int16_t)v;
-            }
-            const float *pw = psqt_weights_f32 + (size_t)fi * NNUE_PSQT_BKTS;
-            int32_t     *ip = psqt_weights      + (size_t)fi * NNUE_PSQT_BKTS;
-            for (int b = 0; b < NNUE_PSQT_BKTS; b++)
-                ip[b] = (int32_t)roundf(pw[b]);
-        }
+}
+
+// One FT/PSQT feature row: round float shadow → int16/int32 inference arrays.
+static inline void nnue_requantize_ft_row(int fi)
+{
+    const float *fw = ft_weights_f32 + (size_t)fi * NNUE_HALF_DIMS;
+    int16_t     *iw = ft_weights      + (size_t)fi * NNUE_HALF_DIMS;
+    for (int d = 0; d < NNUE_HALF_DIMS; d++) {
+        int v = (int)roundf(fw[d]);
+        if (v < -32767) v = -32767;
+        if (v >  32767) v =  32767;
+        iw[d] = (int16_t)v;
     }
+    const float *pw = psqt_weights_f32 + (size_t)fi * NNUE_PSQT_BKTS;
+    int32_t     *ip = psqt_weights      + (size_t)fi * NNUE_PSQT_BKTS;
+    for (int b = 0; b < NNUE_PSQT_BKTS; b++)
+        ip[b] = (int32_t)roundf(pw[b]);
+}
+
+void nnue_requantize_fc()
+{
+    nnue_requantize_fc_layers();
+    // FT/PSQT weights: round float → int16/int32 (all rows).
+    if (ft_weights_f32)
+        for (int fi = 0; fi < NNUE_FT_INPUTS; fi++)
+            nnue_requantize_ft_row(fi);
 
     // Clear score hash — cached evaluations are now stale.
+    if (score_table && SCORE_SIZE > 0)
+        memset(score_table, 0, SCORE_SIZE * sizeof(score_rec));
+}
+
+// Targeted variant: re-quantize the FC layers plus only the FT/PSQT rows the
+// most recent nnue_apply_gradients touched (g_applied_ft_rows).  Bit-identical
+// to the full requantize — untouched rows already hold an int16 matching their
+// FP32 shadow — but O(dirty) instead of O(22,528 rows), which is what makes the
+// batch trainer's per-batch serial tail cheap.  Used by the batch trainer only;
+// online/load/init paths use the full nnue_requantize_fc().
+void nnue_requantize_fc_applied()
+{
+    nnue_requantize_fc_layers();
+    if (ft_weights_f32)
+        for (int fi : g_applied_ft_rows)
+            nnue_requantize_ft_row(fi);
+
     if (score_table && SCORE_SIZE > 0)
         memset(score_table, 0, SCORE_SIZE * sizeof(score_rec));
 }

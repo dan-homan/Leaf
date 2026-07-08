@@ -18,6 +18,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <functional>
 
 // ---------------------------------------------------------------------------
 // Architecture constants
@@ -198,14 +199,29 @@ void nnue_forward_fp32(const int16_t acc[2][NNUE_HALF_DIMS],
                        const int32_t psqt[2][NNUE_PSQT_BKTS],
                        bool wtm, NNUEActivations &act);
 
-// Accumulate per-weight gradients for one position into the static grad arrays.
+// Grouped gradient accumulators (defined in nnue_training.cpp).  Opaque to most
+// of the codebase; the offline batch trainer uses per-thread instances via the
+// nnue_gradbuf_* helpers below.  nullptr target = the global g_grad.
+struct NNUEGradBuf;
+
+// Accumulate per-weight gradients for one position into a grad buffer (default:
+// the global g_grad used by the online path).
 // grad_scale = alpha * e_t * sigmoid_gradient — applied inside.
 // replay_mode: skip parameters that feed back into nnue_init_accumulator
 // (FT weights, PSQT, FT biases).  FC weights are still updated because they do
 // not feed into accumulator rebuilds.  Used by replay passes where accumulators
 // are re-derived from stored positions against current FT.
 void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
-                               bool replay_mode = false);
+                               bool replay_mode = false, NNUEGradBuf *gb = nullptr);
+
+// Per-thread gradient-buffer helpers for the offline batch trainer's
+// within-batch parallelism (see docs/BT_PARALLEL_PLAN.md).  TDLEAF-only.
+NNUEGradBuf *nnue_global_gradbuf();          // the online / reduce-target buffer
+NNUEGradBuf *nnue_gradbuf_alloc();           // allocate a zeroed worker buffer
+void nnue_gradbuf_free(NNUEGradBuf *g);
+void nnue_gradbuf_clear(NNUEGradBuf *g);     // re-zero via dirty_list (O(dirty))
+void nnue_gradbuf_merge_dense(const NNUEGradBuf *w);              // FC + FT bias → g_grad
+void nnue_gradbuf_merge_ft_rows(const NNUEGradBuf *w, int lo, int hi); // FT/PSQT rows → g_grad
 
 // Clip gradients by global L2 norm.  Returns pre-clip norm (0 if disabled).
 float nnue_clip_gradients(float max_norm);
@@ -223,9 +239,22 @@ void nnue_clip_gradient_stats_report();
 // the only effective knob for softening replay updates.
 void nnue_apply_gradients(float lr_scale = 1.0f);
 
+// Parallel apply for the offline batch trainer: the FC-stack and FT/PSQT-row
+// Adam (the per-batch bottleneck) are split across nthreads via the
+// caller-supplied `run`, which must execute its argument fn(tid) for tid in
+// [0, nthreads) and join.  Bit-identical to nnue_apply_gradients for the same
+// input gradients.  TDLEAF-only.  See docs/BT_PARALLEL_PLAN.md.
+void nnue_apply_gradients_parallel(float lr_scale, int nthreads,
+        const std::function<void(const std::function<void(int)>&)> &run);
+
 // Requantize FP32 weights → int8 arrays used by the live forward pass.
 // Must be called after nnue_apply_gradients().  Also clears the score hash.
 void nnue_requantize_fc();
+
+// Targeted requantize: FC layers + only the FT/PSQT rows the last
+// nnue_apply_gradients touched (bit-identical to the full requantize, but
+// O(dirty)).  The batch trainer's per-batch fast path.  TDLEAF-only.
+void nnue_requantize_fc_applied();
 
 // Save FC-only weights (all 8 stacks) to a companion file.  Returns true on success.
 bool nnue_save_fc_weights(const char *path);

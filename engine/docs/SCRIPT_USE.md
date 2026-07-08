@@ -798,23 +798,23 @@ Two positional arguments (old, new); no options.  Uses the
 ## hybrid_loop.py
 
 One command per hybrid-loop iteration: promote a consolidated state → online
-self-play generation with leaf/root corpus dumping → checkpoint → shard →
-sharded multi-process offline training → merged-net export → gauntlet with an
-Elo table.  Non-interactive; run from `learn/`.  Helper binaries (`Leaf_vbt`,
-`Leaf_vtrain_hl_a/b`) are auto-compiled.  See `OFFLINE_TRAINING.md` for the
-concepts and the manual runbook it encodes.
+self-play generation with leaf/root corpus dumping → checkpoint → assemble
+corpus → threaded single-process offline training → best-epoch promotion →
+gauntlet with an Elo table.  Non-interactive; run from `learn/`.  Helper
+binaries (`Leaf_vbt`, `Leaf_vtrain_hl_a/b`) are auto-compiled.  See
+`OFFLINE_TRAINING.md` for the concepts and the manual runbook it encodes.
 
 ```sh
 # Full iteration: generate 400k d8 games, consolidate (settled gen-3+ recipe:
 # pure λ-return defaults, td_λ decay is the knob of record), rate every epoch
 # as it completes, then the final full gauntlet
 python3 hybrid_loop.py --tag iter3 --games 400000 --depth 8 \
-    --state tdL10F10x6_p0_ep4.tdleaf.bin --recompile \
-    --shards 1 --bt-K 220 \
+    --state tdL10F10x6_ep4.tdleaf.bin --recompile \
+    --bt-K 220 --bt-threads 8 \
     --gauntlet-epochs --gauntlet Leaf_vtdL10F10x6-ep4 Leaf_vclassic_eval
 
 # Consolidate-only on existing corpora (e.g. a hyperparameter arm on the same dumps)
-python3 hybrid_loop.py --tag arm1 --skip-online --shards 1 \
+python3 hybrid_loop.py --tag arm1 --skip-online \
     --bt-K 220 \
     $(for f in iter2_work/iter2.*.tsv; do echo --corpus $f; done) \
     --gauntlet Leaf_vbtsp-final Leaf_vclassic_eval
@@ -824,9 +824,10 @@ python3 hybrid_loop.py --tag gen3 --games 200000 --depth 8 --skip-train
 ```
 
 Artifacts (named by `--tag`): `<tag>_final.nnue` (piece_val baked — compile
-rating binaries from this), `<tag>_final.tdleaf.bin` (seeds the next iteration;
+rating binaries from this; with `--gauntlet-epochs` this is the ladder's best
+epoch, else the last epoch), `<tag>_final.tdleaf.bin` (seeds the next iteration;
 pairs with the ORIGINAL base `.nnue`), `<netbase>.tdleaf.bin-<tag>-online`
-(post-generation checkpoint), `<tag>_work/` (dumps, shards, training logs).
+(post-generation checkpoint), `<tag>_work/` (dumps, `corpus.tsv`, training logs).
 
 ### Options
 
@@ -843,7 +844,7 @@ pairs with the ORIGINAL base `.nnue`), `<netbase>.tdleaf.bin-<tag>-online`
 | `--quiet-cp N` | 60 | `TDLEAF_DUMP_QUIET_CP` for the dump |
 | `--skip-train` | off | Generate-only |
 | `--corpus TSV` | — | Extra corpus file(s) for training (repeatable) |
-| `--shards N` | 8 | Parallel trainer processes (**use 1 for gen-2+ consolidation** — sync staleness destroys subtle signal; see `OFFLINE_TRAINING.md`) |
+| `--bt-threads N` | 8 | Worker threads for within-batch gradient compute (single process; synchronous data parallelism, identical to 1 thread up to float summation order — see `OFFLINE_TRAINING.md`) |
 | `--epochs N` | 6 | Training epochs |
 | `--bt-lr X` | 0.25 | LR scale on all category LRs |
 | `--bt-lambda X` | 1.0 | Outcome-weight ceiling in the decayed blend target (`w = λ_eff·td_λ^(N−ply)`).  Default 1.0 = pure λ-return, the settled gen-3+ recipe: `--bt-td-lambda` is the knob of record; this stays a dormant scale knob (decouples overall outcome weight from decay shape across corpora with different ply-gap distributions) |
@@ -851,11 +852,10 @@ pairs with the ORIGINAL base `.nnue`), `<netbase>.tdleaf.bin-<tag>-online`
 | `--bt-batch N` | 512 | Positions per Adam step |
 | `--bt-leaf-lambda X` | = `--bt-lambda` | Outcome-weight ceiling for depth-0 leaf rows (default follows the root λ, the recommended setting) |
 | `--bt-td-lambda X` | trainer default (`TDLEAF_LAMBDA`) | Result decay per ply from the game end: `w = λ_eff·td_λ^(N−ply)`; `1.0` = flat blend |
-| `--sync-every N` | 256 | Batches between delta-merge syncs |
 | `--gauntlet OPP …` | none | Opponent binaries in `learn/` (empty = skip) |
 | `--gauntlet-games N` | 400 | Games per opponent |
 | `--tc TC` | `3+0.05` | Gauntlet time control |
-| `--gauntlet-epochs` | off | Per-epoch ladder: rate each epoch snapshot vs the first `--gauntlet` opponent as soon as its epoch finishes training; the trainer is paused (SIGSTOP/SIGCONT) during each match so games never contend with training for cores; prints an epoch table (requires `--shards 1`) |
+| `--gauntlet-epochs` | off | Per-epoch ladder: rate each epoch snapshot vs the first `--gauntlet` opponent as soon as its epoch finishes training; the trainer is paused (SIGSTOP/SIGCONT) during each match so games never contend with training for cores; prints an epoch table and promotes the best epoch as the final net |
 | `--epoch-games N` | 1000 | Games per epoch-ladder match |
 | `--epoch-tc TC` | `1+0.01` | Epoch-ladder time control |
 | `--no-final-gauntlet` | off | Skip the final full gauntlet (ladder-only runs; `--gauntlet` then names just the ladder opponent) |

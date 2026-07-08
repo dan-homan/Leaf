@@ -1,5 +1,34 @@
 Changes since 2017_12_24
 
+2026_07_08 -- Batch trainer: within-batch thread parallelism (--bt-threads N),
+               and removal of the failed multi-process --bt-sync sharding.
+               Each batch's positions are split contiguously across N worker
+               threads that compute forward+backprop against the same frozen
+               weights into private gradient buffers (new NNUEGradBuf struct +
+               nnue_gradbuf_* helpers in nnue_training.cpp); the workers are
+               summed into the global buffer in thread-index order and the
+               existing serial clip/Adam/requantize tail runs once on the merge.
+               This is synchronous data parallelism — mathematically identical
+               to single-threaded training up to float reduction order, and
+               --bt-threads 1 reproduces the old trainer bit-for-bit — so unlike
+               --bt-sync there is no gradient staleness (the staleness that
+               destroyed the subtle gen-2 signal; see OFFLINE_TRAINING.md).
+               nnue_accumulate_gradients gained an optional NNUEGradBuf* target
+               (nullptr = global g_grad; online callers unchanged).  Both the
+               per-position forward/backprop AND the per-batch Adam step (FC
+               stacks + FT rows, via nnue_apply_gradients_parallel) are threaded;
+               nnue_requantize_fc_applied re-quantizes only the rows the step
+               touched.  --bt-threads 1 is bit-for-bit identical to the old
+               trainer (git A/B verified); measured ~2.85x at 8 threads (30k ->
+               86k pos/s).  Per-epoch phase-timing line added.  hybrid_loop.py: --shards
+               and --sync-every replaced by --bt-threads (default 8); corpus is
+               now one concatenated corpus.tsv (no shard files); the merged
+               zero-LR export is gone — the final net is the ladder's best epoch
+               snapshot (or the last epoch without --gauntlet-epochs); snapshot
+               prefix is <tag>_epN (no _p0 infix).  The POSIX-locked delta-merge
+               save protocol stays for concurrent online self-play training.
+               Plan: docs/BT_PARALLEL_PLAN.md.
+
 2026_07_08 -- hybrid_loop.py: fix stale-binary reuse across --net changes.
                compile_binary() reused an existing Leaf_v<version> whenever the
                file was present, ignoring whether it was built for the requested

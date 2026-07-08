@@ -3,8 +3,8 @@
 hybrid_loop.py — one command per hybrid-loop iteration:
 
     promote state -> online self-play generation (TDLeaf learning + leaf/root
-    corpus dumping) -> checkpoint -> shard -> sharded offline consolidation ->
-    export merged net -> gauntlet.
+    corpus dumping) -> checkpoint -> assemble corpus -> threaded offline
+    consolidation -> promote best-epoch net -> gauntlet.
 
 Implements the playbook in the Hybrid_Loop_Runbook note.  Non-interactive;
 every phase is skippable, so it also covers the general "start from a given
@@ -15,20 +15,26 @@ point and continue learning" cases:
   distance decay (default TDLEAF_LAMBDA = 0.98) supplies all the outcome
   moderation and is the single knob of record):
     python3 hybrid_loop.py --tag iter3 --games 400000 --depth 8 \
-        --state tdL10F10x6_p0_ep4.tdleaf.bin --recompile \
-        --shards 1 --bt-K 220 \
+        --state tdL10F10x6_ep4.tdleaf.bin --recompile \
+        --bt-K 220 --bt-threads 8 \
         --gauntlet-epochs --gauntlet Leaf_vtdL10F10x6-ep4 Leaf_vclassic_eval
+
+  Consolidation is a single process with within-batch thread parallelism
+  (--bt-threads, default 8) — synchronous data parallelism, mathematically
+  identical to single-threaded training up to float summation order (the
+  removed multi-process --bt-sync sharding suffered gradient staleness that
+  destroyed the subtle gen-2+ signal; see docs/OFFLINE_TRAINING.md).
 
   Leaf rows (depth 0) default to the same lambda as roots; give them their own
   outcome weight with --bt-leaf-lambda.  Both lambda ceilings are dormant
   scale knobs in the settled recipe (kept to renormalize across corpora with
   different ply-gap distributions, and for reproducing past runs).
 
-  --gauntlet-epochs (requires --shards 1) rates every epoch snapshot vs the
-  first --gauntlet opponent as soon as that epoch finishes training (default
-  1000 games at 1+0.01), and prints an epoch ladder table at the end.  The
-  trainer is SIGSTOPped while each ladder match runs so training never
-  contends with the games for cores, then SIGCONTed to resume.
+  --gauntlet-epochs rates every epoch snapshot vs the first --gauntlet opponent
+  as soon as that epoch finishes training (default 1000 games at 1+0.01), and
+  prints an epoch ladder table at the end; the best epoch is promoted as the
+  final net.  The trainer is SIGSTOPped while each ladder match runs so training
+  never contends with the games for cores, then SIGCONTed to resume.
 
   Consolidate-only (offline training on existing corpora):
     python3 hybrid_loop.py --tag redo --skip-online \
@@ -41,7 +47,7 @@ point and continue learning" cases:
 Run from engine/learn/.  Artifacts land in learn/:
     <netbase>.tdleaf.bin-pre<tag>      backup of the live state (if --state)
     <netbase>.tdleaf.bin-<tag>-online  post-generation online checkpoint
-    <tag>_work/                        dumps, shards, training dir, logs
+    <tag>_work/                        dumps, corpus.tsv, training dir, logs
     <tag>_final.nnue                   consolidated net (piece_val baked;
                                        compile rating binaries from this)
     <tag>_final.tdleaf.bin             seeds the next iteration (pairs with
@@ -222,13 +228,14 @@ def main():
                     help="Skip offline training (generate-only)")
     ap.add_argument("--corpus", action="append", default=[],
                     help="Extra corpus TSV(s) to include in training (repeatable)")
-    ap.add_argument("--shards", type=int, default=8)
+    ap.add_argument("--bt-threads", type=int, default=8,
+                    help="Worker threads for within-batch gradient compute "
+                         "(single-process; default 8)")
     ap.add_argument("--epochs", type=int, default=6)
     ap.add_argument("--bt-lr", type=float, default=0.25)
     ap.add_argument("--bt-lambda", type=float, default=1.0)
     ap.add_argument("--bt-K", type=float, default=220.0)
     ap.add_argument("--bt-batch", type=int, default=512)
-    ap.add_argument("--sync-every", type=int, default=256)
     ap.add_argument("--bt-leaf-lambda", type=float, default=None,
                     help="Outcome-weight ceiling for depth-0 (leaf) rows "
                          "(default: same as --bt-lambda)")
@@ -242,8 +249,7 @@ def main():
     ap.add_argument("--tc", default="3+0.05")
     ap.add_argument("--gauntlet-epochs", action="store_true",
                     help="Fast per-epoch ladder: after each epoch's training, "
-                         "rate that snapshot vs the first --gauntlet opponent "
-                         "(requires --shards 1)")
+                         "rate that snapshot vs the first --gauntlet opponent")
     ap.add_argument("--epoch-games", type=int, default=1000,
                     help="Games per epoch-ladder match (default 1000)")
     ap.add_argument("--epoch-tc", default="1+0.01",
@@ -262,9 +268,6 @@ def main():
         die(f"run from {LEARN_DIR} (cwd is {Path.cwd()})")
 
     if args.gauntlet_epochs:
-        if args.shards != 1:
-            die("--gauntlet-epochs requires --shards 1 (per-shard snapshots "
-                "are partial views of the merged state)")
         if not args.gauntlet:
             die("--gauntlet-epochs needs at least one --gauntlet opponent "
                 "(the first is used for the epoch ladder)")
@@ -364,74 +367,69 @@ def main():
         log("generate-only mode: done.")
         return
 
-    # ---- Phase 4: assemble corpus and shard -------------------------------
+    # ---- Phase 4: assemble corpus ----------------------------------------
     inputs = dump_files + [Path(c) for c in args.corpus]
     if not inputs:
         die("nothing to train on (no dumps and no --corpus)")
     for c in inputs:
         if not c.is_file():
             die(f"corpus not found: {c}")
-    # Detect corpus axis (game-ply vs legacy record-index).  Sharding strips
-    # '#' comment lines, which would erase the "# tdleaf-corpus axis=game-ply"
-    # marker the trainer keys on — so we detect it here and re-emit it at the
-    # top of every shard.  Mixing axes changes the meaning of the ply column
-    # (and hence the td_lambda decay), so refuse a mix, mirroring the trainer.
+    # Detect corpus axis (game-ply vs legacy record-index).  Concatenation
+    # strips '#' comment lines, which would erase the "# tdleaf-corpus
+    # axis=game-ply" marker the trainer keys on — so we detect it here and
+    # re-emit it at the top of the combined file.  Mixing axes changes the
+    # meaning of the ply column (and hence the td_lambda decay), so refuse a
+    # mix, mirroring the trainer.
     axes = {_corpus_is_game_ply(c) for c in inputs}
     if len(axes) > 1:
         die("cannot mix game-ply-axis and legacy record-index corpora in one "
             "run — the ply column means different things; train them separately")
     game_ply_axis = axes.pop()
-    log(f"sharding {len(inputs)} corpus file(s) into {args.shards} shards "
+    corpus_path = work / "corpus.tsv"
+    log(f"assembling {len(inputs)} corpus file(s) -> {corpus_path.name} "
         f"(axis={'game-ply' if game_ply_axis else 'legacy record-index'}) ...")
-    shard_fh = [open(work / f"shard_{n}.tsv", "w") for n in range(args.shards)]
-    if game_ply_axis:
-        for fh in shard_fh:
-            fh.write("# tdleaf-corpus axis=game-ply\n")
     rows = 0
-    for src in inputs:
-        with open(src) as f:
-            for line in f:
-                if line.startswith("#") or line.startswith("fen\t"):
-                    continue
-                shard_fh[rows % args.shards].write(line)
-                rows += 1
-    for f in shard_fh:
-        f.close()
-    log(f"{rows:,} positions sharded")
+    with open(corpus_path, "w") as out:
+        if game_ply_axis:
+            out.write("# tdleaf-corpus axis=game-ply\n")
+        for src in inputs:
+            with open(src) as f:
+                for line in f:
+                    if line.startswith("#") or line.startswith("fen\t"):
+                        continue
+                    out.write(line)
+                    rows += 1
+    log(f"{rows:,} positions assembled")
 
-    # ---- Phase 5: sharded offline consolidation ---------------------------
+    # ---- Phase 5: offline consolidation (single threaded process) ---------
     tdir = work / "train"
     tdir.mkdir(exist_ok=True)
     shutil.copy2(bt_bin, tdir / "Leaf_vbt")
     shutil.copy2(net_path, tdir / args.net)
     shutil.copy2(live_td, tdir / f"{netbase}.tdleaf.bin")
 
-    log(f"training: {args.shards} workers x {args.epochs} epochs "
-        f"(lr {args.bt_lr}, lambda {args.bt_lambda}, sync every {args.sync_every})")
-    procs = []
-    for n in range(args.shards):
-        logf = open(tdir / f"p{n}.log", "w")
-        cmd = ["./Leaf_vbt", "--batch-train", f"../shard_{n}.tsv",
-               "--bt-epochs", str(args.epochs), "--bt-out", f"{args.tag}_p{n}",
-               "--bt-sync", f"{args.tag}_sync.tdleaf.bin",
-               "--bt-sync-every", str(args.sync_every),
-               "--bt-lr", str(args.bt_lr), "--bt-lambda", str(args.bt_lambda),
-               "--bt-K", str(args.bt_K), "--bt-batch", str(args.bt_batch),
-               "--bt-seed", str(1000 + n)]
-        if args.bt_leaf_lambda is not None:
-            cmd += ["--bt-leaf-lambda", str(args.bt_leaf_lambda)]
-        if args.bt_td_lambda is not None:
-            cmd += ["--bt-td-lambda", str(args.bt_td_lambda)]
-        p = subprocess.Popen(cmd, cwd=str(tdir),
-                             stdout=subprocess.DEVNULL, stderr=logf)
-        procs.append((p, logf))
+    log(f"training: {args.bt_threads} threads x {args.epochs} epochs "
+        f"(lr {args.bt_lr}, lambda {args.bt_lambda}, K {args.bt_K})")
+    cmd = ["./Leaf_vbt", "--batch-train", "../corpus.tsv",
+           "--bt-epochs", str(args.epochs), "--bt-out", args.tag,
+           "--bt-threads", str(args.bt_threads),
+           "--bt-lr", str(args.bt_lr), "--bt-lambda", str(args.bt_lambda),
+           "--bt-K", str(args.bt_K), "--bt-batch", str(args.bt_batch),
+           "--bt-seed", "1000"]
+    if args.bt_leaf_lambda is not None:
+        cmd += ["--bt-leaf-lambda", str(args.bt_leaf_lambda)]
+    if args.bt_td_lambda is not None:
+        cmd += ["--bt-td-lambda", str(args.bt_td_lambda)]
+    logf = open(tdir / "train.log", "w")
+    proc = subprocess.Popen(cmd, cwd=str(tdir),
+                            stdout=subprocess.DEVNULL, stderr=logf)
 
     # Per-epoch ladder: rate each epoch snapshot as soon as its epoch's
     # training finishes, while the trainer keeps running.  The trainer writes
     # _epN.nnue then _epN.tdleaf.bin, so the .tdleaf.bin appearing means the
     # .nnue is complete.
     def rate_epoch(ep, opp):
-        snap = tdir / f"{args.tag}_p0_ep{ep}.nnue"
+        snap = tdir / f"{args.tag}_ep{ep}.nnue"
         ver = f"{args.tag}-ep{ep}"
         shutil.copy2(snap, RUN_DIR / snap.name)
         b = compile_binary(ver, snap.name, tdleaf=False, force=True)
@@ -454,11 +452,10 @@ def main():
         opp = args.gauntlet[0]
         if not (LEARN_DIR / opp).is_file():
             die(f"epoch-ladder opponent {opp} not found in learn/")
-        proc, logf = procs[0]
         rated = 0
         while True:
             if rated < args.epochs and \
-                    (tdir / f"{args.tag}_p0_ep{rated + 1}.tdleaf.bin").exists():
+                    (tdir / f"{args.tag}_ep{rated + 1}.tdleaf.bin").exists():
                 rated += 1
                 # Freeze the trainer while the ladder match runs: the next
                 # epoch's training must not contend for cores with the games.
@@ -478,21 +475,17 @@ def main():
         rc = proc.wait()
         logf.close()
         if rc != 0:
-            die(f"trainer process failed (rc={rc}) — see {tdir}/p0.log")
+            die(f"trainer process failed (rc={rc}) — see {tdir}/train.log")
         # Sweep snapshots that landed between the last check and process exit.
         while rated < args.epochs and \
-                (tdir / f"{args.tag}_p0_ep{rated + 1}.tdleaf.bin").exists():
+                (tdir / f"{args.tag}_ep{rated + 1}.tdleaf.bin").exists():
             rated += 1
             epoch_results.append((rated, rate_epoch(rated, args.gauntlet[0])))
     else:
-        fail = 0
-        for p, logf in procs:
-            rc = p.wait()
-            logf.close()
-            if rc != 0:
-                fail += 1
-        if fail:
-            die(f"{fail} trainer process(es) failed — see {tdir}/p*.log")
+        rc = proc.wait()
+        logf.close()
+        if rc != 0:
+            die(f"trainer process failed (rc={rc}) — see {tdir}/train.log")
 
     if epoch_results:
         print(f"\n=== Epoch ladder: {args.tag} vs {args.gauntlet[0]} "
@@ -504,27 +497,26 @@ def main():
                   f"Elo {elo:+.0f} ± {err:.0f}")
         print()
 
-    # export merged final via a zero-LR pass over the sync file
-    log("exporting merged final net ...")
-    exp = tdir / "export"
-    exp.mkdir(exist_ok=True)
-    shutil.copy2(bt_bin, exp / "Leaf_vbt")
-    shutil.copy2(net_path, exp / args.net)
-    shutil.copy2(tdir / f"{args.tag}_sync.tdleaf.bin", exp / f"{netbase}.tdleaf.bin")
-    with open(work / "shard_0.tsv") as f, open(exp / "tiny.tsv", "w") as g:
-        for i, line in enumerate(f):
-            if i >= 3000:
-                break
-            g.write(line)
-    sh(["./Leaf_vbt", "--batch-train", "tiny.tsv", "--bt-epochs", "1",
-        "--bt-lr", "0.0", "--bt-out", f"../{args.tag}_final"], cwd=exp)
-
-    final_nnue = tdir / f"{args.tag}_final_ep1.nnue"
-    final_td   = tdir / f"{args.tag}_final_ep1.tdleaf.bin"
+    # Choose the final net.  With the epoch ladder, promote the best epoch (max
+    # Elo; ties → later epoch) — both gen-2 runs peaked at epoch 4 of 6, so the
+    # last epoch is not automatically best.  Without the ladder, use the last
+    # epoch.  Each snapshot is a complete net (single process, no merge needed).
+    if epoch_results:
+        best_ep, (_, _, _, best_elo, _) = max(
+            epoch_results, key=lambda r: (r[1][3], r[0]))
+        log(f"final = epoch {best_ep} of {args.epochs} "
+            f"(ladder best, Elo {best_elo:+.0f})")
+        pick_ep = best_ep
+    else:
+        pick_ep = args.epochs
+    src_nnue = tdir / f"{args.tag}_ep{pick_ep}.nnue"
+    src_td   = tdir / f"{args.tag}_ep{pick_ep}.tdleaf.bin"
+    if not src_nnue.is_file() or not src_td.is_file():
+        die(f"epoch {pick_ep} snapshot missing in {tdir} — see train.log")
     out_nnue = LEARN_DIR / f"{args.tag}_final.nnue"
     out_td   = LEARN_DIR / f"{args.tag}_final.tdleaf.bin"
-    shutil.copy2(final_nnue, out_nnue)
-    shutil.copy2(final_td, out_td)
+    shutil.copy2(src_nnue, out_nnue)
+    shutil.copy2(src_td, out_td)
     log(f"consolidated net: {out_nnue.name}  (seed for next iteration: {out_td.name})")
 
     # ---- Phase 6: gauntlet -------------------------------------------------

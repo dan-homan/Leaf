@@ -43,10 +43,12 @@ Two data-scaling caveats established empirically:
   roughly +130–145 over its online endpoint, extractable from its best ~40M
   positions.  The route to more is *better games* (the hybrid loop), not more
   epochs over old ones.
-- Sharded training does **not** multiply effective LR (total Adam step mass is
-  conserved); it adds gradient staleness between syncs.  This was benign for the
-  large generation-1 backlog signal, but **destroys the subtler generation-2
-  signal** — see below.
+- Multi-process sharding does **not** multiply effective LR (total Adam step
+  mass is conserved); it adds gradient staleness between syncs, which was benign
+  for the large generation-1 backlog signal but **destroyed the subtler
+  generation-2 signal**.  Sharding was therefore removed in favour of
+  within-batch threading (`--bt-threads`), which is staleness-free — see
+  "Threaded training" below.
 
 ### Generation 2 (iteration 2, 2026-07-03/04)
 
@@ -83,8 +85,9 @@ Lessons, in order of importance:
    anchor.  (Blended leaves are now the trainer default; the run-time knob is
    `--bt-leaf-lambda`, with 1.0 recovering outcome-only.)
 
-**Settled gen-2+ recipe:** `--shards 1 --bt-K 220 --bt-lambda 0.3` (leaf rows
-follow λ by default; ~4 h single-process on a 57M corpus).  Consolidation
+**Settled gen-2+ recipe:** `--bt-K 220 --bt-lambda 0.3` (leaf rows
+follow λ by default; single process, ~4 h single-threaded / under an hour with
+`--bt-threads 8` on a 57M corpus).  Consolidation
 remains gauntlet-positive per generation: iter2s2 is +55 over the gen-1 net and
 +28 over its own online endpoint, cross-family.  Epoch count matters at gen-2+:
 iter2s2 peaked at **epoch 4** of 6 in the in-family ladder (gen-1 was still
@@ -129,9 +132,10 @@ direct classic anchor on ep4 measured **−58.6 ± 20** (1000 games at 3+0.05) �
 the best of any net, vs iter2s2-ep4's −62 ± 30.  **`tdL10F10x6_p0_ep4.tdleaf.bin`
 seeds iteration 3.**
 
-**Settled gen-3+ recipe:** `--shards 1 --bt-K 220` — `--bt-lambda` now
-*defaults to 1.0* (trainer and hybrid_loop), so **`--bt-td-lambda` (default
-`TDLEAF_LAMBDA` = 0.98) is the single knob of record**.  The λ ceilings remain
+**Settled gen-3+ recipe:** `--bt-K 220` (single process, `--bt-threads 8` for
+speed) — `--bt-lambda` now *defaults to 1.0* (trainer and hybrid_loop), so
+**`--bt-td-lambda` (default `TDLEAF_LAMBDA` = 0.98) is the single knob of
+record**.  The λ ceilings remain
 as dormant scale knobs: they decouple overall outcome weight from decay shape
 (useful when a corpus's ply-gap distribution differs from iter2's mean decay of
 0.502, e.g. different dump depth or PGN-extracted game plies) and keep past
@@ -233,7 +237,7 @@ session, trains on the given TSVs, writes per-epoch snapshots, and exits:
            [--bt-epochs 3] [--bt-lambda 0.7] [--bt-leaf-lambda <λ>] \
            [--bt-td-lambda 0.98] [--bt-K 220] [--bt-lr 0.25] \
            [--bt-batch 512] [--bt-val 0.05] [--bt-seed 42] [--bt-max 0] \
-           [--bt-sync shared.tdleaf.bin] [--bt-sync-every 256]
+           [--bt-threads 8]
 ```
 
 Design principles:
@@ -264,7 +268,8 @@ Design principles:
   position corpus fits in ~8 GB RAM.
 - **Validation split by game** (hashed `gid`), reported per epoch — but see the
   rate-by-gauntlet finding above.
-- Throughput ≈ 31k positions/s single-threaded (≈ 18 min/epoch per 34M positions).
+- Throughput ≈ 31k positions/s single-threaded (≈ 18 min/epoch per 34M
+  positions); ~2.85× that with `--bt-threads 8` (see below).
 
 ### Per-epoch snapshots and pairing rules
 
@@ -277,29 +282,38 @@ Design principles:
 The base `.nnue` never changes across iterations: every consolidated `.tdleaf.bin`
 of every generation pairs with the original base.
 
-### Multi-process data parallelism — `--bt-sync`
+### Threaded training — `--bt-threads`
 
-Shard the corpus across N processes pointing at one shared file:
+`--bt-threads N` parallelizes gradient computation **within each batch** in a
+single process.  A batch's 512 positions are split contiguously across N worker
+threads; every thread computes forward + backprop against the **same frozen
+weights** into its own gradient buffer.  The workers are then summed into the
+global buffer in thread-index order (deterministic for a fixed thread count),
+and a single Adam step + requantize runs on the merged gradient.
 
-```sh
-for N in 0..7:  ./Leaf_vbt --batch-train shard_$N.tsv --bt-sync shared.tdleaf.bin ...
-```
+This is **synchronous data parallelism**: no optimizer step happens until every
+thread's gradients for the batch are in, so it is *mathematically identical* to
+single-threaded training — same weights seen by every gradient, same number and
+sequence of Adam steps, same batch size, same LR calibration — up to
+floating-point reduction order.  `--bt-threads 1` reproduces the pre-threading
+trainer **bit-for-bit** (verified by a git A/B: identical `.tdleaf.bin` and
+`.nnue`).  Measured **~2.85× on 8 performance cores** (30k → 86k pos/s on a 570k
+corpus; a ~3–4 h gen-2 consolidation drops to ~1.3 h).  Both the per-position
+forward/backprop and the per-batch Adam step (FC stacks + FT rows) are
+parallelized; a targeted requantize (only the rows the step touched) keeps the
+serial tail cheap.  The per-epoch log prints a phase-timing line (compute /
+reduce / clear / serial-tail) to watch the remaining serial work.
 
-Every `--bt-sync-every` batches (default 256), each process runs the existing
-POSIX-locked delta-merge save — the same multi-writer protocol as concurrent
-online training — then requantizes, pulling co-workers' merged updates into its
-own inference arrays.  Busy locks defer with deltas retained.  Measured: ~5×
-effective speedup at 8 workers (153k positions/s aggregate); merged state clean
-throughout.  The final merged net is exported by a zero-LR pass over the sync file
-(automated by `hybrid_loop.py`).
-
-**Frontier caveat (iteration 2):** sync-merge staleness that was benign for the
-large generation-1 backlog signal **destroyed the subtler generation-2 signal** —
-every 8-way arm regressed while the identical single-process run gained.  Until a
-frontier-appropriate configuration is validated (fewer workers, much more frequent
-syncs — e.g. 2 workers `--bt-sync-every 64`), use `--shards 1` for gen-2+
-consolidation and accept the single-process overnight run.  Oscillating per-epoch
-validation MSE is the live symptom of staleness trouble.
+**Why sharding was removed (historical).**  The earlier `--bt-sync` scheme ran N
+independent optimizer processes on diverging weight copies, delta-merging every
+~256 batches.  That gradient *staleness* was benign for the large generation-1
+backlog signal but **destroyed the subtler generation-2 signal** — every 8-way
+sharded arm regressed while the identical single-process run gained (the live
+tell was oscillating per-epoch validation MSE).  Within-batch threading has no
+staleness anywhere — nobody steps the weights while another thread computes
+against an old copy — so it delivers the sharded throughput with exact
+single-process semantics.  The multi-process delta-merge save protocol itself
+stays in the engine; concurrent *online* self-play training still uses it.
 
 ---
 
@@ -312,43 +326,45 @@ Obsidian `Hybrid_Loop_Runbook` note for the manual procedure it encodes):
 cd engine/learn/
 python3 hybrid_loop.py --tag iter3 --games 400000 --depth 8 \
     --state <consolidated>.tdleaf.bin --recompile \
-    --shards 1 --bt-K 220 \
+    --bt-K 220 --bt-threads 8 \
     --gauntlet-epochs --gauntlet Leaf_vtdL10F10x6-ep4 Leaf_vclassic_eval
 ```
 
-(`--shards 1 --bt-K 220` with the default pure λ-return target is the settled
-gen-3+ consolidation recipe — see the sweep-results section above.  `--gauntlet-epochs` rates each epoch snapshot
-vs the first gauntlet opponent as soon as that epoch finishes training — 1000
-games at 1+0.01 by default, `--epoch-games`/`--epoch-tc` to change — and prints
-an epoch-ladder table; requires `--shards 1`.  The trainer is paused (SIGSTOP/
-SIGCONT) while each ladder match runs, so training never contends with the
-games for cores.  The interleaved design leaves a hook for a future
-auto-decider that stops a run whose ladder is trending down.)
+(`--bt-K 220` with the default pure λ-return target is the settled gen-3+
+consolidation recipe — see the sweep-results section above.  `--bt-threads 8`
+(the default) is single-process within-batch threading.  `--gauntlet-epochs`
+rates each epoch snapshot vs the first gauntlet opponent as soon as that epoch
+finishes training — 1000 games at 1+0.01 by default, `--epoch-games`/`--epoch-tc`
+to change — and prints an epoch-ladder table; the best epoch is promoted as the
+final net.  The trainer is paused (SIGSTOP/SIGCONT) while each ladder match runs,
+so training never contends with the games for cores.  The interleaved design
+leaves a hook for a future auto-decider that stops a run whose ladder is trending
+down.)
 
 Phases: promote `--state` to the live training state (with backup and a
 content-hash pairing pre-flight) → online self-play generation with corpus dumping
-(TDLeaf keeps learning throughout) → post-generation checkpoint → shard →
-sharded consolidation → merged-net export → rating-binary compile → gauntlet with
-an Elo table.
+(TDLeaf keeps learning throughout) → post-generation checkpoint → assemble corpus
+→ threaded consolidation → best-epoch promotion → rating-binary compile →
+gauntlet with an Elo table.
 
 Skippable phases cover the general workflows:
 - `--skip-online` + `--corpus ...` — consolidate-only on existing corpora (also how
-  LR/sync probe arms rerun on the same dumps without regenerating games).
+  LR probe arms rerun on the same dumps without regenerating games).
 - `--skip-train` — generate-only (games + corpora, no offline training).
 
 Artifacts (all named by `--tag`): `<tag>_final.nnue` (rating binaries),
 `<tag>_final.tdleaf.bin` (seeds the next iteration), `<netbase>.tdleaf.bin-<tag>-online`
-(post-generation online checkpoint), `<tag>_work/` (dumps, shards, logs).
+(post-generation online checkpoint), `<tag>_work/` (dumps, `corpus.tsv`, logs).
 
 ### Practical guidance
 
 - **Rate by gauntlet**, 300–400 games vs a fixed panel; never by validation-MSE
   *level*.  The MSE trajectory *shape* is still useful live: smooth = healthy
-  optimizer, oscillating = staleness/step-size trouble.
-- Consolidation recipe (settled 2026-07-05): `--shards 1 --bt-K 220` with the
-  default pure λ-return target — `--bt-td-lambda` (0.98) is the knob of record;
-  `--bt-lambda`/`--bt-leaf-lambda` default to 1.0 and stay dormant.  Sharding
-  is currently for gen-1-scale backlogs only.
+  optimizer, oscillating = step-size trouble.
+- Consolidation recipe (settled 2026-07-05): `--bt-K 220` with the default pure
+  λ-return target — `--bt-td-lambda` (0.98) is the knob of record;
+  `--bt-lambda`/`--bt-leaf-lambda` default to 1.0 and stay dormant.  Training is
+  single-process; use `--bt-threads` (default 8) for speed.
 - Select the epoch by ladder (`--gauntlet-epochs`), not by assuming the last
   epoch: both gen-2 multi-epoch runs peaked at epoch 4 of 6.  A single
   1000-game ladder point can swing ~±30 — read the shape, replicate peaks.

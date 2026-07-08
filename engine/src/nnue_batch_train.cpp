@@ -49,21 +49,22 @@
 //              [--bt-val F]      validation fraction, BY GAME     (default 0.05)
 //              [--bt-seed N]     shuffle/split seed               (default 42)
 //              [--bt-max N]      cap on loaded positions, 0 = all (default 0)
-//              [--bt-sync F]     shared .tdleaf.bin for multi-process
-//                                data-parallel training (see below)
-//              [--bt-sync-every N]  batches between syncs        (default 256)
+//              [--bt-threads N]  worker threads for gradient compute (default 1)
 //
 // Per epoch: <prefix>_ep<N>.nnue and <prefix>_ep<N>.tdleaf.bin are written.
 //
-// Multi-process data parallelism (--bt-sync): shard the TSV across N trainer
-// processes and point them all at the same --bt-sync file.  Every
-// --bt-sync-every batches each process calls nnue_save_fc_weights() on it —
-// the same POSIX-locked delta-merge protocol used by concurrent online
-// training — then requantizes, pulling co-workers' accumulated updates into
-// its own inference arrays.  Busy locks defer the sync (deltas are retained),
-// exactly as online.  Give each process a distinct --bt-out prefix; the
-// per-epoch .tdleaf.bin/.nnue snapshots are per-process views, while the
-// --bt-sync file holds the merged state (a final sync runs at exit).
+// Within-batch thread parallelism (--bt-threads): synchronous data parallelism
+// in ONE process — mathematically identical to single-threaded training, up to
+// float summation order.  Each batch's positions are split contiguously across
+// N worker threads; every thread computes forward+backprop against the SAME
+// frozen weights into its own gradient buffer (nnue_gradbuf_alloc).  The workers
+// are then summed into the global buffer in thread-index order (deterministic
+// for a fixed thread count) and a single Adam step + requantize runs on the
+// merged gradient.  No optimizer sees a stale weight, so — unlike the removed
+// multi-process --bt-sync sharding — there is no gradient staleness; the ONLY
+// deviation from --bt-threads 1 is reduction summation order.  The per-batch
+// Adam step (the bottleneck) is parallelized separately via
+// nnue_apply_gradients_parallel.  Measured ~2.85x on 8 cores.
 
 #include <cstdio>
 #include <cstdlib>
@@ -74,6 +75,10 @@
 #include <random>
 #include <algorithm>
 #include <chrono>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <functional>
 
 // ---------------------------------------------------------------------------
 // Packed training record — 32 bytes.  Board is stored as an occupancy
@@ -240,15 +245,15 @@ static bool bt_load_file(const char *path, std::vector<BTRecord> &out,
 
 // ---------------------------------------------------------------------------
 // Evaluate one record with the current weights.
-// Fills act (forward activations + backprop fields) when train != nullptr.
+// pos/acc are caller-owned scratch (per worker thread — no statics, so the
+// trainer is thread-safe: the weight arrays are read-only within a batch).
+// Fills act_out (forward activations + backprop fields) when non-null.
 // Returns d = sigmoid(white-POV score / K).
 // ---------------------------------------------------------------------------
-static float bt_eval_record(const BTRecord &r, float K, NNUEActivations *act_out)
+static float bt_eval_record(const BTRecord &r, float K, position &pos,
+                            NNUEAccumulator &acc, NNUEActivations *act_out)
 {
-    static position pos;   // single-threaded trainer; plist/wtm reset per call
     bt_decode(r, pos);
-
-    static NNUEAccumulator acc;
     nnue_init_accumulator(acc, pos);
 
     int pc = 0;
@@ -307,6 +312,77 @@ static inline float bt_target(const BTRecord &r, float lambda,
 }
 
 // ---------------------------------------------------------------------------
+// Minimal fixed-size worker pool.  run(fn) invokes fn(tid) on T worker threads
+// and blocks until all return — a barrier per phase.  No per-batch thread spawn
+// (a full run is hundreds of thousands of batches).  T==1 runs fn(0) inline on
+// the calling thread, so the single-thread path has zero threading overhead.
+// ---------------------------------------------------------------------------
+struct BTPool {
+    int T;
+    std::vector<std::thread> threads;
+    std::mutex m;
+    std::condition_variable cv_go, cv_done;
+    std::function<void(int)> fn;
+    int generation = 0;   // incremented per dispatch
+    int done = 0;         // workers finished this generation
+    bool stop = false;
+
+    explicit BTPool(int t) : T(t) {
+        for (int i = 1; i < T; i++)
+            threads.emplace_back([this, i] { worker(i); });
+    }
+    ~BTPool() {
+        {
+            std::unique_lock<std::mutex> lk(m);
+            stop = true;
+            generation++;
+            cv_go.notify_all();
+        }
+        for (auto &th : threads) th.join();
+    }
+    void worker(int tid) {
+        int seen = 0;
+        for (;;) {
+            std::unique_lock<std::mutex> lk(m);
+            cv_go.wait(lk, [&] { return generation != seen; });
+            seen = generation;
+            if (stop) return;
+            lk.unlock();
+            fn(tid);
+            lk.lock();
+            if (++done == T - 1) cv_done.notify_one();
+        }
+    }
+    // Run fn(tid) for tid in [0, T); returns when all have finished.
+    void run(const std::function<void(int)> &f) {
+        if (T == 1) { f(0); return; }
+        {
+            std::unique_lock<std::mutex> lk(m);
+            fn = f;
+            done = 0;
+            generation++;
+            cv_go.notify_all();
+        }
+        fn(0);   // the calling thread is worker 0
+        {
+            std::unique_lock<std::mutex> lk(m);
+            cv_done.wait(lk, [&] { return done == T - 1; });
+        }
+    }
+};
+
+// Per-thread scratch: private position/accumulator/activations + gradient buffer.
+// se/se2 accumulate this thread's squared-error partials (se2 = outcome-MSE, val
+// only).  Heap-allocated (NNUEGradBuf owns ~93 MB of FT/PSQT gradient arrays).
+struct BTWorker {
+    position         pos;
+    NNUEAccumulator  acc;
+    NNUEActivations  act;
+    NNUEGradBuf     *gb = nullptr;
+    double           se = 0.0, se2 = 0.0;
+};
+
+// ---------------------------------------------------------------------------
 // Entry point — called from main() when --batch-train is present.
 // ---------------------------------------------------------------------------
 int nnue_batch_train(int argc, char *argv[])
@@ -322,8 +398,7 @@ int nnue_batch_train(int argc, char *argv[])
     float val_frac = 0.05f;
     unsigned seed  = 42;
     size_t max_rec = 0;
-    const char *sync_path = nullptr;
-    int   sync_every = 256;
+    int   threads  = 1;          // worker threads for within-batch gradient compute
     float leaf_lambda = -1.0f;   // < 0 → follow --bt-lambda
     float td_lambda   = TDLEAF_LAMBDA;   // result-decay per game-ply (default sqrt(0.98))
     bool  td_lambda_explicit = false;    // true if --bt-td-lambda was passed
@@ -344,22 +419,19 @@ int nnue_batch_train(int argc, char *argv[])
         else if ((v = next("--bt-val")))     val_frac = (float)atof(v);
         else if ((v = next("--bt-seed")))    seed     = (unsigned)atoi(v);
         else if ((v = next("--bt-max")))     max_rec  = (size_t)atoll(v);
-        else if ((v = next("--bt-sync")))    sync_path = v;
-        else if ((v = next("--bt-sync-every"))) sync_every = atoi(v);
+        else if ((v = next("--bt-threads"))) threads  = atoi(v);
         else if ((v = next("--bt-leaf-lambda"))) leaf_lambda = (float)atof(v);
         else if ((v = next("--bt-td-lambda")))   { td_lambda = (float)atof(v); td_lambda_explicit = true; }
     }
     if (!files) { fprintf(stderr, "batch-train: no input files\n"); return 1; }
     if (batch < 1) batch = 1;
+    if (threads < 1) threads = 1;
+    if (threads > 16) threads = 16;
     if (leaf_lambda < 0.0f) leaf_lambda = lambda;
     if (td_lambda < 0.0f || td_lambda > 1.0f) {
         fprintf(stderr, "batch-train: --bt-td-lambda must be in [0,1]\n");
         return 1;
     }
-
-    if (sync_path)
-        fprintf(stderr, "batch-train: multi-process sync → %s every %d batches\n",
-                sync_path, sync_every);
 
     // ---- Load data ------------------------------------------------------
     std::vector<BTRecord> recs;
@@ -396,9 +468,10 @@ int nnue_batch_train(int argc, char *argv[])
         td_lambda = TDLEAF_LAMBDA * TDLEAF_LAMBDA;   // legacy record-index axis → 0.98/record
 
     fprintf(stderr, "batch-train: lambda=%.2f leaf_lambda=%.2f td_lambda=%.5f "
-                    "K=%.0f lr_scale=%.3f batch=%d epochs=%d val=%.3f seed=%u  axis=%s\n",
+                    "K=%.0f lr_scale=%.3f batch=%d epochs=%d val=%.3f seed=%u "
+                    "threads=%d  axis=%s\n",
             (double)lambda, (double)leaf_lambda, (double)td_lambda, (double)K,
-            (double)lr_scale, batch, epochs, (double)val_frac, seed,
+            (double)lr_scale, batch, epochs, (double)val_frac, seed, threads,
             corpus_game_ply ? "game-ply" : "record-index(legacy)");
 
     // ---- Result-decay lookup: decay(r) = td_lambda^(N_game - ply) --------
@@ -437,16 +510,37 @@ int nnue_batch_train(int argc, char *argv[])
     fprintf(stderr, "batch-train: %zu positions (%zu train / %zu val, split by game)\n",
             recs.size(), train_idx.size(), val_idx.size());
 
-    // ---- Validation-loss helper -----------------------------------------
+    const float cp_factor = 100.0f / 5776.0f;
+
+    // ---- Worker pool + per-thread scratch/gradient buffers --------------
+    // Workers accumulate into private NNUEGradBuf; the reduce phase sums them
+    // into the global buffer (nnue_global_gradbuf) in thread order.
+    BTPool pool(threads);
+    std::vector<BTWorker*> workers(threads);
+    for (int t = 0; t < threads; t++) {
+        workers[t] = new BTWorker();
+        workers[t]->gb = nnue_gradbuf_alloc();
+    }
+
+    // ---- Validation-loss helper (read-only → parallel) ------------------
+    // Contiguous per-worker slices, partials summed in thread order.
     auto val_loss = [&]() {
+        pool.run([&](int tid) {
+            BTWorker &w = *workers[tid];
+            w.se = w.se2 = 0.0;
+            size_t lo = (size_t)tid * val_idx.size() / threads;
+            size_t hi = (size_t)(tid + 1) * val_idx.size() / threads;
+            for (size_t k = lo; k < hi; k++) {
+                uint32_t i = val_idx[k];
+                float d  = bt_eval_record(recs[i], K, w.pos, w.acc, nullptr);
+                float tb = bt_target(recs[i], lambda, leaf_lambda, K, decay(recs[i]));
+                float to = 0.5f * (float)recs[i].result2;
+                w.se  += (double)(tb - d) * (tb - d);
+                w.se2 += (double)(to - d) * (to - d);
+            }
+        });
         double se_blend = 0.0, se_outcome = 0.0;
-        for (uint32_t i : val_idx) {
-            float d  = bt_eval_record(recs[i], K, nullptr);
-            float tb = bt_target(recs[i], lambda, leaf_lambda, K, decay(recs[i]));
-            float to = 0.5f * (float)recs[i].result2;
-            se_blend   += (double)(tb - d) * (tb - d);
-            se_outcome += (double)(to - d) * (to - d);
-        }
+        for (int t = 0; t < threads; t++) { se_blend += workers[t]->se; se_outcome += workers[t]->se2; }
         double n = (double)std::max<size_t>(val_idx.size(), 1);
         fprintf(stderr, "  val MSE(blend)=%.6f  MSE(outcome)=%.6f  (n=%zu)\n",
                 se_blend / n, se_outcome / n, val_idx.size());
@@ -456,72 +550,105 @@ int nnue_batch_train(int argc, char *argv[])
     fprintf(stderr, "batch-train: baseline (epoch 0)\n");
     val_loss();
 
-    const float cp_factor = 100.0f / 5776.0f;
     std::mt19937 rng(seed);
-    static NNUEActivations act;   // ~12 KB; single-threaded
 
-    // Multi-process sync: merge our deltas into the shared file (or defer if
-    // the lock is busy — deltas are retained, same as online training), then
-    // requantize so co-workers' merged updates reach our inference arrays.
-    int batches_since_sync = 0;
-    auto do_sync = [&](const char *when) {
-        if (!sync_path) return;
-        if (!nnue_save_fc_weights(sync_path))
-            fprintf(stderr, "batch-train: sync (%s) to %s FAILED\n", when, sync_path);
-        nnue_requantize_fc();
-        batches_since_sync = 0;
+    // ---- One batch: parallel compute → deterministic reduce → clear → serial
+    // Adam step.  se_batch collects the batch's squared-error partials (thread
+    // order).  Phase timers accumulate per epoch.
+    double t_compute = 0, t_reduce = 0, t_clear = 0, t_tail = 0;
+
+    auto run_batch = [&](size_t base, int cur, double &se_batch) {
+        auto ta = std::chrono::steady_clock::now();
+        // Phase 1: compute (parallel over contiguous position slices).
+        pool.run([&](int tid) {
+            BTWorker &w = *workers[tid];
+            w.se = 0.0;
+            int lo = (int)((long)tid * cur / threads);
+            int hi = (int)((long)(tid + 1) * cur / threads);
+            for (int j = lo; j < hi; j++) {
+                const BTRecord &r = recs[train_idx[base + j]];
+                float d      = bt_eval_record(r, K, w.pos, w.acc, &w.act);
+                float target = bt_target(r, lambda, leaf_lambda, K, decay(r));
+                float e      = target - d;
+                w.se += (double)e * e;
+                // Same descent-form gradient scale as tdleaf_accumulate_game;
+                // wtm here is the position's stm (the "leaf" of a 0-ply PV).
+                float sig_grad   = d * (1.0f - d) / K;
+                float wtm_sign   = r.wtm ? -1.0f : 1.0f;
+                float grad_scale = e * sig_grad * cp_factor * wtm_sign;
+                if (grad_scale != 0.0f)
+                    nnue_accumulate_gradients(w.act, grad_scale, false, w.gb);
+            }
+        });
+        auto tb = std::chrono::steady_clock::now();
+        // Phase 2: reduce into g_grad.  Each thread owns a disjoint FT/PSQT row
+        // range and sums all workers (index order) into it; thread 0 also sums
+        // the dense FC + FT-bias grads.  Disjoint rows → no races; fixed order
+        // → deterministic.
+        pool.run([&](int tid) {
+            int lo = (int)((long)tid * NNUE_FT_INPUTS / threads);
+            int hi = (int)((long)(tid + 1) * NNUE_FT_INPUTS / threads);
+            for (int t = 0; t < threads; t++)
+                nnue_gradbuf_merge_ft_rows(workers[t]->gb, lo, hi);
+            if (tid == 0)
+                for (int t = 0; t < threads; t++)
+                    nnue_gradbuf_merge_dense(workers[t]->gb);
+        });
+        auto tc = std::chrono::steady_clock::now();
+        // Phase 3: clear each worker buffer (its own dirty rows) for next batch.
+        pool.run([&](int tid) { nnue_gradbuf_clear(workers[tid]->gb); });
+        auto td = std::chrono::steady_clock::now();
+        // Phase 4: Adam step on the merged gradient, then targeted requantize
+        // (only the rows apply touched — O(dirty), not a full 23M-weight FT
+        // requantize).  apply re-zeroes g_grad for the next batch.  At >1 thread
+        // the FC-stack + FT-row Adam (the bottleneck) is parallelized; threads==1
+        // uses the untouched serial path (bit-identical to the pre-threading
+        // trainer).  clip and requantize stay serial (cheap).
+        nnue_clip_gradients(TDLEAF_GRAD_CLIP_NORM);
+        if (threads == 1)
+            nnue_apply_gradients(lr_scale);
+        else
+            nnue_apply_gradients_parallel(lr_scale, threads,
+                [&](const std::function<void(int)> &fn) { pool.run(fn); });
+        nnue_requantize_fc_applied();
+        auto te = std::chrono::steady_clock::now();
+
+        for (int t = 0; t < threads; t++) se_batch += workers[t]->se;
+        t_compute += std::chrono::duration<double>(tb - ta).count();
+        t_reduce  += std::chrono::duration<double>(tc - tb).count();
+        t_clear   += std::chrono::duration<double>(td - tc).count();
+        t_tail    += std::chrono::duration<double>(te - td).count();
     };
 
     for (int ep = 1; ep <= epochs; ep++) {
         std::shuffle(train_idx.begin(), train_idx.end(), rng);
         double se = 0.0;
-        int in_batch = 0;
+        t_compute = t_reduce = t_clear = t_tail = 0.0;
+        size_t next_report = 1000000;
         auto t0 = std::chrono::steady_clock::now();
 
-        for (size_t n = 0; n < train_idx.size(); n++) {
-            const BTRecord &r = recs[train_idx[n]];
-            float d      = bt_eval_record(r, K, &act);
-            float target = bt_target(r, lambda, leaf_lambda, K, decay(r));
-            float e      = target - d;
-            se += (double)e * e;
-
-            // Same descent-form gradient scale as tdleaf_accumulate_game:
-            // wtm here is the position's stm (the "leaf" of a 0-ply PV).
-            float sig_grad   = d * (1.0f - d) / K;
-            float wtm_sign   = r.wtm ? -1.0f : 1.0f;
-            float grad_scale = e * sig_grad * cp_factor * wtm_sign;
-            if (grad_scale != 0.0f)
-                nnue_accumulate_gradients(act, grad_scale, false);
-
-            if (++in_batch >= batch) {
-                nnue_clip_gradients(TDLEAF_GRAD_CLIP_NORM);
-                nnue_apply_gradients(lr_scale);
-                nnue_requantize_fc();
-                in_batch = 0;
-                if (sync_path && ++batches_since_sync >= sync_every)
-                    do_sync("periodic");
-            }
-            if ((n + 1) % 1000000 == 0) {
+        for (size_t base = 0; base < train_idx.size(); base += batch) {
+            int cur = (int)std::min<size_t>(batch, train_idx.size() - base);
+            run_batch(base, cur, se);
+            size_t done = base + cur;
+            if (done >= next_report) {
                 auto el = std::chrono::duration<double>(
                               std::chrono::steady_clock::now() - t0).count();
                 fprintf(stderr, "  epoch %d: %zuM positions  train MSE=%.6f  (%.0f pos/s)\n",
-                        ep, (n + 1) / 1000000, se / (double)(n + 1), (n + 1) / el);
+                        ep, done / 1000000, se / (double)done, done / el);
+                next_report += 1000000;
             }
         }
-        if (in_batch > 0) {   // flush the tail batch
-            nnue_clip_gradients(TDLEAF_GRAD_CLIP_NORM);
-            nnue_apply_gradients(lr_scale);
-            nnue_requantize_fc();
-        }
-
-        // Merge before validation/snapshot so both reflect co-workers' work.
-        do_sync("epoch-end");
 
         auto el = std::chrono::duration<double>(
                       std::chrono::steady_clock::now() - t0).count();
         fprintf(stderr, "batch-train: epoch %d done — train MSE=%.6f  (%.0fs, %.0f pos/s)\n",
                 ep, se / (double)std::max<size_t>(train_idx.size(), 1), el,
                 train_idx.size() / el);
+        fprintf(stderr, "  phase timing: compute=%.1fs reduce=%.1fs clear=%.1fs "
+                        "serial-tail=%.1fs (tail %.0f%% of batch time)\n",
+                t_compute, t_reduce, t_clear, t_tail,
+                100.0 * t_tail / std::max(1e-9, t_compute + t_reduce + t_clear + t_tail));
         val_loss();
 
         // Per-epoch snapshots: .nnue for gauntlet binaries + .tdleaf.bin to
@@ -539,5 +666,9 @@ int nnue_batch_train(int argc, char *argv[])
             fprintf(stderr, "batch-train: wrote %s\n", path);
     }
 
+    for (int t = 0; t < threads; t++) {
+        nnue_gradbuf_free(workers[t]->gb);
+        delete workers[t];
+    }
     return 0;
 }
