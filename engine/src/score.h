@@ -77,7 +77,7 @@ uint16_t outpost_trans[64] =    // from the POV of black, just like piece-sq, se
 // Value of the pieces
 //  -- note if difference between BISHOP and KNIGHT is > 49, then
 //     need to make some other changes to margins elsewhere
-int value[7] = { 0, 100, 377, 399, 596, 1197, 10000 };
+int value[7] = { 0, 100, 380, 400, 600, 1200, 10000 };
 
 // Scaling of king attack scores
 //#define ATTACK_SCALE(x)  MAX(0, (VAR1*sqrt(x) + VAR2*x*x - VAR3))
