@@ -84,12 +84,46 @@ def sh(cmd, cwd, env=None, check=True):
     return r.returncode
 
 
+def _corpus_is_game_ply(path):
+    """True if a corpus TSV carries the '# tdleaf-corpus axis=game-ply' marker
+    (Phase C dumps, ply column = game-ply).  Absence means legacy record-index
+    axis.  Only the leading comment/header block is scanned, so this is cheap
+    even on multi-GB dumps."""
+    with open(path) as f:
+        for line in f:
+            if line.startswith("#"):
+                if "axis=game-ply" in line:
+                    return True
+                continue
+            if line.startswith("fen\t"):
+                continue
+            break
+    return False
+
+
+def binary_baked_net_matches(binary, net_name):
+    """True if BINARY was compiled with NNUE_NET=net_name.  The default net
+    path is embedded as a literal string, so a stale binary built for a
+    different net (common when the Leaf_v<version> name is reused across runs
+    with different --net) is detected by a simple string search."""
+    try:
+        blob = binary.read_bytes()
+    except OSError:
+        return False
+    return net_name.encode() in blob
+
+
 def compile_binary(version, net_name, tdleaf, force=False):
     """Compile Leaf_v<version> in run/; returns the binary path."""
     binary = RUN_DIR / f"Leaf_v{version}"
     if binary.exists() and not force:
-        log(f"using existing binary {binary.name}")
-        return binary
+        if binary_baked_net_matches(binary, net_name):
+            log(f"using existing binary {binary.name}")
+            return binary
+        # The name was reused for a different net — reusing it would load the
+        # wrong (or a missing) .nnue at runtime.  Recompile against net_name.
+        log(f"{binary.name} was built for a different net — recompiling "
+            f"against {net_name}")
     flags = ["NNUE=1", f"NNUE_NET={net_name}"]
     if tdleaf:
         flags.append("TDLEAF=1")
@@ -316,6 +350,16 @@ def main():
             die("online phase produced no dump files")
         log(f"{len(dump_files)} dump files")
 
+    else:
+        # Resume path: --skip-online over an existing work dir (--force) reuses
+        # the dumps already generated there, so a crashed run continues from the
+        # consolidation phase without re-running generation or re-passing every
+        # dump as --corpus.
+        existing = sorted(work.glob(f"{args.tag}.*.tsv"))
+        if existing:
+            dump_files = existing
+            log(f"reusing {len(dump_files)} existing dump file(s) from {work.name}")
+
     if args.skip_train:
         log("generate-only mode: done.")
         return
@@ -327,8 +371,22 @@ def main():
     for c in inputs:
         if not c.is_file():
             die(f"corpus not found: {c}")
-    log(f"sharding {len(inputs)} corpus file(s) into {args.shards} shards ...")
+    # Detect corpus axis (game-ply vs legacy record-index).  Sharding strips
+    # '#' comment lines, which would erase the "# tdleaf-corpus axis=game-ply"
+    # marker the trainer keys on — so we detect it here and re-emit it at the
+    # top of every shard.  Mixing axes changes the meaning of the ply column
+    # (and hence the td_lambda decay), so refuse a mix, mirroring the trainer.
+    axes = {_corpus_is_game_ply(c) for c in inputs}
+    if len(axes) > 1:
+        die("cannot mix game-ply-axis and legacy record-index corpora in one "
+            "run — the ply column means different things; train them separately")
+    game_ply_axis = axes.pop()
+    log(f"sharding {len(inputs)} corpus file(s) into {args.shards} shards "
+        f"(axis={'game-ply' if game_ply_axis else 'legacy record-index'}) ...")
     shard_fh = [open(work / f"shard_{n}.tsv", "w") for n in range(args.shards)]
+    if game_ply_axis:
+        for fh in shard_fh:
+            fh.write("# tdleaf-corpus axis=game-ply\n")
     rows = 0
     for src in inputs:
         with open(src) as f:

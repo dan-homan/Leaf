@@ -1,5 +1,23 @@
 Changes since 2017_12_24
 
+2026_07_08 -- hybrid_loop.py: fix stale-binary reuse across --net changes.
+               compile_binary() reused an existing Leaf_v<version> whenever the
+               file was present, ignoring whether it was built for the requested
+               --net.  A run started with --net nn-psqt-prior-v12.nnue therefore
+               silently reused Jul-5 binaries baked for nn-fresh-260628.nnue:
+               the trainer aborted ("--batch-train requires a loaded NNUE
+               network", wrong .nnue absent), and worse, online generation had
+               already run 100k games against nn-fresh (mutating its companion)
+               instead of the intended net.  compile_binary() now checks that
+               the baked net name string is present in the existing binary and
+               recompiles on mismatch.  Also: sharding stripped '#' lines,
+               erasing the '# tdleaf-corpus axis=game-ply' marker so Phase-C
+               game-ply dumps were misread as legacy record-index (wrong
+               td_lambda) — sharding now detects the axis, refuses to mix axes,
+               and re-emits the marker atop every shard.  And --skip-online over
+               an existing --force work dir now reuses the dumps already there
+               (resume without re-passing every dump as --corpus).
+
 2026_07_07 -- Phase C: ply semantics — per-record STM + game-ply lambda^Delta,
                landed and gated in the two-process harness.  C1: the online
                gradient was already fully white-POV via each record's own leaf
