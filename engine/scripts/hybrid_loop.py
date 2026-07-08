@@ -30,11 +30,15 @@ point and continue learning" cases:
   scale knobs in the settled recipe (kept to renormalize across corpora with
   different ply-gap distributions, and for reproducing past runs).
 
-  --gauntlet-epochs rates every epoch snapshot vs the first --gauntlet opponent
-  as soon as that epoch finishes training (default 1000 games at 1+0.01), and
-  prints an epoch ladder table at the end; the best epoch is promoted as the
-  final net.  The trainer is SIGSTOPped while each ladder match runs so training
-  never contends with the games for cores, then SIGCONTed to resume.
+  --gauntlet-epochs rates every epoch snapshot vs the net as it stood BEFORE
+  offline training as soon as that epoch finishes training (default 1000 games
+  at 1+0.01), and prints an epoch ladder table at the end; the best epoch is
+  promoted as the final net.  That baseline is the post-online checkpoint when
+  this run generated games, or the incoming live state under --skip-online — so
+  the ladder always isolates what offline consolidation added, and --gauntlet is
+  reserved for opponents of the final promoted net.  The trainer is SIGSTOPped
+  while each ladder match runs so training never contends with the games for
+  cores, then SIGCONTed to resume.
 
   Consolidate-only (offline training on existing corpora):
     python3 hybrid_loop.py --tag redo --skip-online \
@@ -259,20 +263,25 @@ def main():
                          "(default: trainer's TDLEAF_LAMBDA; 1.0 = flat blend)")
     # gauntlet
     ap.add_argument("--gauntlet", nargs="*", default=[],
-                    help="Opponent binaries in learn/ (empty = skip gauntlet)")
+                    help="Opponent binaries in learn/ for the FINAL gauntlet "
+                         "(rates the promoted best-epoch net; empty = skip). "
+                         "The --gauntlet-epochs ladder opponent is independent "
+                         "(always the pre-offline-training net).")
     ap.add_argument("--gauntlet-games", type=int, default=400)
     ap.add_argument("--tc", default="3+0.05")
     ap.add_argument("--gauntlet-epochs", action="store_true",
                     help="Fast per-epoch ladder: after each epoch's training, "
-                         "rate that snapshot vs the first --gauntlet opponent")
+                         "rate that snapshot vs the net as it stood BEFORE "
+                         "offline training (post-online checkpoint, or the "
+                         "incoming state under --skip-online) — measures what "
+                         "consolidation added.  Independent of --gauntlet.")
     ap.add_argument("--epoch-games", type=int, default=1000,
                     help="Games per epoch-ladder match (default 1000)")
     ap.add_argument("--epoch-tc", default="1+0.01",
                     help="Epoch-ladder time control (default 1+0.01)")
     ap.add_argument("--no-final-gauntlet", action="store_true",
-                    help="Skip the final full gauntlet (with --gauntlet-epochs: "
-                         "ladder-only runs, --gauntlet names just the ladder "
-                         "opponent)")
+                    help="Skip the final full gauntlet (with --gauntlet-epochs, "
+                         "for ladder-only runs — no --gauntlet opponents needed)")
     ap.add_argument("--force", action="store_true",
                     help="Reuse an existing <tag>_work directory")
     ap.add_argument("--recompile", action="store_true",
@@ -281,11 +290,6 @@ def main():
 
     if Path.cwd().resolve() != LEARN_DIR.resolve():
         die(f"run from {LEARN_DIR} (cwd is {Path.cwd()})")
-
-    if args.gauntlet_epochs:
-        if not args.gauntlet:
-            die("--gauntlet-epochs needs at least one --gauntlet opponent "
-                "(the first is used for the epoch ladder)")
 
     net_path = LEARN_DIR / args.net
     netbase = args.net[:-5] if args.net.endswith(".nnue") else args.net
@@ -449,6 +453,34 @@ def main():
     shutil.copy2(net_path, tdir / args.net)
     shutil.copy2(live_td, tdir / f"{netbase}.tdleaf.bin")
 
+    def build_rating_binary(snap, ver):
+        """Compile a TDLEAF-off inference binary Leaf_v<ver> for the net SNAP
+        (a .nnue in tdir), staging both binary and net into learn/ so the net
+        resolves next to the binary.  Returns the binary name."""
+        shutil.copy2(snap, RUN_DIR / snap.name)
+        b = compile_binary(ver, snap.name, tdleaf=False, force=True)
+        shutil.copy2(b, LEARN_DIR / b.name)
+        shutil.copy2(snap, LEARN_DIR / snap.name)   # net resolves next to binary
+        (RUN_DIR / snap.name).unlink()
+        return b.name
+
+    # Epoch-ladder opponent = the net exactly as it enters offline training: the
+    # post-online checkpoint when we generated games this run, or the incoming
+    # live state under --skip-online.  Bake base .nnue + live .tdleaf.bin (the
+    # trainer's own starting state, freshly copied into tdir above) into a
+    # standalone net via the trainer binary's --write-nnue, then compile an
+    # inference binary from it.  Done before the trainer launches so the bake
+    # sees the untouched state and doesn't contend with training for cores.
+    ladder_opp = None
+    if args.gauntlet_epochs:
+        pre_nnue = tdir / f"{args.tag}_pretrain.nnue"
+        log(f"baking pre-offline-training baseline net -> {pre_nnue.name}")
+        sh(["./Leaf_vbt", "--write-nnue", pre_nnue.name], cwd=tdir)
+        if not pre_nnue.is_file():
+            die(f"failed to bake pre-training baseline {pre_nnue}")
+        ladder_opp = build_rating_binary(pre_nnue, f"{args.tag}-pretrain")
+        log(f"epoch-ladder opponent: {ladder_opp} (net before offline training)")
+
     log(f"training: {args.bt_threads} threads x {args.epochs} epochs "
         f"(lr {args.bt_lr}, lambda {args.bt_lambda}, K {args.bt_K})")
     cmd = ["./Leaf_vbt", "--batch-train", "../corpus.tsv",
@@ -470,17 +502,12 @@ def main():
     # _epN.nnue then _epN.tdleaf.bin, so the .tdleaf.bin appearing means the
     # .nnue is complete.
     def rate_epoch(ep, opp):
-        snap = tdir / f"{args.tag}_ep{ep}.nnue"
         ver = f"{args.tag}-ep{ep}"
-        shutil.copy2(snap, RUN_DIR / snap.name)
-        b = compile_binary(ver, snap.name, tdleaf=False, force=True)
-        shutil.copy2(b, LEARN_DIR / b.name)
-        shutil.copy2(snap, LEARN_DIR / snap.name)   # net resolves next to binary
-        (RUN_DIR / snap.name).unlink()
+        bname = build_rating_binary(tdir / f"{args.tag}_ep{ep}.nnue", ver)
         pgn = LEARN_DIR / f"match_{ver}_vs_{opp.replace('Leaf_v', '')}.pgn"
         log(f"epoch ladder: epoch {ep} vs {opp} "
             f"({args.epoch_games} games at {args.epoch_tc})")
-        sh(["python3", SCRIPT_DIR / "match.py", b.name, opp,
+        sh(["python3", SCRIPT_DIR / "match.py", bname, opp,
             "-n", args.epoch_games, "-c", 8, "-tc", args.epoch_tc,
             "--openings", args.openings, "--fischer-random",
             "--pgn-out", pgn], cwd=LEARN_DIR)
@@ -490,9 +517,7 @@ def main():
 
     epoch_results = []
     if args.gauntlet_epochs:
-        opp = args.gauntlet[0]
-        if not (LEARN_DIR / opp).is_file():
-            die(f"epoch-ladder opponent {opp} not found in learn/")
+        opp = ladder_opp
         rated = 0
         while True:
             if rated < args.epochs and \
@@ -521,7 +546,7 @@ def main():
         while rated < args.epochs and \
                 (tdir / f"{args.tag}_ep{rated + 1}.tdleaf.bin").exists():
             rated += 1
-            epoch_results.append((rated, rate_epoch(rated, args.gauntlet[0])))
+            epoch_results.append((rated, rate_epoch(rated, opp)))
     else:
         rc = proc.wait()
         logf.close()
@@ -529,7 +554,7 @@ def main():
             die(f"trainer process failed (rc={rc}) — see {tdir}/train.log")
 
     if epoch_results:
-        print(f"\n=== Epoch ladder: {args.tag} vs {args.gauntlet[0]} "
+        print(f"\n=== Epoch ladder: {args.tag} vs {ladder_opp} "
               f"({args.epoch_games} games at {args.epoch_tc}) ===")
         for ep, (W, L, D, elo, err) in epoch_results:
             n = W + L + D
