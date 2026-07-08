@@ -24,11 +24,14 @@
 // ---------------------------------------------------------------------------
 // Hyperparameters (can be overridden by setvalue/environment at runtime)
 // ---------------------------------------------------------------------------
-static const float TDLEAF_LAMBDA           = 0.98f;  // eligibility trace decay (single value for
-                                                     // decisive and draw games — empirically fitted
-                                                     // from 1.6M self-play games; autocorrelation
-                                                     // and d_t-vs-result methods give ~0.97–0.99
-                                                     // for both game types)
+// Eligibility trace decay, expressed PER GAME-PLY.  The online trace applies
+// pow(TDLEAF_LAMBDA, dply) where dply is the game-ply gap between consecutive
+// records (2 in the two-process harness, since the engine records only its own
+// moves; 1 under internal self-play).  Value is sqrt(0.98): with dply=2 this
+// reproduces the historical per-own-move decay of 0.98 (fitted from 1.6M
+// self-play games — autocorrelation and d_t-vs-result give ~0.97–0.99), while a
+// single ONE lambda now expresses the same real-game horizon in both modes.
+static const float TDLEAF_LAMBDA           = 0.98994949f;  // = sqrt(0.98), per game-ply
 static const float TDLEAF_K               = 220.0f; // sigmoid temperature (centipawns)
                                                      // MLE over 58M positions from the classical
                                                      // eval side of match_nn-fresh-260514-
@@ -162,6 +165,10 @@ struct TDRecord {
                                         // In harness mode == engine_color for every
                                         // record; per-record (alternates) under internal
                                         // self-play.  Used by the TSV dump for POV.
+    int     game_ply;                  // 1-based game-ply of the ROOT position.  Gap
+                                        // between consecutive records = 2 in the harness
+                                        // (own moves only), 1 under internal self-play.
+                                        // Drives the pow(lambda, dply) trace decay.
     float   id_score_variance;         // variance of last N ID depth scores (cp²); 0 if < 2 depths
     // Active feature indices at the leaf position (indexed by actual perspective 0=BLACK,1=WHITE).
     // Used for FT and PSQT gradient backprop.
@@ -213,7 +220,8 @@ void tdleaf_record_ply(TDGameRecord &rec,
                        int score_root_stm,
                        const int *id_scores,
                        int id_score_count,
-                       int search_depth);
+                       int search_depth,
+                       int game_ply);
 
 // Run the full TDLeaf(λ) update after a game ends.
 // result: game outcome from White's perspective (1.0=White wins, 0.5=draw, 0.0=Black wins).

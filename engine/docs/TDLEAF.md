@@ -159,7 +159,11 @@ change between consecutive moves exceeds `TDLEAF_SCORE_CLIP_PAWNS × max(value[P
 
 where `∇_w d_t = d_t * (1 - d_t) / K * ∇_w score_t`.
 
-Defaults: `λ = 0.98`, `K = 220 cp` (λ empirically calibrated from 1.6M self-play games;
+Defaults: `λ = √0.98 ≈ 0.98995` **per game-ply** (the trace applies `λ^dply` where
+`dply` is the game-ply gap between consecutive records — 2 in the two-process harness
+→ `λ²` = 0.98 per own-move, matching the historical decay; 1 under internal self-play,
+so one λ expresses the same real-game horizon in both modes), `K = 220 cp`
+(λ empirically calibrated from 1.6M self-play games;
 K was lowered from 400 → 200 → 150 cp during the classical-prior calibration runs, then
 recalibrated to 220 cp from a 1M-game MLE fit on the classical-eval side of
 `match_nn-fresh-260514-1.39e6g_9.5e5g.pgn` — optimum 217.71 cp, rounded to 220.

@@ -689,7 +689,8 @@ void make_move()
                          game.ts.g_last,
                          game.ts.id_scores,
                          game.ts.id_score_count,
-                         game.ts.last_depth);
+                         game.ts.last_depth,
+                         game.T);
      }
 #endif
      //---------------------------

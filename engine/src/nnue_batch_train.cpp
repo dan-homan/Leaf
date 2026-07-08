@@ -171,15 +171,23 @@ static void bt_decode(const BTRecord &r, position &pos)
 // ---------------------------------------------------------------------------
 static bool bt_load_file(const char *path, std::vector<BTRecord> &out,
                          uint32_t gid_base, uint32_t &gid_max, size_t max_records,
-                         std::vector<uint16_t> &gid_N)
+                         std::vector<uint16_t> &gid_N, bool &out_game_ply_axis)
 {
     FILE *f = fopen(path, "r");
     if (!f) { fprintf(stderr, "batch-train: cannot open %s\n", path); return false; }
     setvbuf(f, nullptr, _IOFBF, 4u << 20);
     char line[512];
     size_t rows = 0, skipped = 0;
+    out_game_ply_axis = false;
     while (fgets(line, sizeof(line), f)) {
-        if (line[0] == '#' || strncmp(line, "fen\t", 4) == 0) continue;
+        // Corpus axis marker (game-ply λ^Δ era): the ply/endply columns are true
+        // game-ply, so the result-decay is per game-ply.  Legacy corpora lack it
+        // and use the old per-record-index axis.
+        if (line[0] == '#') {
+            if (strstr(line, "axis=game-ply")) out_game_ply_axis = true;
+            continue;
+        }
+        if (strncmp(line, "fen\t", 4) == 0) continue;
         if (max_records && out.size() >= max_records) break;
         // fen \t cp \t result \t ply \t depth \t gid
         char *tab1 = strchr(line, '\t');
@@ -317,7 +325,8 @@ int nnue_batch_train(int argc, char *argv[])
     const char *sync_path = nullptr;
     int   sync_every = 256;
     float leaf_lambda = -1.0f;   // < 0 → follow --bt-lambda
-    float td_lambda   = TDLEAF_LAMBDA;   // result-decay per ply from game end
+    float td_lambda   = TDLEAF_LAMBDA;   // result-decay per game-ply (default sqrt(0.98))
+    bool  td_lambda_explicit = false;    // true if --bt-td-lambda was passed
 
     for (int i = 1; i < argc; i++) {
         auto next = [&](const char *flag) -> const char* {
@@ -338,7 +347,7 @@ int nnue_batch_train(int argc, char *argv[])
         else if ((v = next("--bt-sync")))    sync_path = v;
         else if ((v = next("--bt-sync-every"))) sync_every = atoi(v);
         else if ((v = next("--bt-leaf-lambda"))) leaf_lambda = (float)atof(v);
-        else if ((v = next("--bt-td-lambda")))   td_lambda   = (float)atof(v);
+        else if ((v = next("--bt-td-lambda")))   { td_lambda = (float)atof(v); td_lambda_explicit = true; }
     }
     if (!files) { fprintf(stderr, "batch-train: no input files\n"); return 1; }
     if (batch < 1) batch = 1;
@@ -348,10 +357,6 @@ int nnue_batch_train(int argc, char *argv[])
         return 1;
     }
 
-    fprintf(stderr, "batch-train: lambda=%.2f leaf_lambda=%.2f td_lambda=%.3f "
-                    "K=%.0f lr_scale=%.3f batch=%d epochs=%d val=%.3f seed=%u\n",
-            (double)lambda, (double)leaf_lambda, (double)td_lambda, (double)K,
-            (double)lr_scale, batch, epochs, (double)val_frac, seed);
     if (sync_path)
         fprintf(stderr, "batch-train: multi-process sync → %s every %d batches\n",
                 sync_path, sync_every);
@@ -360,18 +365,41 @@ int nnue_batch_train(int argc, char *argv[])
     std::vector<BTRecord> recs;
     std::vector<uint16_t> gid_N;   // per-game final ply (see bt_load_file)
     recs.reserve(max_rec ? max_rec : (1u << 25));
+    int n_game_ply = 0, n_legacy = 0;   // corpus-axis tally across input files
     {
         char buf[4096];
         strncpy(buf, files, sizeof(buf) - 1);
         buf[sizeof(buf) - 1] = '\0';
         uint32_t gid_base = 0, gid_max = 0;
         for (char *tok = strtok(buf, ","); tok; tok = strtok(nullptr, ",")) {
-            if (!bt_load_file(tok, recs, gid_base, gid_max, max_rec, gid_N))
+            bool file_game_ply = false;
+            if (!bt_load_file(tok, recs, gid_base, gid_max, max_rec, gid_N, file_game_ply))
                 return 1;
+            (file_game_ply ? n_game_ply : n_legacy)++;
             gid_base = gid_max + 1;   // keep gids unique across files
         }
     }
     if (recs.empty()) { fprintf(stderr, "batch-train: no records\n"); return 1; }
+
+    // Result-decay axis.  New (game-ply) corpora carry the axis marker and use
+    // td_lambda per game-ply.  Legacy corpora index ply by record and need the
+    // squared decay (TDLEAF_LAMBDA² = 0.98) to reproduce the historical
+    // per-own-move rate.  Refuse a mix — the two axes are not interchangeable.
+    if (n_game_ply > 0 && n_legacy > 0) {
+        fprintf(stderr, "batch-train: refusing to mix game-ply-axis corpora (marked "
+                        "'# tdleaf-corpus axis=game-ply') with legacy record-index "
+                        "corpora — regenerate the legacy set or train them separately\n");
+        return 1;
+    }
+    bool corpus_game_ply = (n_game_ply > 0);
+    if (!td_lambda_explicit && !corpus_game_ply)
+        td_lambda = TDLEAF_LAMBDA * TDLEAF_LAMBDA;   // legacy record-index axis → 0.98/record
+
+    fprintf(stderr, "batch-train: lambda=%.2f leaf_lambda=%.2f td_lambda=%.5f "
+                    "K=%.0f lr_scale=%.3f batch=%d epochs=%d val=%.3f seed=%u  axis=%s\n",
+            (double)lambda, (double)leaf_lambda, (double)td_lambda, (double)K,
+            (double)lr_scale, batch, epochs, (double)val_frac, seed,
+            corpus_game_ply ? "game-ply" : "record-index(legacy)");
 
     // ---- Result-decay lookup: decay(r) = td_lambda^(N_game - ply) --------
     // Precomputed per integer gap (gaps span 0..max game length, a few

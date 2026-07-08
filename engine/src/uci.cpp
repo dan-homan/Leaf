@@ -485,7 +485,8 @@ static void uci_dispatch_go(const std::string &line)
                               game.ts.g_last,
                               game.ts.id_scores,
                               game.ts.id_score_count,
-                              game.ts.last_depth);
+                              game.ts.last_depth,
+                              game.T);
         }
 #endif
 

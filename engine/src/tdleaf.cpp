@@ -44,7 +44,8 @@ void tdleaf_record_ply(TDGameRecord &rec,
                        int score_root_stm,
                        const int *id_scores,
                        int id_score_count,
-                       int search_depth)
+                       int search_depth,
+                       int game_ply)
 {
     if (rec.n_plies >= MAX_GAME_PLY) return;  // safety guard
 
@@ -118,6 +119,7 @@ void tdleaf_record_ply(TDGameRecord &rec,
     r.score_root_stm    = score_root_stm;   // engine-POV root score (cp) for adjudication
     r.wtm               = leaf_wtm;
     r.root_wtm          = (bool)root_pos.wtm;  // per-record root STM (POV for the dump)
+    r.game_ply          = game_ply;            // 1-based game-ply of the root position
     r.stack             = (pc - 1) / 4;
     r.id_score_variance = id_var;
     r.pos               = cur;  // store leaf position for Flavor A replay
@@ -185,7 +187,14 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result,
         float delta_cp = fabsf(score_w_cp[t + 1] - score_w_cp[t]);
         if (delta_cp > score_clip_cp && delta_cp > 0.0f)
             delta_d *= score_clip_cp / delta_cp;
-        e[t] = delta_d + lambda * e[t + 1];
+        // Decay per GAME-PLY: pow(lambda, dply).  dply = 2 in the two-process
+        // harness (own moves only), 1 under internal self-play — so one lambda
+        // expresses the same real-game horizon in both modes.  Guard dply >= 1
+        // against any out-of-order/duplicate ply.
+        int dply = rec.plies[t + 1].game_ply - rec.plies[t].game_ply;
+        if (dply < 1) dply = 1;
+        float trace_decay = (dply == 1) ? lambda : powf(lambda, (float)dply);
+        e[t] = delta_d + trace_decay * e[t + 1];
     }
 
     // 3. For each ply, run FP32 forward pass + accumulate gradients
@@ -296,6 +305,11 @@ static void tdleaf_dump_game(const TDGameRecord &rec, float result)
                 FILE *f = fopen(path, "a");
                 if (f) {
                     if (ftell(f) == 0)
+                        // Axis marker: the ply/endply columns are true GAME-ply
+                        // (game-ply λ^Δ era).  --batch-train keys its result-decay
+                        // axis off this line; legacy corpora without it use the
+                        // old record-index axis.
+                        fprintf(f, "# tdleaf-corpus axis=game-ply\n");
                         fprintf(f, "fen\tcp\tresult\tply\tdepth\tgid\tendply\n");
                 } else {
                     fprintf(stderr, "TDLeaf: cannot open dump file %s\n", path);
@@ -317,6 +331,10 @@ static void tdleaf_dump_game(const TDGameRecord &rec, float result)
     dump_gid++;
     const char *res_str = (result > 0.75f) ? "1" : (result < 0.25f) ? "0" : "0.5";
     char fen[110];
+    // Result-decay reference N_game: the last recorded root game-ply (the engine's
+    // final recorded move).  Slightly short of the game's true terminal ply, same
+    // approximation as the historical per-gid-max fallback.
+    int final_game_ply = (rec.n_plies > 0) ? rec.plies[rec.n_plies - 1].game_ply : 0;
 
     for (int t = 0; t < rec.n_plies; t++) {
         const TDRecord &r = rec.plies[t];
@@ -333,8 +351,8 @@ static void tdleaf_dump_game(const TDGameRecord &rec, float result)
                 if (cp_white <= dump_max_cp && cp_white >= -dump_max_cp) {
                     tdleaf_dump_fen(r.pos, r.wtm, fen);
                     fprintf(leaf_f, "%s\t%d\t%s\t%d\t0\t%u\t%d\n",
-                            fen, cp_white, res_str, t + 1, dump_gid,
-                            rec.n_plies);
+                            fen, cp_white, res_str, r.game_ply, dump_gid,
+                            final_game_ply);
                 }
             }
         }
@@ -346,8 +364,8 @@ static void tdleaf_dump_game(const TDGameRecord &rec, float result)
                 if (cp_white <= dump_max_cp && cp_white >= -dump_max_cp) {
                     tdleaf_dump_fen(r.root_pos, (bool)root_wtm, fen);
                     fprintf(root_f, "%s\t%d\t%s\t%d\t%d\t%u\t%d\n",
-                            fen, cp_white, res_str, t + 1, (int)r.id_depth,
-                            dump_gid, rec.n_plies);
+                            fen, cp_white, res_str, r.game_ply, (int)r.id_depth,
+                            dump_gid, final_game_ply);
                 }
             }
         }

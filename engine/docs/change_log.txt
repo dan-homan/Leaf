@@ -1,5 +1,28 @@
 Changes since 2017_12_24
 
+2026_07_07 -- Phase C: ply semantics — per-record STM + game-ply lambda^Delta,
+               landed and gated in the two-process harness.  C1: the online
+               gradient was already fully white-POV via each record's own leaf
+               wtm (score_w_cp, d[t], score-clip, wtm_sign) — engine_color only
+               leaked into the TSV dump.  Added a per-record root_wtm field and
+               drove the dump from it (no-op in harness where it equals
+               engine_color; correct once records alternate STM under internal
+               self-play).  C2: eligibility trace decay is now expressed PER
+               GAME-PLY — the trace applies pow(lambda, dply) where dply is the
+               game-ply gap between consecutive records (2 in the harness, 1
+               under internal self-play).  TDLEAF_LAMBDA retuned 0.98 ->
+               sqrt(0.98)=0.98995 so harness dply=2 reproduces the historical
+               0.98/own-move.  Added game_ply to TDRecord (from game.T at both
+               record_ply call sites); the TSV dump's ply/endply columns are now
+               true game-ply and carry a '# tdleaf-corpus axis=game-ply' marker.
+               --batch-train keys its result-decay axis off that marker: new
+               corpora use td_lambda=sqrt(0.98) per game-ply, legacy corpora use
+               td_lambda=0.98 on the record-index axis (refuses to mix the two).
+               Gates: offline batch-train on a frozen 3000-position LEGACY corpus
+               is byte-identical to the pre-C build (md5 59dfb29d...); online
+               pow(sqrt(0.98),2) vs 0.98 rel-dev 7.4e-9 (< 1e-6); harness dump
+               confirmed game-ply gaps of exactly 2.
+
 2026_07_07 -- Phase B: deleted the gauge machinery and cut .tdleaf.bin format
                v12.  Pure-PSQT is now the only mode.  Removed the dense
                piece_val training channel (eval term, gradient, Adam moments,
