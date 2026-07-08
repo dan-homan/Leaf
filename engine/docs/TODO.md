@@ -141,6 +141,84 @@ diminishing returns. The depth itself is the primary lever, not game volume.
 - Larger/more varied opening EPD set: position diversity creates fresh
   gradients even at fixed depth, potentially slowing the plateau.
 
+### Cross-entropy loss for offline batch-train (focal-γ variant)
+
+**Idea:** Leaf currently minimizes squared error *in probability space* everywhere,
+not cross-entropy.  Both learning paths map the white-POV eval through a sigmoid
+`d = σ(score/K)` and descend `(target − d)²`:
+- Online TDLeaf (`tdleaf.cpp:194,204`): `sig_grad = d*(1−d)/K`,
+  `grad_scale = e[t] · sig_grad · …`, where `e[t]` is the backward, λ-traced sum of
+  consecutive-leaf sigmoid deltas (`delta_d = d[t+1] − d[t]`, `tdleaf.cpp:182`).
+- Offline `--batch-train` (`nnue_batch_train.cpp:457-464`): `e = target − d`;
+  `se += e·e`; `sig_grad = d*(1−d)/K`; `grad_scale = e · sig_grad · …`.  Header
+  comment (line 30) literally says the loss is `(p_target − d)²`.  `target` is the
+  λ-blend soft label (`bt_target`).
+
+For a **fixed (soft) target**, MSE and cross-entropy differ by *exactly one factor* —
+the sigmoid Jacobian `d(1−d)` — because of the standard sigmoid+CE cancellation:
+
+| loss          | ∂L/∂score                 |
+|---------------|---------------------------|
+| MSE (current) | −(target − d) · d(1−d)/K   |
+| Cross-entropy | −(target − d) / K          |
+
+So in the **offline** trainer, "switch to CE" ≈ drop `d(1−d)` from `sig_grad`, keeping
+`e = target − d` (a soft label → soft-label cross-entropy).  ~One line.
+
+**Why CE could help:** MSE's `d(1−d)` factor →0 at the confident tails (`d→0/1`), so a
+position the net rates winning (`d=0.98`) that was actually lost (`target=0`) gets a
+near-zero gradient — the blunder/horizon corrections you most want are throttled
+hardest.  CE keeps full `(target − d)` strength there (this is why nnue-pytorch /
+Stockfish train NNUE with a CE-style loss).  Better calibration, often faster.
+
+**Do it OFFLINE ONLY.**  The offline path has genuine fixed targets, so CE is a clean,
+correct drop-in and A/B-able via the normal gauntlet without touching the online gauge
+machinery.  Leave online TDLeaf on MSE — there the `d(1−d)` is **not** a discretionary
+MSE-damping term but the chain-rule Jacobian `∂d/∂score`, because `e[t]` is built in
+*d-space* (a traced sum of `delta_d`).  Dropping it online yields a gradient
+inconsistent with its own objective, not "CE"; a real logit-space CE would require
+redefining the eligibility trace over logits — a different algorithm, out of scope.
+
+**No numerical blowup to fear.**  With the sigmoid+CE cancellation the CE gradient is
+`(d − target)/K`, bounded by `1/K` — at most ~4× MSE's peak of `0.25/K`.  Only the
+*reported* NLL metric can overflow (`log(d)` as `d→0/1`); clamp `d` to `[0.05,0.95]`
+(or `+ε` inside the log) for the metric only.  **Do not clamp to "protect" training**
+— any clamp tight enough to tame magnitude just re-introduces MSE-style tail damping
+and gives back the whole point of switching.
+
+**Implementation — focal-γ knob (preferred over binary MSE-vs-CE):**
+- `sig_grad = powf(d*(1−d), γ) / K`.  `γ=1` = current MSE, `γ=0` = CE, `γ=0.5` between.
+- Behind a `--bt-loss-gamma <γ>` flag (default 1.0 = no behavior change).
+- Gives the tail-emphasis/stability tradeoff as a *curve* over a small grid
+  (γ ∈ {0, 0.5, 1}) for the same gauntlet cost, instead of a coin flip.
+
+**Two things that must accompany the switch (else the A/B is confounded):**
+1. **Global LR rescale, ~÷4 — not a seven-LR re-tune.**  `d(1−d)` is a *per-position
+   scalar* that multiplies `grad_scale`, scaling **every section's gradient uniformly**
+   (FC0/FC1/FC2/FT/PSQT).  It never changes the *relative* magnitude between sections,
+   so the inter-section LR ratios are preserved; only a global `lr_scale ÷ ~4` is
+   needed (most data sits near `d=0.5` where `1/(d(1−d)) ≈ 4`).
+2. **Bump `TDLEAF_GRAD_CLIP_NORM` ~×4.**  `nnue_clip_gradients(TDLEAF_GRAD_CLIP_NORM)`
+   runs at `nnue_batch_train.cpp:469` **before** `nnue_apply_gradients(lr_scale)` (470),
+   i.e. on the *raw, pre-LR* accumulated gradient.  CE's ~4× larger raw gradients hit
+   the norm clip ~4× more often, and lowering `lr_scale` does **not** relieve that (LR
+   applies after the clip).  Without a matching clip bump, the clip silently becomes
+   the dominant regularizer and confounds the comparison.
+
+**Expectation management:** the payoff is likely *modest*.  Offline corpora are quiet
+positions from near-equal self-play, where most targets and `d` sit near 0.5 — exactly
+where `d(1−d) ≈ 0.25` is maximal and MSE ≈ CE.  The confidently-wrong tail cases CE
+helps with are rare in balanced data (the same distribution that makes
+outcome-imbalance drift benign — [[tdleaf-fixed-opponent-bias-collapse]]).  A small or
+null result is a legitimate outcome.  Watch the piece_val / PSQT scale spectrum when
+testing, since CE's tail emphasis can interact with material scale
+([[frozen-psqt-experiment]]).
+
+**Plan:** add `--bt-loss-gamma` + paired `GRAD_CLIP_NORM` handling → sweep
+γ ∈ {1, 0.5, 0} with `lr_scale ÷ 4` at γ<1 → gauntlet each net vs the current-MSE
+consolidation → keep γ only if it clearly wins.  Report NLL (with metric-only clamp)
+alongside MSE(blend)/MSE(outcome) in `val_loss()`.
+
 ### Adam hyperparameter tuning
 
 The Adam optimizer uses five separate LRs tuned from 190k-game weight distribution
