@@ -944,16 +944,14 @@ void nnue_gradbuf_free(NNUEGradBuf *g)
     delete g;
 }
 
-// Zero a worker buffer for the next batch: FT/PSQT rows via its dirty_list
-// (O(dirty) — never a 92 MB memset), plus the dense FC grads and FT bias.
+// Reset a worker buffer for the next batch.  The FT/PSQT rows and their
+// ft_dirty flags were already zeroed by nnue_gradbuf_merge_ft_rows (zero-on-
+// merge: the reducer holds those cache lines anyway, so re-zeroing there is
+// nearly free, where a separate O(dirty-rows) memset pass here was memory-
+// bandwidth-bound) — only the dirty_list cursor and the dense FC grads +
+// FT bias remain to clear.
 void nnue_gradbuf_clear(NNUEGradBuf *g)
 {
-    for (int k = 0; k < g->dirty_n; k++) {
-        int fi = g->dirty_list[k];
-        memset(g->grad_ft_w   + (size_t)fi * NNUE_HALF_DIMS, 0, NNUE_HALF_DIMS * sizeof(float));
-        memset(g->grad_psqt_w + (size_t)fi * NNUE_PSQT_BKTS, 0, NNUE_PSQT_BKTS * sizeof(float));
-        g->ft_dirty[fi] = false;
-    }
     g->dirty_n = 0;
     memset(g->grad_l0_w,    0, sizeof(g->grad_l0_w));
     memset(g->grad_l0_b,    0, sizeof(g->grad_l0_b));
@@ -982,19 +980,27 @@ void nnue_gradbuf_merge_dense(const NNUEGradBuf *w)
 // Reduce (FT/PSQT): add a worker's dirty rows whose feature index is in
 // [lo, hi) into g_grad, marking g_grad.ft_dirty.  Row-range partitioned across
 // reducer threads (disjoint g_grad rows → no races); call over all workers in
-// index order within each range for deterministic summation.
-void nnue_gradbuf_merge_ft_rows(const NNUEGradBuf *w, int lo, int hi)
+// index order within each range for deterministic summation.  Zero-on-merge:
+// each source row (and its ft_dirty flag) is re-zeroed right after being
+// summed, while its cache lines are hot — this replaces the row-memset pass
+// that nnue_gradbuf_clear used to do.  The ranges tile [0, NNUE_FT_INPUTS), so
+// every dirty row of every worker is merged (and thus zeroed) exactly once;
+// distinct reducer threads write disjoint index ranges of w's arrays, so the
+// concurrent writes into the same worker buffer are race-free.  Only the
+// dirty_list/dirty_n cursor is left for nnue_gradbuf_clear to reset.
+void nnue_gradbuf_merge_ft_rows(NNUEGradBuf *w, int lo, int hi)
 {
     for (int k = 0; k < w->dirty_n; k++) {
         int fi = w->dirty_list[k];
         if (fi < lo || fi >= hi) continue;
-        const float *sw = w->grad_ft_w      + (size_t)fi * NNUE_HALF_DIMS;
-        float       *dw = g_grad.grad_ft_w  + (size_t)fi * NNUE_HALF_DIMS;
-        for (int d = 0; d < NNUE_HALF_DIMS; d++) dw[d] += sw[d];
-        const float *sp = w->grad_psqt_w      + (size_t)fi * NNUE_PSQT_BKTS;
-        float       *dp = g_grad.grad_psqt_w  + (size_t)fi * NNUE_PSQT_BKTS;
-        for (int b = 0; b < NNUE_PSQT_BKTS; b++) dp[b] += sp[b];
+        float *sw = w->grad_ft_w      + (size_t)fi * NNUE_HALF_DIMS;
+        float *dw = g_grad.grad_ft_w  + (size_t)fi * NNUE_HALF_DIMS;
+        for (int d = 0; d < NNUE_HALF_DIMS; d++) { dw[d] += sw[d]; sw[d] = 0.0f; }
+        float *sp = w->grad_psqt_w      + (size_t)fi * NNUE_PSQT_BKTS;
+        float *dp = g_grad.grad_psqt_w  + (size_t)fi * NNUE_PSQT_BKTS;
+        for (int b = 0; b < NNUE_PSQT_BKTS; b++) { dp[b] += sp[b]; sp[b] = 0.0f; }
         g_grad.ft_dirty[fi] = true;
+        w->ft_dirty[fi] = false;
     }
 }
 

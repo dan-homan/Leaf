@@ -219,9 +219,11 @@ void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
 NNUEGradBuf *nnue_global_gradbuf();          // the online / reduce-target buffer
 NNUEGradBuf *nnue_gradbuf_alloc();           // allocate a zeroed worker buffer
 void nnue_gradbuf_free(NNUEGradBuf *g);
-void nnue_gradbuf_clear(NNUEGradBuf *g);     // re-zero via dirty_list (O(dirty))
+void nnue_gradbuf_clear(NNUEGradBuf *g);     // reset dense grads + dirty cursor
+                                             // (FT/PSQT rows zeroed by merge)
 void nnue_gradbuf_merge_dense(const NNUEGradBuf *w);              // FC + FT bias → g_grad
-void nnue_gradbuf_merge_ft_rows(const NNUEGradBuf *w, int lo, int hi); // FT/PSQT rows → g_grad
+void nnue_gradbuf_merge_ft_rows(NNUEGradBuf *w, int lo, int hi);  // FT/PSQT rows → g_grad,
+                                             // zeroing each source row after summing
 
 // Clip gradients by global L2 norm.  Returns pre-clip norm (0 if disabled).
 float nnue_clip_gradients(float max_norm);

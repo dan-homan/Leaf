@@ -237,7 +237,7 @@ session, trains on the given TSVs, writes per-epoch snapshots, and exits:
            [--bt-epochs 3] [--bt-lambda 0.7] [--bt-leaf-lambda <λ>] \
            [--bt-td-lambda 0.98] [--bt-K 220] [--bt-lr 0.25] \
            [--bt-batch 512] [--bt-val 0.05] [--bt-seed 42] [--bt-max 0] \
-           [--bt-threads 8]
+           [--bt-threads 8] [--bt-clip-every 64]
 ```
 
 Design principles:
@@ -303,6 +303,57 @@ forward/backprop and the per-batch Adam step (FC stacks + FT rows) are
 parallelized; a targeted requantize (only the rows the step touched) keeps the
 serial tail cheap.  The per-epoch log prints a phase-timing line (compute /
 reduce / clear / serial-tail) to watch the remaining serial work.
+
+**Serial-tail trims (2026-07-09, +16% at batch 512, bit-identical).**  Phase
+timing on the 137.7M-position material-line run showed the per-batch fixed
+costs — not gradient compute — dominating wall clock (serial tail 36–58%,
+reduce+clear another ~22%).  Two changes:
+
+- **Zero-on-merge:** `nnue_gradbuf_merge_ft_rows` re-zeroes each worker's
+  FT/PSQT row (and its dirty flag) right after summing it into `g_grad`, while
+  the cache lines are hot.  The separate clear phase — previously a
+  memory-bandwidth-bound O(dirty-rows) memset pass — shrinks to the dense FC
+  grads plus the dirty-list cursor (measured 6.7s → 0.5s per epoch on an
+  8M-position slice).
+- **Sampled clip scan (`--bt-clip-every`, default 64):** the L2 clip-norm scan
+  is serial and touches every dirty FT/PSQT row each batch, yet the clip
+  *never fires* on self-play corpora — measured batch norms 0.053–0.082
+  against the 1.0 threshold (12–19× headroom, zero fires in ~1M batches).
+  The norm is now computed on every Nth batch only; skipped batches still run
+  the freeze-passthrough housekeeping.  Safety: if a sampled norm ever exceeds
+  half the threshold, per-batch scanning is restored for the rest of the run.
+  `--bt-clip-every 1` recovers the old behaviour exactly.
+
+Both changes verified bit-identical to the previous trainer at 8 threads and at
+1 thread (same corpus/seed, identical `.nnue` + `.tdleaf.bin` MD5s).  Combined
+throughput at batch 512: 82k → 95k pos/s on 8 cores.
+
+**Batch-size sweep (2026-07-09/10): batch 2048 trades ~7 Elo for 1.8× speed;
+do NOT raise the LR.**  Three arms at `--bt-batch 2048` on the 137.7M-position
+material-line corpus, identical starting state to the batch-512 reference run,
+4–6 epochs, each epoch laddered vs the same pretrain anchor (1000 games at
+1+0.01, ±11):
+
+| arm | ep1 | ep2 | ep3 | ep4 | ep5 | ep6 | plateau |
+|---|---|---|---|---|---|---|---|
+| b512, lr 0.25 (reference) | +50 | +59 | **+86** | +84 | — | — | ~+85 |
+| b2048, lr 0.25 | +38 | +72 | +76 | **+82** | +77 | +78 | ~+78 |
+| b2048, lr 0.5 (√4 scaling) | +69 | +68 | +75 | +59 | — | — | rolls over |
+| b2048, lr 1.0 (linear scaling) | +74 | +59 | +76 | +47 | — | — | rolls over |
+
+Findings: (1) **LR scaling rules don't apply** — Adam's normalized steps
+largely absorb the batch-size change, so the classical √/linear batch-LR
+scaling just runs hot: both scaled arms peak early then roll over, losing
+20–30 Elo by epoch 4-6 equivalents.  (2) At unchanged LR, batch 2048 converges
+~1 epoch later to a plateau ~7 Elo below batch 512's (~+78 vs ~+85, each point
+±11 — borderline individually, consistent across three plateau points each).
+(3) Throughput at 2048 was 103–152k pos/s in production vs 66–83k at 512
+(~1.8×).  **Recipe: keep `--bt-batch 512` for production consolidations (the
+promoted net); use `--bt-batch 2048` at unchanged `--bt-lr 0.25` for sweeps
+and probe arms** where turnaround matters more than the last ~7 Elo (LR/K/λ
+sweeps, loss-function A/Bs).  Val-MSE note: the lr 1.0 arm's val MSE fell
+monotonically while its strength collapsed after ep3 — the strongest
+rate-by-gauntlet-never-by-val-loss datapoint yet.
 
 **Why sharding was removed (historical).**  The earlier `--bt-sync` scheme ran N
 independent optimizer processes on diverging weight copies, delta-merging every

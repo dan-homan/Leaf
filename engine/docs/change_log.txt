@@ -1,5 +1,41 @@
 Changes since 2017_12_24
 
+2026_07_10 -- Batch-size sweep resolved (docs only; no code change).  Three
+               --bt-batch 2048 arms vs the batch-512 reference on the 137.7M
+               material-line corpus, per-epoch ladders vs a shared pretrain
+               anchor: raising --bt-lr by sqrt/linear batch-scaling rules
+               (0.5/1.0) peaks early then rolls over (Adam's normalized steps
+               absorb the batch change; the classical scaling rules overshoot);
+               unchanged lr 0.25 converges ~1 epoch later to a plateau ~7 Elo
+               below batch 512 (~+78 vs ~+85 vs pretrain, +-11/point) at ~1.8x
+               throughput (103-152k vs 66-83k pos/s).  Recipe: batch 512 for
+               production consolidations, batch 2048 unchanged-LR for sweep and
+               probe arms.  Also the sharpest rate-by-gauntlet datapoint yet:
+               the lr 1.0 arm's val MSE fell monotonically while its ladder
+               collapsed +76 -> +47 after epoch 3.  See OFFLINE_TRAINING.md.
+
+2026_07_09 -- Batch trainer: serial-tail speedups, bit-identical (+16% at batch
+               512, 82k -> 95k pos/s on 8 threads).  (1) Zero-on-merge:
+               nnue_gradbuf_merge_ft_rows re-zeroes each worker FT/PSQT row (and
+               its dirty flag) right after summing it into g_grad, while the
+               cache lines are hot; the clear phase drops its memory-bound
+               row-memset pass (6.7s -> 0.5s/epoch on an 8M-row slice) and
+               nnue_gradbuf_clear now resets only the dense FC grads + dirty
+               cursor.  (2) Sampled clip scan: new --bt-clip-every N (default
+               64) computes the serial L2 clip-norm scan on every Nth batch
+               only — clip telemetry on the 137.7M-position material run showed
+               norms 0.053-0.082 vs the 1.0 threshold (12-19x headroom, zero
+               fires in ~1M batches).  Skipped batches still run the
+               freeze-passthrough housekeeping (nnue_clip_gradients(0));
+               if a sampled norm exceeds half the threshold, per-batch scanning
+               is restored for the rest of the run; --bt-clip-every 1 = old
+               behaviour.  Outputs verified bit-identical (MD5) to the previous
+               trainer at 8 threads and 1 thread.  Measured but NOT adopted:
+               --bt-batch 2048/4096 reach 147k/180k pos/s — needs a paired
+               --bt-lr sweep rated by gauntlet first (fewer Adam steps = less
+               movement per epoch).  See OFFLINE_TRAINING.md "Serial-tail
+               trims".
+
 2026_07_08 -- hybrid_loop.py: --init-nnue [material|classical|noprior] Phase 0.
                Creates a fresh --net and its companion .tdleaf.bin from scratch
                (via the trainer binary's --init-nnue* / --write-nnue path) before

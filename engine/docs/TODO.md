@@ -93,9 +93,15 @@ Open items:
       50%) becomes a first-class mode.  See "Outcome-Imbalance Drift" in TDLEAF.md.
 - [ ] Bayeselo pool rating (not head-to-heads) once a consolidated net approaches
       classic_eval (+598) — iter2s2 at ~−64 is getting close.
-- [ ] Dirty-row-only requantize (nnue_requantize_fc currently rewrites the full
-      92 MB FT array every batch) — now a *priority* speedup since gen-2+
-      consolidation is single-process (~4 h per run).
+- [x] ~~Dirty-row-only requantize~~ — resolved by the `--bt-threads` work
+      (`nnue_requantize_fc_applied`, targeted rows only).  Further serial-tail
+      trims landed 2026-07-09: zero-on-merge worker clearing + sampled clip
+      scan (`--bt-clip-every`, default 64) — +16% at batch 512, bit-identical;
+      see `OFFLINE_TRAINING.md` "Serial-tail trims".  Batch-size sweep
+      resolved 2026-07-10: batch 2048 at *unchanged* lr 0.25 plateaus ~7 Elo
+      below batch 512 at 1.8× speed (LR scaling rules hurt — Adam absorbs the
+      batch change; scaled arms roll over).  Recipe: 512 for production
+      consolidations, 2048 for sweep/probe arms.
 
 ### Training depth curriculum (2026-04-11; see UPDATE above)
 
@@ -200,12 +206,17 @@ and gives back the whole point of switching.
    (FC0/FC1/FC2/FT/PSQT).  It never changes the *relative* magnitude between sections,
    so the inter-section LR ratios are preserved; only a global `lr_scale ÷ ~4` is
    needed (most data sits near `d=0.5` where `1/(d(1−d)) ≈ 4`).
-2. **Bump `TDLEAF_GRAD_CLIP_NORM` ~×4.**  `nnue_clip_gradients(TDLEAF_GRAD_CLIP_NORM)`
-   runs at `nnue_batch_train.cpp:469` **before** `nnue_apply_gradients(lr_scale)` (470),
-   i.e. on the *raw, pre-LR* accumulated gradient.  CE's ~4× larger raw gradients hit
-   the norm clip ~4× more often, and lowering `lr_scale` does **not** relieve that (LR
-   applies after the clip).  Without a matching clip bump, the clip silently becomes
-   the dominant regularizer and confounds the comparison.
+2. ~~**Bump `TDLEAF_GRAD_CLIP_NORM` ~×4.**~~  **Empirically moot (measured
+   2026-07-09):** clip telemetry over the 137.7M-position material-line run
+   showed batch grad norms of 0.053–0.082 against the 1.0 threshold — 12–19×
+   headroom, zero fires in ~1M batches — so even CE's ~4× larger raw gradients
+   (~0.2–0.33) never reach the clip.  No clip change needed; only the LR ÷4
+   pairing above.  (Caveat kept for the record: on a corpus with much larger
+   norms the original reasoning applies — the clip runs on the raw, pre-LR
+   gradient, so lowering `lr_scale` would not relieve it.  Note the clip scan
+   is now *sampled* by default (`--bt-clip-every 64`) with an automatic
+   fall-back to per-batch scanning if a sampled norm exceeds half the
+   threshold.)
 
 **Expectation management:** the payoff is likely *modest*.  Offline corpora are quiet
 positions from near-equal self-play, where most targets and `d` sit near 0.5 — exactly

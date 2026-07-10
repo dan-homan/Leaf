@@ -50,6 +50,16 @@
 //              [--bt-seed N]     shuffle/split seed               (default 42)
 //              [--bt-max N]      cap on loaded positions, 0 = all (default 0)
 //              [--bt-threads N]  worker threads for gradient compute (default 1)
+//              [--bt-clip-every N]  compute the L2 clip norm on every Nth batch
+//                                only (default 64; 1 = every batch).  The norm
+//                                scan is serial and touches every dirty FT/PSQT
+//                                row; measured batch norms sit 12-19x under
+//                                TDLEAF_GRAD_CLIP_NORM on self-play corpora, so
+//                                sampling is outcome-identical in practice.
+//                                Safety: if a sampled norm ever exceeds half
+//                                the threshold, per-batch scanning is restored
+//                                for the rest of the run.  Skipped batches
+//                                still run the freeze-passthrough housekeeping.
 //
 // Per epoch: <prefix>_ep<N>.nnue and <prefix>_ep<N>.tdleaf.bin are written.
 //
@@ -399,6 +409,7 @@ int nnue_batch_train(int argc, char *argv[])
     unsigned seed  = 42;
     size_t max_rec = 0;
     int   threads  = 1;          // worker threads for within-batch gradient compute
+    int   clip_every = 64;       // L2 clip-norm scan stride (1 = every batch)
     float leaf_lambda = -1.0f;   // < 0 → follow --bt-lambda
     float td_lambda   = TDLEAF_LAMBDA;   // result-decay per game-ply (default sqrt(0.98))
     bool  td_lambda_explicit = false;    // true if --bt-td-lambda was passed
@@ -420,6 +431,7 @@ int nnue_batch_train(int argc, char *argv[])
         else if ((v = next("--bt-seed")))    seed     = (unsigned)atoi(v);
         else if ((v = next("--bt-max")))     max_rec  = (size_t)atoll(v);
         else if ((v = next("--bt-threads"))) threads  = atoi(v);
+        else if ((v = next("--bt-clip-every"))) clip_every = atoi(v);
         else if ((v = next("--bt-leaf-lambda"))) leaf_lambda = (float)atof(v);
         else if ((v = next("--bt-td-lambda")))   { td_lambda = (float)atof(v); td_lambda_explicit = true; }
     }
@@ -427,6 +439,7 @@ int nnue_batch_train(int argc, char *argv[])
     if (batch < 1) batch = 1;
     if (threads < 1) threads = 1;
     if (threads > 16) threads = 16;
+    if (clip_every < 1) clip_every = 1;
     if (leaf_lambda < 0.0f) leaf_lambda = lambda;
     if (td_lambda < 0.0f || td_lambda > 1.0f) {
         fprintf(stderr, "batch-train: --bt-td-lambda must be in [0,1]\n");
@@ -469,10 +482,10 @@ int nnue_batch_train(int argc, char *argv[])
 
     fprintf(stderr, "batch-train: lambda=%.2f leaf_lambda=%.2f td_lambda=%.5f "
                     "K=%.0f lr_scale=%.3f batch=%d epochs=%d val=%.3f seed=%u "
-                    "threads=%d  axis=%s\n",
+                    "threads=%d clip_every=%d  axis=%s\n",
             (double)lambda, (double)leaf_lambda, (double)td_lambda, (double)K,
             (double)lr_scale, batch, epochs, (double)val_frac, seed, threads,
-            corpus_game_ply ? "game-ply" : "record-index(legacy)");
+            clip_every, corpus_game_ply ? "game-ply" : "record-index(legacy)");
 
     // ---- Result-decay lookup: decay(r) = td_lambda^(N_game - ply) --------
     // Precomputed per integer gap (gaps span 0..max game length, a few
@@ -556,6 +569,7 @@ int nnue_batch_train(int argc, char *argv[])
     // Adam step.  se_batch collects the batch's squared-error partials (thread
     // order).  Phase timers accumulate per epoch.
     double t_compute = 0, t_reduce = 0, t_clear = 0, t_tail = 0;
+    size_t batch_no = 0;   // global batch counter (clip-norm sampling stride)
 
     auto run_batch = [&](size_t base, int cur, double &se_batch) {
         auto ta = std::chrono::steady_clock::now();
@@ -595,7 +609,8 @@ int nnue_batch_train(int argc, char *argv[])
                     nnue_gradbuf_merge_dense(workers[t]->gb);
         });
         auto tc = std::chrono::steady_clock::now();
-        // Phase 3: clear each worker buffer (its own dirty rows) for next batch.
+        // Phase 3: clear each worker buffer for next batch (dense FC grads +
+        // dirty cursor only — FT/PSQT rows were zeroed by the merge phase).
         pool.run([&](int tid) { nnue_gradbuf_clear(workers[tid]->gb); });
         auto td = std::chrono::steady_clock::now();
         // Phase 4: Adam step on the merged gradient, then targeted requantize
@@ -603,8 +618,25 @@ int nnue_batch_train(int argc, char *argv[])
         // requantize).  apply re-zeroes g_grad for the next batch.  At >1 thread
         // the FC-stack + FT-row Adam (the bottleneck) is parallelized; threads==1
         // uses the untouched serial path (bit-identical to the pre-threading
-        // trainer).  clip and requantize stay serial (cheap).
-        nnue_clip_gradients(TDLEAF_GRAD_CLIP_NORM);
+        // trainer).  The L2 clip-norm scan (serial, touches every dirty FT/PSQT
+        // row) runs on every clip_every-th batch; skipped batches still call
+        // nnue_clip_gradients(0) for the freeze-passthrough housekeeping.  If a
+        // sampled norm ever reaches half the threshold, per-batch scanning is
+        // restored — measured self-play corpora sit 12-19x under it, so the
+        // sampled scan is outcome-identical in practice.
+        if (clip_every == 1 || batch_no % (size_t)clip_every == 0) {
+            float norm = nnue_clip_gradients(TDLEAF_GRAD_CLIP_NORM);
+            if (clip_every > 1 && norm > 0.5f * TDLEAF_GRAD_CLIP_NORM) {
+                fprintf(stderr, "batch-train: sampled grad norm %.3f above half "
+                                "the clip threshold %.2f — restoring per-batch "
+                                "clip scans\n",
+                        (double)norm, (double)TDLEAF_GRAD_CLIP_NORM);
+                clip_every = 1;
+            }
+        } else {
+            nnue_clip_gradients(0.0f);
+        }
+        batch_no++;
         if (threads == 1)
             nnue_apply_gradients(lr_scale);
         else
