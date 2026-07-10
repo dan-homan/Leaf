@@ -1,5 +1,19 @@
 Changes since 2017_12_24
 
+2026_07_10 -- td_lambda calibration sweep resolved (docs only; no code change).
+               Four points on the 137.7M material-line corpus (batch 2048,
+               lr 0.25, epoch ladders vs shared pretrain anchor): td_lambda
+               0.985 (mean outcome mass 0.33) monotone-rises to +95 at ep6
+               (still rising) vs the 0.98995 default's ~+78 plateau (mass
+               0.45) and 0.995's +56 (mass 0.65); 0.975 (mass 0.20) ties
+               0.985 head-to-head (49.55%, 2000g) but oscillates.  Verdict:
+               td_lambda 0.985 for this line; transferable rule = choose
+               td_lambda per corpus so the trainer's printed mean decay lands
+               ~0.25-0.33 (reproduces the flat-lambda sweep's plateau under
+               the decayed target).  Best net: td0985 ep6 (extension snapshot
+               td0985b2048_work/train_ext/td0985x_ep2).  See
+               OFFLINE_TRAINING.md "td_lambda calibration sweep".
+
 2026_07_10 -- Batch-size sweep resolved (docs only; no code change).  Three
                --bt-batch 2048 arms vs the batch-512 reference on the 137.7M
                material-line corpus, per-epoch ladders vs a shared pretrain

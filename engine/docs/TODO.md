@@ -74,8 +74,13 @@ Open items:
       so the dump binaries emit the exact `endply` column); gauntlet vs
       {tdL10F10x6-ep4, classic_eval}, plus a direct promoted-net-vs-classic
       anchor match (family-chained Elo reads ~20–30 optimistic).
-- [ ] td_λ calibration on a larger corpus (sweep around 0.98 once iter3's
-      exact-endply corpus exists; PGN-scale equivalent ≈ 0.99/game-ply).
+- [x] ~~td_λ calibration on a larger corpus~~ — resolved 2026-07-10 on the
+      137.7M material-line corpus: **td_λ 0.985** (game-ply) beats the 0.98995
+      default by ~10–15 Elo (+95 still-rising vs +78 plateau vs the shared
+      pretrain anchor); 0.975 ties it (noisier); 0.995 clearly worst.  The
+      transferable knob is corpus-mean outcome mass ≈ 0.25–0.33 (matches the
+      old flat-λ plateau) — pick td_λ per corpus from the trainer's printed
+      mean decay.  See `OFFLINE_TRAINING.md` "td_λ calibration sweep".
 - [x] ~~`--bt-sync` frontier fix~~ — resolved 2026-07-08 by *removing* sharding:
       replaced with within-batch thread parallelism (`--bt-threads`, single
       process, staleness-free — mathematically identical to 1 thread up to float

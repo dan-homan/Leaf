@@ -146,6 +146,35 @@ swing ~±30 Elo (the *bit-identical* ep1 net measured +29 at 1+0.1 and −5 at
 1+0.01 vs the same opponent).  Read ladders by shape, replicate before trusting
 any single-point peak.
 
+### td_λ calibration sweep (2026-07-10): 0.985 on the material corpus — the knob is corpus-mean outcome mass ≈ 0.2–0.33
+
+Four td_λ points on the 137.7M-position material-line corpus (game-ply axis,
+exact endply; batch 2048, lr 0.25, per-epoch ladders vs a shared pretrain
+anchor, 1000 games/point):
+
+| td_λ | mean outcome mass | ep1…ep6 ladder | read |
+|---|---|---|---|
+| 0.975 | 0.196 | +68 +74 +91 +78 +99 +81 | oscillating plateau ~+85–99 |
+| **0.985** | **0.330** | +65 +67 +77 +87 +90 **+95** | **monotone, still rising at ep6** |
+| 0.98995 (default) | 0.451 | +38 +72 +76 +82 +77 +78 | plateau ~+78 |
+| 0.995 | 0.651 | +42 +40 +43 +56 | clearly worst |
+
+Head-to-head between the two best snapshots (td0985-ep6 vs td0975-ep5, 2000
+games): 49.55% — a tie.  **0.985 is the pick** on curve shape (smooth monotone
+vs oscillating) and proximity to the default.  Its ep6 net is the strongest of
+the material line (+95 vs pretrain, vs the b512 reference's +86 peak) and was
+still rising — more epochs may extract more.
+
+The deeper reading: mapped to corpus-mean outcome mass, the sweep reproduces
+the flat-λ sweep's plateau (mass ≈ 0.19–0.33, falloff above) under the decayed
+target.  The default td_λ (0.98995 → mass 0.451 on this corpus) sits past the
+plateau edge and cost ~10–15 Elo here.  **For a new corpus, don't reuse a
+td_λ value blindly — check the trainer's printed mean decay and choose td_λ
+to land mean outcome mass ≈ 0.25–0.33** (ply-gap distributions differ by dump
+depth and source, so the same td_λ yields different mass).  Whether the
+optimal mass shifts across hybrid-loop generations (as label quality
+improves) is an open question — re-check per generation until it stabilizes.
+
 ---
 
 ## Corpus Format
