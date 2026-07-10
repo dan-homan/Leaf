@@ -389,7 +389,7 @@ struct BTWorker {
     NNUEAccumulator  acc;
     NNUEActivations  act;
     NNUEGradBuf     *gb = nullptr;
-    double           se = 0.0, se2 = 0.0;
+    double           se = 0.0, se2 = 0.0, nll = 0.0;
 };
 
 // ---------------------------------------------------------------------------
@@ -410,6 +410,7 @@ int nnue_batch_train(int argc, char *argv[])
     size_t max_rec = 0;
     int   threads  = 1;          // worker threads for within-batch gradient compute
     int   clip_every = 64;       // L2 clip-norm scan stride (1 = every batch)
+    float loss_gamma = 1.0f;     // sig_grad = (d(1-d))^gamma / K.  1=MSE, 0=CE, 0.5=focal
     float leaf_lambda = -1.0f;   // < 0 → follow --bt-lambda
     float td_lambda   = TDLEAF_LAMBDA;   // result-decay per game-ply (default sqrt(0.98))
     bool  td_lambda_explicit = false;    // true if --bt-td-lambda was passed
@@ -432,6 +433,7 @@ int nnue_batch_train(int argc, char *argv[])
         else if ((v = next("--bt-max")))     max_rec  = (size_t)atoll(v);
         else if ((v = next("--bt-threads"))) threads  = atoi(v);
         else if ((v = next("--bt-clip-every"))) clip_every = atoi(v);
+        else if ((v = next("--bt-loss-gamma"))) loss_gamma = (float)atof(v);
         else if ((v = next("--bt-leaf-lambda"))) leaf_lambda = (float)atof(v);
         else if ((v = next("--bt-td-lambda")))   { td_lambda = (float)atof(v); td_lambda_explicit = true; }
     }
@@ -440,6 +442,7 @@ int nnue_batch_train(int argc, char *argv[])
     if (threads < 1) threads = 1;
     if (threads > 16) threads = 16;
     if (clip_every < 1) clip_every = 1;
+    if (loss_gamma < 0.0f) loss_gamma = 0.0f;
     if (leaf_lambda < 0.0f) leaf_lambda = lambda;
     if (td_lambda < 0.0f || td_lambda > 1.0f) {
         fprintf(stderr, "batch-train: --bt-td-lambda must be in [0,1]\n");
@@ -482,10 +485,11 @@ int nnue_batch_train(int argc, char *argv[])
 
     fprintf(stderr, "batch-train: lambda=%.2f leaf_lambda=%.2f td_lambda=%.5f "
                     "K=%.0f lr_scale=%.3f batch=%d epochs=%d val=%.3f seed=%u "
-                    "threads=%d clip_every=%d  axis=%s\n",
+                    "threads=%d clip_every=%d loss_gamma=%.2f  axis=%s\n",
             (double)lambda, (double)leaf_lambda, (double)td_lambda, (double)K,
             (double)lr_scale, batch, epochs, (double)val_frac, seed, threads,
-            clip_every, corpus_game_ply ? "game-ply" : "record-index(legacy)");
+            clip_every, (double)loss_gamma,
+            corpus_game_ply ? "game-ply" : "record-index(legacy)");
 
     // ---- Result-decay lookup: decay(r) = td_lambda^(N_game - ply) --------
     // Precomputed per integer gap (gaps span 0..max game length, a few
@@ -540,7 +544,7 @@ int nnue_batch_train(int argc, char *argv[])
     auto val_loss = [&]() {
         pool.run([&](int tid) {
             BTWorker &w = *workers[tid];
-            w.se = w.se2 = 0.0;
+            w.se = w.se2 = w.nll = 0.0;
             size_t lo = (size_t)tid * val_idx.size() / threads;
             size_t hi = (size_t)(tid + 1) * val_idx.size() / threads;
             for (size_t k = lo; k < hi; k++) {
@@ -550,13 +554,21 @@ int nnue_batch_train(int argc, char *argv[])
                 float to = 0.5f * (float)recs[i].result2;
                 w.se  += (double)(tb - d) * (tb - d);
                 w.se2 += (double)(to - d) * (to - d);
+                // Soft-label cross-entropy against the blend target — reported
+                // as a calibration diagnostic only (never fed to training).
+                // Clamp d to [0.05,0.95] so log() can't overflow at the tails;
+                // this touches the METRIC only, not the gradient.
+                float dc = d < 0.05f ? 0.05f : (d > 0.95f ? 0.95f : d);
+                w.nll += -((double)tb * log(dc) + (1.0 - (double)tb) * log(1.0 - dc));
             }
         });
-        double se_blend = 0.0, se_outcome = 0.0;
-        for (int t = 0; t < threads; t++) { se_blend += workers[t]->se; se_outcome += workers[t]->se2; }
+        double se_blend = 0.0, se_outcome = 0.0, nll = 0.0;
+        for (int t = 0; t < threads; t++) {
+            se_blend += workers[t]->se; se_outcome += workers[t]->se2; nll += workers[t]->nll;
+        }
         double n = (double)std::max<size_t>(val_idx.size(), 1);
-        fprintf(stderr, "  val MSE(blend)=%.6f  MSE(outcome)=%.6f  (n=%zu)\n",
-                se_blend / n, se_outcome / n, val_idx.size());
+        fprintf(stderr, "  val MSE(blend)=%.6f  MSE(outcome)=%.6f  NLL(blend)=%.6f  (n=%zu)\n",
+                se_blend / n, se_outcome / n, nll / n, val_idx.size());
         return se_blend / n;
     };
 
@@ -587,7 +599,14 @@ int nnue_batch_train(int argc, char *argv[])
                 w.se += (double)e * e;
                 // Same descent-form gradient scale as tdleaf_accumulate_game;
                 // wtm here is the position's stm (the "leaf" of a 0-ply PV).
-                float sig_grad   = d * (1.0f - d) / K;
+                // Focal-γ loss family: sig_grad = (d(1-d))^γ / K.  γ=1 is MSE
+                // (the sigmoid Jacobian in full, kept bit-identical via the
+                // branch); γ=0 drops it → soft-label cross-entropy gradient
+                // (target-d)/K, which keeps full strength at the confident
+                // tails; γ=0.5 sits between.
+                float sig_grad   = (loss_gamma == 1.0f)
+                                     ? d * (1.0f - d) / K
+                                     : powf(d * (1.0f - d), loss_gamma) / K;
                 float wtm_sign   = r.wtm ? -1.0f : 1.0f;
                 float grad_scale = e * sig_grad * cp_factor * wtm_sign;
                 if (grad_scale != 0.0f)

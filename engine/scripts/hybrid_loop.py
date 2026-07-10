@@ -261,6 +261,9 @@ def main():
     ap.add_argument("--bt-td-lambda", type=float, default=None,
                     help="Result decay per ply from the game end "
                          "(default: trainer's TDLEAF_LAMBDA; 1.0 = flat blend)")
+    ap.add_argument("--bt-loss-gamma", type=float, default=None,
+                    help="Focal-gamma loss exponent (d(1-d))^gamma: "
+                         "1.0=MSE (default), 0.0=cross-entropy, 0.5=between")
     # gauntlet
     ap.add_argument("--gauntlet", nargs="*", default=[],
                     help="Opponent binaries in learn/ for the FINAL gauntlet "
@@ -493,6 +496,8 @@ def main():
         cmd += ["--bt-leaf-lambda", str(args.bt_leaf_lambda)]
     if args.bt_td_lambda is not None:
         cmd += ["--bt-td-lambda", str(args.bt_td_lambda)]
+    if args.bt_loss_gamma is not None:
+        cmd += ["--bt-loss-gamma", str(args.bt_loss_gamma)]
     logf = open(tdir / "train.log", "w")
     proc = subprocess.Popen(cmd, cwd=str(tdir),
                             stdout=subprocess.DEVNULL, stderr=logf)

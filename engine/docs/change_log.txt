@@ -1,5 +1,19 @@
 Changes since 2017_12_24
 
+2026_07_10 -- Offline batch-train focal-gamma loss family (--bt-loss-gamma).
+               sig_grad = (d(1-d))^gamma / K: gamma=1 = MSE (default, kept
+               bit-identical via an explicit branch), gamma=0 = soft-label
+               cross-entropy ((target-d)/K, full strength at the confident
+               tails), gamma=0.5 between.  Offline path only (online TDLeaf
+               keeps MSE — there d(1-d) is the chain-rule Jacobian, not a
+               discretionary damping term).  Added an NLL(blend) validation
+               metric (log clamped to d in [0.05,0.95], metric-only) printed
+               beside MSE(blend)/MSE(outcome).  hybrid_loop.py gains a matching
+               --bt-loss-gamma passthrough.  Pair gamma<1 with a global lr
+               rescale (the factor scales every section uniformly): /2 at
+               gamma=0.5, /4 at gamma=0 (the (0.25)^gamma factor at d~0.5).
+               Verdict pending the g in {1,0.5,0} gauntlet sweep.
+
 2026_07_10 -- td_lambda calibration sweep resolved (docs only; no code change).
                Four points on the 137.7M material-line corpus (batch 2048,
                lr 0.25, epoch ladders vs shared pretrain anchor): td_lambda
