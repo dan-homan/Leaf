@@ -31,7 +31,7 @@
 // reproduces the historical per-own-move decay of 0.98 (fitted from 1.6M
 // self-play games — autocorrelation and d_t-vs-result give ~0.97–0.99), while a
 // single ONE lambda now expresses the same real-game horizon in both modes.
-static const float TDLEAF_LAMBDA           = 0.98994949f;  // = sqrt(0.98), per game-ply
+static const float TDLEAF_LAMBDA           = 0.985f;  // per game ply, based on offline calibration
 static const float TDLEAF_K               = 220.0f; // sigmoid temperature (centipawns)
                                                      // MLE over 58M positions from the classical
                                                      // eval side of match_nn-fresh-260514-
