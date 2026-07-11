@@ -101,6 +101,14 @@
  #define TDLEAF_READONLY 0
 #endif
 
+// WDL_HEAD: auxiliary win/draw/loss read-out head trained alongside the scalar
+// eval (Phase 1a — see docs/WDL_HEAD.md).  Requires TDLEAF=1.  The scalar path
+// and search are unaffected when this is off (default).  Compile with
+// -D NNUE=1 -D TDLEAF=1 -D WDL_HEAD=1.
+#ifndef WDL_HEAD
+ #define WDL_HEAD 0
+#endif
+
 // TDLEAF_LOG_STEP_CLIPS: append one line per Adam batch to
 // <exec_path>tdleaf_telemetry.log recording per-category max |step| and clip
 // counts.  Disabled by default; set to 1 to enable (for diagnosing clip

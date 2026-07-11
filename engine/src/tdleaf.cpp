@@ -234,6 +234,70 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result,
 
         nnue_accumulate_gradients(act, grad_scale, replay_mode);
     }
+
+#if WDL_HEAD
+    // -----------------------------------------------------------------------
+    // Auxiliary WDL head — TD(λ) on the win/draw/loss distribution.
+    // Computed in White POV, then converted to STM POV per ply (see
+    // docs/WDL_HEAD.md).  Independent of the scalar grad_scale above, so it runs
+    // its own pass over every ply.  Phase 1a: gradient touches only head weights.
+    // Cost: one extra forward per ply during learning (opt-in WDL build).
+    // -----------------------------------------------------------------------
+    if (T >= 1) {
+        static float PW [MAX_GAME_PLY][NNUE_WDL_OUT];  // predicted dist, White POV
+        static float piW[MAX_GAME_PLY][NNUE_WDL_OUT];  // λ-return target, White POV
+
+        // Pass 1: predicted White-POV distribution per ply.
+        for (int t = 0; t < T; t++) {
+            NNUEActivations act;
+            act.stack = rec.plies[t].stack;
+            nnue_forward_fp32(rec.plies[t].acc, rec.plies[t].psqt, rec.plies[t].wtm, act);
+            if (rec.plies[t].wtm) {           // STM == White: no swap
+                PW[t][0] = act.wdl_soft[0]; PW[t][1] = act.wdl_soft[1]; PW[t][2] = act.wdl_soft[2];
+            } else {                          // STM == Black: swap win/loss
+                PW[t][0] = act.wdl_soft[2]; PW[t][1] = act.wdl_soft[1]; PW[t][2] = act.wdl_soft[0];
+            }
+        }
+
+        // Terminal target = one-hot(result), White POV (0.75/0.25 thresholds
+        // match the TSV dump's result bucketing).
+        piW[T - 1][0] = (result > 0.75f) ? 1.0f : 0.0f;
+        piW[T - 1][1] = (result >= 0.25f && result <= 0.75f) ? 1.0f : 0.0f;
+        piW[T - 1][2] = (result < 0.25f) ? 1.0f : 0.0f;
+
+        // Backward λ-return over distributions: πW_t = (1-λ^dply)·P_{t+1} + λ^dply·πW_{t+1}.
+        // Reuses the scalar path's game-ply trace decay (dply gap, `lambda`).
+        for (int t = T - 2; t >= 0; t--) {
+            int dply = rec.plies[t + 1].game_ply - rec.plies[t].game_ply;
+            if (dply < 1) dply = 1;
+            float lam = (dply == 1) ? lambda : powf(lambda, (float)dply);
+            for (int o = 0; o < NNUE_WDL_OUT; o++)
+                piW[t][o] = (1.0f - lam) * PW[t + 1][o] + lam * piW[t + 1][o];
+        }
+
+        // Pass 2: forward again (for activations), accumulate head gradient.
+        for (int t = 0; t < T; t++) {
+            float tgt[NNUE_WDL_OUT];
+            if (rec.plies[t].wtm) {           // White POV → STM POV: no swap
+                tgt[0] = piW[t][0]; tgt[1] = piW[t][1]; tgt[2] = piW[t][2];
+            } else {                          // swap back win/loss for Black STM
+                tgt[0] = piW[t][2]; tgt[1] = piW[t][1]; tgt[2] = piW[t][0];
+            }
+            NNUEActivations act;
+            act.stack = rec.plies[t].stack;
+            nnue_forward_fp32(rec.plies[t].acc, rec.plies[t].psqt, rec.plies[t].wtm, act);
+            float d_logits[NNUE_WDL_OUT];
+            for (int o = 0; o < NNUE_WDL_OUT; o++)
+                d_logits[o] = act.wdl_soft[o] - tgt[o];   // softmax-CE gradient, STM POV
+            float id_weight = 1.0f / (1.0f + rec.plies[t].id_score_variance / TDLEAF_ID_VAR_SIGMA2);
+            nnue_accumulate_wdl_gradients(act, d_logits, TDLEAF_WDL_WEIGHT * id_weight);
+        }
+
+        if (getenv("WDL_DEBUG"))
+            fprintf(stderr, "WDL: T=%d result=%.1f termPred(W/D/L)=%.3f/%.3f/%.3f\n",
+                    T, (double)result, PW[T - 1][0], PW[T - 1][1], PW[T - 1][2]);
+    }
+#endif
 }
 
 // ---------------------------------------------------------------------------

@@ -40,6 +40,13 @@ static const int NNUE_L1_PADDED   = 32;   // padded input dim (ceil(30, 16) = 32
 // FC2 (output): input = NNUE_L1_SIZE = 32 neurons
 static const int NNUE_L2_PADDED   = 32;   // padded input dim for FC2
 
+#if WDL_HEAD
+// Auxiliary WDL head (see docs/WDL_HEAD.md): reads the same fc2_in[32] activation
+// as FC2 plus one material input (the STM-POV cp eval), producing 3 logits.
+static const int NNUE_WDL_OUT = 3;                    // win / draw / loss
+static const int NNUE_WDL_IN  = NNUE_L2_PADDED + 1;   // fc2_in[32] + material (33)
+#endif
+
 // Quantization scales
 static const int NNUE_WEIGHT_SHIFT = 6;   // FC weights: raw >> 6 → [0,127] int8
 static const int NNUE_SQR_SHIFT    = 7;   // SqrCReLU: (v*v) >> 19 → [0,127]  (2*WEIGHT_SHIFT+SQR_SHIFT=19)
@@ -176,6 +183,12 @@ struct NNUEActivations {
     float fwdOut;                     // passthrough: fc0_raw[15] * 9600/8128
     float positional;                 // fc2_raw + fwdOut
     int   stack;                      // layer stack index
+#if WDL_HEAD
+    // Auxiliary WDL head activations (Phase 1a: read-out only, no trunk backprop).
+    float wdl_mat;                    // 33rd head input: STM-POV cp eval × WDL_MAT_SCALE
+    float wdl_logits[NNUE_WDL_OUT];   // pre-softmax head outputs (STM POV)
+    float wdl_soft  [NNUE_WDL_OUT];   // softmax(wdl_logits): (p_w, p_d, p_l) STM POV
+#endif
     // FT/PSQT backprop fields — filled by tdleaf_update_after_game before nnue_accumulate_gradients:
     int16_t acc_raw[2][NNUE_HALF_DIMS];       // raw int16 accumulator (for SqrCReLU gradient)
     int     ft_idx[2][NNUE_MAX_FT_PER_PERSP]; // active feature indices, indexed by actual persp
@@ -213,6 +226,16 @@ struct NNUEGradBuf;
 // are re-derived from stored positions against current FT.
 void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
                                bool replay_mode = false, NNUEGradBuf *gb = nullptr);
+
+#if WDL_HEAD
+// Accumulate the auxiliary WDL head gradient for one ply.  d_logits is the
+// softmax-CE gradient (softmax(logits) − target) in STM POV; scale folds the
+// loss weight and id-stability weight.  Phase 1a: updates only the head weights
+// (grad_wdl_*), never the trunk.  Uses act.wdl_soft / act.fc2_in / act.wdl_mat.
+void nnue_accumulate_wdl_gradients(const NNUEActivations &act,
+                                   const float d_logits[NNUE_WDL_OUT],
+                                   float scale, NNUEGradBuf *gb = nullptr);
+#endif
 
 // Per-thread gradient-buffer helpers for the offline batch trainer's
 // within-batch parallelism (see docs/BT_PARALLEL_PLAN.md).  TDLEAF-only.

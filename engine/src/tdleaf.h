@@ -118,6 +118,16 @@ static const float TDLEAF_ADAM_FT_BIAS_LR0 = 0.02f;   // FT biases  (int16, medi
                                                        // 0.001×median to limit dying-ReLU risk)
 static const float TDLEAF_ADAM_PSQT_LR0    = 13.0f;   // PSQT (int32; sized to raw ~13 319 — active
                                                        // post-centering subspace is ~665, see note above)
+#if WDL_HEAD
+// Auxiliary WDL head (see docs/WDL_HEAD.md).  The head reads fc2_in[0..31] ∈ [0,127]
+// plus one material input = STM-POV cp eval × WDL_MAT_SCALE.  Head weights are tiny
+// (~0.01–0.05) so the Adam LR is sized for ~0.1% steps at that magnitude.  Phase 1a
+// keeps the head's Adam moments session-local and persists weights as absolute
+// values, so no multi-writer merge / counts machinery is wired for it yet.
+static const float WDL_MAT_SCALE        = 1.0f / 16.0f; // cp → head-input scale (±400cp → ±25)
+static const float TDLEAF_ADAM_WDL_LR0  = 0.001f;       // WDL head weights + biases
+static const float TDLEAF_WDL_WEIGHT    = 1.0f;         // WDL loss coefficient (per-ply gradient scale)
+#endif
 // Material representation: pure-PSQT — the bucketed PSQT is the SOLE trainable
 // material channel.  There is no dense piece_val channel and no gauge machinery
 // (pin / gradient mean-centering / post-Adam dw centering / persisted slot-mean
