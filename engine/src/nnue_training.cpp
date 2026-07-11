@@ -90,6 +90,13 @@ static float delta_l1_w[NNUE_LAYER_STACKS][NNUE_L1_SIZE * NNUE_L1_PADDED];
 static float delta_l1_b[NNUE_LAYER_STACKS][NNUE_L1_SIZE];
 static float delta_l2_w[NNUE_LAYER_STACKS][NNUE_L2_PADDED];
 static float delta_l2_b[NNUE_LAYER_STACKS];
+#if WDL_HEAD
+// Phase 2: WDL head deltas since last file sync — enables additive multi-writer
+// merge (shadow = file + delta) instead of Phase-1a last-writer-wins.  Adam
+// moments stay session-local (fine within one run); see docs/WDL_HEAD.md.
+static float delta_wdl_w[NNUE_LAYER_STACKS][NNUE_WDL_OUT][NNUE_WDL_IN];
+static float delta_wdl_b[NNUE_LAYER_STACKS][NNUE_WDL_OUT];
+#endif
 // Per-session delta counts: incremented alongside absolute counts in nnue_apply_gradients.
 // On save, merged count = file_count + delta_count (additive, not max-based).
 // Cleared after each file sync.  FT weights keep max-based merge (counts not used
@@ -397,6 +404,7 @@ void nnue_init_zero_weights(int prior_mode)
     memset(grad_wdl_b, 0, sizeof(grad_wdl_b));
     memset(v_wdl_w, 0, sizeof(v_wdl_w));  memset(v_wdl_b, 0, sizeof(v_wdl_b));
     memset(m_wdl_w, 0, sizeof(m_wdl_w));  memset(m_wdl_b, 0, sizeof(m_wdl_b));
+    memset(delta_wdl_w, 0, sizeof(delta_wdl_w));  memset(delta_wdl_b, 0, sizeof(delta_wdl_b));
 #endif
     // Delta counts — zero for fresh network.
     memset(delta_l0_w_cnt, 0, sizeof(delta_l0_w_cnt));
@@ -733,6 +741,7 @@ void nnue_init_fp32_weights()
     memset(grad_wdl_b, 0, sizeof(grad_wdl_b));
     memset(v_wdl_w, 0, sizeof(v_wdl_w));  memset(v_wdl_b, 0, sizeof(v_wdl_b));
     memset(m_wdl_w, 0, sizeof(m_wdl_w));  memset(m_wdl_b, 0, sizeof(m_wdl_b));
+    memset(delta_wdl_w, 0, sizeof(delta_wdl_w));  memset(delta_wdl_b, 0, sizeof(delta_wdl_b));
 #endif
     t_adam = 0;
 
@@ -1519,12 +1528,12 @@ void nnue_apply_gradients(float lr_scale)
             for (int i = 0; i < NNUE_WDL_IN; i++) {
                 if (grad_wdl_w[s][o][i] != 0.0f) {
                     float dw = do_step(grad_wdl_w[s][o][i], m_wdl_w[s][o][i], v_wdl_w[s][o][i], t_wdl_session, wdl_lr);
-                    wdl_weights_f32[s][o][i] -= dw;
+                    wdl_weights_f32[s][o][i] -= dw;  delta_wdl_w[s][o][i] -= dw;
                 }
             }
             if (grad_wdl_b[s][o] != 0.0f) {
                 float dw = do_step(grad_wdl_b[s][o], m_wdl_b[s][o], v_wdl_b[s][o], t_wdl_session, wdl_lr);
-                wdl_bias_f32[s][o] -= dw;
+                wdl_bias_f32[s][o] -= dw;  delta_wdl_b[s][o] -= dw;
             }
         }
 #endif
@@ -1762,11 +1771,11 @@ static void nnue_apply_fc_stack(int s, const NNUEApplyParams &p,
         for (int i = 0; i < NNUE_WDL_IN; i++)
             if (grad_wdl_w[s][o][i] != 0.0f) {
                 float dw = nnue_adam_step(grad_wdl_w[s][o][i], m_wdl_w[s][o][i], v_wdl_w[s][o][i], t_wdl_session, p.wdl_lr, smax, sclip);
-                wdl_weights_f32[s][o][i] -= dw;
+                wdl_weights_f32[s][o][i] -= dw;  delta_wdl_w[s][o][i] -= dw;
             }
         if (grad_wdl_b[s][o] != 0.0f) {
             float dw = nnue_adam_step(grad_wdl_b[s][o], m_wdl_b[s][o], v_wdl_b[s][o], t_wdl_session, p.wdl_lr, smax, sclip);
-            wdl_bias_f32[s][o] -= dw;
+            wdl_bias_f32[s][o] -= dw;  delta_wdl_b[s][o] -= dw;
         }
     }
 #endif
@@ -2426,6 +2435,31 @@ bool nnue_save_fc_weights(const char *path)
                     }
                 }
             }
+#if WDL_HEAD
+            // WDL head (v13+): additive delta merge (shadow = file + our_delta).
+            // Read in the same order the writer emits (per stack: w[o][NNUE_WDL_IN]
+            // for o=0..2, then bias[NNUE_WDL_OUT]).
+            if (ok && version >= 13u) {
+                for (int s = 0; s < NNUE_LAYER_STACKS && ok; s++) {
+                    for (int o = 0; o < NNUE_WDL_OUT && ok; o++) {
+                        float tw[NNUE_WDL_IN];
+                        if (fread(tw, sizeof(float), NNUE_WDL_IN, cur) != (size_t)NNUE_WDL_IN) { ok = false; break; }
+                        for (int i = 0; i < NNUE_WDL_IN; i++) {
+                            wdl_weights_f32[s][o][i] = tw[i] + delta_wdl_w[s][o][i];
+                            delta_wdl_w[s][o][i] = 0.0f;
+                        }
+                    }
+                    if (ok) {
+                        float tb[NNUE_WDL_OUT];
+                        if (fread(tb, sizeof(float), NNUE_WDL_OUT, cur) != (size_t)NNUE_WDL_OUT) { ok = false; }
+                        else for (int o = 0; o < NNUE_WDL_OUT; o++) {
+                            wdl_bias_f32[s][o] = tb[o] + delta_wdl_b[s][o];
+                            delta_wdl_b[s][o] = 0.0f;
+                        }
+                    }
+                }
+            }
+#endif
         }
         fclose(cur);
         // If merge failed partway, clear remaining FC deltas so we don't double-count
@@ -2438,6 +2472,10 @@ bool nnue_save_fc_weights(const char *path)
             memset(delta_l1_b, 0, sizeof(delta_l1_b));
             memset(delta_l2_w, 0, sizeof(delta_l2_w));
             memset(delta_l2_b, 0, sizeof(delta_l2_b));
+#if WDL_HEAD
+            memset(delta_wdl_w, 0, sizeof(delta_wdl_w));
+            memset(delta_wdl_b, 0, sizeof(delta_wdl_b));
+#endif
             memset(delta_l0_w_cnt, 0, sizeof(delta_l0_w_cnt));
             memset(delta_l0_b_cnt, 0, sizeof(delta_l0_b_cnt));
             memset(delta_l1_w_cnt, 0, sizeof(delta_l1_w_cnt));
@@ -2455,6 +2493,10 @@ bool nnue_save_fc_weights(const char *path)
         memset(delta_l1_b, 0, sizeof(delta_l1_b));
         memset(delta_l2_w, 0, sizeof(delta_l2_w));
         memset(delta_l2_b, 0, sizeof(delta_l2_b));
+#if WDL_HEAD
+        memset(delta_wdl_w, 0, sizeof(delta_wdl_w));
+        memset(delta_wdl_b, 0, sizeof(delta_wdl_b));
+#endif
         memset(delta_l0_w_cnt, 0, sizeof(delta_l0_w_cnt));
         memset(delta_l0_b_cnt, 0, sizeof(delta_l0_b_cnt));
         memset(delta_l1_w_cnt, 0, sizeof(delta_l1_w_cnt));
@@ -2980,6 +3022,10 @@ bool nnue_load_fc_weights(const char *path)
     memset(delta_l1_b, 0, sizeof(delta_l1_b));
     memset(delta_l2_w, 0, sizeof(delta_l2_w));
     memset(delta_l2_b, 0, sizeof(delta_l2_b));
+#if WDL_HEAD
+    memset(delta_wdl_w, 0, sizeof(delta_wdl_w));
+    memset(delta_wdl_b, 0, sizeof(delta_wdl_b));
+#endif
     memset(delta_l0_w_cnt, 0, sizeof(delta_l0_w_cnt));
     memset(delta_l0_b_cnt, 0, sizeof(delta_l0_b_cnt));
     memset(delta_l1_w_cnt, 0, sizeof(delta_l1_w_cnt));

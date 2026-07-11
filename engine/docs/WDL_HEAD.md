@@ -76,18 +76,19 @@ Per-ply gradient is scaled by `TDLEAF_WDL_WEIGHT` and the existing `id_weight`
 is **not** applied to the WDL target in Phase 1a (softmax is already bounded) —
 a Phase-2 refinement.
 
-## Phase 1a scope decisions (deliberate simplifications)
+## Scope by phase
 
-| Concern | Phase 1a | Phase 2 upgrade |
-|---|---|---|
-| Adam moments (`m`,`v`) | **session-local** (zeroed each start), shared `t_wdl_session` counter for bias correction | persist like FC2 if warmup matters |
-| `.tdleaf.bin` persistence | **absolute values** of `wdl_w/b` (v13 trailing section) | full delta-merge + counts |
-| Multi-writer merge | **last-writer-wins** on the head (harmless: head doesn't affect play, only slows head convergence) | count-weighted merge like FC2 |
-| Trunk gradient clip | head **excluded** from the shared L2 norm; bounded by `TDLEAF_ADAM_STEP_CLIP` only | own clip if needed |
-| Inference read-out | **none** — head trained + persisted + telemetered only | `nnue_evaluate_wdl` + contempt (Phase 1b/2) |
-| Forward passes | head computed via a second forward per ply during learning (opt-in build) | single-pass activation cache |
+| Concern | Phase 1a | Phase 2 (done) | Later |
+|---|---|---|---|
+| Multi-writer merge | last-writer-wins | **additive delta-merge** (`shadow = file + delta`), like FC2 — 12 concurrent writers combine | — |
+| `.tdleaf.bin` persistence | absolute values (v13 trailing section) | **delta-merged** on save (v13 bytes unchanged; only save *behavior* changes) | — |
+| Adam moments (`m`,`v`) | session-local, `t_wdl_session` bias-correction counter | **still session-local** (correct within one continuous run; each writer's Adam is independent, deltas sum) | persist for cross-restart warmup |
+| Head → trunk gradient | isolated (stops at `fc2_in`) | **still isolated** — scalar path stays provably untouched for the verification run | optional: let gradient flow into trunk / WDL-as-scalar-TD-target |
+| Inference read-out | none | none | `nnue_evaluate_wdl` + contempt (**Phase 1b**) |
+| Trunk gradient clip | head excluded (bounded by `TDLEAF_ADAM_STEP_CLIP`) | unchanged | own clip if needed |
+| Forward passes | second forward per learning-ply | unchanged | single-pass activation cache (perf) |
 
-These keep the change surgical and the scalar path provably untouched.
+**Phase 2 rationale:** under concurrency N, last-writer-wins discards ~(N−1)/N of each save cycle's head updates. The additive delta-merge (each writer tracks `Σ applied dw` since last sync and adds it onto the re-read file value) makes all N writers' updates combine — the prerequisite for a concurrent-12 training run. Adam stays session-local because within one run every process runs the whole time, so per-writer moments are correct and only the *weights* need merging. The head remains a pure read-out (no trunk perturbation), so the scalar net is still bit-identical.
 
 ## Format
 
