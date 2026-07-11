@@ -83,6 +83,12 @@ RUN_DIR    = ENGINE_DIR / "run"
 LEARN_DIR  = ENGINE_DIR / "learn"
 COMP_PL    = "../src/comp.pl"
 
+# Set from --wdl-head: compile TDLEAF binaries with WDL_HEAD=1 so the auxiliary
+# WDL head is trained (online + offline) and persisted in the .tdleaf.bin.
+# Only applied to TDLEAF builds (WDL_HEAD requires TDLEAF=1); TDLEAF-off gauntlet
+# rating binaries are unaffected — the head is a read-out and doesn't alter play.
+WDL_HEAD_FLAG = False
+
 
 def log(msg):
     print(f"[hybrid_loop {time.strftime('%H:%M:%S')}] {msg}", flush=True)
@@ -144,6 +150,8 @@ def compile_binary(version, net_name, tdleaf, force=False):
     flags = ["NNUE=1", f"NNUE_NET={net_name}"]
     if tdleaf:
         flags.append("TDLEAF=1")
+        if WDL_HEAD_FLAG:
+            flags.append("WDL_HEAD=1")
     sh(["perl", COMP_PL, version] + flags + ["OVERWRITE"], cwd=RUN_DIR)
     if not binary.exists():
         die(f"compile did not produce {binary}")
@@ -289,7 +297,16 @@ def main():
                     help="Reuse an existing <tag>_work directory")
     ap.add_argument("--recompile", action="store_true",
                     help="Force recompile of helper binaries")
+    ap.add_argument("--wdl-head", action="store_true",
+                    help="Compile TDLEAF binaries with WDL_HEAD=1 so the auxiliary "
+                         "win/draw/loss head is trained (online TD(lambda) + offline "
+                         "outcome target) and persisted in the .tdleaf.bin. The head "
+                         "is a read-out (does not change play or the promoted .nnue); "
+                         "watch offline WDL_Brier in the batch-train log for calibration. "
+                         "Pair with --recompile so existing same-named binaries rebuild.")
     args = ap.parse_args()
+    global WDL_HEAD_FLAG
+    WDL_HEAD_FLAG = args.wdl_head
 
     if Path.cwd().resolve() != LEARN_DIR.resolve():
         die(f"run from {LEARN_DIR} (cwd is {Path.cwd()})")

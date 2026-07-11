@@ -90,6 +90,37 @@ a Phase-2 refinement.
 
 **Phase 2 rationale:** under concurrency N, last-writer-wins discards ~(N−1)/N of each save cycle's head updates. The additive delta-merge (each writer tracks `Σ applied dw` since last sync and adds it onto the re-read file value) makes all N writers' updates combine — the prerequisite for a concurrent-12 training run. Adam stays session-local because within one run every process runs the whole time, so per-writer moments are correct and only the *weights* need merging. The head remains a pure read-out (no trunk perturbation), so the scalar net is still bit-identical.
 
+## Phase 3a — offline WDL training in the batch trainer (done)
+
+Phase 1a/2 trained the head only in the **online** self-play path. Phase 3a adds
+the WDL loss to the **offline** batch trainer (`nnue_batch_train.cpp`), so a
+`--wdl-head` hybrid_loop run trains the head over the offline consolidation
+epochs too (on the full quiet-position corpus).
+
+Offline positions are independent (no per-position TD bootstrap), so the target
+is the **game-outcome one-hot** (`result2`, STM POV), weighted by the same
+result-decay `w` the scalar target applies to its outcome term — the
+Lc0/KataGo-style approach where the head learns draw probability from the
+*frequency* of draws across similar positions. Gradient
+`d_logits = softmax − onehot`, scaled by `w`, into the same per-thread gradbuf →
+`merge_dense` → apply → delta-merge as the online path. Head-only (trunk
+untouched). A `WDL_Brier` column is added to the batch-train `val` line for
+monitoring.
+
+Verified: `WDL_Brier` descends monotonically in the realistic regime (15k
+positions, 6 epochs: 0.788 → 0.608). A pathological tiny-corpus × many-epoch run
+(2.4k positions, 40 epochs) overfits (val Brier climbs) as expected for a
+768-param head with too little data — not a concern at hybrid_loop scale.
+
+> **Latent note:** the head's material input is `score_cp/16` (unbounded); under
+> very aggressive trunk sharpening it can grow faster than the slow head (LR
+> 0.001) adapts. A future refinement is a bounded input (e.g. `sigmoid(cp/K)`).
+> It did not bite in the realistic regime.
+
+**Not covered by Phase 3a:** the head still lives in the `.tdleaf.bin`, not the
+promoted `.nnue` — carrying it into a promoted net needs `.nnue` embedding
+(separate step). And the gauntlet still rates the scalar net, not the head.
+
 ## Phase 1b — inference read-out (done)
 
 `nnue_evaluate_wdl(acc, psqt, wtm, piece_count, out[3])` returns the head's
