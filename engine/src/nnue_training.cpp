@@ -1016,12 +1016,117 @@ void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
 }
 
 #if WDL_HEAD
+#if WDL_TRUNK_GRAD
+// ---------------------------------------------------------------------------
+// nnue_backprop_wdl_trunk — backprop a gradient w.r.t. fc2_in[] through the
+// SHARED trunk (FC1 -> FC0[0..14] -> FT weights/biases), accumulating into gb.
+// A faithful copy of the fc2_in -> FT portion of nnue_accumulate_gradients, but
+// deliberately EXCLUDING three scalar-only channels:
+//   - FC2 output-layer weights (l2_*): the scalar head, not shared with WDL.
+//   - the FC0 passthrough (fc0_raw[15]): a direct score channel that fc2_in has
+//     no dependence on, so its WDL gradient is identically zero.
+//   - PSQT: the WDL head's only PSQT dependence is via the wdl_mat input, which
+//     is treated as stop-gradient (protects the pure-PSQT material scale).
+// Result: the WDL objective co-trains the shared body (FT/FC0/FC1) as an
+// auxiliary task while leaving the scalar output layer and eval scale alone.
+// ---------------------------------------------------------------------------
+static void nnue_backprop_wdl_trunk(const NNUEActivations &act,
+                                    const float g_fc2_in[NNUE_L2_PADDED],
+                                    NNUEGradBuf *gb)
+{
+    int s = act.stack;
+    // CReLU inverse: fc1_raw <- fc2_in
+    float g_fc1_raw[NNUE_L1_SIZE];
+    for (int o = 0; o < NNUE_L1_SIZE; o++) {
+        float v = act.fc1_raw[o] * (1.0f / 64.0f);
+        g_fc1_raw[o] = (v > 0.0f && v < 127.0f) ? g_fc2_in[o] * (1.0f / 64.0f) : 0.0f;
+    }
+    // FC1 backward
+    for (int o = 0; o < NNUE_L1_SIZE; o++) {
+        if (g_fc1_raw[o] == 0.0f) continue;
+        for (int i = 0; i < NNUE_L1_PADDED; i++)
+            gb->grad_l1_w[s][o * NNUE_L1_PADDED + i] += g_fc1_raw[o] * act.fc1_in[i];
+        gb->grad_l1_b[s][o] += g_fc1_raw[o];
+    }
+    float g_fc1_in[NNUE_L1_PADDED] = {};
+    for (int o = 0; o < NNUE_L1_SIZE; o++) {
+        if (g_fc1_raw[o] == 0.0f) continue;
+        const float *w = &l1_weights_f32[s][o * NNUE_L1_PADDED];
+        for (int i = 0; i < NNUE_L1_PADDED; i++)
+            g_fc1_in[i] += g_fc1_raw[o] * w[i];
+    }
+    // Dual-activation inverse -> g_fc0_raw[0..14]  (passthrough [15] stays 0)
+    float g_fc0_raw[NNUE_L0_SIZE] = {};
+    for (int o = 0; o < NNUE_L0_DIRECT; o++) {
+        float raw = act.fc0_raw[o];
+        float sq = (raw * raw) * (1.0f / (1 << 19));
+        if (sq > 0.0f && sq < 127.0f)
+            g_fc0_raw[o] += g_fc1_in[o] * 2.0f * raw * (1.0f / (float)(1 << 19));
+        float v = raw * (1.0f / 64.0f);
+        if (v > 0.0f && v < 127.0f)
+            g_fc0_raw[o] += g_fc1_in[NNUE_L0_DIRECT + o] * (1.0f / 64.0f);
+    }
+    // FC0 backward
+    for (int o = 0; o < NNUE_L0_SIZE; o++) {
+        if (g_fc0_raw[o] == 0.0f) continue;
+        for (int i = 0; i < NNUE_L0_INPUT; i++)
+            gb->grad_l0_w[s][o * NNUE_L0_INPUT + i] += g_fc0_raw[o] * act.l0_in[i];
+        gb->grad_l0_b[s][o] += g_fc0_raw[o];
+    }
+    // FC0 inputs -> accumulator -> FT (SqrCReLU inverse)
+    float g_l0_in[NNUE_L0_INPUT] = {};
+    for (int o = 0; o < NNUE_L0_SIZE; o++) {
+        if (g_fc0_raw[o] == 0.0f) continue;
+        const float *w = &l0_weights_f32[s][o * NNUE_L0_INPUT];
+        for (int i = 0; i < NNUE_L0_INPUT; i++)
+            g_l0_in[i] += g_fc0_raw[o] * w[i];
+    }
+    float g_acc[2][NNUE_HALF_DIMS] = {};
+    int stm_p = (int)act.stm_persp;
+    for (int p = 0; p < 2; p++) {
+        int persp        = (p == 0) ? stm_p : (stm_p ^ 1);
+        const float *gi  = g_l0_in + p * 512;
+        const int16_t *a = act.acc_raw[persp];
+        float *g_a       = g_acc[persp];
+        for (int j = 0; j < 512; j++) {
+            float vlo = (float)a[j];
+            float vhi = (float)a[j + 512];
+            float clo = (vlo < 0.0f) ? 0.0f : (vlo > 127.0f) ? 127.0f : vlo;
+            float chi = (vhi < 0.0f) ? 0.0f : (vhi > 127.0f) ? 127.0f : vhi;
+            float g   = gi[j] * (1.0f / 128.0f);
+            if (vlo > 0.0f && vlo < 127.0f) g_a[j]       += g * chi;
+            if (vhi > 0.0f && vhi < 127.0f) g_a[j + 512] += g * clo;
+        }
+    }
+    // FT weight gradient + dirty-row marking (NO PSQT).
+    for (int p = 0; p < 2; p++) {
+        int persp  = (p == 0) ? stm_p : (stm_p ^ 1);
+        float *g_a = g_acc[persp];
+        for (int k = 0; k < (int)act.n_ft[persp]; k++) {
+            int fi = act.ft_idx[persp][k];
+            if (fi < 0 || fi >= NNUE_FT_INPUTS) continue;
+            if (!gb->ft_dirty[fi]) {
+                gb->ft_dirty[fi] = true;
+                if (gb->dirty_list) gb->dirty_list[gb->dirty_n++] = fi;
+            }
+            float *gfw = gb->grad_ft_w + (size_t)fi * NNUE_HALF_DIMS;
+            for (int d = 0; d < NNUE_HALF_DIMS; d++)
+                gfw[d] += g_a[d];
+        }
+    }
+    for (int d = 0; d < NNUE_HALF_DIMS; d++)
+        gb->grad_ft_bias[d] += (g_acc[0][d] + g_acc[1][d]);
+}
+#endif  // WDL_TRUNK_GRAD
+
 // ---------------------------------------------------------------------------
 // nnue_accumulate_wdl_gradients — backprop the auxiliary WDL head for one ply.
 // d_logits = softmax(logits) − target (STM POV), the softmax-CE gradient; scale
-// folds the loss weight and id-stability weight.  Phase 1a: the head gradient
-// stops at the head weights — it does NOT propagate into fc2_in / the trunk, so
-// the scalar path is untouched.  Input reconstructed from act.fc2_in + act.wdl_mat.
+// folds the loss weight and id-stability weight.  Updates the head's own weights
+// always.  With WDL_TRUNK_GRAD, the gradient w.r.t. fc2_in is ALSO backpropped
+// into the shared trunk (FC1/FC0/FT) as an auxiliary task — but the wdl_mat
+// (material) channel stays stop-gradient, so PSQT / the eval scale are untouched.
+// Without WDL_TRUNK_GRAD (default), the head is a pure read-out.
 // ---------------------------------------------------------------------------
 void nnue_accumulate_wdl_gradients(const NNUEActivations &act,
                                    const float d_logits[NNUE_WDL_OUT],
@@ -1029,14 +1134,25 @@ void nnue_accumulate_wdl_gradients(const NNUEActivations &act,
 {
     if (!gb) gb = &g_grad;
     int s = act.stack;
+#if WDL_TRUNK_GRAD
+    float g_fc2_in[NNUE_L2_PADDED] = {};   // dLoss/dfc2_in accumulated over outputs
+#endif
     for (int o = 0; o < NNUE_WDL_OUT; o++) {
         float g = scale * d_logits[o];
         if (g == 0.0f) continue;
         float *gw = gb->grad_wdl_w[s][o];
-        for (int i = 0; i < NNUE_L2_PADDED; i++) gw[i] += g * act.fc2_in[i];
-        gw[NNUE_L2_PADDED] += g * act.wdl_mat;
+        for (int i = 0; i < NNUE_L2_PADDED; i++) {
+            gw[i] += g * act.fc2_in[i];
+#if WDL_TRUNK_GRAD
+            g_fc2_in[i] += g * wdl_weights_f32[s][o][i];   // d logit_o / d fc2_in_i
+#endif
+        }
+        gw[NNUE_L2_PADDED] += g * act.wdl_mat;   // head weight on wdl_mat; input is stop-grad
         gb->grad_wdl_b[s][o] += g;
     }
+#if WDL_TRUNK_GRAD
+    nnue_backprop_wdl_trunk(act, g_fc2_in, gb);
+#endif
 }
 #endif
 

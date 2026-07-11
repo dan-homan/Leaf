@@ -109,6 +109,17 @@
  #define WDL_HEAD 0
 #endif
 
+// WDL_TRUNK_GRAD: let the WDL head's gradient flow back into the SHARED trunk
+// (FC1/FC0/FT + biases) via fc2_in, so the WDL objective co-trains those weights
+// as an auxiliary task.  The material-input channel (wdl_mat) is stop-gradient,
+// so PSQT and the scalar eval scale are NOT perturbed (protects the pure-PSQT
+// anchor).  FC2 (scalar output layer) is also untouched.  Requires WDL_HEAD=1.
+// OFF by default: with it off the head is a pure read-out and the scalar net is
+// bit-identical.  With it ON the net changes and must be gauntlet-validated.
+#ifndef WDL_TRUNK_GRAD
+ #define WDL_TRUNK_GRAD 0
+#endif
+
 // TDLEAF_LOG_STEP_CLIPS: append one line per Adam batch to
 // <exec_path>tdleaf_telemetry.log recording per-category max |step| and clip
 // counts.  Disabled by default; set to 1 to enable (for diagnosing clip

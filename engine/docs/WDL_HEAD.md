@@ -83,12 +83,44 @@ a Phase-2 refinement.
 | Multi-writer merge | last-writer-wins | **additive delta-merge** (`shadow = file + delta`), like FC2 — 12 concurrent writers combine | — |
 | `.tdleaf.bin` persistence | absolute values (v13 trailing section) | **delta-merged** on save (v13 bytes unchanged; only save *behavior* changes) | — |
 | Adam moments (`m`,`v`) | session-local, `t_wdl_session` bias-correction counter | **still session-local** (correct within one continuous run; each writer's Adam is independent, deltas sum) | persist for cross-restart warmup |
-| Head → trunk gradient | isolated (stops at `fc2_in`) | **still isolated** — scalar path stays provably untouched for the verification run | optional: let gradient flow into trunk / WDL-as-scalar-TD-target |
+| Head → trunk gradient | isolated (stops at `fc2_in`) | **still isolated** by default | **Phase 4: `WDL_TRUNK_GRAD`** (opt-in) lets it co-train the trunk (below) |
 | Inference read-out | none | none | **Phase 1b: `nnue_evaluate_wdl` done** (below); contempt next |
 | Trunk gradient clip | head excluded (bounded by `TDLEAF_ADAM_STEP_CLIP`) | unchanged | own clip if needed |
 | Forward passes | second forward per learning-ply | unchanged | single-pass activation cache (perf) |
 
 **Phase 2 rationale:** under concurrency N, last-writer-wins discards ~(N−1)/N of each save cycle's head updates. The additive delta-merge (each writer tracks `Σ applied dw` since last sync and adds it onto the re-read file value) makes all N writers' updates combine — the prerequisite for a concurrent-12 training run. Adam stays session-local because within one run every process runs the whole time, so per-writer moments are correct and only the *weights* need merging. The head remains a pure read-out (no trunk perturbation), so the scalar net is still bit-identical.
+
+## Phase 4 — WDL as an auxiliary objective on the trunk (`WDL_TRUNK_GRAD`, opt-in)
+
+By default the head is a read-out: its gradient stops at `fc2_in`. With
+`-D WDL_TRUNK_GRAD=1` (requires `WDL_HEAD=1`), the head's gradient w.r.t. `fc2_in`
+is also backpropped into the **shared trunk** (FC1/FC0/FT + biases) via
+`nnue_backprop_wdl_trunk`, so the WDL objective co-trains those weights as an
+auxiliary task. Deliberately excluded:
+- **FC2** (scalar output layer) — WDL has its own head weights.
+- **the FC0 passthrough** (`fc0_raw[15]`) — a direct score channel `fc2_in`
+  doesn't depend on.
+- **PSQT / the material scale** — the `wdl_mat` input is treated as
+  **stop-gradient**, so the WDL loss cannot perturb the pure-PSQT anchor.
+
+The scalar backprop function is left untouched; the helper is a faithful copy of
+its `fc2_in → FT` sub-path minus those three channels.
+
+**Verified (deterministic offline A/B on the 100k-game `material_wdl` net +
+571k-position corpus, 2 epochs, single-thread):**
+- `WDL_TRUNK_GRAD=0` → scalar `val MSE` is **byte-identical** to a non-WDL build
+  (0.004079 → 0.003564 → 0.003432), while the head trains (Brier 0.488→0.433).
+  The isolation invariant holds under real training.
+- `WDL_TRUNK_GRAD=1` → scalar net **diverges** (mechanism works), but at full
+  weight (`TDLEAF_WDL_WEIGHT=1`) it **hurt both** metrics over 2 epochs: scalar
+  `val MSE` 0.003432 → **0.004154** and WDL Brier 0.433 → **0.454**.
+
+**Read:** the co-training mechanism is correct, but naive equal-weight
+multi-tasking degrades here (classic un-balanced multi-task behaviour). The
+obvious lever is a **separate, attenuated WDL→trunk weight** (e.g. 0.05–0.1)
+distinct from the head's own `TDLEAF_WDL_WEIGHT`; and the real verdict is a
+**gauntlet**, since a higher training loss doesn't necessarily mean weaker play.
+Off by default until a weight regime is found that helps.
 
 ## Phase 3a — offline WDL training in the batch trainer (done)
 
