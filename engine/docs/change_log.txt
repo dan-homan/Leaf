@@ -1,5 +1,16 @@
 Changes since 2017_12_24
 
+2026_07_11 -- merge_tdleaf.py understands .tdleaf.bin v13 (WDL head).  Reads and
+               writes the trailing WDL-head section (per layer stack: WDL_OUT=3
+               rows of WDL_IN=33 raw FP32 weights + 3 biases, no counts, not at
+               TDLEAF_SCALE).  The head has no per-weight counts, so it is
+               combined by a plain mean across the inputs that carry it.  Output
+               version tracks the inputs: v13 when any input has a WDL section
+               (mirroring the engine, where a WDL build cold-starts the head off
+               a v12 file), else v12.  Head lives only in the .tdleaf.bin, so
+               --baseline .nnue output is unaffected.  Verified byte-exact on an
+               engine-written v13 load->save round-trip.
+
 2026_07_10 -- Offline batch-train focal-gamma loss family (--bt-loss-gamma).
                sig_grad = (d(1-d))^gamma / K: gamma=1 = MSE (default, kept
                bit-identical via an explicit branch), gamma=0 = soft-label

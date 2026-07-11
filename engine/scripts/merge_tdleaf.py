@@ -19,7 +19,11 @@ and <base>.nnue when --baseline is given.  The .nnue is constructed by
 applying merged float weights (divided by TDLEAF_SCALE=128) on top of
 the baseline network, requantizing to int8/int16/int32.
 
-The output .tdleaf.bin is a valid v10 file that can be loaded by Leaf.
+The output .tdleaf.bin is a valid file that can be loaded by Leaf.  The output
+format version tracks the inputs: if any input carries a v13 WDL-head section it
+is merged (mean-averaged across the inputs that have it) and the output is v13;
+otherwise the output stays v12.  The WDL head lives only in the .tdleaf.bin, so
+it does not affect the optional --baseline .nnue output.
 """
 
 import argparse
@@ -30,7 +34,7 @@ from pathlib import Path
 
 # Constants matching nnue.cpp / nnue.h
 TDLEAF_MAGIC   = 0x544D4C46  # "TMLF"
-TDLEAF_VERSION = 12
+TDLEAF_VERSION = 13
 TDLEAF_SCALE   = 128.0
 FNV_OFFSET     = 0xcbf29ce484222325
 FNV_PRIME      = 0x100000001b3
@@ -44,6 +48,11 @@ L2_PADDED    = 32
 HALF_DIMS    = 1024
 PSQT_BKTS    = 8
 FT_INPUTS    = 22528
+
+# Auxiliary WDL head (v13+, WDL_HEAD builds only).  Per layer stack:
+# NNUE_WDL_OUT rows of NNUE_WDL_IN weights each, then NNUE_WDL_OUT biases.
+WDL_OUT = 3                 # win / draw / loss
+WDL_IN  = L2_PADDED + 1     # fc2_in[32] + material = 33
 
 LEB128_MAGIC = b"COMPRESSED_LEB128"
 
@@ -173,7 +182,7 @@ class FCBlock:
 
 
 class TDLeafFile:
-    """Parsed .tdleaf.bin v10 file."""
+    """Parsed .tdleaf.bin file (v2–v13)."""
     def __init__(self):
         self.version = TDLEAF_VERSION
         # FT content fingerprint of the source .nnue (v10+).  0 = legacy/unknown.
@@ -209,6 +218,11 @@ class TDLeafFile:
         # prefer any non-zero source.
         self.psqt_init_slot_means = np.zeros((11, PSQT_BKTS), dtype=np.float32)
         self.psqt_init_slot_means_loaded = False
+        # Auxiliary WDL head (v13+).  Absolute FP32 weights + biases, no counts.
+        # wdl_w[s][o][i], wdl_b[s][o].  Pre-v13 files leave these zero / unloaded.
+        self.wdl_w = np.zeros((LAYER_STACKS, WDL_OUT, WDL_IN), dtype=np.float32)
+        self.wdl_b = np.zeros((LAYER_STACKS, WDL_OUT), dtype=np.float32)
+        self.wdl_loaded = False
 
     @classmethod
     def load(cls, path):
@@ -218,7 +232,7 @@ class TDLeafFile:
             version = read_u32(f)
             if magic != TDLEAF_MAGIC:
                 raise ValueError(f"{path}: bad magic 0x{magic:08X} (expected 0x{TDLEAF_MAGIC:08X})")
-            if version not in (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12):
+            if version not in (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13):
                 raise ValueError(f"{path}: unsupported version {version}")
             obj.version = version
 
@@ -297,11 +311,21 @@ class TDLeafFile:
             if version == 11:
                 read_f32_array(f, 11 * PSQT_BKTS)
 
+            # WDL head (v13+): absolute FP32 weights + biases, no counts, written
+            # raw (NOT at TDLEAF_SCALE).  Per stack: WDL_OUT rows of WDL_IN
+            # weights, then WDL_OUT biases — same order the engine emits.
+            if version >= 13:
+                for s in range(LAYER_STACKS):
+                    for o in range(WDL_OUT):
+                        obj.wdl_w[s, o] = read_f32_array(f, WDL_IN)
+                    obj.wdl_b[s] = read_f32_array(f, WDL_OUT)
+                obj.wdl_loaded = True
+
         return obj
 
     def save(self, path):
         with open(path, 'wb') as f:
-            f.write(struct.pack('<II', TDLEAF_MAGIC, TDLEAF_VERSION))
+            f.write(struct.pack('<II', TDLEAF_MAGIC, self.version))
             # v10+: nnue_content_hash immediately after version.
             f.write(struct.pack('<I', self.nnue_content_hash & 0xFFFFFFFF))
 
@@ -358,6 +382,14 @@ class TDLeafFile:
                 write_f32_array(f, self.ft_v_rows[fi])
 
             # (v12: PSQT init slot-means block removed.)
+
+            # WDL head section (v13+): absolute FP32 weights + biases, no counts.
+            # Written raw (no TDLEAF_SCALE — head weights are already O(0.01–1)).
+            if self.version >= 13:
+                for s in range(LAYER_STACKS):
+                    for o in range(WDL_OUT):
+                        write_f32_array(f, self.wdl_w[s, o])
+                    write_f32_array(f, self.wdl_b[s])
 
 
 # ---------------------------------------------------------------------------
@@ -587,7 +619,8 @@ def merge_files(files, output_base, baseline_path=None, report=False):
         print(f"Loading {path} ...", end=' ')
         td = TDLeafFile.load(path)
         hash_str = f"0x{td.nnue_content_hash:08X}" if td.version >= 10 else "n/a"
-        print(f"v{td.version}, {len(td.ft_rows)} FT rows, .nnue hash={hash_str}")
+        wdl_str = ", WDL head" if td.wdl_loaded else ""
+        print(f"v{td.version}, {len(td.ft_rows)} FT rows, .nnue hash={hash_str}{wdl_str}")
         loaded.append(td)
 
     if not loaded:
@@ -732,6 +765,21 @@ def merge_files(files, output_base, baseline_path=None, report=False):
                       file=sys.stderr)
                 break
 
+    # --- Auxiliary WDL head (v13+) ---
+    # No per-weight counts exist for the head, so combine the absolute weights
+    # with a plain mean across the inputs that actually carry a WDL section
+    # (equivalent to count-weighted merging with equal counts).  Output stays
+    # v12 unless at least one input is v13 — mirroring the engine, where a WDL
+    # build reading a v12 file cold-starts the head.
+    wdl_sources = [td for td in loaded if td.wdl_loaded]
+    if wdl_sources:
+        out.version = 13
+        out.wdl_w = np.mean([td.wdl_w for td in wdl_sources], axis=0).astype(np.float32)
+        out.wdl_b = np.mean([td.wdl_b for td in wdl_sources], axis=0).astype(np.float32)
+        out.wdl_loaded = True
+    else:
+        out.version = 12
+
     # --- Write .nnue if baseline provided.  This runs before the .tdleaf.bin
     # save so we can stamp the OUTPUT .nnue's FT content hash into the
     # .tdleaf.bin (matching the engine's load-time pairing check).
@@ -744,8 +792,9 @@ def merge_files(files, output_base, baseline_path=None, report=False):
     # --- Write .tdleaf.bin ---
     tdleaf_path = output_base + '.tdleaf.bin'
     out.save(tdleaf_path)
-    print(f"\nWrote {tdleaf_path}: {len(out.ft_rows)} FT rows, "
-          f".nnue hash=0x{out.nnue_content_hash:08X}")
+    wdl_out_str = f", WDL head ({len(wdl_sources)}/{len(loaded)} inputs)" if out.wdl_loaded else ""
+    print(f"\nWrote {tdleaf_path} (v{out.version}): {len(out.ft_rows)} FT rows, "
+          f".nnue hash=0x{out.nnue_content_hash:08X}{wdl_out_str}")
 
     if report:
         print_report(loaded, out)
@@ -874,8 +923,9 @@ def print_report(loaded, merged):
     """Print summary statistics about the merge (output is v10)."""
     print("\n--- Merge Report ---")
     print(f"Input files: {len(loaded)}")
-    print(f"Output format: v10 (.nnue content hash header + dense piece_val[6] "
-          f"+ Adam m first-moment + sparse FT v second-moment)")
+    wdl_note = " + WDL head" if merged.wdl_loaded else ""
+    print(f"Output format: v{merged.version} (.nnue content hash header "
+          f"+ Adam m first-moment + sparse FT v second-moment{wdl_note})")
 
     # FC total counts per file
     for i, td in enumerate(loaded):
