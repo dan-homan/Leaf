@@ -12,7 +12,18 @@ Changes since 2017_12_24
                --bt-loss-gamma passthrough.  Pair gamma<1 with a global lr
                rescale (the factor scales every section uniformly): /2 at
                gamma=0.5, /4 at gamma=0 (the (0.25)^gamma factor at d~0.5).
-               Verdict pending the g in {1,0.5,0} gauntlet sweep.
+               VERDICT: gamma<1 loses on this near-equal quiet corpus.  Epoch
+               ladders (batch 2048, td_lambda 0.985, 1000g/pt vs shared
+               pretrain): gamma=1 (MSE) +65/78/94/73/91/91 (best +94);
+               gamma=0.5 +54/70/60/64/84/71 (best +84, ~10 Elo worse);
+               gamma=0 (CE) +49/54/51/48 (ep1-4, flat ~40 Elo below MSE, then
+               aborted).  Monotone in gamma: 1 (+94) > 0.5 (+84) > 0 (~+50),
+               each step of tail-emphasis worse.  Matches the spec's
+               "null-or-negative on balanced quiet data" expectation
+               (targets/d cluster near d=0.5 where MSE~=CE; removing the
+               d(1-d) damping just amplifies the noisy near-0.5 bulk).  Flag
+               retained (default gamma=1, inert) for possible retest on a
+               fatter-tailed corpus; not adopted.
 
 2026_07_10 -- td_lambda calibration sweep resolved (docs only; no code change).
                Four points on the 137.7M material-line corpus (batch 2048,

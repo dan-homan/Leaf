@@ -154,7 +154,30 @@ diminishing returns. The depth itself is the primary lever, not game volume.
 - Larger/more varied opening EPD set: position diversity creates fresh
   gradients even at fixed depth, potentially slowing the plateau.
 
-### Cross-entropy loss for offline batch-train (focal-γ variant)
+### ~~Cross-entropy loss for offline batch-train (focal-γ variant)~~ — DONE, NOT ADOPTED (2026-07-10)
+
+**Result: γ<1 loses on the near-equal quiet corpus.**  Implemented `--bt-loss-gamma`
+(`sig_grad = (d(1−d))^γ/K`; γ=1 MSE bit-identical, γ=0 CE, γ=0.5 between) + an NLL(blend)
+val metric.  Epoch ladders (batch 2048, td_λ 0.985, 1000g/pt vs shared pretrain anchor,
+lr paired ÷2 at γ=0.5 / ÷4 at γ=0):
+
+| γ | ladder (ep1…6) | best |
+|---|----------------|------|
+| 1.0 (MSE) | +65 +78 +94 +73 +91 +91 | +94 |
+| 0.5 | +54 +70 +60 +64 +84 +71 | +84 |
+| 0.0 (CE) | +49 +54 +51 +48 (ep1–4, then aborted) | +54 |
+
+The ordering is cleanly **monotone in γ**: γ=1 (+94) > γ=0.5 (+84) > γ=0 (~+50, flat) —
+each step of tail-emphasis (lower γ) makes it progressively worse.  γ=0 (CE) is the worst
+by ~40 Elo and never climbs, so its remaining epochs were aborted.  This is exactly the
+"null-or-negative on balanced quiet data" outcome predicted below: targets and `d` cluster
+near 0.5 where `d(1−d)≈0.25` is maximal and MSE≈CE, so CE's confidently-wrong-tail
+advantage has almost no mass to act on — and removing the `d(1−d)` damping just amplifies
+the noisy near-0.5 bulk.  Flag kept (default γ=1, fully inert) in case a future
+fatter-tailed corpus (e.g. a blunder-heavy line) warrants a retest; **not adopted for the
+mainstream recipe.**  Original analysis retained below.
+
+
 
 **Idea:** Leaf currently minimizes squared error *in probability space* everywhere,
 not cross-entropy.  Both learning paths map the white-POV eval through a sigmoid
