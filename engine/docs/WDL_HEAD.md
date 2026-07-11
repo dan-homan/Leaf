@@ -116,11 +116,18 @@ its `fc2_in → FT` sub-path minus those three channels.
   `val MSE` 0.003432 → **0.004154** and WDL Brier 0.433 → **0.454**.
 
 **Read:** the co-training mechanism is correct, but naive equal-weight
-multi-tasking degrades here (classic un-balanced multi-task behaviour). The
-obvious lever is a **separate, attenuated WDL→trunk weight** (e.g. 0.05–0.1)
-distinct from the head's own `TDLEAF_WDL_WEIGHT`; and the real verdict is a
-**gauntlet**, since a higher training loss doesn't necessarily mean weaker play.
-Off by default until a weight regime is found that helps.
+multi-tasking degrades here (classic un-balanced multi-task behaviour).
+
+**Tuning knob (`TDLEAF_WDL_TRUNK_WEIGHT`, default 0.1).** Scales *only* the
+gradient into the trunk — the head's own weights always learn at full
+`TDLEAF_WDL_WEIGHT`. **Runtime-overridable** via env `TDLEAF_WDL_TRUNK_WEIGHT`
+so it can be swept without recompiling (0 = head stays a pure read-out that step;
+1.0 = the degrading full-strength A/B above). Sweep e.g. 0.05 / 0.1 / 0.25 and
+rate by **gauntlet** — a higher offline training loss doesn't necessarily mean
+weaker play.
+
+**hybrid_loop:** `--wdl-trunk-grad` (implies `--wdl-head`) compiles it in;
+`--wdl-trunk-weight W` sets the env for the launched binaries. Off by default.
 
 ## Phase 3a — offline WDL training in the batch trainer (done)
 

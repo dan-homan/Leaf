@@ -127,6 +127,15 @@ static const float TDLEAF_ADAM_PSQT_LR0    = 13.0f;   // PSQT (int32; sized to r
 static const float WDL_MAT_SCALE        = 1.0f / 16.0f; // cp → head-input scale (±400cp → ±25)
 static const float TDLEAF_ADAM_WDL_LR0  = 0.001f;       // WDL head weights + biases
 static const float TDLEAF_WDL_WEIGHT    = 1.0f;         // WDL loss coefficient (per-ply gradient scale)
+#if WDL_TRUNK_GRAD
+// Scales ONLY the WDL gradient that flows into the shared trunk (FC1/FC0/FT) as
+// an auxiliary objective — the head's own weights always learn at full
+// TDLEAF_WDL_WEIGHT.  1.0 = full strength (an offline A/B degraded both scalar
+// MSE and WDL Brier at 1.0 — see docs/WDL_HEAD.md Phase 4); attenuate toward a
+// gentle regularizer.  Runtime-overridable via env TDLEAF_WDL_TRUNK_WEIGHT so it
+// can be swept without recompiling.
+static const float TDLEAF_WDL_TRUNK_WEIGHT = 0.1f;
+#endif
 #endif
 // Material representation: pure-PSQT — the bucketed PSQT is the SOLE trainable
 // material channel.  There is no dense piece_val channel and no gauge machinery

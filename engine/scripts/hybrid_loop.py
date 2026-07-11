@@ -88,6 +88,10 @@ COMP_PL    = "../src/comp.pl"
 # Only applied to TDLEAF builds (WDL_HEAD requires TDLEAF=1); TDLEAF-off gauntlet
 # rating binaries are unaffected — the head is a read-out and doesn't alter play.
 WDL_HEAD_FLAG = False
+# Set from --wdl-trunk-grad: additionally compile with WDL_TRUNK_GRAD=1 so the WDL
+# objective co-trains the shared trunk (implies WDL_HEAD).  Sweep the strength via
+# --wdl-trunk-weight (env TDLEAF_WDL_TRUNK_WEIGHT).  See docs/WDL_HEAD.md Phase 4.
+WDL_TRUNK_GRAD_FLAG = False
 
 
 def log(msg):
@@ -150,8 +154,10 @@ def compile_binary(version, net_name, tdleaf, force=False):
     flags = ["NNUE=1", f"NNUE_NET={net_name}"]
     if tdleaf:
         flags.append("TDLEAF=1")
-        if WDL_HEAD_FLAG:
+        if WDL_HEAD_FLAG or WDL_TRUNK_GRAD_FLAG:
             flags.append("WDL_HEAD=1")
+        if WDL_TRUNK_GRAD_FLAG:
+            flags.append("WDL_TRUNK_GRAD=1")
     sh(["perl", COMP_PL, version] + flags + ["OVERWRITE"], cwd=RUN_DIR)
     if not binary.exists():
         die(f"compile did not produce {binary}")
@@ -304,9 +310,23 @@ def main():
                          "is a read-out (does not change play or the promoted .nnue); "
                          "watch offline WDL_Brier in the batch-train log for calibration. "
                          "Pair with --recompile so existing same-named binaries rebuild.")
+    ap.add_argument("--wdl-trunk-grad", action="store_true",
+                    help="Also compile with WDL_TRUNK_GRAD=1 (implies --wdl-head): the "
+                         "WDL objective co-trains the shared trunk (FT/FC0/FC1) as an "
+                         "auxiliary task — this DOES change the scalar net, so gauntlet "
+                         "it. Tune strength with --wdl-trunk-weight.")
+    ap.add_argument("--wdl-trunk-weight", type=float, default=None,
+                    help="WDL->trunk gradient scale (env TDLEAF_WDL_TRUNK_WEIGHT) for "
+                         "--wdl-trunk-grad runs; sweep it (e.g. 0.05, 0.1, 0.25). "
+                         "Default: the compiled-in 0.1. Full strength (1.0) degraded "
+                         "both metrics in an offline A/B — see docs/WDL_HEAD.md.")
     args = ap.parse_args()
-    global WDL_HEAD_FLAG
-    WDL_HEAD_FLAG = args.wdl_head
+    global WDL_HEAD_FLAG, WDL_TRUNK_GRAD_FLAG
+    WDL_TRUNK_GRAD_FLAG = args.wdl_trunk_grad
+    WDL_HEAD_FLAG = args.wdl_head or args.wdl_trunk_grad
+    if args.wdl_trunk_weight is not None:
+        # Inherited by every binary hybrid_loop launches (subprocess inherits env).
+        os.environ["TDLEAF_WDL_TRUNK_WEIGHT"] = repr(float(args.wdl_trunk_weight))
 
     if Path.cwd().resolve() != LEARN_DIR.resolve():
         die(f"run from {LEARN_DIR} (cwd is {Path.cwd()})")

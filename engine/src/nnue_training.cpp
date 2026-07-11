@@ -1017,6 +1017,18 @@ void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
 
 #if WDL_HEAD
 #if WDL_TRUNK_GRAD
+// WDL->trunk gradient scale, read once from env (default TDLEAF_WDL_TRUNK_WEIGHT).
+// Scales only the auxiliary gradient into the shared body; the head's own weights
+// are unaffected.  Env-overridable so the weight can be swept without recompiling.
+static float wdl_trunk_weight()
+{
+    static float w = []{
+        const char *e = getenv("TDLEAF_WDL_TRUNK_WEIGHT");
+        return (e && *e) ? (float)atof(e) : TDLEAF_WDL_TRUNK_WEIGHT;
+    }();
+    return w;
+}
+
 // ---------------------------------------------------------------------------
 // nnue_backprop_wdl_trunk — backprop a gradient w.r.t. fc2_in[] through the
 // SHARED trunk (FC1 -> FC0[0..14] -> FT weights/biases), accumulating into gb.
@@ -1151,7 +1163,14 @@ void nnue_accumulate_wdl_gradients(const NNUEActivations &act,
         gb->grad_wdl_b[s][o] += g;
     }
 #if WDL_TRUNK_GRAD
-    nnue_backprop_wdl_trunk(act, g_fc2_in, gb);
+    // Attenuate ONLY the trunk contribution (the head above already learned at
+    // full strength).  weight 0 => head stays a pure read-out this step.
+    float tw = wdl_trunk_weight();
+    if (tw != 0.0f) {
+        if (tw != 1.0f)
+            for (int i = 0; i < NNUE_L2_PADDED; i++) g_fc2_in[i] *= tw;
+        nnue_backprop_wdl_trunk(act, g_fc2_in, gb);
+    }
 #endif
 }
 #endif
