@@ -249,6 +249,23 @@ void parse_command()
       cout << "score = " << game.pos.score_pos(&game,&game.ts.tdata[0]) << "\n";
       cout << "material = " << game.pos.material << "\n";
       game.p_side = game.pos.wtm; }
+#if WDL_HEAD
+  else if(!strcmp(response, "wdl") && !proto.xboard)
+    {
+      if (nnue_available) {
+        NNUEAccumulator tmp_acc;
+        nnue_init_accumulator(tmp_acc, game.pos);
+        int pc = 2;  // two kings
+        for (int s = 0; s < 2; s++)
+          for (int pt = PAWN; pt <= QUEEN; pt++)
+            pc += game.pos.plist[s][pt][0];
+        float wdl[NNUE_WDL_OUT];
+        nnue_evaluate_wdl(tmp_acc.acc, tmp_acc.psqt, game.pos.wtm, pc, wdl);
+        cout << "wdl (stm POV): win=" << wdl[0]
+             << " draw=" << wdl[1] << " loss=" << wdl[2] << "\n";
+      } else cout << "wdl: NNUE not available\n";
+    }
+#endif
   else if(!proto.xboard && !strcmp(response, "help")) { help(); }
   else if(!strcmp(response, "nopost")) { proto.post = 0; }
   else if((!strcmp(response, "save") || !strcmp(response, "SR")) && !proto.xboard) { save_game(); }

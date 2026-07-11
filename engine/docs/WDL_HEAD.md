@@ -84,11 +84,29 @@ a Phase-2 refinement.
 | `.tdleaf.bin` persistence | absolute values (v13 trailing section) | **delta-merged** on save (v13 bytes unchanged; only save *behavior* changes) | — |
 | Adam moments (`m`,`v`) | session-local, `t_wdl_session` bias-correction counter | **still session-local** (correct within one continuous run; each writer's Adam is independent, deltas sum) | persist for cross-restart warmup |
 | Head → trunk gradient | isolated (stops at `fc2_in`) | **still isolated** — scalar path stays provably untouched for the verification run | optional: let gradient flow into trunk / WDL-as-scalar-TD-target |
-| Inference read-out | none | none | `nnue_evaluate_wdl` + contempt (**Phase 1b**) |
+| Inference read-out | none | none | **Phase 1b: `nnue_evaluate_wdl` done** (below); contempt next |
 | Trunk gradient clip | head excluded (bounded by `TDLEAF_ADAM_STEP_CLIP`) | unchanged | own clip if needed |
 | Forward passes | second forward per learning-ply | unchanged | single-pass activation cache (perf) |
 
 **Phase 2 rationale:** under concurrency N, last-writer-wins discards ~(N−1)/N of each save cycle's head updates. The additive delta-merge (each writer tracks `Σ applied dw` since last sync and adds it onto the re-read file value) makes all N writers' updates combine — the prerequisite for a concurrent-12 training run. Adam stays session-local because within one run every process runs the whole time, so per-writer moments are correct and only the *weights* need merging. The head remains a pure read-out (no trunk perturbation), so the scalar net is still bit-identical.
+
+## Phase 1b — inference read-out (done)
+
+`nnue_evaluate_wdl(acc, psqt, wtm, piece_count, out[3])` returns the head's
+STM-POV `(p_win, p_draw, p_loss)` for a position, reusing `nnue_forward_fp32`
+(so the distribution is identical to what the head is trained against — correct
+by construction). It is **not on any hot path** — call at the root or for
+diagnostics only; `nnue_evaluate` (the int8 leaf path) is untouched.
+
+Observable via the interactive CLI `wdl` command (prints the current position's
+distribution alongside `score`). Verified STM-consistent: the same material
+(side-with-queen to move) yields the identical STM-POV distribution for either
+colour, matching the scalar score's POV flip.
+
+**Contempt (next):** with `p_draw` available at the root, a draw-avoidance /
+draw-seeking bias can be applied. This changes play, so it must be gated
+off-by-default and gauntlet-validated, and wants a well-calibrated head (from a
+long run) first — deliberately **not** bundled with the read-out.
 
 ## Format
 

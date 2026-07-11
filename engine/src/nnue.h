@@ -294,6 +294,16 @@ int nnue_evaluate_acc_raw(const int16_t acc[2][NNUE_HALF_DIMS],
                            const int32_t psqt[2][NNUE_PSQT_BKTS],
                            int stm, int piece_count);
 
+#if WDL_HEAD
+// Phase 1b: inference-side WDL read-out.  Computes the auxiliary head's
+// win/draw/loss distribution (STM POV) for a position from its raw accumulator,
+// reusing the FP32 forward pass.  Read-out only — does not affect search or the
+// scalar score.  out = {p_win, p_draw, p_loss}, sums to 1.  wtm: White to move.
+void nnue_evaluate_wdl(const int16_t acc[2][NNUE_HALF_DIMS],
+                       const int32_t psqt[2][NNUE_PSQT_BKTS],
+                       bool wtm, int piece_count, float out[NNUE_WDL_OUT]);
+#endif
+
 // Offline batch trainer (nnue_batch_train.cpp) — supervised training on
 // quiet-position TSV sets from scripts/extract_quiet_positions.py.
 // Invoked from main() when --batch-train is present; returns exit code.

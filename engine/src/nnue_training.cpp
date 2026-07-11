@@ -3077,4 +3077,21 @@ int nnue_evaluate_acc_raw(const int16_t acc[2][NNUE_HALF_DIMS],
     return nnue_evaluate(tmp, stm, piece_count);
 }
 
+#if WDL_HEAD
+// Phase 1b: inference-side WDL read-out.  Reuses nnue_forward_fp32 (which fills
+// act.wdl_soft) so the distribution is identical to what the head is trained
+// against.  Not on any hot path — call at the root / for diagnostics only.
+void nnue_evaluate_wdl(const int16_t acc[2][NNUE_HALF_DIMS],
+                       const int32_t psqt[2][NNUE_PSQT_BKTS],
+                       bool wtm, int piece_count, float out[NNUE_WDL_OUT])
+{
+    if (piece_count < 1)  piece_count = 1;
+    if (piece_count > 32) piece_count = 32;
+    NNUEActivations act;
+    act.stack = (piece_count - 1) / 4;   // 0..7, same bucketing as nnue_evaluate
+    nnue_forward_fp32(acc, psqt, wtm, act);
+    for (int o = 0; o < NNUE_WDL_OUT; o++) out[o] = act.wdl_soft[o];
+}
+#endif
+
 #endif // TDLEAF
