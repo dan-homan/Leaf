@@ -59,26 +59,26 @@ See [`engine/docs/NNUE.md`](engine/docs/NNUE.md) for full architecture notes, sc
 
 ### TDLeaf(λ) Online Learning
 
-Leaf includes a complete **TDLeaf(λ)** reinforcement learning system that trains all NNUE layers from self-play games — FC weights, the 46 MB feature transformer, PSQT weights, and dense piece values.  The long-term goal is for Leaf to develop its own network, tuned to its own search, entirely through self-play.
+Leaf includes a complete **TDLeaf(λ)** reinforcement learning system that trains all NNUE layers from self-play games — FC weights, the 46 MB feature transformer, and PSQT weights (the sole trainable material channel).  The long-term goal is for Leaf to develop its own network, tuned to its own search, entirely through self-play.
 
 Key features:
 - PV leaf scores as the TD signal with full NNUE backpropagation
 - Sparse FT/PSQT updates (only active feature rows touched per position)
-- Adam optimizer with per-section learning rates and persistent momentum across sessions (`.tdleaf.bin` v11 format)
-- Evaluation-gauge anchoring (PAWN pin + PSQT slot-mean centering) so material scale stays identifiable during training
-- Works under both xboard/CECP (protocol results) and UCI (in-engine self-adjudication of game outcomes)
+- Adam optimizer with per-section learning rates and persistent momentum across sessions (`.tdleaf.bin` v12 format)
+- Pure-PSQT material representation — a single trainable material channel, loss-anchored, with no gauge-anchoring machinery needed (an earlier dense second material channel and its anchoring mechanism were tried and later fully removed; see `engine/docs/history/TRAINING_HISTORY.md`)
+- Works under both xboard/CECP (protocol results) and UCI (in-engine self-adjudication of game outcomes) — UCI is the default for `match.py`/fastchess training runs today
 - Concurrent multi-instance training via POSIX file locking and delta merging
-- Automated training via `scripts/training_run.py` with opponent rotation, checkpointing, and train-validate loops
+- Automated online training via `scripts/training_run.py` with opponent rotation, checkpointing, and train-validate loops; automated hybrid-loop iterations (online + offline + gauntlet, chainable via `--continue`) via `scripts/train.py`
 
-Build with `NNUE=1 TDLEAF=1`.  See [`engine/docs/TDLEAF.md`](engine/docs/TDLEAF.md) for the full algorithm, hyperparameter reference, and training workflow.
+Build with `NNUE=1 TDLEAF=1`.  See [`engine/docs/TRAINING.md`](engine/docs/TRAINING.md) for the full algorithm, hyperparameter reference, and training workflow.
 
 ### Offline Training & the Hybrid Loop
 
 Online learning is complemented by an **offline supervised consolidation** mode: quiet positions are harvested from games the engine has already played (extracted from PGNs, or dumped directly by the engine during play via `TDLEAF_DUMP_TSV`) and trained with multi-epoch, shuffled, all-layer gradient descent on a λ-blend of game outcome and search score.  Together the two modes form the **hybrid loop** — online self-play generates games and learns as it goes; offline training extracts the full information content of those games; the consolidated net re-enters online play to generate better games.  Training targets use a TD(λ)-style **distance-decayed result weight** — the game outcome carries weight `0.98^(N−ply)` and the position's own eval takes the rest — so late positions learn from the result and early positions from the bootstrap.
 
-Measured on the from-scratch self-play run (2026-07): a single ~2-hour offline consolidation pass over the engine's own self-play games gained **+139 Elo over the online endpoint** (+127 measured cross-family against the classical hand-crafted eval) — no external networks and no new games.  A second loop iteration (400k fresh depth-8 self-play games from the consolidated net, then re-consolidation with the decayed λ-return target) cut the remaining gap to the classical eval from ~87 to **~59 Elo**.  Supports multi-process data-parallel training (`--bt-sync`) and one-command iterations via `scripts/train.py`.
+Measured on the from-scratch self-play run (2026-07): a single ~2-hour offline consolidation pass over the engine's own self-play games gained **+139 Elo over the online endpoint** (+127 measured cross-family against the classical hand-crafted eval) — no external networks and no new games.  A second loop iteration (400k fresh depth-8 self-play games from the consolidated net, then re-consolidation with the decayed λ-return target) cut the remaining gap to the classical eval from ~87 to **~59 Elo**.  Consolidation uses single-process, within-batch thread parallelism (`--bt-threads`); `scripts/train.py` drives one-command iterations, chainable with `--continue`.
 
-See [`engine/docs/OFFLINE_TRAINING.md`](engine/docs/OFFLINE_TRAINING.md) for the corpus format, trainer reference, and hybrid-loop workflow.
+See [`engine/docs/TRAINING.md`](engine/docs/TRAINING.md) for the corpus format, trainer reference, and hybrid-loop workflow.
 
 ### Chess960 / Fischer Random
 
@@ -178,9 +178,9 @@ cd engine/learn/
 python3 training_run.py
 ```
 
-This handles network initialization, binary compilation, opponent rotation, checkpointing, and optional train-validate loops.  See [`engine/docs/TDLEAF.md`](engine/docs/TDLEAF.md) for details.
+This handles network initialization, binary compilation, opponent rotation, checkpointing, and optional train-validate loops.  See [`engine/docs/TRAINING.md`](engine/docs/TRAINING.md) for details.
 
-A full hybrid-loop iteration (online generation with corpus dumping → sharded offline consolidation → gauntlet) is one command:
+A full hybrid-loop iteration (online generation with corpus dumping → offline consolidation → gauntlet) is one command:
 
 ```sh
 cd engine/learn/
@@ -188,7 +188,7 @@ python3 train.py --tag iter2 --games 400000 --depth 8 \
     --state <consolidated>.tdleaf.bin --gauntlet Leaf_vclassic_eval
 ```
 
-See [`engine/docs/OFFLINE_TRAINING.md`](engine/docs/OFFLINE_TRAINING.md) and [`engine/docs/SCRIPT_USE.md`](engine/docs/SCRIPT_USE.md).
+See [`engine/docs/TRAINING.md`](engine/docs/TRAINING.md) and [`engine/docs/SCRIPT_USE.md`](engine/docs/SCRIPT_USE.md).
 
 ---
 
@@ -197,7 +197,7 @@ See [`engine/docs/OFFLINE_TRAINING.md`](engine/docs/OFFLINE_TRAINING.md) and [`e
 ```
 engine/
   src/          C++ source code (unity build via Leaf.cc)
-  docs/         Documentation (NNUE.md, TDLEAF.md, OFFLINE_TRAINING.md, SCRIPT_USE.md, change_log.txt)
+  docs/         Documentation (NNUE.md, TRAINING.md, SCRIPT_USE.md, TODO.md, MAINSTREAM_PLAN.md, change_log.txt, history/)
   scripts/      Python automation scripts
   run/          Compiled binaries + runtime data (opening book)
   learn/        Training artifacts (.nnue, .tdleaf.bin, PGN)

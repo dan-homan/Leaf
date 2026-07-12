@@ -36,7 +36,7 @@ point and continue learning" cases:
   (--bt-threads, default 8) — synchronous data parallelism, mathematically
   identical to single-threaded training up to float summation order (the
   removed multi-process --bt-sync sharding suffered gradient staleness that
-  destroyed the subtle gen-2+ signal; see docs/OFFLINE_TRAINING.md).
+  destroyed the subtle gen-2+ signal; see docs/TRAINING.md).
 
   Leaf rows (depth 0) default to the same lambda as roots; give them their own
   outcome weight with --bt-leaf-lambda.  Both lambda ceilings are dormant
@@ -201,7 +201,7 @@ def piece_value_canary(binary, cwd, label):
     companion) and log the extracted PSQT piece values.  Warns loudly if the
     extracted pawn value leaves [85, 130] cp — the pure-PSQT material scale is
     only loss-anchored, so slow drift is expected but a large excursion signals
-    the outcome-imbalance pathology (see docs/TDLEAF.md).  Report-only under
+    the outcome-imbalance pathology (see docs/TRAINING.md).  Report-only under
     NNUE_FIXED_PIECE_VALUES; never constrains training."""
     try:
         out = subprocess.run([f"./{binary}"], cwd=str(cwd), input="quit\n",

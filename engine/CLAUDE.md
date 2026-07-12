@@ -115,9 +115,9 @@ errors (unknown types, undeclared identifiers).  These are expected and can be i
 
 ### TDLeaf(λ) learning
 
-See `docs/TDLEAF.md` for the full algorithm reference, hyperparameters, and gradient flow.
+See `docs/TRAINING.md` for the full algorithm reference, hyperparameters, and gradient flow.
 
-**Two training modes** — online TDLeaf(λ) (below) and offline supervised consolidation of quiet-position corpora (`--batch-train` in any TDLEAF binary; corpora from `extract_quiet_positions.py` or the in-play `TDLEAF_DUMP_TSV` dump).  Together they form the hybrid loop (online generates games, offline extracts them fully, consolidated net re-enters online play) — driven end-to-end by `scripts/train.py`.  See `docs/OFFLINE_TRAINING.md`.
+**Two training modes** — online TDLeaf(λ) (below) and offline supervised consolidation of quiet-position corpora (`--batch-train` in any TDLEAF binary; corpora from `extract_quiet_positions.py` or the in-play `TDLEAF_DUMP_TSV` dump).  Together they form the hybrid loop (online generates games, offline extracts them fully, consolidated net re-enters online play) — driven end-to-end by `scripts/train.py`, including chained iterations via `--continue`.  See `docs/TRAINING.md`.
 
 **Call flow:**
 - After each search: `tdleaf_record_ply()` snapshots the PV leaf accumulator, feature indices, and ID score history.
@@ -126,21 +126,20 @@ See `docs/TDLEAF.md` for the full algorithm reference, hyperparameters, and grad
 
 **Key hyperparameters:** `TDLEAF_K = 220 cp` (sigmoid temperature), `TDLEAF_LAMBDA = √0.98 ≈ 0.98995` — eligibility trace decay expressed **per game-ply**: the online trace applies `λ^dply` where `dply` is the game-ply gap between consecutive records (2 in the two-process harness where the engine records only its own moves → 0.98 per own-move, matching the historical value; 1 under internal self-play).  Adam LRs sized to ~0.001 × median(|w|) per section: FC0/FC1 weights (0.005), FC2 weights (0.07), FC biases (1.5), FT weights (0.015), FT bias (0.02), PSQT (13.0).  Runtime sweep via env vars `TDLEAF_LR_{FC,FC2,FC_BIAS,FT,FT_BIAS,PSQT}`.  Gradient clipping (L2 norm, 1.0) and AdamW weight decay (1e-4, FC+FT weights only).  Horizon noise mitigation: `TDLEAF_SCORE_CLIP_PAWNS = 1.0` (×max(value[PAWN], 100 cp); hand-tuned 0.5 → 1.0) and `TDLEAF_ID_VAR_SIGMA2 = 10000 cp²` (hand-tuned 625 → 10000, equivalent to a 100 cp std-dev reference).  Per-step safety: `TDLEAF_ADAM_STEP_CLIP = 30.0` uniform across categories.  Mini-batch size `TDLEAF_BATCH_SIZE = 8`.
 
-**Material representation — pure-PSQT (current default).**  The bucketed PSQT is the *sole* trainable material channel; `piece_val` and the gauge machinery are disabled.  Defaults: `TDLEAF_PURE_PSQT = true` (tdleaf.h), `NNUE_FIXED_PIECE_VALUES 1` (define.h — search keeps classical `value[]`; `nnue_extract_piece_values()` is report-only).  Seed with `--init-nnue-classical` (classical material + phase-interpolated PST baked into PSQT) or `--init-nnue-noprior` (uniform 100 cp).  With one material channel there is no gauge null direction, so nothing for the multi-writer merge to amplify; absolute scale is loss-anchored by `TDLEAF_K = 220`.  Validated by an 8k-game two-writer merge smoke test (pawn pinned at 100 cp across all merge cycles, FC biases converge).  Full rationale in `docs/TDLEAF.md` ("Evaluation Gauge — Pure-PSQT"); planned code cleanup in `docs/MAINSTREAM_PLAN.md` Phase B.
-- **⚠️ Do NOT freeze PSQT.**  Freezing (phase 1 = PSQT+piece_val, phase 1b = PSQT only) fails ~−200 Elo.  Outcome-scaling pressure is phase-dependent per material bucket; the bucketed PSQT is the only *linear* absorber; `piece_val` is bucket-independent and cannot substitute (1b proved this).  With PSQT frozen the pressure blows out the int8 FC output scale (won KQP-vs-K read +4033 cp vs reference +1286 cp).  Pure-PSQT works precisely because it keeps the bucketed PSQT *free* and removes only the redundant second channel.
-- Gauge-machinery internals (`TDLEAF_PIN_PAWN_VALUE`, `nnue_mean_center_psqt_gradients`, Pass-2 dw centering, `nnue_recenter_psqt_slot_means`, persisted v11 slot-means) remain in the code but are gated off by `TDLEAF_PURE_PSQT`.  Retained for history; slated for deletion + `.tdleaf.bin` v12 in Phase B.
+**Material representation — pure-PSQT (only mode).**  The bucketed PSQT is the *sole* trainable material channel.  There is no separate dense `piece_val` channel and no gauge-anchoring machinery in the codebase — both were fully deleted (not just disabled by a flag) once pure-PSQT was mainstreamed.  Defaults: `NNUE_FIXED_PIECE_VALUES 1` (define.h — search keeps classical `value[]`; `nnue_extract_piece_values()` is report-only).  Seed with `--init-nnue-classical` (classical material + phase-interpolated PST baked into PSQT) or `--init-nnue-noprior` (uniform 100 cp).  With one material channel there is no gauge null direction, so nothing for the multi-writer merge to amplify; absolute scale is loss-anchored by `TDLEAF_K = 220`.  Validated by an 8k-game two-writer merge smoke test (pawn pinned at 100 cp across all merge cycles, FC biases converge).  Full rationale and the retired gauge machinery in `docs/history/TRAINING_HISTORY.md`.
+- **⚠️ Do NOT freeze PSQT.**  Freezing (phase 1 = PSQT+piece_val, phase 1b = PSQT only) fails ~−200 Elo.  Outcome-scaling pressure is phase-dependent per material bucket; the bucketed PSQT is the only *linear* absorber; the old `piece_val` channel was bucket-independent and could not substitute (1b proved this).  With PSQT frozen the pressure blows out the int8 FC output scale (won KQP-vs-K read +4033 cp vs reference +1286 cp).  Pure-PSQT works precisely because it keeps the bucketed PSQT *free*.
+- The old gauge-machinery internals (pawn pin, gradient mean-centering, post-Adam dw centering, persisted PSQT slot-means) and the dense `piece_val` channel itself were deleted from the code, along with the `.tdleaf.bin` sections they used — current format is v12. Full mechanism writeup in `docs/history/TRAINING_HISTORY.md`.
 - Cosmetic drift: extracted pawn 100→107 cp per 500k online games — harmless because search values are fixed.  `TDLEAF_SCORE_CLIP_PAWNS` is in units of `max(value[PAWN], 100 cp)`, which stays 100 cp exactly under fixed values, so the clip does not stretch with drift.
 
 **Critical gotchas for code changes:**
 - `material` in `score.cpp` is **already STM (side-to-move) POV** — do not flip it.
-- `piece_val` is **clamped ≥ 0** after each Adam step: negative piece_val inverts material evaluation, creating an unrecoverable death spiral.
 - PSQT must be initialized **symmetrically** (own=+V, enemy=-V).  Asymmetric init (own=+2V, enemy=0) produces the same score but causes FT biases to explode to int16 saturation during training.
 - FC0 passthrough row (output 15) is **zero-initialized**; gradient flows through it normally.
 - FT uses RMSProp (no m), not full Adam.  Session-local `t_ft_session` prevents oversized steps after restart.
-- Weights persist to `.tdleaf.bin` (v11 format: adds source-`.nnue` content hash (v10) and persisted PSQT init slot-means (v11)); POSIX file locking + delta merging for concurrent training.  The save path uses section-level buffered I/O + cached dirty-row bitmaps (learning overhead ≈ +13% wall clock at depth 6).
-- TDLeaf works under BOTH protocols: xboard/CECP gets results via the protocol `result` command (`make_move()` hooks); UCI derives outcomes via `tdleaf_self_adjudicate()` in `uci_finish_game()` (terminal-position checks + score-history fallback; ambiguous games skip learning).
-- Sustained training score far from 50% (e.g. vs a fixed stronger opponent) causes outcome-imbalance drift — the constant component of the TD outcome term is absorbed by FC output biases and other constant-capable channels, collapsing the net.  Self-play is immune and balanced play actively heals drift.  See "Outcome-Imbalance Drift" in `docs/TDLEAF.md`; canary monitor: `scripts/diff_tdleaf_checkpoints.py`.
-- Setting `TDLEAF_DUMP_TSV=<prefix>` dumps quiet leaf+root training corpora during play (see `docs/OFFLINE_TRAINING.md`).
+- Weights persist to `.tdleaf.bin` (v12 format: adds source-`.nnue` content hash (v10); the loader still accepts v2–v11, discarding the now-removed piece-value and PSQT-slot-means fields from those older files); POSIX file locking + delta merging for concurrent training.  The save path uses section-level buffered I/O + cached dirty-row bitmaps (learning overhead ≈ +13% wall clock at depth 6).
+- TDLeaf works under BOTH protocols: xboard/CECP gets results via the protocol `result` command (`make_move()` hooks); UCI derives outcomes via `tdleaf_self_adjudicate()` in `uci_finish_game()` (terminal-position checks + score-history fallback; ambiguous games skip learning) — UCI is the default for `match.py`/fastchess training runs today.
+- Sustained training score far from 50% (e.g. vs a fixed stronger opponent) causes outcome-imbalance drift — the constant component of the TD outcome term is absorbed by FC output biases and other constant-capable channels, collapsing the net.  Self-play is immune and balanced play actively heals drift.  See "Outcome-Imbalance Drift" in `docs/TRAINING.md`; canary monitor: `scripts/diff_tdleaf_checkpoints.py`.
+- Setting `TDLEAF_DUMP_TSV=<prefix>` dumps quiet leaf+root training corpora during play (see `docs/TRAINING.md`).
 
 ### Protocol support
 
@@ -188,6 +187,13 @@ python3 scripts/match.py Leaf_vA Leaf_vB -n 200 -c 4 -tc 5+0.05
 # Interactive training run (from learn/)
 python3 scripts/training_run.py
 
+# One full hybrid-loop iteration: generate -> consolidate -> gauntlet (from learn/)
+python3 scripts/train.py --tag iter1 --games 400000 --depth 8 \
+    --state <net>.tdleaf.bin --bt-K 220 --bt-threads 8 --gauntlet-epochs
+
+# Chained iteration: --continue reads the previous run's sidecar JSON
+python3 scripts/train.py --tag iter2 --continue iter1 --games 1000000 --depth 8
+
 # Bayesian Elo ratings (one or more PGN files combined)
 python3 scripts/bayeselo_ratings.py file1.pgn file2.pgn --min 20 --report
 
@@ -220,7 +226,7 @@ python3 scripts/analyze_calibration.py --input learn/positions.parquet --out-dir
 
 ### Training workflow summary
 
-The recommended way to train is via `training_run.py`, which handles network init,
+For straightforward online-only training, `training_run.py` handles network init,
 binary compilation, opponent rotation, checkpointing, and optional train-validate loops:
 
 ```sh
@@ -228,7 +234,21 @@ cd learn/
 python3 training_run.py
 ```
 
-Manual workflow (equivalent to what the script automates):
+For the hybrid loop (online generation + offline consolidation + gauntlet, the
+recommended path for iterative training today), `train.py` drives one full iteration
+per invocation, with `--continue` to chain iterations without re-specifying `--net`/
+`--state`/opponent lists by hand:
+
+```sh
+cd learn/
+python3 train.py --tag iter1 --games 400000 --depth 8 --bt-K 220 --bt-threads 8 \
+    --gauntlet-epochs --gauntlet Leaf_vclassic_eval
+```
+
+See `docs/TRAINING.md` for the full workflow and `docs/SCRIPT_USE.md` for the option
+tables of both scripts.
+
+Manual online-only workflow (equivalent to what `training_run.py` automates):
 
 ```sh
 # 1. Initialise a fresh random network (optional)
@@ -252,10 +272,15 @@ python3 match.py Leaf_vtrain_fresh_a Leaf_vtrain_fresh_b -c 5 -tc 0:03+0.05 --wa
 ```
 engine/
   src/          Source code (unity-built via Leaf.cc)
-  docs/         Documentation (NNUE.md, TDLEAF.md, TODO.md, TRAINING_RUN1.md, SCRIPT_USE.md, change_log.txt)
+  docs/         Documentation (NNUE.md, TRAINING.md, SCRIPT_USE.md, TODO.md,
+                MAINSTREAM_PLAN.md, change_log.txt, history/ for retired
+                designs and experiment write-ups)
   scripts/      Python automation scripts
-  run/          Compiled binaries + runtime config (opening book)
-  learn/        Training artifacts: .nnue, .tdleaf.bin, .games, pgn/
+  run/          Compiled binaries + runtime config (opening book, incl.
+                main_bk.dat) — binaries land here only as a compile-time
+                step; no training/rating binary ever executes from here
+  learn/        Training artifacts: .nnue, .tdleaf.bin, per-run <tag>_work/
+                archives, PGNs
 gui/            LeafGUI Flutter chess GUI (see gui/CLAUDE.md)
 logos/          Shared logo assets
 tools/          Third-party tools (cutechess-1.4.0/, BayesElo/)

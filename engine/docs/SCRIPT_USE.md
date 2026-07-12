@@ -8,9 +8,17 @@ since engines, `.nnue` files, and `.tdleaf.bin` files live there.
 
 ## match.py
 
-Run a head-to-head match or gauntlet between chess engines using cutechess-cli.
-Supports Leaf binaries and external UCI engines (e.g. Stockfish, placed in
-`tools/engines/<name>/`).  **Invoke from `run/`** (symlink) or `scripts/`.
+Run a head-to-head match or gauntlet between chess engines using a tournament
+driver — **fastchess by default** (`--driver=cutechess` selects cutechess-cli
+instead).  Supports Leaf binaries and external UCI engines (e.g. Stockfish,
+placed in `tools/engines/<name>/`).  **Invoke from `run/` or `learn/`**
+(symlinked into both) or `scripts/`.
+
+fastchess is UCI-only: the engine self-adjudicates game outcomes for TDLeaf
+learning (`tdleaf_self_adjudicate()`), which is how online training runs by
+default today — no xboard game loop is required.  cutechess-cli supports
+xboard as well, so the engine receives explicit `result` commands instead;
+pass `--driver=cutechess --proto xboard` for that path.
 
 ### Interactive mode
 
@@ -61,33 +69,40 @@ etc.) without manual `dir=` configuration.
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--driver` | `fastchess` | Tournament driver: `fastchess` or `cutechess` |
 | `-n`, `--games` | 100 | Games per iteration per opponent |
 | `-i`, `--iterations` | 1 | Iterations per opponent; engines restart between each |
 | `-c`, `--concurrency` | cpu_count/2 | Simultaneous games |
-| `-tc`, `--time-control` | `10+0.1` | Time control (`moves/time+inc` or `time+inc`, seconds) |
-| `--proto` | `uci` | Protocol for both engines (`uci` or `xboard`) |
-| `--proto1` | (from `--proto`) | Override protocol for engine1 only |
-| `--proto2` | (from `--proto`) | Override protocol for engine2 only |
+| `-tc`, `--time-control` | `3+0.05` | Time control for both engines (`moves/time+inc` or `time+inc`, seconds) |
+| `--tc1` / `--tc2` | (from `-tc`) | Override time control for engine1/engine2 only |
+| `--proto` | `uci` | Protocol for both engines (`uci` or `xboard`; fastchess requires `uci` for both) |
+| `--proto1` / `--proto2` | (from `--proto`) | Override protocol for engine1/engine2 only |
 | `--pgn FILE` | — | Persistent PGN; all games appended across opponents/iterations |
 | `--pgn-out FILE` | auto | Per-iteration PGN (default: `match_<e1>_vs_<e2>.pgn`) |
 | `--fischer-random` | off | Chess960 starting positions |
+| `--no-adjudication` | off | Disable score-based early adjudication (`-draw`/`-resign`); games run to a natural ending (mate/stalemate/repetition/50-move/insufficient material), capped by `-maxmoves 400`. Useful early in training when evals are noisy. |
+| `--ponder` | off | Enable pondering (cutechess only; fastchess doesn't expose it — a warning is printed if combined with `--driver=fastchess`) |
 | `--wait MS` | 0 | Milliseconds between games (useful when sharing a `.tdleaf.bin`) |
-| `--depth1 N` | — | Limit engine1 search to depth N |
-| `--depth2 N` | — | Limit engine2 search to depth N |
-| `--openings FILE` | — | Openings file: `.epd`, `.pgn`, or `.bin` (polyglot book) |
+| `--depth1 N` / `--depth2 N` | — | Limit engine1/engine2 search to depth N |
+| `--openings FILE` | — | Openings file: `.epd`, `.pgn`, or `.bin` (polyglot book; fastchess doesn't support `.bin`) |
 | `--no-repeat` | off | Play each opening once (`-rounds N`, no `-games 2 -repeat`).  Increases position diversity; recommended for symmetric self-play. |
-| `--noswap` | off | Pass `-noswap` to cutechess-cli; engine1 always plays white.  Off by default (correct for training). |
-| `--error-log FILE` | — | Append cutechess-cli stderr (and inherited engine stderr) to FILE.  Captures per-batch `[tdleaf step-clip]` telemetry from all concurrent training engines in one file; lines are atomic per `fprintf` (<4KB), so interleaving is line-granular. |
+| `--noswap` | off | Pass `-noswap` to the driver; engine1 always plays white.  Off by default (correct for training). |
+| `--error-log FILE` | — | Append driver stderr (and inherited engine stderr) to FILE.  Captures per-batch `[tdleaf step-clip]` telemetry from all concurrent training engines in one file; lines are atomic per `fprintf` (<4KB), so interleaving is line-granular. |
+| `--stall-timeout SEC` | 600 | Kill the driver + engines if no output appears for this long (guards a known cutechess-cli 1.4.0 deadlock under high concurrency; exits with code 124 on stall) |
+| `--option1` / `--option2 KEY=VALUE` | — | Pass a UCI/xboard option to engine1/engine2 (repeatable), e.g. `--option1 'UCI_Elo=2000'` |
+| `--name1` / `--name2` | basename of engine | Override the display name in PGN/output |
 
 When more than one opponent is supplied the script enters **gauntlet mode** and
 prints a summary table (Opponent, Games, W, D, L, Score%, Elo diff) at the end.
 
 ### Protocol notes
 
-The default protocol is **UCI**.  Leaf auto-detects UCI, so no special flags are
-needed.  Use `--proto xboard` (or `--proto1`/`--proto2` for per-engine overrides)
-when running xboard-only engines or TDLeaf training (which requires the xboard
-game loop).
+The default protocol is **UCI**, and the default driver **fastchess** requires
+UCI for both engines. Leaf auto-detects UCI, so no special flags are needed —
+this is also how online TDLeaf training runs by default (`match.py Leaf_vtrain_a
+Leaf_vtrain_b ...` from `learn/`), via UCI self-adjudication. To run under
+xboard instead (e.g. for external xboard-only engines), pass `--driver=cutechess
+--proto xboard` (or `--proto1`/`--proto2` for per-engine overrides).
 
 For a cross-protocol parity test (same Leaf binary, UCI vs xboard):
 
@@ -192,12 +207,13 @@ Interactive TDLeaf(λ) training run manager.  **Invoke from `learn/`** so that
 all working files (`.nnue`, `.tdleaf.bin`, `.games`, built binaries, PGN output)
 land in `learn/`.
 
-> **TDLeaf requires xboard protocol.**  Learning hooks are called from inside
-> `make_move()`, which is only reached in the xboard game loop.  Matches driven
-> through a UCI GUI will not update any weights even if the binary was compiled
-> with `TDLEAF=1`.  `training_run.py` automatically passes `--proto1 xboard`
-> for the learner and selects the opponent protocol per fixed engine (xboard
-> for Leaf binaries, the engine's own protocol for external executables).
+> **TDLeaf runs under UCI by default.**  All engines in `training_run.py` now
+> run under `--proto uci`: the default driver (fastchess) is UCI-only, and
+> Leaf's UCI loop triggers TDLeaf learning via self-adjudicated outcomes
+> (`uci_finish_game()` → `tdleaf_self_adjudicate()` — terminal-position checks
+> with a score-history fallback).  xboard/CECP remains supported (learning
+> hooks also run from `make_move()` there, driven by the protocol `result`
+> command) for `--driver=cutechess --proto xboard`, but is no longer required.
 
 ```sh
 cd learn/
@@ -250,14 +266,10 @@ as `.tdleaf.bin.bak` before any training begins.  This allows recovery of the
 pre-run weights if a training session produces bad results or is interrupted at an
 inopportune moment.
 
-**Adam momentum persistence (.tdleaf.bin v7):** the Adam first-moment (m) arrays are
-now persisted across sessions alongside the second-moment (v) arrays introduced in v6.
-Previously m cold-started at zero each run while v was restored, causing the optimizer
-to rediscover gradient directions for the first few thousand games — visible as a slow
-or negative Elo trend at the start of every run.  With v7, the optimizer resumes with
-full directional momentum.  Concurrent-writer merge uses element-wise average
-`(m_file + m_local) / 2`.  Storage overhead: ~1.5 MB.  Existing v6 files upgrade
-automatically on the first save.
+**Adam momentum persistence:** both Adam moment arrays (m and v) persist across
+sessions in `.tdleaf.bin`, so the optimizer resumes with full directional momentum
+rather than cold-starting — see `TRAINING.md`'s Adam Optimizer section for the
+concurrent-writer merge rules and format detail.
 
 **Self-play opening diversity:** when the current opponent segment is symmetric
 self-play (both engines learn), `training_run.py` automatically passes `--no-repeat`
@@ -345,8 +357,9 @@ Also prints a console summary of weight changes, then produces a four-page matpl
 - **Page 4 — PSQT**: baseline vs learned distributions, delta histogram,
   per-bucket mean delta bar chart ±1σ
 
-Supports `.tdleaf.bin` versions 2–9.  V9 stores `piece_val[6]` (one value per piece
-type); V5–V8 stored `piece_val[6][8]` (per bucket), which is averaged on read.
+Supports `.tdleaf.bin` versions 2–12.  Version 12 (pure-PSQT) removed the dense
+piece-value channel and the v11 PSQT gauge-anchoring slot-means; earlier versions'
+now-dropped fields are read and discarded to stay aligned.
 
 Optional flags:
 
@@ -728,7 +741,7 @@ python3 scripts/analyze_calibration.py --all-stages
 ## extract_quiet_positions.py
 
 Build an offline-training position set from existing PGNs (see
-`OFFLINE_TRAINING.md`).  Replays each game (python-chess, Chess960-aware,
+`TRAINING.md`).  Replays each game (python-chess, Chess960-aware,
 multiprocessed, ~2,300 games/s) and emits one TSV record per QUIET position:
 `fen  cp  result  ply  depth  gid  endply` — Shredder-FEN, search eval from the
 move comment (white POV, cp), game result (white POV), ply, eval depth, a stable
@@ -737,7 +750,7 @@ final ply (distance base for the trainer's result decay).  Eval and outcome are
 stored separately: the trainer's decayed λ-blend keeps λ, td_λ, and K as
 training-time hyperparameters.  Note: `ply`/`endply` here count game plies
 (every half-move), vs recorded engine plies in the in-engine dump — see the ply
-scale caveat in `OFFLINE_TRAINING.md`.
+scale caveat in `TRAINING.md`.
 
 Quiet filters: side-to-move in check, played move is a capture/promotion/check,
 missing or mate eval, |eval| cap, min-ply, fifty-move clock.  Duplicate control
@@ -783,7 +796,7 @@ Diff two `.tdleaf.bin` checkpoints section by section: piece values (raw and
 cp-equivalent), per-section FC weight/bias movement (median/mean/max |dw|),
 FT bias, and FT/PSQT rows matched by feature index.  The standard monitor for
 the outcome-imbalance drift canaries (per-stack fc2_bias, stack-0 fc2_w[13]/[27],
-FC0 passthrough-row mean, R/Q piece_val — see `TDLEAF.md`).
+FC0 passthrough-row mean, R/Q piece_val — see `TRAINING.md`).
 
 ```sh
 # From learn/: compare consecutive checkpoints
@@ -791,7 +804,7 @@ python3 diff_tdleaf_checkpoints.py nn-fresh.tdleaf.bin-1e6g nn-fresh.tdleaf.bin-
 ```
 
 Two positional arguments (old, new); no options.  Uses the
-`compare_nnue_learning.py` reader (supports `.tdleaf.bin` v2–v11).
+`compare_nnue_learning.py` reader (supports `.tdleaf.bin` v2–v12).
 
 ---
 
@@ -802,7 +815,7 @@ self-play generation with leaf/root corpus dumping → checkpoint → assemble
 corpus → threaded single-process offline training → best-epoch promotion →
 gauntlet with an Elo table.  Non-interactive; run from `learn/`.  Helper
 binaries (`Leaf_vbt`, `Leaf_vtrain_hl_a/b`) are auto-compiled.  See
-`OFFLINE_TRAINING.md` for the concepts and the manual runbook it encodes.
+`TRAINING.md` for the concepts and the manual runbook it encodes.
 
 ```sh
 # Full iteration: generate 400k d8 games, consolidate (settled gen-3+ recipe:
@@ -812,6 +825,11 @@ python3 train.py --tag iter3 --games 400000 --depth 8 \
     --state tdL10F10x6_ep4.tdleaf.bin --recompile \
     --bt-K 220 --bt-threads 8 \
     --gauntlet-epochs --gauntlet Leaf_vtdL10F10x6-ep4 Leaf_vclassic_eval
+
+# Chained iteration: --continue reads iter3_final.json and defaults
+# --net/--state/--gauntlet-anchors from it, tracking cumulative_games
+python3 train.py --tag iter4 --continue iter3 --games 1000000 --depth 8 \
+    --bt-K 220 --bt-threads 8 --gauntlet-epochs
 
 # Consolidate-only on existing corpora (e.g. a hyperparameter arm on the same dumps)
 python3 train.py --tag arm1 --skip-online \
@@ -823,19 +841,33 @@ python3 train.py --tag arm1 --skip-online \
 python3 train.py --tag gen3 --games 200000 --depth 8 --skip-train
 ```
 
-Artifacts (named by `--tag`): `<tag>_final.nnue` (piece_val baked — compile
-rating binaries from this; with `--gauntlet-epochs` this is the ladder's best
-epoch, else the last epoch), `<tag>_final.tdleaf.bin` (seeds the next iteration;
-pairs with the ORIGINAL base `.nnue`), `<netbase>.tdleaf.bin-<tag>-online`
-(post-generation checkpoint), `<tag>_work/` (dumps, `corpus.tsv`, training logs).
+**Artifacts** (named by `--tag`), always flat in `learn/`: `<tag>_final.nnue`
+(compile rating binaries from this; with `--gauntlet-epochs` this is the ladder's
+best epoch, else the last epoch), `<tag>_final.tdleaf.bin` (seeds the next
+iteration; pairs with the ORIGINAL base `.nnue`), `<tag>_final.json` (sidecar:
+cumulative games, gauntlet anchors, epoch-ladder/gauntlet results — read by
+`--continue`), and `Leaf_v<tag>-final` (compiled rating binary — always built,
+even with no gauntlet opponents, so it's ready as a future `--continue` anchor;
+never left resident in `run/`).
+
+**`<tag>_work/`** is a permanent per-run archive — never deleted on a successful
+run. It keeps `corpus.tsv` (gzip'd), the online-generation and final-gauntlet
+PGNs (online one gzip'd), and `train/train.log` (with the epoch-ladder and
+gauntlet tables appended); it prunes raw per-shard dumps, non-winning epoch
+`.nnue` files, epoch-ladder PGNs, and epoch rating binaries. `--keep-epoch-states`
+additionally keeps every epoch's `.tdleaf.bin`; `--keep-work` disables all
+pruning for one run. A failed run's `<tag>_work/` is never touched. See
+`TRAINING.md` for the full artifact-lifecycle reference.
 
 ### Options
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--tag NAME` | required | Iteration name; prefixes all artifacts |
-| `--net FILE` | `nn-fresh-260628.nnue` | Base `.nnue` in `learn/` (never changes across iterations) |
-| `--state FILE` | keep live | `.tdleaf.bin` to promote to the live state (backed up + hash-checked against the base) |
+| `--net FILE` | `nn-fresh-260628.nnue`, or from `--continue`'s sidecar | Base `.nnue` in `learn/` (never changes across iterations) |
+| `--continue PREV_TAG` | — | Chain from a prior run: read `learn/PREV_TAG_final.json` and default `--net`/`--state`/`--gauntlet-anchors` from it, track `cumulative_games` across the chain, and auto-add `Leaf_v<PREV_TAG>-final` to the final gauntlet |
+| `--init-nnue [material\|classical\|noprior]` | off | Initialise a fresh `--net` (+ companion `.tdleaf.bin`) before generating — turns the run into a start-to-finish iteration. Bare flag = `material`. Fails if `--net` already exists |
+| `--state FILE` | keep live, or from `--continue`'s sidecar | `.tdleaf.bin` to promote to the live state (backed up + hash-checked against the base) |
 | `--skip-online` | off | Consolidate-only; train on `--corpus` files |
 | `--games N` | 400000 | Games to generate |
 | `--depth N` | 8 | Fixed search depth for generation |
@@ -844,7 +876,7 @@ pairs with the ORIGINAL base `.nnue`), `<netbase>.tdleaf.bin-<tag>-online`
 | `--quiet-cp N` | 60 | `TDLEAF_DUMP_QUIET_CP` for the dump |
 | `--skip-train` | off | Generate-only |
 | `--corpus TSV` | — | Extra corpus file(s) for training (repeatable) |
-| `--bt-threads N` | 8 | Worker threads for within-batch gradient compute (single process; synchronous data parallelism, identical to 1 thread up to float summation order — see `OFFLINE_TRAINING.md`) |
+| `--bt-threads N` | 8 | Worker threads for within-batch gradient compute (single process; synchronous data parallelism, identical to 1 thread up to float summation order — see `TRAINING.md`) |
 | `--epochs N` | 6 | Training epochs |
 | `--bt-lr X` | 0.25 | LR scale on all category LRs |
 | `--bt-lambda X` | 1.0 | Outcome-weight ceiling in the decayed blend target (`w = λ_eff·td_λ^(N−ply)`).  Default 1.0 = pure λ-return, the settled gen-3+ recipe: `--bt-td-lambda` is the knob of record; this stays a dormant scale knob (decouples overall outcome weight from decay shape across corpora with different ply-gap distributions) |
@@ -852,12 +884,62 @@ pairs with the ORIGINAL base `.nnue`), `<netbase>.tdleaf.bin-<tag>-online`
 | `--bt-batch N` | 512 | Positions per Adam step |
 | `--bt-leaf-lambda X` | = `--bt-lambda` | Outcome-weight ceiling for depth-0 leaf rows (default follows the root λ, the recommended setting) |
 | `--bt-td-lambda X` | trainer default (`TDLEAF_LAMBDA`) | Result decay per ply from the game end: `w = λ_eff·td_λ^(N−ply)`; `1.0` = flat blend |
-| `--gauntlet OPP …` | none | Opponent binaries in `learn/` (empty = skip) |
+| `--bt-loss-gamma X` | 1.0 | Focal-loss exponent `(d·(1−d))^γ/K`: `1.0` = standard MSE (default), `0.0` = cross-entropy, `0.5` = between |
+| `--gauntlet OPP …` | none | One-off opponent binaries in `learn/` for this run's final gauntlet (combined with `--gauntlet-anchors`) |
+| `--gauntlet-anchors OPP …` | inherited from `--continue`'s sidecar, or empty | Fixed opponent list carried forward automatically across a `--continue` chain (e.g. `Leaf_vclassic_eval`). Pass with no arguments to explicitly clear an inherited list |
 | `--gauntlet-games N` | 400 | Games per opponent |
 | `--tc TC` | `3+0.05` | Gauntlet time control |
-| `--gauntlet-epochs` | off | Per-epoch ladder: rate each epoch snapshot vs the first `--gauntlet` opponent as soon as its epoch finishes training; the trainer is paused (SIGSTOP/SIGCONT) during each match so games never contend with training for cores; prints an epoch table and promotes the best epoch as the final net |
+| `--gauntlet-epochs` | off | Per-epoch ladder: rate each epoch snapshot vs the net as it stood before offline training, as soon as that epoch finishes; the trainer is paused (SIGSTOP/SIGCONT) during each match so games never contend with training for cores; prints an epoch table and promotes the best epoch as the final net |
 | `--epoch-games N` | 1000 | Games per epoch-ladder match |
 | `--epoch-tc TC` | `1+0.01` | Epoch-ladder time control |
-| `--no-final-gauntlet` | off | Skip the final full gauntlet (ladder-only runs; `--gauntlet` then names just the ladder opponent) |
+| `--no-final-gauntlet` | off | Skip the final full gauntlet matches (the rating binary is still always built) |
 | `--force` | off | Reuse an existing `<tag>_work` directory |
 | `--recompile` | off | Force recompile of helper binaries |
+| `--keep-epoch-states` | off | Keep every epoch's `.tdleaf.bin` in `<tag>_work/train/` (default: only the promoted epoch's state survives) |
+| `--keep-work` | off | Skip all end-of-run pruning inside `<tag>_work/` for this run (raw dumps, non-winning epoch `.nnue`, epoch-ladder PGNs, epoch rating binaries all stay; `corpus.tsv` stays uncompressed) |
+
+---
+
+## migrate_legacy_work.py
+
+One-time backlog migration for training iterations produced before `train.py`'s
+per-run archive model existed (the pre-rename `hybrid_loop.py`, and any early
+`train.py` runs predating this script). For each `--tags` entry, in the order
+given: reorganizes the tag's scattered flat-`learn/` artifacts (per-epoch rating
+binaries, PGNs previously written flat instead of into `<tag>_work/`, checkpoint
+backups) into the current archive layout and prunes them the same way a live run
+would, then backfills a `<tag>_final.json` sidecar — reconstructed from whatever
+PGNs/snapshots are still on disk — so `--continue` works on the net going forward.
+
+**Defaults to a dry run.** Prints every action without touching anything; pass
+`--apply` to actually execute. Always dry-run first and read the output before
+`--apply` — this operates on irreplaceable training data.
+
+```sh
+cd learn/
+
+# Review what would happen (default: dry run)
+python3 ../scripts/migrate_legacy_work.py --tags \
+    material_260708-1e5g material_260708-5e5g material_260708-1e6g \
+    material_260708-2e6g material_260708-3e6g
+
+# Then actually perform it
+python3 ../scripts/migrate_legacy_work.py --tags \
+    material_260708-1e5g material_260708-5e5g material_260708-1e6g \
+    material_260708-2e6g material_260708-3e6g --apply
+```
+
+`bt_lr`/`bt_lambda`/`bt_K`/`bt_td_lambda` can't be recovered from on-disk
+artifacts alone (the orchestrator's own hyperparameter log line went to the
+terminal, not to any file) — they stay `null` in the reconstructed sidecar
+unless `--transcript <file>` points at a saved copy of the original invocations,
+in which case they're parsed from the actual flags used.
+
+### Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--tags TAG [TAG ...]` | required | Tags in chain order (each tag's parent = the previous one) |
+| `--transcript FILE` | — | Saved copy of the original invocations, to recover `bt_lr`/`bt_lambda`/`bt_K`/`bt_td_lambda`/`gauntlet_anchors` precisely |
+| `--keep-epoch-states` | off | Keep every epoch's `.tdleaf.bin` (same meaning as `train.py`'s flag) |
+| `--apply` | off | Actually perform the migration (default: dry run only) |

@@ -128,7 +128,8 @@ static const float TDLEAF_ADAM_PSQT_LR0    = 13.0f;   // PSQT (int32; sized to r
 // scale by NNUE_FIXED_PIECE_VALUES (define.h): value[] stays at the classical
 // constants, so SEE, pruning margins, and TDLEAF_SCORE_CLIP are unaffected by any
 // slow PSQT scale drift.  DO NOT reintroduce a second material channel or freeze
-// PSQT — see docs/TDLEAF.md "Evaluation Gauge — Pure-PSQT" for why both fail.
+// PSQT — see docs/history/TRAINING_HISTORY.md "Material Representation —
+// Dense Piece Values & the Gauge Machinery" and "PSQT Freezing" for why both fail.
 static const float TDLEAF_ADAM_BETA1    = 0.9f;    // first-moment decay  (FC + FT bias + PSQT)
 static const float TDLEAF_ADAM_BETA2    = 0.999f;  // second-moment decay (all layers)
 static const float TDLEAF_ADAM_EPS      = 1e-8f;   // numerical floor

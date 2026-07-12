@@ -1,194 +1,20 @@
-# Mainstreaming Plan: Pure-PSQT + Ply Semantics + Internal Self-Play
+# Mainstreaming Plan: Internal Self-Play
 
-**Date:** 2026-07-07
-**Status:** approved direction; implementation not started
+**Date:** 2026-07-07 (Phases A–C); this file trimmed to the still-pending phases
+**Status:** Phases A–C (pure-PSQT + ply semantics) are **done** — see
+`docs/history/TRAINING_HISTORY.md` for the full experimental record, phase-by-phase
+implementation notes, and gates. Phases D–E below are **approved direction, not
+started**.
 **Baseline:** branch `frozen-psqt` at commit `da9e57a` (experimental state, validated); `main` at `fa20daa`
-**Companion docs:** `docs/TDLEAF.md`, `docs/OFFLINE_TRAINING.md`,
+**Companion docs:** `docs/TRAINING.md`,
 `~/.claude/projects/-Users-homand-Leaf/memory/single-process-selfplay-tdleaf-plan.md` (original
 internal-self-play design), `~/.claude/projects/-Users-homand-Leaf/memory/frozen-psqt-experiment.md`
 (full experimental record)
 
-This document is the implementation roadmap. It is self-contained: experimental context first,
-then five phases in strict order, each with its validation gate. **Do not reorder the phases** —
-each is the test platform for the next.
-
----
-
-## 0. Experimental context (why these changes)
-
-All results below from branch `frozen-psqt`, 500k-game depth-6 training runs with matched batching
-(single fastchess invocations of 50k/50k/100k/300k games, c=12, tc=inf, no adjudication, bookless
-binaries in `learn/`), rated by gauntlet at 3+0.05 in a combined bayeselo frame anchored by
-`Leaf_vclassic_eval` / `Leaf_vmaterial_eval` and a shared 0g checkpoint.
-
-| Experiment | Config | Result @500k |
-|---|---|---|
-| Reference (`psqt-prior-*`) | full gauge machinery: mean-centering, dw centering, slot-mean recentering, pawn pin, trainable piece_val | +78 (frame) |
-| Phase 1 (freeze PSQT + piece_val) | all material channels frozen at classical prior | **FAILED** ~−200 vs ref |
-| Phase 1b (freeze PSQT only) | piece_val trainable w/ pawn pin | **FAILED** ~−200 vs ref |
-| Pure-PSQT (`pure-*`) | one trainable channel: PSQT free, NO centering/pin/piece_val, search values fixed classical | +47 (frame), −33±26 vs ref |
-| **Pure-PSQT + offline (`pure-bt-ep4`)** | above + 4 epochs batch-train on own 80M-position corpus | **+149 (frame): +71 over ref, +102 over own online endpoint** |
-
-**Failure mechanism (phases 1/1b), do not re-attempt freezing:** outcome-scaling pressure is
-phase-dependent (per material bucket). The bucketed PSQT is the only *linear* absorber for it;
-`piece_val` cannot substitute (it is bucket-independent — 1b proved this directly). With PSQT
-frozen, the pressure routes through the int8-clipped FC stacks and blows out per-bucket output
-scale (won KQP-vs-K endgame evaluated +4033cp vs reference +1286cp; collapsed gauntlet draw rates).
-
-**Why pure-PSQT is safe without the gauge machinery:** the machinery existed because PSQT and
-`piece_val` redundantly encode material level → a gauge null direction the multi-writer merge can
-amplify geometrically. Delete `piece_val` as a training channel and there is ONE material channel:
-no null direction, nothing to amplify. Absolute scale is loss-anchored via `TDLEAF_K = 220` under
-outcome-dominated λ-return targets. Measured drift: extracted pawn 100→107cp per 500k online
-games, +7cp more per 4 offline epochs — slow, and cosmetic because search piece values are fixed
-(see `NNUE_FIXED_PIECE_VALUES` below).
-
-**Rating discipline:** rate by gauntlet, never by val-MSE level. Val-MSE is a gate for "not
-diverging," not a fitness function.
-
----
-
-## Phase A — Merge pure-PSQT to main (defaults on, no deletions yet)
-
-### A1. Merge `frozen-psqt` → `main`
-
-Defaults after merge (already the state at `da9e57a`):
-
-- `src/tdleaf.h`: `TDLEAF_PURE_PSQT = true`, `TDLEAF_FREEZE_PSQT = false`
-  (`TDLEAF_PIN_PAWN_VALUE` is moot in pure mode)
-- `src/define.h`: `NNUE_FIXED_PIECE_VALUES 1` — search keeps classical
-  `value[] = {0,100,377,399,596,1197,10000}`; `nnue_extract_piece_values()` in `src/nnue.cpp`
-  computes implied values for the banner ("report only; search uses classical") but does not
-  assign `value[]`.
-- Gates already in `src/nnue_training.cpp` (verify they survive the merge):
-  - piece_val gradient accumulation and piece_val Adam block: `if (piece_val_active && !TDLEAF_PURE_PSQT)`
-  - Pass 2 dw centering: `if (!TDLEAF_FREEZE_PSQT && !TDLEAF_PURE_PSQT && ...)`
-  - `nnue_mean_center_psqt_gradients()` and `nnue_recenter_psqt_slot_means()`: early-return on
-    `TDLEAF_PURE_PSQT`
-
-### A2. Multi-writer merge smoke test — the ONE thing 500k didn't exercise
-
-The pure run was effectively single-lineage. The historical reason for centering was
-merge-amplified gauge drift. Pure-PSQT removes the null direction *in theory*; test it with the
-actual merge code:
-
-1. Two TDLEAF training processes, same `.tdleaf.bin`, concurrent self-play, ~5–10k games.
-2. Diff checkpoints with `scripts/diff_tdleaf_checkpoints.py`; watch extracted piece values
-   (`P` especially) and FC bias means across a few save/merge cycles.
-3. **Gate:** no accelerating drift across merge cycles (pawn stays within a few cp of its
-   pre-test value; FC bias means stable). If it drifts, stop and investigate before Phase B —
-   the merge path may need count-weighting fixes rather than restored centering.
-
-### A3. Docs
-
-Update `docs/TDLEAF.md` and `engine/CLAUDE.md`: pure-PSQT is the recipe; move gauge-anchoring to a
-"historical / why not" section; record the phase-1/1b failure mechanism prominently so freezing is
-never re-attempted. Log in `docs/change_log.txt`.
-
----
-
-## Phase B — Delete the gauge machinery, format v12
-
-Pure deletion, after A2 passes.
-
-### B1. Delete from `src/nnue_training.cpp` / `src/tdleaf.cpp` / `src/tdleaf.h`
-
-- `nnue_mean_center_psqt_gradients()` (and its call site)
-- post-Adam dw centering in `nnue_apply_gradients` Pass 2
-- `nnue_recenter_psqt_slot_means()` (load-path and save-path call sites)
-- pawn pin (`TDLEAF_PIN_PAWN_VALUE`)
-- the entire `piece_val` training channel: gradient accumulation, Adam moments, the ≥0 clamp,
-  LR `TDLEAF_LR_PV` env override
-- flags `TDLEAF_FREEZE_PSQT` / `TDLEAF_FREEZE_MATERIAL` / `TDLEAF_PURE_PSQT` (pure is now the
-  only mode; keep the *name* out of the code, keep the *explanation* in TDLEAF.md)
-
-Keep: `--init-nnue-classical` and `--init-nnue-noprior` unchanged (both bake material into PSQT —
-exactly what one-channel wants). Keep `NNUE_FIXED_PIECE_VALUES` as a define defaulting to 1.
-
-### B2. `.tdleaf.bin` format v12
-
-- Drop: piece_val weights + their Adam moments; the 88 persisted PSQT init slot-means (v11 field).
-- Loader: accept v11 (ignore dropped fields) and v12; writer emits v12 only.
-- Update `scripts/merge_tdleaf.py` (class `TDLeafFile`), `scripts/compare_nnue_learning.py`,
-  `scripts/diff_tdleaf_checkpoints.py` for the new layout.
-- **Gotcha that will bite:** `--init-nnue` over an existing `.tdleaf.bin` MERGES with it (save
-  path is merge-save). Any fresh-init workflow must `rm` the old file first. Preserve this
-  warning in docs; better, make `--init-nnue` refuse to run if the companion `.tdleaf.bin`
-  exists.
-
-### B3. Drift canary (replaces the pin — monitor, don't constrain)
-
-- `scripts/train.py`: log extracted piece values (the report-only banner values) at every
-  checkpoint; warn if pawn leaves [85, 130] cp.
-- The only *functional* coupling to drift is `TDLEAF_SCORE_CLIP_PAWNS` (units of
-  max(value[PAWN], 100cp) — with fixed classical values this stays 100cp exactly, so the clip
-  does NOT stretch with drift. Good; note it in TDLEAF.md).
-- Do NOT add a scale regularizer preemptively. If the canary ever fires at the 2.4M-game
-  horizon, the fix is a soft pull of extracted-pawn toward 100 with tiny weight (~10 lines).
-
-### B4. Gate
-
-A fresh `--init-nnue-classical` + 50k-game depth-6 run on the v12 build must track the pure-PSQT
-50k checkpoint (`Leaf_vpure-5e4g`, still in `learn/`) within noise in a 1000-game 1+0.01 match.
-
----
-
-## Phase C — Ply semantics: per-record STM + game-ply λ^Δ (harness mode)
-
-These are the mode-agnostic wins from the internal-self-play plan, landed and validated *in the
-existing two-process harness mode* where behavior can be regression-tested bit-for-bit. Original
-design in `single-process-selfplay-tdleaf-plan.md`; the additions below are critique fixes.
-
-### C1. Per-record STM/sign (do this first — biggest correctness surface)
-
-Current code hard-assumes a single-color trajectory:
-
-- `rec.engine_color` is per-GAME (`src/tdleaf.cpp:53` at da9e57a — re-verify line numbers)
-- propagated-score sign flip at `tdleaf.cpp:91` derives from it
-- TSV dump uses `root_wtm = rec.engine_color` (`tdleaf.cpp:322`)
-
-Changes:
-
-1. Add per-record STM to `TDRecord`; outcome term z applied from each record's own STM POV.
-2. **Centralize ALL POV/sign logic in ONE helper.** A half-inverted-targets bug here is silent.
-3. **Edit surface beyond the original plan** — two mechanisms operate on *successive records*
-   and are POV-sensitive once STM can alternate:
-   - `TDLEAF_SCORE_CLIP` (compares consecutive scores — must negate across a POV flip, or every
-     quiet position looks like a ±2×eval swing and the clip fires constantly, silently neutering
-     learning)
-   - ID-stability variance weighting (`TDLEAF_ID_VAR_SIGMA2`, operates on `id_scores[]`
-     histories — same negation requirement)
-   Route both through the central helper.
-4. Rework the `tdleaf.cpp:91` sanity check and the `TDLEAF_DUMP_TSV` dump for per-ply color.
-
-**Gate C1 (invariance tests, write them before the refactor):**
-- (a) In harness mode (all records same STM) the refactor is a no-op: fixed game →
-  **bit-identical gradients** vs pre-change build.
-- (b) Sign-symmetry: same fixed game recorded from white POV vs black POV → identical updates.
-- (c) Mirror test: color-flipped game → exactly mirrored gradients.
-
-### C2. Game-ply accounting + λ^Δ
-
-1. Store true game-ply in each `TDRecord`.
-2. Trace update (`tdleaf.cpp:192` at da9e57a): `e[t] = delta_d + lambda*e[t+1]` →
-   `e[t] = delta_d + pow(lambda, dply)*e[t+1]`, `dply` = game-ply gap to the next record.
-   Harness mode has dply=2; internal self-play will have dply=1; ONE λ expresses the same
-   real-game horizon in both.
-3. **λ default retune — not in the original plan, mandatory:** today λ=0.98 decays per
-   own-move step = per 2 game-plies. Under λ^Δ, preserving current harness behavior requires
-   `TDLEAF_LAMBDA = sqrt(0.98) ≈ 0.98995`. Leaving 0.98 would silently change the harness
-   horizon to λ_eff=0.9604.
-4. TSV dump: ply column becomes game-ply.
-5. **Corpus version marker — not in the original plan, mandatory:** the offline trainer
-   (`--batch-train` in `src/nnue_batch_train.cpp`) computes its own λ-return over TSV records
-   and must switch to the game-ply axis (λ^Δ over the ply column) in the SAME commit. Add a
-   version header/column to the TSV format; `--batch-train` must refuse pre-change corpora
-   (e.g. `pure500k.*.tsv`) or handle them with the old axis explicitly. Note `--bt-lambda 1.0`
-   (the settled gen-3 recipe) is exponent-invariant, but the td_λ=0.98 component and any future
-   λ<1 sweep are not.
-
-**Gate C2:** harness mode with λ = √0.98 → bit-identical gradients to the old code on a fixed
-game (up to fp rounding in `pow`; if not exactly identical, assert max relative deviation < 1e-6).
+This document is the implementation roadmap for internal self-play (Phases D and E).
+It assumes the pure-PSQT material representation and the per-record-STM/game-ply
+ply semantics from Phases A–C (`docs/history/TRAINING_HISTORY.md`) are already in
+place — Phase D's `tdleaf_record_ply` reuse and gradient path depend on both.
 
 ---
 
@@ -262,8 +88,10 @@ bayeselo. This frame resolved both +98 and −33±26 cleanly; trust it. Then run
 consolidation pass (4 epochs, `--bt-lambda 1.0`, on the new game-ply-axis corpus) and gauntlet
 the epochs — screening 1000g @ 1+0.01 vs the online endpoint, best epoch → 500g @ 3+0.05 finals.
 
-**All experiment binaries live in `learn/` (bookless). `run/` contains `main_bk.dat` — a binary
-in `run/` gets book moves and corrupts the comparison.** match.py auto-detects FRC openings.
+**All training/rating binaries execute only from `learn/` or `<tag>_work/epoch_binaries/`,
+never `run/`.** `run/` contains `main_bk.dat` — a binary executing there gets book moves and
+corrupts the comparison; `run/` is only ever a transient compile-output location (see
+`docs/TRAINING.md`, "The `run/` invariant"). `match.py` auto-detects FRC openings.
 
 ---
 
@@ -301,16 +129,16 @@ it matters, the same salt mechanism extends per-board — but measure first, sam
 
 - **WDL head** (FC2 32→3 + translation to cp for search): strongest phase-2 *architecture* idea;
   motivation strengthened by phase-1's blowup (outcome term stretching an unbounded cp head is
-  the root distortion). Orthogonal to everything here; needs its own branch and its own 500k rig
-  run. Do not share a validation run with the ply/process work.
-- Scale regularizer for PSQT drift: only if the B3 canary fires.
+  the root distortion — see `docs/history/TRAINING_HISTORY.md`). Orthogonal to everything here;
+  needs its own branch and its own 500k rig run. Do not share a validation run with the ply/process work.
+- Scale regularizer for PSQT drift: only if a drift canary fires (see `docs/TRAINING.md`).
 
 ## Sequencing summary
 
 ```
-A  merge pure-PSQT, defaults on          gate: merge smoke test (A2)
-B  delete gauge machinery, v12           gate: 50k tracks Leaf_vpure-5e4g (B4)
-C  per-record STM + λ^Δ, harness mode    gate: bit-identical-gradient tests (C1/C2)
+A  merge pure-PSQT, defaults on          DONE — see docs/history/TRAINING_HISTORY.md
+B  delete gauge machinery, v12           DONE — see docs/history/TRAINING_HISTORY.md
+C  per-record STM + λ^Δ, harness mode    DONE — see docs/history/TRAINING_HISTORY.md
 D  internal self-play, single board      gate: TD-error metric (D2), then 500k rig (D4)
 E  multi-board                           gate: globals audit, then rig again
 ```
