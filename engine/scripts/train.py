@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-hybrid_loop.py — one command per hybrid-loop iteration:
+train.py — one command per hybrid-loop iteration:
 
     promote state -> online self-play generation (TDLeaf learning + leaf/root
     corpus dumping) -> checkpoint -> assemble corpus -> threaded offline
@@ -14,10 +14,23 @@ point and continue learning" cases:
   pure lambda-return: --bt-lambda defaults to 1.0, the --bt-td-lambda
   distance decay (default TDLEAF_LAMBDA = 0.98) supplies all the outcome
   moderation and is the single knob of record):
-    python3 hybrid_loop.py --tag iter3 --games 400000 --depth 8 \
+    python3 train.py --tag iter3 --games 400000 --depth 8 \
         --state tdL10F10x6_ep4.tdleaf.bin --recompile \
         --bt-K 220 --bt-threads 8 \
         --gauntlet-epochs --gauntlet Leaf_vtdL10F10x6-ep4 Leaf_vclassic_eval
+
+  Chained iteration — --continue reads <prev_tag>_final.json and defaults
+  --net/--state/--gauntlet-anchors from it, tracks cumulative_games across
+  the chain, and auto-adds Leaf_v<prev_tag>-final to the final gauntlet:
+    python3 train.py --tag iter4 --continue iter3 --games 1000000 --depth 8 \
+        --bt-K 220 --bt-threads 8 --gauntlet-epochs
+
+  --gauntlet-anchors <binary...> is the fixed opponent list that carries
+  forward automatically across a --continue chain (e.g. Leaf_vclassic_eval);
+  one-off opponents still go in --gauntlet.  --keep-epoch-states keeps every
+  epoch's .tdleaf.bin in <tag>_work/train/ (default: only the promoted epoch
+  survives).  --keep-work disables all end-of-run pruning inside
+  <tag>_work/ for one run (for postmortems on a run that looks suspicious).
 
   Consolidation is a single process with within-batch thread parallelism
   (--bt-threads, default 8) — synchronous data parallelism, mathematically
@@ -41,32 +54,49 @@ point and continue learning" cases:
   cores, then SIGCONTed to resume.
 
   Consolidate-only (offline training on existing corpora):
-    python3 hybrid_loop.py --tag redo --skip-online \
+    python3 train.py --tag redo --skip-online \
         --corpus quiet_d8_260702.tsv --corpus quiet_arch_260628d6.tsv \
         --gauntlet Leaf_v260628-2.4e6g
 
   Generate-only (online games + corpus dump, no offline training):
-    python3 hybrid_loop.py --tag gen3 --games 200000 --depth 8 --skip-train
+    python3 train.py --tag gen3 --games 200000 --depth 8 --skip-train
 
   Start-to-finish from scratch (--init-nnue creates --net + its companion
   .tdleaf.bin, then the same generate -> consolidate -> gauntlet pipeline runs;
   prior = material|classical|noprior, bare flag = material):
-    python3 hybrid_loop.py --tag scratch --net nn-scratch.nnue \
+    python3 train.py --tag scratch --net nn-scratch.nnue \
         --init-nnue --games 400000 --depth 8 --bt-threads 8 \
         --gauntlet Leaf_vclassic_eval
 
-Run from engine/learn/.  Artifacts land in learn/:
-    <netbase>.tdleaf.bin-pre<tag>      backup of the live state (if --state)
+Run from engine/learn/.  Artifacts land in learn/ and <tag>_work/:
+    <netbase>.tdleaf.bin-pre<tag>      backup of the live state (if --state;
+                                       deleted on a successful run)
     <netbase>.tdleaf.bin-<tag>-online  post-generation online checkpoint
-    <tag>_work/                        dumps, corpus.tsv, training dir, logs
+                                       (deleted on a successful run)
     <tag>_final.nnue                   consolidated net (piece_val baked;
                                        compile rating binaries from this)
     <tag>_final.tdleaf.bin             seeds the next iteration (pairs with
                                        the ORIGINAL base .nnue)
-    Leaf_v<tag>-final                  rating binary (when gauntlet runs)
+    <tag>_final.json                   run metadata (cumulative games,
+                                       gauntlet anchors, epoch-ladder and
+                                       final-gauntlet results) — read by
+                                       --continue for the next iteration
+    Leaf_v<tag>-final                  rating binary (when gauntlet runs);
+                                       never resident in run/
+    <tag>_work/                        permanent per-run archive, never
+                                       deleted on success: corpus.tsv.gz,
+                                       the online-generation PGN (gzipped)
+                                       and final-gauntlet PGNs, train/
+                                       (train.log with the epoch-ladder and
+                                       final-gauntlet tables appended, plus
+                                       per-epoch .tdleaf.bin if
+                                       --keep-epoch-states).  A failed run's
+                                       <tag>_work/ is never pruned.
 """
 
 import argparse
+import gzip
+import json
 import math
 import os
 import re
@@ -82,10 +112,11 @@ ENGINE_DIR = SCRIPT_DIR.parent
 RUN_DIR    = ENGINE_DIR / "run"
 LEARN_DIR  = ENGINE_DIR / "learn"
 COMP_PL    = "../src/comp.pl"
+DEFAULT_NET = "nn-fresh-260628.nnue"
 
 
 def log(msg):
-    print(f"[hybrid_loop {time.strftime('%H:%M:%S')}] {msg}", flush=True)
+    print(f"[train {time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
 def die(msg):
@@ -215,13 +246,90 @@ def pgn_score(pgn_path, name_substr):
     return W, L, D, elo, err
 
 
+def render_epoch_ladder(tag, opp, games, tc, results):
+    """Format the epoch-ladder results table as printable lines (used for
+    both stdout and the persisted train.log)."""
+    lines = [f"=== Epoch ladder: {tag} vs {opp} ({games} games at {tc}) ==="]
+    for ep, (W, L, D, elo, err) in results:
+        n = W + L + D
+        s = 100 * (W + 0.5 * D) / max(n, 1)
+        lines.append(f"  epoch {ep}:  W/L/D {W}/{L}/{D}  score {s:5.1f}%  "
+                     f"Elo {elo:+.0f} ± {err:.0f}")
+    return lines
+
+
+def render_gauntlet(label, results):
+    """Format the final-gauntlet results table (stdout + train.log)."""
+    lines = [f"=== Gauntlet results: {label} ==="]
+    for opp, (W, L, D, elo, err) in results:
+        n = W + L + D
+        s = 100 * (W + 0.5 * D) / max(n, 1)
+        lines.append(f"  vs {opp:<28} n={n:<5} W/L/D {W}/{L}/{D}  "
+                     f"score {s:5.1f}%  Elo {elo:+.0f} ± {err:.0f}")
+    return lines
+
+
+def gzip_and_remove(path):
+    """Gzip PATH to PATH.gz in place and remove the original."""
+    with open(path, "rb") as fin, gzip.open(f"{path}.gz", "wb") as fout:
+        shutil.copyfileobj(fin, fout)
+    path.unlink()
+
+
+def prune_work_dir(work, tdir, epoch_bin_dir, tag, pick_ep, keep_epoch_states):
+    """End-of-run pruning inside <tag>_work/ on a successful run.  The work
+    dir itself is never deleted — it's the permanent per-run archive — but
+    genuinely single-use/regenerable contents are pruned: raw per-shard
+    dumps (superseded by corpus.tsv.gz), epoch-ladder PGNs (their Elo is
+    already captured in the log/sidecar), non-winning epoch .nnue files
+    (regenerable via Leaf_vbt --write-nnue), and per-epoch .tdleaf.bin
+    unless --keep-epoch-states.  corpus.tsv and the online-generation PGN
+    are gzip'd in place, not deleted."""
+    for dump in work.glob(f"{tag}.*.tsv"):
+        dump.unlink()
+
+    corpus = work / "corpus.tsv"
+    if corpus.is_file():
+        gzip_and_remove(corpus)
+
+    for pgn in work.glob(f"match_{tag}_d*.pgn"):
+        gzip_and_remove(pgn)
+
+    for pgn in work.glob(f"match_{tag}-ep*_vs_*.pgn"):
+        pgn.unlink()
+
+    if tdir.is_dir():
+        for nnue in tdir.glob(f"{tag}_ep*.nnue"):
+            if nnue.name != f"{tag}_ep{pick_ep}.nnue":
+                nnue.unlink()
+        if not keep_epoch_states:
+            for td in tdir.glob(f"{tag}_ep*.tdleaf.bin"):
+                td.unlink()
+
+    # Epoch rating binaries are deleted right after each match already —
+    # sweep any leftovers defensively (e.g. a ladder that was interrupted).
+    if epoch_bin_dir.is_dir():
+        for p in epoch_bin_dir.iterdir():
+            p.unlink()
+        try:
+            epoch_bin_dir.rmdir()
+        except OSError:
+            pass
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="One hybrid-loop iteration: generate -> consolidate -> gauntlet.")
     ap.add_argument("--tag", required=True,
                     help="Iteration name (prefixes all artifacts)")
-    ap.add_argument("--net", default="nn-fresh-260628.nnue",
-                    help="Base .nnue in learn/ (default nn-fresh-260628.nnue)")
+    ap.add_argument("--net", default=None,
+                    help=f"Base .nnue in learn/ (default: {DEFAULT_NET}, or "
+                         "the net recorded in --continue's sidecar)")
+    ap.add_argument("--continue", dest="continue_tag", default=None, metavar="PREV_TAG",
+                    help="Chain from a prior run: read learn/PREV_TAG_final.json "
+                         "and default --net/--state/--gauntlet-anchors from it, "
+                         "track cumulative_games across the chain, and "
+                         "auto-add Leaf_v<PREV_TAG>-final to the final gauntlet")
     ap.add_argument("--init-nnue", nargs="?", const="material", default=None,
                     choices=["material", "classical", "noprior"],
                     help="Initialise a fresh --net (and its companion .tdleaf.bin) "
@@ -270,6 +378,14 @@ def main():
                          "(rates the promoted best-epoch net; empty = skip). "
                          "The --gauntlet-epochs ladder opponent is independent "
                          "(always the pre-offline-training net).")
+    ap.add_argument("--gauntlet-anchors", nargs="*", default=None,
+                    help="Fixed opponent binaries in learn/ for the final "
+                         "gauntlet, carried forward automatically across a "
+                         "--continue chain (default: inherited from "
+                         "--continue's sidecar, or empty; pass with no "
+                         "arguments to explicitly clear the inherited list). "
+                         "Combined with --gauntlet and (under --continue) "
+                         "Leaf_v<PREV_TAG>-final.")
     ap.add_argument("--gauntlet-games", type=int, default=400)
     ap.add_argument("--tc", default="3+0.05")
     ap.add_argument("--gauntlet-epochs", action="store_true",
@@ -289,10 +405,42 @@ def main():
                     help="Reuse an existing <tag>_work directory")
     ap.add_argument("--recompile", action="store_true",
                     help="Force recompile of helper binaries")
+    ap.add_argument("--keep-epoch-states", action="store_true",
+                    help="Keep every epoch's .tdleaf.bin in <tag>_work/train/ "
+                         "(default: only the promoted epoch's state survives; "
+                         "the corresponding .nnue is always regenerable via "
+                         "Leaf_vbt --write-nnue and is never kept)")
+    ap.add_argument("--keep-work", action="store_true",
+                    help="Skip all end-of-run pruning inside <tag>_work/ "
+                         "(raw dumps, non-winning epoch .nnue, epoch-ladder "
+                         "PGNs, epoch rating binaries all stay; corpus.tsv "
+                         "stays uncompressed) — <tag>_work/ is never deleted "
+                         "either way, this only controls pruning aggressiveness")
     args = ap.parse_args()
 
     if Path.cwd().resolve() != LEARN_DIR.resolve():
         die(f"run from {LEARN_DIR} (cwd is {Path.cwd()})")
+
+    # ---- --continue: chain --net/--state/--gauntlet-anchors from a prior run
+    continue_json = None
+    if args.continue_tag:
+        sidecar = LEARN_DIR / f"{args.continue_tag}_final.json"
+        if not sidecar.is_file():
+            die(f"--continue {args.continue_tag}: sidecar not found: {sidecar} "
+                f"(pre-migration or wrong tag — pass --net/--state explicitly "
+                f"instead)")
+        with open(sidecar) as f:
+            continue_json = json.load(f)
+        log(f"--continue {args.continue_tag}: net={continue_json['net']} "
+            f"cumulative_games so far={continue_json['cumulative_games']:,}")
+
+    if args.net is None:
+        args.net = continue_json["net"] if continue_json else DEFAULT_NET
+    if args.state is None and args.continue_tag:
+        args.state = str(LEARN_DIR / f"{args.continue_tag}_final.tdleaf.bin")
+    if args.gauntlet_anchors is None:
+        args.gauntlet_anchors = (continue_json["gauntlet_anchors"]
+                                  if continue_json else [])
 
     net_path = LEARN_DIR / args.net
     netbase = args.net[:-5] if args.net.endswith(".nnue") else args.net
@@ -319,12 +467,18 @@ def main():
         # Any TDLeaf binary can init; reuse the trainer binary (compiled against
         # --net, but --init-nnue writes a fresh net rather than reading one, so
         # the not-yet-existing net file is fine at compile time without EMBED).
+        # Compiled in run/ (build-system requirement) but never executed there —
+        # run/ holds files (e.g. main_bk.dat) that must never affect a training
+        # binary's behavior, so run() only ever happens from a copy in learn/.
         init_bin = compile_binary("bt", args.net, tdleaf=True, force=args.recompile)
+        init_bin_learn = LEARN_DIR / init_bin.name
+        shutil.copy2(init_bin, init_bin_learn)
         flag = {"material":  "--init-nnue",
                 "classical": "--init-nnue-classical",
                 "noprior":   "--init-nnue-noprior"}[args.init_nnue]
         log(f"initialising fresh net {net_path.name} (prior={args.init_nnue})")
-        sh([f"./{init_bin.name}", flag, "--write-nnue", net_path], cwd=RUN_DIR)
+        sh([f"./{init_bin_learn.name}", flag, "--write-nnue", net_path], cwd=LEARN_DIR)
+        init_bin_learn.unlink()
         if not net_path.is_file() or not live_td.is_file():
             die(f"--init-nnue did not produce {net_path.name} + {live_td.name}")
 
@@ -375,9 +529,9 @@ def main():
         env = dict(os.environ)
         env["TDLEAF_DUMP_TSV"] = str(work / args.tag)
         env["TDLEAF_DUMP_QUIET_CP"] = str(args.quiet_cp)
-        pgn_dir = LEARN_DIR / "pgn" / netbase
-        pgn_dir.mkdir(parents=True, exist_ok=True)
-        pgn_out = pgn_dir / f"match_{args.tag}_d{args.depth}.pgn"
+        # PGN lives in <tag>_work/ (kept, gzip'd at end of run) rather than a
+        # flat learn/pgn/ tree — the work dir is the permanent per-run archive.
+        pgn_out = work / f"match_{args.tag}_d{args.depth}.pgn"
         log(f"online generation: {args.games} games at depth {args.depth} "
             f"(dump -> {work}/{args.tag}.*)")
         sh(["python3", SCRIPT_DIR / "match.py",
@@ -456,16 +610,31 @@ def main():
     shutil.copy2(net_path, tdir / args.net)
     shutil.copy2(live_td, tdir / f"{netbase}.tdleaf.bin")
 
+    # Per-epoch rating binaries are single-use (needed only for their one
+    # ladder match) and relocate here rather than living flat in learn/ —
+    # run/ is a build-output step only, never an execution location (main_bk.dat
+    # and other run/-only files must never reach a training/rating binary).
+    epoch_bin_dir = work / "epoch_binaries"
+    epoch_bin_dir.mkdir(exist_ok=True)
+
     def build_rating_binary(snap, ver):
         """Compile a TDLEAF-off inference binary Leaf_v<ver> for the net SNAP
-        (a .nnue in tdir), staging both binary and net into learn/ so the net
-        resolves next to the binary.  Returns the binary name."""
+        (a .nnue in tdir), then relocate both binary and net out of run/ into
+        <tag>_work/epoch_binaries/ so the net resolves next to the binary and
+        nothing lingers in run/.  Returns (binary_path, net_path, display_name):
+        binary_path is the absolute path match.py should be given (it resolves
+        absolute paths directly and derives each engine's own execution
+        directory from os.path.dirname(exe), so this guarantees the engine
+        never runs with run/ as its directory); display_name is the bare
+        Leaf_v<ver> for PGN filenames and log messages."""
         shutil.copy2(snap, RUN_DIR / snap.name)
         b = compile_binary(ver, snap.name, tdleaf=False, force=True)
-        shutil.copy2(b, LEARN_DIR / b.name)
-        shutil.copy2(snap, LEARN_DIR / snap.name)   # net resolves next to binary
+        dest_bin = epoch_bin_dir / b.name
+        dest_net = epoch_bin_dir / snap.name
+        shutil.move(str(b), str(dest_bin))
+        shutil.copy2(snap, dest_net)   # net resolves next to binary
         (RUN_DIR / snap.name).unlink()
-        return b.name
+        return dest_bin, dest_net, b.name
 
     # Epoch-ladder opponent = the net exactly as it enters offline training: the
     # post-online checkpoint when we generated games this run, or the incoming
@@ -474,14 +643,15 @@ def main():
     # standalone net via the trainer binary's --write-nnue, then compile an
     # inference binary from it.  Done before the trainer launches so the bake
     # sees the untouched state and doesn't contend with training for cores.
-    ladder_opp = None
+    ladder_opp_bin = ladder_opp_net = ladder_opp = None
     if args.gauntlet_epochs:
         pre_nnue = tdir / f"{args.tag}_pretrain.nnue"
         log(f"baking pre-offline-training baseline net -> {pre_nnue.name}")
         sh(["./Leaf_vbt", "--write-nnue", pre_nnue.name], cwd=tdir)
         if not pre_nnue.is_file():
             die(f"failed to bake pre-training baseline {pre_nnue}")
-        ladder_opp = build_rating_binary(pre_nnue, f"{args.tag}-pretrain")
+        ladder_opp_bin, ladder_opp_net, ladder_opp = build_rating_binary(
+            pre_nnue, f"{args.tag}-pretrain")
         log(f"epoch-ladder opponent: {ladder_opp} (net before offline training)")
 
     log(f"training: {args.bt_threads} threads x {args.epochs} epochs "
@@ -506,23 +676,26 @@ def main():
     # training finishes, while the trainer keeps running.  The trainer writes
     # _epN.nnue then _epN.tdleaf.bin, so the .tdleaf.bin appearing means the
     # .nnue is complete.
-    def rate_epoch(ep, opp):
+    def rate_epoch(ep, opp_bin, opp_name):
         ver = f"{args.tag}-ep{ep}"
-        bname = build_rating_binary(tdir / f"{args.tag}_ep{ep}.nnue", ver)
-        pgn = LEARN_DIR / f"match_{ver}_vs_{opp.replace('Leaf_v', '')}.pgn"
-        log(f"epoch ladder: epoch {ep} vs {opp} "
+        bpath, npath, bname = build_rating_binary(
+            tdir / f"{args.tag}_ep{ep}.nnue", ver)
+        pgn = work / f"match_{ver}_vs_{opp_name.replace('Leaf_v', '')}.pgn"
+        log(f"epoch ladder: epoch {ep} vs {opp_name} "
             f"({args.epoch_games} games at {args.epoch_tc})")
-        sh(["python3", SCRIPT_DIR / "match.py", bname, opp,
+        sh(["python3", SCRIPT_DIR / "match.py", str(bpath), str(opp_bin),
             "-n", args.epoch_games, "-c", 8, "-tc", args.epoch_tc,
             "--openings", args.openings, "--fischer-random",
             "--pgn-out", pgn], cwd=LEARN_DIR)
         W, L, D, elo, err = pgn_score(pgn, ver)
         log(f"epoch ladder: epoch {ep}  W/L/D {W}/{L}/{D}  Elo {elo:+.0f} ± {err:.0f}")
+        # single-use: prune this epoch's rating binary + net right after its match
+        bpath.unlink(missing_ok=True)
+        npath.unlink(missing_ok=True)
         return (W, L, D, elo, err)
 
     epoch_results = []
     if args.gauntlet_epochs:
-        opp = ladder_opp
         rated = 0
         while True:
             if rated < args.epochs and \
@@ -533,7 +706,8 @@ def main():
                 if proc.poll() is None:
                     proc.send_signal(signal.SIGSTOP)
                 try:
-                    epoch_results.append((rated, rate_epoch(rated, opp)))
+                    epoch_results.append(
+                        (rated, rate_epoch(rated, ladder_opp_bin, ladder_opp)))
                 finally:
                     if proc.poll() is None:
                         proc.send_signal(signal.SIGCONT)
@@ -551,7 +725,13 @@ def main():
         while rated < args.epochs and \
                 (tdir / f"{args.tag}_ep{rated + 1}.tdleaf.bin").exists():
             rated += 1
-            epoch_results.append((rated, rate_epoch(rated, opp)))
+            epoch_results.append(
+                (rated, rate_epoch(rated, ladder_opp_bin, ladder_opp)))
+        # Pretrain baseline is only needed as the fixed ladder opponent —
+        # prune it once the whole ladder is done with it.
+        if ladder_opp_bin is not None:
+            ladder_opp_bin.unlink(missing_ok=True)
+            ladder_opp_net.unlink(missing_ok=True)
     else:
         rc = proc.wait()
         logf.close()
@@ -559,13 +739,10 @@ def main():
             die(f"trainer process failed (rc={rc}) — see {tdir}/train.log")
 
     if epoch_results:
-        print(f"\n=== Epoch ladder: {args.tag} vs {ladder_opp} "
-              f"({args.epoch_games} games at {args.epoch_tc}) ===")
-        for ep, (W, L, D, elo, err) in epoch_results:
-            n = W + L + D
-            s = 100 * (W + 0.5 * D) / max(n, 1)
-            print(f"  epoch {ep}:  W/L/D {W}/{L}/{D}  score {s:5.1f}%  "
-                  f"Elo {elo:+.0f} ± {err:.0f}")
+        print()
+        for line in render_epoch_ladder(args.tag, ladder_opp, args.epoch_games,
+                                        args.epoch_tc, epoch_results):
+            print(line)
         print()
 
     # Choose the final net.  With the epoch ladder, promote the best epoch (max
@@ -591,38 +768,104 @@ def main():
     log(f"consolidated net: {out_nnue.name}  (seed for next iteration: {out_td.name})")
 
     # ---- Phase 6: gauntlet -------------------------------------------------
-    if not args.gauntlet:
-        log("no --gauntlet opponents given: done.")
-        return
-    if args.no_final_gauntlet:
-        log("--no-final-gauntlet: done.")
-        return
+    # Resolved opponent list = --gauntlet-anchors (explicit, or inherited via
+    # --continue) + Leaf_v<prev_tag>-final (auto, when chaining) + --gauntlet.
+    gauntlet_list = list(args.gauntlet_anchors)
+    if args.continue_tag:
+        prev_final = f"Leaf_v{args.continue_tag}-final"
+        if prev_final not in gauntlet_list:
+            gauntlet_list.append(prev_final)
+    for opp in args.gauntlet:
+        if opp not in gauntlet_list:
+            gauntlet_list.append(opp)
+
+    # Always build Leaf_v<tag>-final (needed as the anchor opponent for any
+    # future --continue chain, even if this run has nothing to gauntlet
+    # against yet) — compiled in run/ (build-system requirement) but moved
+    # into learn/ before anything executes it, never left resident in run/.
     shutil.copy2(out_nnue, RUN_DIR / out_nnue.name)
-    rate_bin = compile_binary(f"{args.tag}-final", out_nnue.name,
-                              tdleaf=False, force=True)
-    shutil.copy2(rate_bin, LEARN_DIR / rate_bin.name)
+    compiled_final = compile_binary(f"{args.tag}-final", out_nnue.name,
+                                    tdleaf=False, force=True)
+    rate_bin = LEARN_DIR / compiled_final.name
+    shutil.move(str(compiled_final), str(rate_bin))
     (RUN_DIR / out_nnue.name).unlink()
 
     results = []
-    for opp in args.gauntlet:
-        if not (LEARN_DIR / opp).is_file():
-            log(f"WARNING: opponent {opp} not found in learn/ — skipping")
-            continue
-        pgn = LEARN_DIR / f"match_{args.tag}-final_vs_{opp.replace('Leaf_v','')}.pgn"
-        log(f"gauntlet: vs {opp} ({args.gauntlet_games} games)")
-        sh(["python3", SCRIPT_DIR / "match.py", rate_bin.name, opp,
-            "-n", args.gauntlet_games, "-c", 8, "-tc", args.tc,
-            "--openings", args.openings, "--fischer-random",
-            "--pgn-out", pgn], cwd=LEARN_DIR)
-        results.append((opp, pgn_score(pgn, f"{args.tag}-final")))
+    if not gauntlet_list:
+        log("no gauntlet opponents (--gauntlet/--gauntlet-anchors): "
+            "skipping final gauntlet matches.")
+    elif args.no_final_gauntlet:
+        log("--no-final-gauntlet: skipping final gauntlet matches.")
+    else:
+        for opp in gauntlet_list:
+            if not (LEARN_DIR / opp).is_file():
+                log(f"WARNING: opponent {opp} not found in learn/ — skipping")
+                continue
+            pgn = work / f"match_{args.tag}-final_vs_{opp.replace('Leaf_v','')}.pgn"
+            log(f"gauntlet: vs {opp} ({args.gauntlet_games} games)")
+            sh(["python3", SCRIPT_DIR / "match.py", rate_bin.name, opp,
+                "-n", args.gauntlet_games, "-c", 8, "-tc", args.tc,
+                "--openings", args.openings, "--fischer-random",
+                "--pgn-out", pgn], cwd=LEARN_DIR)
+            results.append((opp, pgn_score(pgn, f"{args.tag}-final")))
 
-    print("\n=== Gauntlet results:", rate_bin.name, "===")
-    for opp, (W, L, D, elo, err) in results:
-        n = W + L + D
-        s = 100 * (W + 0.5 * D) / max(n, 1)
-        print(f"  vs {opp:<28} n={n:<5} W/L/D {W}/{L}/{D}  "
-              f"score {s:5.1f}%  Elo {elo:+.0f} ± {err:.0f}")
-    print()
+        print()
+        for line in render_gauntlet(rate_bin.name, results):
+            print(line)
+        print()
+
+    # ---- persisted log: append the tables that were only ever on stdout ---
+    with open(tdir / "train.log", "a") as f:
+        if epoch_results:
+            f.write("\n" + "\n".join(render_epoch_ladder(
+                args.tag, ladder_opp, args.epoch_games, args.epoch_tc,
+                epoch_results)) + "\n")
+        if results:
+            f.write("\n" + "\n".join(render_gauntlet(rate_bin.name, results)) + "\n")
+
+    # ---- sidecar: the self-describing handoff unit for --continue ---------
+    games_this_iter = 0 if args.skip_online else args.games
+    cumulative_games = games_this_iter + (
+        continue_json["cumulative_games"] if continue_json else 0)
+    sidecar = {
+        "tag": args.tag,
+        "net": args.net,
+        "parent_tag": args.continue_tag,
+        "date": time.strftime("%Y-%m-%d"),
+        "games_this_iter": games_this_iter,
+        "cumulative_games": cumulative_games,
+        "depth": args.depth,
+        "epochs": args.epochs,
+        "picked_epoch": pick_ep,
+        "bt_lr": args.bt_lr,
+        "bt_lambda": args.bt_lambda,
+        "bt_K": args.bt_K,
+        "bt_td_lambda": args.bt_td_lambda,
+        "gauntlet_anchors": args.gauntlet_anchors,
+        "epoch_ladder": [
+            {"epoch": ep, "W": W, "L": L, "D": D, "elo": elo, "err": err}
+            for ep, (W, L, D, elo, err) in epoch_results
+        ],
+        "final_gauntlet": [
+            {"opponent": opp, "W": W, "L": L, "D": D, "elo": elo, "err": err}
+            for opp, (W, L, D, elo, err) in results
+        ],
+    }
+    sidecar_path = LEARN_DIR / f"{args.tag}_final.json"
+    with open(sidecar_path, "w") as f:
+        json.dump(sidecar, f, indent=2)
+    log(f"cumulative games for this net: {cumulative_games:,} "
+        f"(this iteration: {games_this_iter:,}) -> {sidecar_path.name}")
+
+    # ---- end-of-run archive pruning (only on success, unless --keep-work) -
+    if not args.keep_work:
+        prune_work_dir(work, tdir, epoch_bin_dir, args.tag, pick_ep,
+                       args.keep_epoch_states)
+        for stray in (LEARN_DIR / f"{netbase}.tdleaf.bin-pre{args.tag}",
+                      LEARN_DIR / f"{netbase}.tdleaf.bin-{args.tag}-online"):
+            if stray.is_file():
+                stray.unlink()
+
     log("iteration complete.")
 
 

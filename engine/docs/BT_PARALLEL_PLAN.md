@@ -49,7 +49,7 @@ delicate deterministic-merge path.  Left for a future pass.
 
 Replace the failed multi-process sharding (`--bt-sync`) with **within-batch
 thread parallelism** in a single trainer process, then delete the sharding
-machinery from the trainer, `hybrid_loop.py`, and the docs.
+machinery from the trainer, `train.py`, and the docs.
 
 Why this is safe where sharding was not: `--bt-sync` ran N independent Adam
 optimizers, each taking ~256 full steps on its own diverging weight copy
@@ -202,7 +202,7 @@ operating on `g_grad` only, serial, exactly as today (stage 1).
 ```
 
 Default **1** = exact current behaviour (and the code path is the same one,
-just with one worker).  `hybrid_loop.py` passes 8 by default (§5).  Clamp to
+just with one worker).  `train.py` passes 8 by default (§5).  Clamp to
 [1, 16], print the value in the startup banner alongside lambda/K/etc.
 No OpenMP — plain `std::thread` (already used elsewhere in the engine; no
 new build flags in `comp.pl`).
@@ -299,7 +299,7 @@ locking, delta-merge, deferral logic all serve concurrent *online* training.
 
 ---
 
-## 5. Part B — `scripts/hybrid_loop.py` simplification
+## 5. Part B — `scripts/train.py` simplification
 
 1. **Arguments**: delete `--shards` (:225) and `--sync-every` (:231).  Add
    `--bt-threads` (default 8), forwarded to the trainer.  Delete the
@@ -346,7 +346,7 @@ locking, delta-merge, deferral logic all serve concurrent *online* training.
   signal) — keep the lesson, drop the workaround advice.  Update the
   hybrid-loop invocation examples (`--shards 1` → nothing needed) and the
   "Practical guidance" bullet.
-- `docs/SCRIPT_USE.md` hybrid_loop section (:801-858): phase list, option
+- `docs/SCRIPT_USE.md` train.py section (:801-858): phase list, option
   table (`--shards`/`--sync-every` out, `--bt-threads` in, `--gauntlet-epochs`
   no longer says "requires --shards 1"), artifact names (`shards` out).
 - `engine/CLAUDE.md`: `nnue_batch_train.cpp` row (:103) — replace
@@ -382,7 +382,7 @@ locking, delta-merge, deferral logic all serve concurrent *online* training.
 5. **Strength (optional but cheap, recommended)**: train 1 epoch at T=1 and
    T=8 on the same corpus from the same state; 1000-game ladder between the
    two snapshot nets at 1+0.01 → expect ≈ 0 ± 19.
-6. **hybrid_loop smoke**: `--skip-online --corpus <small.tsv> --force` with
+6. **train.py smoke**: `--skip-online --corpus <small.tsv> --force` with
    `--gauntlet-epochs`, 1 epoch, tiny game counts — corpus concat, single
    trainer, ladder, final-net copy, gauntlet all fire; artifact names correct.
 
@@ -405,5 +405,5 @@ locking, delta-merge, deferral logic all serve concurrent *online* training.
 - `nnue_apply_gradients` consumes and clears the **global** `ft_dirty`
   (:1227, :1275) — the reduce phase must set it for every merged row, or Adam
   silently skips those rows.
-- hybrid_loop's epoch watcher keys on `_ep<N>.tdleaf.bin` appearing (written
+- train.py's epoch watcher keys on `_ep<N>.tdleaf.bin` appearing (written
   after the `.nnue`) — keep that write order in the trainer.

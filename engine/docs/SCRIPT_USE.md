@@ -795,7 +795,7 @@ Two positional arguments (old, new); no options.  Uses the
 
 ---
 
-## hybrid_loop.py
+## train.py
 
 One command per hybrid-loop iteration: promote a consolidated state → online
 self-play generation with leaf/root corpus dumping → checkpoint → assemble
@@ -808,19 +808,19 @@ binaries (`Leaf_vbt`, `Leaf_vtrain_hl_a/b`) are auto-compiled.  See
 # Full iteration: generate 400k d8 games, consolidate (settled gen-3+ recipe:
 # pure λ-return defaults, td_λ decay is the knob of record), rate every epoch
 # as it completes, then the final full gauntlet
-python3 hybrid_loop.py --tag iter3 --games 400000 --depth 8 \
+python3 train.py --tag iter3 --games 400000 --depth 8 \
     --state tdL10F10x6_ep4.tdleaf.bin --recompile \
     --bt-K 220 --bt-threads 8 \
     --gauntlet-epochs --gauntlet Leaf_vtdL10F10x6-ep4 Leaf_vclassic_eval
 
 # Consolidate-only on existing corpora (e.g. a hyperparameter arm on the same dumps)
-python3 hybrid_loop.py --tag arm1 --skip-online \
+python3 train.py --tag arm1 --skip-online \
     --bt-K 220 \
     $(for f in iter2_work/iter2.*.tsv; do echo --corpus $f; done) \
     --gauntlet Leaf_vbtsp-final Leaf_vclassic_eval
 
 # Generate-only (games + corpora, no offline training)
-python3 hybrid_loop.py --tag gen3 --games 200000 --depth 8 --skip-train
+python3 train.py --tag gen3 --games 200000 --depth 8 --skip-train
 ```
 
 Artifacts (named by `--tag`): `<tag>_final.nnue` (piece_val baked — compile

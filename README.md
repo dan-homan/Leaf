@@ -76,7 +76,7 @@ Build with `NNUE=1 TDLEAF=1`.  See [`engine/docs/TDLEAF.md`](engine/docs/TDLEAF.
 
 Online learning is complemented by an **offline supervised consolidation** mode: quiet positions are harvested from games the engine has already played (extracted from PGNs, or dumped directly by the engine during play via `TDLEAF_DUMP_TSV`) and trained with multi-epoch, shuffled, all-layer gradient descent on a λ-blend of game outcome and search score.  Together the two modes form the **hybrid loop** — online self-play generates games and learns as it goes; offline training extracts the full information content of those games; the consolidated net re-enters online play to generate better games.  Training targets use a TD(λ)-style **distance-decayed result weight** — the game outcome carries weight `0.98^(N−ply)` and the position's own eval takes the rest — so late positions learn from the result and early positions from the bootstrap.
 
-Measured on the from-scratch self-play run (2026-07): a single ~2-hour offline consolidation pass over the engine's own self-play games gained **+139 Elo over the online endpoint** (+127 measured cross-family against the classical hand-crafted eval) — no external networks and no new games.  A second loop iteration (400k fresh depth-8 self-play games from the consolidated net, then re-consolidation with the decayed λ-return target) cut the remaining gap to the classical eval from ~87 to **~59 Elo**.  Supports multi-process data-parallel training (`--bt-sync`) and one-command iterations via `scripts/hybrid_loop.py`.
+Measured on the from-scratch self-play run (2026-07): a single ~2-hour offline consolidation pass over the engine's own self-play games gained **+139 Elo over the online endpoint** (+127 measured cross-family against the classical hand-crafted eval) — no external networks and no new games.  A second loop iteration (400k fresh depth-8 self-play games from the consolidated net, then re-consolidation with the decayed λ-return target) cut the remaining gap to the classical eval from ~87 to **~59 Elo**.  Supports multi-process data-parallel training (`--bt-sync`) and one-command iterations via `scripts/train.py`.
 
 See [`engine/docs/OFFLINE_TRAINING.md`](engine/docs/OFFLINE_TRAINING.md) for the corpus format, trainer reference, and hybrid-loop workflow.
 
@@ -184,7 +184,7 @@ A full hybrid-loop iteration (online generation with corpus dumping → sharded 
 
 ```sh
 cd engine/learn/
-python3 hybrid_loop.py --tag iter2 --games 400000 --depth 8 \
+python3 train.py --tag iter2 --games 400000 --depth 8 \
     --state <consolidated>.tdleaf.bin --gauntlet Leaf_vclassic_eval
 ```
 

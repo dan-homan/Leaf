@@ -118,7 +118,7 @@ exactly what one-channel wants). Keep `NNUE_FIXED_PIECE_VALUES` as a define defa
 
 ### B3. Drift canary (replaces the pin — monitor, don't constrain)
 
-- `scripts/hybrid_loop.py`: log extracted piece values (the report-only banner values) at every
+- `scripts/train.py`: log extracted piece values (the report-only banner values) at every
   checkpoint; warn if pawn leaves [85, 130] cp.
 - The only *functional* coupling to drift is `TDLEAF_SCORE_CLIP_PAWNS` (units of
   max(value[PAWN], 100cp) — with fixed classical values this stays 100cp exactly, so the clip

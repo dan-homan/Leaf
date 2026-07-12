@@ -1101,7 +1101,7 @@ classic segments, and previously accumulated drift recovered.
 `scripts/training_run.py` manages the process of creating the necessary binaries
 (if needed), specifies a baseline `.nnue` file, and sets up training matches.
 
-`scripts/hybrid_loop.py` drives one full hybrid-loop iteration (online generation
+`scripts/train.py` drives one full hybrid-loop iteration (online generation
 with corpus dumping → sharded offline consolidation → gauntlet); see
 `OFFLINE_TRAINING.md`.
 

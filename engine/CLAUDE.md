@@ -117,7 +117,7 @@ errors (unknown types, undeclared identifiers).  These are expected and can be i
 
 See `docs/TDLEAF.md` for the full algorithm reference, hyperparameters, and gradient flow.
 
-**Two training modes** — online TDLeaf(λ) (below) and offline supervised consolidation of quiet-position corpora (`--batch-train` in any TDLEAF binary; corpora from `extract_quiet_positions.py` or the in-play `TDLEAF_DUMP_TSV` dump).  Together they form the hybrid loop (online generates games, offline extracts them fully, consolidated net re-enters online play) — driven end-to-end by `scripts/hybrid_loop.py`.  See `docs/OFFLINE_TRAINING.md`.
+**Two training modes** — online TDLeaf(λ) (below) and offline supervised consolidation of quiet-position corpora (`--batch-train` in any TDLEAF binary; corpora from `extract_quiet_positions.py` or the in-play `TDLEAF_DUMP_TSV` dump).  Together they form the hybrid loop (online generates games, offline extracts them fully, consolidated net re-enters online play) — driven end-to-end by `scripts/train.py`.  See `docs/OFFLINE_TRAINING.md`.
 
 **Call flow:**
 - After each search: `tdleaf_record_ply()` snapshots the PV leaf accumulator, feature indices, and ID score history.

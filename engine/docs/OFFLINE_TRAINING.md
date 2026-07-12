@@ -91,7 +91,7 @@ follow λ by default; single process, ~4 h single-threaded / under an hour with
 remains gauntlet-positive per generation: iter2s2 is +55 over the gen-1 net and
 +28 over its own online endpoint, cross-family.  Epoch count matters at gen-2+:
 iter2s2 peaked at **epoch 4** of 6 in the in-family ladder (gen-1 was still
-improving at 6) — select the epoch by a fast ladder (`hybrid_loop.py
+improving at 6) — select the epoch by a fast ladder (`train.py
 --gauntlet-epochs`: 1000 games at 1+0.01 per epoch snapshot, ±19, minutes each)
 rather than assuming the last epoch.  Direct classic anchor: ep4 −62 ± 30 vs
 ep6 −64 ± 18 — statistically identical cross-family (the +24 in-family edge is
@@ -133,7 +133,7 @@ the best of any net, vs iter2s2-ep4's −62 ± 30.  **`tdL10F10x6_p0_ep4.tdleaf.
 seeds iteration 3.**
 
 **Settled gen-3+ recipe:** `--bt-K 220` (single process, `--bt-threads 8` for
-speed) — `--bt-lambda` now *defaults to 1.0* (trainer and hybrid_loop), so
+speed) — `--bt-lambda` now *defaults to 1.0* (trainer and train.py), so
 **`--bt-td-lambda` (default `TDLEAF_LAMBDA` = 0.98) is the single knob of
 record**.  The λ ceilings remain
 as dormant scale knobs: they decouple overall outcome weight from decay shape
@@ -397,14 +397,14 @@ stays in the engine; concurrent *online* self-play training still uses it.
 
 ---
 
-## The Hybrid Loop — `scripts/hybrid_loop.py`
+## The Hybrid Loop — `scripts/train.py`
 
 One command per iteration (see `SCRIPT_USE.md` for the option table, and the
 Obsidian `Hybrid_Loop_Runbook` note for the manual procedure it encodes):
 
 ```sh
 cd engine/learn/
-python3 hybrid_loop.py --tag iter3 --games 400000 --depth 8 \
+python3 train.py --tag iter3 --games 400000 --depth 8 \
     --state <consolidated>.tdleaf.bin --recompile \
     --bt-K 220 --bt-threads 8 \
     --gauntlet-epochs --gauntlet Leaf_vtdL10F10x6-ep4 Leaf_vclassic_eval

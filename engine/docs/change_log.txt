@@ -1,5 +1,22 @@
 Changes since 2017_12_24
 
+2026_07_12 -- hybrid_loop.py renamed train.py.  --continue <prev_tag> chains
+               --net/--state/--gauntlet-anchors and cumulative_games from a
+               new <tag>_final.json sidecar, so a multi-invocation training
+               chain no longer hand-computes running game counts or retypes
+               the gauntlet opponent list.  <tag>_work/ is now a permanent
+               per-run archive (never deleted on a successful run) instead
+               of scattering artifacts flat into learn/: raw per-shard
+               dumps, non-winning epoch .nnue, and epoch-ladder PGNs are
+               pruned; corpus.tsv and the online-generation PGN are gzip'd
+               in place and kept; final-gauntlet PGNs and train.log (with
+               the epoch-ladder/gauntlet tables appended) are kept as-is.
+               Epoch and final rating binaries compile in run/ (build-system
+               requirement) but are relocated before anything executes them
+               — run/ holds files (main_bk.dat) that must never reach a
+               training/rating binary, so execution only ever happens from
+               <tag>_work/epoch_binaries/ or learn/.  New --keep-epoch-states
+               and --keep-work escape hatches.
 2026_07_10 -- Offline batch-train focal-gamma loss family (--bt-loss-gamma).
                sig_grad = (d(1-d))^gamma / K: gamma=1 = MSE (default, kept
                bit-identical via an explicit branch), gamma=0 = soft-label

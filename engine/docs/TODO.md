@@ -64,13 +64,13 @@ distance-decayed result weight (`w = λ_eff·td_λ^(N−ply)`, committed 5ce7714
 sweep found the λ = leaf-λ = 1.0 end best: decay shape beats any flat mean,
 piece-value drift self-limits (geometric convergence, no multi-epoch rollover),
 and `tdL10F10x6-ep4` posted the best direct classic anchor yet (**−58.6 ± 20**;
-gap ~59 Elo).  `--bt-lambda` now defaults to 1.0 (trainer + hybrid_loop);
+gap ~59 Elo).  `--bt-lambda` now defaults to 1.0 (trainer + train.py);
 `--bt-td-lambda` (= `TDLEAF_LAMBDA` 0.98) is the single knob of record.  The
 λ-fine-tuning item below is superseded by td_λ calibration.
 
 Open items:
 - [ ] Iteration 3: long d8 online generation (~400k–1M games) from
-      `tdL10F10x6_p0_ep4.tdleaf.bin` via `hybrid_loop.py` (needs `--recompile`
+      `tdL10F10x6_p0_ep4.tdleaf.bin` via `train.py` (needs `--recompile`
       so the dump binaries emit the exact `endply` column); gauntlet vs
       {tdL10F10x6-ep4, classic_eval}, plus a direct promoted-net-vs-classic
       anchor match (family-chained Elo reads ~20–30 optimistic).
