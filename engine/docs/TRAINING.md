@@ -14,7 +14,7 @@ Leaf has two complementary NNUE training modes that together form the **hybrid l
   errors through the NNUE network to update weights after every game. See
   [Online Learning — TDLeaf(λ)](#online-learning--tdleafλ) below.
 - **Offline consolidation — batch training.** Supervised training on quiet-position
-  corpora harvested from games the engine has already played (`--batch-train`),
+  corpora harvested from root **and** leaf positions in games the engine has already played (`--batch-train`),
   extracting the full information content of those games with multi-epoch, shuffled,
   all-layer gradient descent — something online TD's single, in-order pass through each
   game cannot do. See
@@ -48,24 +48,12 @@ All learning code is gated by `#if TDLEAF`; when `TDLEAF=0` (default) no overhea
 
 ## Quick Start
 
-The easiest way to run a single online training session is via the interactive
-training manager:
-
-```sh
-cd learn/
-python3 training_run.py
-```
-
-This handles network initialization, binary compilation, opponent rotation,
-checkpointing, and optional train-validate loops. See
-[`SCRIPT_USE.md`](SCRIPT_USE.md) for full `training_run.py` option documentation.
-
-The easiest way to run one full hybrid-loop iteration — online generation, offline
+The easiest way to run one full hybrid-loop iteration against an existing net — online generation, offline
 consolidation, and a gauntlet, in one command — is `scripts/train.py`:
 
 ```sh
 cd learn/
-python3 train.py --tag iter1 --games 400000 --depth 8 \
+python train.py --tag iter1 --games 400000 --depth 8 \
     --state <net>.tdleaf.bin --recompile --bt-K 220 --bt-threads 8 \
     --gauntlet-epochs --gauntlet Leaf_vclassic_eval
 ```
@@ -73,24 +61,42 @@ python3 train.py --tag iter1 --games 400000 --depth 8 \
 See [The Hybrid Loop Workflow](#the-hybrid-loop-workflow--scriptstrainpy) below, and
 `SCRIPT_USE.md` for the full option table.
 
-Manual online-training workflow:
+Manual online-training workflow, including initialization of a fresh net:
 
 ```sh
 # 1. Build a training binary
-perl comp.pl train NNUE=1 NNUE_NET=nn-leaf-260414.nnue TDLEAF=1 OVERWRITE
+perl comp.pl train NNUE=1 NNUE_NET=nn-fresh.nnue TDLEAF=1 OVERWRITE
 
-# 2. Initialize a fresh network (pure-PSQT recipe: classical material baked into PSQT).
+# 2. Initialize a fresh network (default material values baked into PSQT).
 #    Use --init-nnue-noprior for uniform 100 cp instead.  Delete any stale companion
 #    .tdleaf.bin FIRST — --init-nnue over an existing one merge-saves, not resets.
-./Leaf_vtrain --init-nnue-classical --write-nnue nn-fresh.nnue
+./Leaf_vtrain --init-nnue --write-nnue nn-fresh.nnue
 
 # 3. Run self-play matches (from run/ or learn/; UCI + fastchess is the default,
-#    game outcomes reach the learner via UCI self-adjudication)
-python3 match.py Leaf_vtrain_a Leaf_vtrain_b -n 500 -tc 0:03+0.05
+#    game outcomes reach the learner via UCI self-adjudication).  Fixed depth with
+#    no early adjudication provides the best learning targets. 
+python match.py Leaf_vtrain_a Leaf_vtrain_b -n 50000 -c 12 -tc inf --depth1 6 --depth2 6 --no-adjudication
 ```
 
-See [Initialization](#initialization) and
-[Hooks in Existing Code](#hooks-in-existing-code) for details.
+The steps above will place the learned delta values in nn-fresh.tdleaf.bin which will be loaded alongside nn-fresh.nnue in future training rounds.   For a statistical and graphical analysis of the learned values use
+
+```sh
+# Analyze current state of the learned values
+python compare_nnue_learning.py nn-fresh.nnue nn-fresh.tdleaf.bin
+
+# To run another learning round that builds upon the same net, just repeat
+# the above match.py command.  Training will pick up from the current
+# state of nn-fresh.tdleaf.bin
+python match.py Leaf_vtrain_a Leaf_vtrain_b -n 50000 -c 12 -tc inf --depth1 6 --depth2 6 --no-adjudication
+```
+
+Any online training match can optionally dump root and leaf node training corpa (.tsv files) to be used during offline training:
+
+```sh
+TDLEAF_DUMP_TSV=iter2 python match.py Leaf_vtrain_a Leaf_vtrain_b ...
+```
+
+writes two per-process files at game end:  `iter2.<pid>.root.tsv`  and `iter2.<pid>.leaf.tsv`.  See [Offline Consolidation — Batch Training](#offline-consolidation--batch-training) below for how to use training corpa for offline training.
 
 ---
 

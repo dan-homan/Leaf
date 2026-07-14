@@ -6,6 +6,98 @@ since engines, `.nnue` files, and `.tdleaf.bin` files live there.
 
 ---
 
+## train.py
+
+One command per hybrid-loop iteration: promote a consolidated state → online
+self-play generation with leaf/root corpus dumping → checkpoint → assemble
+corpus → threaded single-process offline training → best-epoch promotion →
+gauntlet with an Elo table.  Non-interactive; run from `learn/`.  Helper
+binaries (`Leaf_vbt`, `Leaf_vtrain_hl_a/b`) are auto-compiled.  See
+`TRAINING.md` for the concepts and the manual runbook it encodes.
+
+```sh
+# Full iteration: generate 400k d8 games, consolidate (settled gen-3+ recipe:
+# pure λ-return defaults, td_λ decay is the knob of record), rate every epoch
+# as it completes, then the final full gauntlet
+python3 train.py --tag iter3 --games 400000 --depth 8 \
+    --state tdL10F10x6_ep4.tdleaf.bin --recompile \
+    --bt-K 220 --bt-threads 8 \
+    --gauntlet-epochs --gauntlet Leaf_vtdL10F10x6-ep4 Leaf_vclassic_eval
+
+# Chained iteration: --continue reads iter3_final.json and defaults
+# --net/--state/--gauntlet-anchors from it, tracking cumulative_games
+python3 train.py --tag iter4 --continue iter3 --games 1000000 --depth 8 \
+    --bt-K 220 --bt-threads 8 --gauntlet-epochs
+
+# Consolidate-only on existing corpora (e.g. a hyperparameter arm on the same dumps)
+python3 train.py --tag arm1 --skip-online \
+    --bt-K 220 \
+    $(for f in iter2_work/iter2.*.tsv; do echo --corpus $f; done) \
+    --gauntlet Leaf_vbtsp-final Leaf_vclassic_eval
+
+# Generate-only (games + corpora, no offline training)
+python3 train.py --tag gen3 --games 200000 --depth 8 --skip-train
+```
+
+**Artifacts** (named by `--tag`), always flat in `learn/`: `<tag>_final.nnue`
+(compile rating binaries from this; with `--gauntlet-epochs` this is the ladder's
+best epoch, else the last epoch), `<tag>_final.tdleaf.bin` (seeds the next
+iteration; pairs with the ORIGINAL base `.nnue`), `<tag>_final.json` (sidecar:
+cumulative games, gauntlet anchors, epoch-ladder/gauntlet results — read by
+`--continue`), and `Leaf_v<tag>-final` (compiled rating binary — always built,
+even with no gauntlet opponents, so it's ready as a future `--continue` anchor;
+never left resident in `run/`).
+
+**`<tag>_work/`** is a permanent per-run archive — never deleted on a successful
+run. It keeps `corpus.tsv` (gzip'd), the online-generation and final-gauntlet
+PGNs (online one gzip'd), and `train/train.log` (with the epoch-ladder and
+gauntlet tables appended); it prunes raw per-shard dumps, non-winning epoch
+`.nnue` files, epoch-ladder PGNs, and epoch rating binaries. `--keep-epoch-states`
+additionally keeps every epoch's `.tdleaf.bin`; `--keep-work` disables all
+pruning for one run. A failed run's `<tag>_work/` is never touched. See
+`TRAINING.md` for the full artifact-lifecycle reference.
+
+### Options
+
+| Flag                                         | Default                                                | Description                                                  |
+| -------------------------------------------- | ------------------------------------------------------ | ------------------------------------------------------------ |
+| `--tag NAME`                                 | required                                               | Iteration name; prefixes all artifacts                       |
+| `--net FILE`                                 | `nn-fresh-260628.nnue`, or from `--continue`'s sidecar | Base `.nnue` in `learn/` (never changes across iterations)   |
+| `--continue PREV_TAG`                        | —                                                      | Chain from a prior run: read `learn/PREV_TAG_final.json` and default `--net`/`--state`/`--gauntlet-anchors` from it, track `cumulative_games` across the chain, and auto-add `Leaf_v<PREV_TAG>-final` to the final gauntlet |
+| `--init-nnue [material\|classical\|noprior]` | off                                                    | Initialise a fresh `--net` (+ companion `.tdleaf.bin`) before generating — turns the run into a start-to-finish iteration. Bare flag = `material`. Fails if `--net` already exists |
+| `--state FILE`                               | keep live, or from `--continue`'s sidecar              | `.tdleaf.bin` to promote to the live state (backed up + hash-checked against the base) |
+| `--skip-online`                              | off                                                    | Consolidate-only; train on `--corpus` files                  |
+| `--games N`                                  | 400000                                                 | Games to generate                                            |
+| `--depth N`                                  | 8                                                      | Fixed search depth for generation                            |
+| `--concurrency N`                            | 9                                                      | Concurrent games                                             |
+| `--openings FILE`                            | `training_openings.epd`                                | Opening set (FRC)                                            |
+| `--quiet-cp N`                               | 60                                                     | `TDLEAF_DUMP_QUIET_CP` for the dump                          |
+| `--skip-train`                               | off                                                    | Generate-only                                                |
+| `--corpus TSV`                               | —                                                      | Extra corpus file(s) for training (repeatable)               |
+| `--bt-threads N`                             | 8                                                      | Worker threads for within-batch gradient compute (single process; synchronous data parallelism, identical to 1 thread up to float summation order — see `TRAINING.md`) |
+| `--epochs N`                                 | 6                                                      | Training epochs                                              |
+| `--bt-lr X`                                  | 0.25                                                   | LR scale on all category LRs                                 |
+| `--bt-lambda X`                              | 1.0                                                    | Outcome-weight ceiling in the decayed blend target (`w = λ_eff·td_λ^(N−ply)`).  Default 1.0 = pure λ-return, the settled gen-3+ recipe: `--bt-td-lambda` is the knob of record; this stays a dormant scale knob (decouples overall outcome weight from decay shape across corpora with different ply-gap distributions) |
+| `--bt-K X`                                   | 220                                                    | Sigmoid temperature                                          |
+| `--bt-batch N`                               | 512                                                    | Positions per Adam step                                      |
+| `--bt-leaf-lambda X`                         | = `--bt-lambda`                                        | Outcome-weight ceiling for depth-0 leaf rows (default follows the root λ, the recommended setting) |
+| `--bt-td-lambda X`                           | trainer default (`TDLEAF_LAMBDA`)                      | Result decay per ply from the game end: `w = λ_eff·td_λ^(N−ply)`; `1.0` = flat blend |
+| `--bt-loss-gamma X`                          | 1.0                                                    | Focal-loss exponent `(d·(1−d))^γ/K`: `1.0` = standard MSE (default), `0.0` = cross-entropy, `0.5` = between |
+| `--gauntlet OPP …`                           | none                                                   | One-off opponent binaries in `learn/` for this run's final gauntlet (combined with `--gauntlet-anchors`) |
+| `--gauntlet-anchors OPP …`                   | inherited from `--continue`'s sidecar, or empty        | Fixed opponent list carried forward automatically across a `--continue` chain (e.g. `Leaf_vclassic_eval`). Pass with no arguments to explicitly clear an inherited list |
+| `--gauntlet-games N`                         | 400                                                    | Games per opponent                                           |
+| `--tc TC`                                    | `3+0.05`                                               | Gauntlet time control                                        |
+| `--gauntlet-epochs`                          | off                                                    | Per-epoch ladder: rate each epoch snapshot vs the net as it stood before offline training, as soon as that epoch finishes; the trainer is paused (SIGSTOP/SIGCONT) during each match so games never contend with training for cores; prints an epoch table and promotes the best epoch as the final net |
+| `--epoch-games N`                            | 1000                                                   | Games per epoch-ladder match                                 |
+| `--epoch-tc TC`                              | `1+0.01`                                               | Epoch-ladder time control                                    |
+| `--no-final-gauntlet`                        | off                                                    | Skip the final full gauntlet matches (the rating binary is still always built) |
+| `--force`                                    | off                                                    | Reuse an existing `<tag>_work` directory                     |
+| `--recompile`                                | off                                                    | Force recompile of helper binaries                           |
+| `--keep-epoch-states`                        | off                                                    | Keep every epoch's `.tdleaf.bin` in `<tag>_work/train/` (default: only the promoted epoch's state survives) |
+| `--keep-work`                                | off                                                    | Skip all end-of-run pruning inside `<tag>_work/` for this run (raw dumps, non-winning epoch `.nnue`, epoch-ladder PGNs, epoch rating binaries all stay; `corpus.tsv` stays uncompressed) |
+
+---
+
 ## match.py
 
 Run a head-to-head match or gauntlet between chess engines using a tournament
@@ -198,132 +290,6 @@ the EPD before sending to the engine.  `--eval-workers` parallel engine processe
 concurrently (~75 pos/sec at depth 10 with 4 workers).  Compile the eval binary with
 `perl src/comp.pl classic_eval OVERWRITE` (no NNUE, no TDLEAF).  If the binary is
 absent, a warning is printed and the filter is skipped.
-
----
-
-## training_run.py
-
-Interactive TDLeaf(λ) training run manager.  **Invoke from `learn/`** so that
-all working files (`.nnue`, `.tdleaf.bin`, `.games`, built binaries, PGN output)
-land in `learn/`.
-
-> **TDLeaf runs under UCI by default.**  All engines in `training_run.py` now
-> run under `--proto uci`: the default driver (fastchess) is UCI-only, and
-> Leaf's UCI loop triggers TDLeaf learning via self-adjudicated outcomes
-> (`uci_finish_game()` → `tdleaf_self_adjudicate()` — terminal-position checks
-> with a score-history fallback).  xboard/CECP remains supported (learning
-> hooks also run from `make_move()` there, driven by the protocol `result`
-> command) for `--driver=cutechess --proto xboard`, but is no longer required.
-
-```sh
-cd learn/
-python3 training_run.py
-```
-
-### Prompt sequence
-
-1. **Starting network** — existing `.nnue` file or a freshly random-initialised one
-   (classical material prior or uniform 100cp via `--init-nnue-noprior`)
-2. **Opponent roster** — build a rotation of one or more opponent types:
-   - `[s]` Self-play — both `_a` and `_b` instances learn (symmetric)
-   - `[r]` Read-only mirror — learner vs. a TDLEAF_READONLY copy of itself,
-     frozen at the start of each rotation segment
-   - `[f]` Fixed engine — any Leaf binary or external executable; presents a
-     numbered list of engines discovered under `tools/engines/`, plus the
-     option to enter a custom path
-
-   When the roster has multiple entries (or includes a read-only mirror), the
-   user sets a **rotation interval** — games are split into segments of that
-   many games, cycling through the roster.  A `.nnue` checkpoint is exported at
-   every rotation boundary.  The read-only mirror loads the most recently
-   exported checkpoint (or the base net for the first segment).
-3. **Train-validate loop** — optional; see below
-4. **Build** — compiles only the binaries the roster requires:
-   - Learner (`_a`, TDLEAF=1) — always built
-   - Self-play partner (`_b`, TDLEAF=1) — built if roster includes self-play
-   - Read-only mirror (`_ro`, TDLEAF_READONLY=1) — built if roster includes
-     a read-only mirror; loads weights but skips updates
-5. **Continuity** — continue from existing `.tdleaf.bin` or start fresh
-6. **Match parameters** — TC, concurrency, wait, opening selection, per-engine
-   depth limits; per-engine TCs (`--tc1` / `--tc2`) when the opponent runs at a
-   different speed.  Opening selection priority:
-   - If `learn/training_openings.epd` exists: use it with Fischer Random variant
-     (no question asked — EPD file encodes the intent).
-   - Else if Fischer Random is chosen: use random Chess960 positions.
-   - Else if `normbk02.bin` is in `learn/`: use it as the Polyglot opening book.
-   See `make_training_epd.py` to generate `training_openings.epd`.
-
-On completion, trained weights are exported to `<net_base>-<total_games>g.nnue` and
-a copy of the current `.tdleaf.bin` is saved as `<net_base>.tdleaf.bin-<total_games>g`
-for archival and rollback.  If terminated early with Ctrl-C, the export uses a
-`-partial` suffix to avoid overwriting an existing game-count checkpoint.
-The `<net_base>.games` sidecar is always written to `current_games` at the start of
-Step 6 (before any filename is determined), so sidecar counts and file names stay
-in sync on all exit paths.  Game counts accumulate across runs.
-
-**Startup backup:** when continuing from an existing `.tdleaf.bin`, a copy is saved
-as `.tdleaf.bin.bak` before any training begins.  This allows recovery of the
-pre-run weights if a training session produces bad results or is interrupted at an
-inopportune moment.
-
-**Adam momentum persistence:** both Adam moment arrays (m and v) persist across
-sessions in `.tdleaf.bin`, so the optimizer resumes with full directional momentum
-rather than cold-starting — see `TRAINING.md`'s Adam Optimizer section for the
-concurrent-writer merge rules and format detail.
-
-**Self-play opening diversity:** when the current opponent segment is symmetric
-self-play (both engines learn), `training_run.py` automatically passes `--no-repeat`
-to `match.py` so each opening is played once rather than twice, maximising the variety
-of positions seen per N games.  Non-self-play segments (read-only mirror, fixed
-engine) retain `-games 2 -repeat` for fairer W/L/D statistics.
-
-### Train-validate loop
-
-When enabled, the script runs repeated train → validate cycles instead of a single
-match block:
-
-```
-setup (once before first cycle):
-  export current .tdleaf.bin → <net>-best.nnue
-  (or copy base .nnue if no .tdleaf.bin exists yet)
-
-repeat N cycles (0 = forever until Ctrl-C):
-  1. Checkpoint current .tdleaf.bin
-  2. Train for X games (single iteration — Adam state preserved throughout)
-  3. Export new weights → <net>-cand.nnue
-  4. Run Y-game validation match: eval_cand vs eval_best
-  5. Accept if LOS ≥ threshold →
-       bank games, export accepted weights → best.nnue
-       save snapshot → <net>-<total_games>g.nnue  (for tournament use)
-     Reject → revert .tdleaf.bin to pre-cycle checkpoint
-```
-
-**Snapshots:** Each accepted cycle saves a game-count-stamped `.nnue` file (e.g.
-`nn-training1a-5000g.nnue`, `nn-training1a-10000g.nnue`).  These can later be
-entered in a tournament via `bayeselo_ratings.py` to chart Elo progression over
-training.
-
-Loop-mode prompts (Step 3):
-
-| Prompt | Default | Notes |
-|--------|---------|-------|
-| Cycles | 0 (∞) | Number of train-validate cycles; 0 = run until Ctrl-C |
-| Validation games | 200 | Games per validation match |
-| LOS acceptance threshold | 70% | Candidate accepted if LOS ≥ this |
-| Early-stop high | 90% | Terminate validation early if LOS ≥ this (clear win) |
-| Early-stop low  | 10% | Terminate validation early if LOS ≤ this (clear loss) |
-| Validation TC | (same as training TC) | Separate TC for the validation match |
-| Games per cycle | 5000 | Training games per cycle (single iteration; no engine restart) |
-
-Two eval-only binaries (`NNUE=1`, no `TDLEAF`) are compiled once at setup:
-`eval_best` loads `<net>-best.nnue` and `eval_cand` loads `<net>-cand.nnue`.
-
-**Why single iteration in loop mode**: multiple iterations restart the engine
-processes between blocks, discarding Adam momentum and variance state.  A single
-long iteration preserves the full optimiser state across the training block.
-
-Ctrl-C exits cleanly: current weights are exported and a per-cycle result table
-is printed.
 
 ---
 
@@ -808,99 +774,141 @@ Two positional arguments (old, new); no options.  Uses the
 
 ---
 
-## train.py
+## older/training_run.py
 
-One command per hybrid-loop iteration: promote a consolidated state → online
-self-play generation with leaf/root corpus dumping → checkpoint → assemble
-corpus → threaded single-process offline training → best-epoch promotion →
-gauntlet with an Elo table.  Non-interactive; run from `learn/`.  Helper
-binaries (`Leaf_vbt`, `Leaf_vtrain_hl_a/b`) are auto-compiled.  See
-`TRAINING.md` for the concepts and the manual runbook it encodes.
+Interactive TDLeaf(λ) training run manager.  **Invoke from `learn/`** so that
+all working files (`.nnue`, `.tdleaf.bin`, `.games`, built binaries, PGN output)
+land in `learn/`.
+
+> **TDLeaf runs under UCI by default.**  All engines in `training_run.py` now
+> run under `--proto uci`: the default driver (fastchess) is UCI-only, and
+> Leaf's UCI loop triggers TDLeaf learning via self-adjudicated outcomes
+> (`uci_finish_game()` → `tdleaf_self_adjudicate()` — terminal-position checks
+> with a score-history fallback).  xboard/CECP remains supported (learning
+> hooks also run from `make_move()` there, driven by the protocol `result`
+> command) for `--driver=cutechess --proto xboard`, but is no longer required.
 
 ```sh
-# Full iteration: generate 400k d8 games, consolidate (settled gen-3+ recipe:
-# pure λ-return defaults, td_λ decay is the knob of record), rate every epoch
-# as it completes, then the final full gauntlet
-python3 train.py --tag iter3 --games 400000 --depth 8 \
-    --state tdL10F10x6_ep4.tdleaf.bin --recompile \
-    --bt-K 220 --bt-threads 8 \
-    --gauntlet-epochs --gauntlet Leaf_vtdL10F10x6-ep4 Leaf_vclassic_eval
-
-# Chained iteration: --continue reads iter3_final.json and defaults
-# --net/--state/--gauntlet-anchors from it, tracking cumulative_games
-python3 train.py --tag iter4 --continue iter3 --games 1000000 --depth 8 \
-    --bt-K 220 --bt-threads 8 --gauntlet-epochs
-
-# Consolidate-only on existing corpora (e.g. a hyperparameter arm on the same dumps)
-python3 train.py --tag arm1 --skip-online \
-    --bt-K 220 \
-    $(for f in iter2_work/iter2.*.tsv; do echo --corpus $f; done) \
-    --gauntlet Leaf_vbtsp-final Leaf_vclassic_eval
-
-# Generate-only (games + corpora, no offline training)
-python3 train.py --tag gen3 --games 200000 --depth 8 --skip-train
+cd learn/
+python3 training_run.py
 ```
 
-**Artifacts** (named by `--tag`), always flat in `learn/`: `<tag>_final.nnue`
-(compile rating binaries from this; with `--gauntlet-epochs` this is the ladder's
-best epoch, else the last epoch), `<tag>_final.tdleaf.bin` (seeds the next
-iteration; pairs with the ORIGINAL base `.nnue`), `<tag>_final.json` (sidecar:
-cumulative games, gauntlet anchors, epoch-ladder/gauntlet results — read by
-`--continue`), and `Leaf_v<tag>-final` (compiled rating binary — always built,
-even with no gauntlet opponents, so it's ready as a future `--continue` anchor;
-never left resident in `run/`).
+### Prompt sequence
 
-**`<tag>_work/`** is a permanent per-run archive — never deleted on a successful
-run. It keeps `corpus.tsv` (gzip'd), the online-generation and final-gauntlet
-PGNs (online one gzip'd), and `train/train.log` (with the epoch-ladder and
-gauntlet tables appended); it prunes raw per-shard dumps, non-winning epoch
-`.nnue` files, epoch-ladder PGNs, and epoch rating binaries. `--keep-epoch-states`
-additionally keeps every epoch's `.tdleaf.bin`; `--keep-work` disables all
-pruning for one run. A failed run's `<tag>_work/` is never touched. See
-`TRAINING.md` for the full artifact-lifecycle reference.
+1. **Starting network** — existing `.nnue` file or a freshly random-initialised one
+   (classical material prior or uniform 100cp via `--init-nnue-noprior`)
 
-### Options
+2. **Opponent roster** — build a rotation of one or more opponent types:
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--tag NAME` | required | Iteration name; prefixes all artifacts |
-| `--net FILE` | `nn-fresh-260628.nnue`, or from `--continue`'s sidecar | Base `.nnue` in `learn/` (never changes across iterations) |
-| `--continue PREV_TAG` | — | Chain from a prior run: read `learn/PREV_TAG_final.json` and default `--net`/`--state`/`--gauntlet-anchors` from it, track `cumulative_games` across the chain, and auto-add `Leaf_v<PREV_TAG>-final` to the final gauntlet |
-| `--init-nnue [material\|classical\|noprior]` | off | Initialise a fresh `--net` (+ companion `.tdleaf.bin`) before generating — turns the run into a start-to-finish iteration. Bare flag = `material`. Fails if `--net` already exists |
-| `--state FILE` | keep live, or from `--continue`'s sidecar | `.tdleaf.bin` to promote to the live state (backed up + hash-checked against the base) |
-| `--skip-online` | off | Consolidate-only; train on `--corpus` files |
-| `--games N` | 400000 | Games to generate |
-| `--depth N` | 8 | Fixed search depth for generation |
-| `--concurrency N` | 9 | Concurrent games |
-| `--openings FILE` | `training_openings.epd` | Opening set (FRC) |
-| `--quiet-cp N` | 60 | `TDLEAF_DUMP_QUIET_CP` for the dump |
-| `--skip-train` | off | Generate-only |
-| `--corpus TSV` | — | Extra corpus file(s) for training (repeatable) |
-| `--bt-threads N` | 8 | Worker threads for within-batch gradient compute (single process; synchronous data parallelism, identical to 1 thread up to float summation order — see `TRAINING.md`) |
-| `--epochs N` | 6 | Training epochs |
-| `--bt-lr X` | 0.25 | LR scale on all category LRs |
-| `--bt-lambda X` | 1.0 | Outcome-weight ceiling in the decayed blend target (`w = λ_eff·td_λ^(N−ply)`).  Default 1.0 = pure λ-return, the settled gen-3+ recipe: `--bt-td-lambda` is the knob of record; this stays a dormant scale knob (decouples overall outcome weight from decay shape across corpora with different ply-gap distributions) |
-| `--bt-K X` | 220 | Sigmoid temperature |
-| `--bt-batch N` | 512 | Positions per Adam step |
-| `--bt-leaf-lambda X` | = `--bt-lambda` | Outcome-weight ceiling for depth-0 leaf rows (default follows the root λ, the recommended setting) |
-| `--bt-td-lambda X` | trainer default (`TDLEAF_LAMBDA`) | Result decay per ply from the game end: `w = λ_eff·td_λ^(N−ply)`; `1.0` = flat blend |
-| `--bt-loss-gamma X` | 1.0 | Focal-loss exponent `(d·(1−d))^γ/K`: `1.0` = standard MSE (default), `0.0` = cross-entropy, `0.5` = between |
-| `--gauntlet OPP …` | none | One-off opponent binaries in `learn/` for this run's final gauntlet (combined with `--gauntlet-anchors`) |
-| `--gauntlet-anchors OPP …` | inherited from `--continue`'s sidecar, or empty | Fixed opponent list carried forward automatically across a `--continue` chain (e.g. `Leaf_vclassic_eval`). Pass with no arguments to explicitly clear an inherited list |
-| `--gauntlet-games N` | 400 | Games per opponent |
-| `--tc TC` | `3+0.05` | Gauntlet time control |
-| `--gauntlet-epochs` | off | Per-epoch ladder: rate each epoch snapshot vs the net as it stood before offline training, as soon as that epoch finishes; the trainer is paused (SIGSTOP/SIGCONT) during each match so games never contend with training for cores; prints an epoch table and promotes the best epoch as the final net |
-| `--epoch-games N` | 1000 | Games per epoch-ladder match |
-| `--epoch-tc TC` | `1+0.01` | Epoch-ladder time control |
-| `--no-final-gauntlet` | off | Skip the final full gauntlet matches (the rating binary is still always built) |
-| `--force` | off | Reuse an existing `<tag>_work` directory |
-| `--recompile` | off | Force recompile of helper binaries |
-| `--keep-epoch-states` | off | Keep every epoch's `.tdleaf.bin` in `<tag>_work/train/` (default: only the promoted epoch's state survives) |
-| `--keep-work` | off | Skip all end-of-run pruning inside `<tag>_work/` for this run (raw dumps, non-winning epoch `.nnue`, epoch-ladder PGNs, epoch rating binaries all stay; `corpus.tsv` stays uncompressed) |
+   - `[s]` Self-play — both `_a` and `_b` instances learn (symmetric)
+   - `[r]` Read-only mirror — learner vs. a TDLEAF_READONLY copy of itself,
+     frozen at the start of each rotation segment
+   - `[f]` Fixed engine — any Leaf binary or external executable; presents a
+     numbered list of engines discovered under `tools/engines/`, plus the
+     option to enter a custom path
+
+   When the roster has multiple entries (or includes a read-only mirror), the
+   user sets a **rotation interval** — games are split into segments of that
+   many games, cycling through the roster.  A `.nnue` checkpoint is exported at
+   every rotation boundary.  The read-only mirror loads the most recently
+   exported checkpoint (or the base net for the first segment).
+
+3. **Train-validate loop** — optional; see below
+
+4. **Build** — compiles only the binaries the roster requires:
+
+   - Learner (`_a`, TDLEAF=1) — always built
+   - Self-play partner (`_b`, TDLEAF=1) — built if roster includes self-play
+   - Read-only mirror (`_ro`, TDLEAF_READONLY=1) — built if roster includes
+     a read-only mirror; loads weights but skips updates
+
+5. **Continuity** — continue from existing `.tdleaf.bin` or start fresh
+
+6. **Match parameters** — TC, concurrency, wait, opening selection, per-engine
+   depth limits; per-engine TCs (`--tc1` / `--tc2`) when the opponent runs at a
+   different speed.  Opening selection priority:
+
+   - If `learn/training_openings.epd` exists: use it with Fischer Random variant
+     (no question asked — EPD file encodes the intent).
+   - Else if Fischer Random is chosen: use random Chess960 positions.
+   - Else if `normbk02.bin` is in `learn/`: use it as the Polyglot opening book.
+     See `make_training_epd.py` to generate `training_openings.epd`.
+
+On completion, trained weights are exported to `<net_base>-<total_games>g.nnue` and
+a copy of the current `.tdleaf.bin` is saved as `<net_base>.tdleaf.bin-<total_games>g`
+for archival and rollback.  If terminated early with Ctrl-C, the export uses a
+`-partial` suffix to avoid overwriting an existing game-count checkpoint.
+The `<net_base>.games` sidecar is always written to `current_games` at the start of
+Step 6 (before any filename is determined), so sidecar counts and file names stay
+in sync on all exit paths.  Game counts accumulate across runs.
+
+**Startup backup:** when continuing from an existing `.tdleaf.bin`, a copy is saved
+as `.tdleaf.bin.bak` before any training begins.  This allows recovery of the
+pre-run weights if a training session produces bad results or is interrupted at an
+inopportune moment.
+
+**Adam momentum persistence:** both Adam moment arrays (m and v) persist across
+sessions in `.tdleaf.bin`, so the optimizer resumes with full directional momentum
+rather than cold-starting — see `TRAINING.md`'s Adam Optimizer section for the
+concurrent-writer merge rules and format detail.
+
+**Self-play opening diversity:** when the current opponent segment is symmetric
+self-play (both engines learn), `training_run.py` automatically passes `--no-repeat`
+to `match.py` so each opening is played once rather than twice, maximising the variety
+of positions seen per N games.  Non-self-play segments (read-only mirror, fixed
+engine) retain `-games 2 -repeat` for fairer W/L/D statistics.
+
+### Train-validate loop
+
+When enabled, the script runs repeated train → validate cycles instead of a single
+match block:
+
+```
+setup (once before first cycle):
+  export current .tdleaf.bin → <net>-best.nnue
+  (or copy base .nnue if no .tdleaf.bin exists yet)
+
+repeat N cycles (0 = forever until Ctrl-C):
+  1. Checkpoint current .tdleaf.bin
+  2. Train for X games (single iteration — Adam state preserved throughout)
+  3. Export new weights → <net>-cand.nnue
+  4. Run Y-game validation match: eval_cand vs eval_best
+  5. Accept if LOS ≥ threshold →
+       bank games, export accepted weights → best.nnue
+       save snapshot → <net>-<total_games>g.nnue  (for tournament use)
+     Reject → revert .tdleaf.bin to pre-cycle checkpoint
+```
+
+**Snapshots:** Each accepted cycle saves a game-count-stamped `.nnue` file (e.g.
+`nn-training1a-5000g.nnue`, `nn-training1a-10000g.nnue`).  These can later be
+entered in a tournament via `bayeselo_ratings.py` to chart Elo progression over
+training.
+
+Loop-mode prompts (Step 3):
+
+| Prompt                   | Default               | Notes                                                        |
+| ------------------------ | --------------------- | ------------------------------------------------------------ |
+| Cycles                   | 0 (∞)                 | Number of train-validate cycles; 0 = run until Ctrl-C        |
+| Validation games         | 200                   | Games per validation match                                   |
+| LOS acceptance threshold | 70%                   | Candidate accepted if LOS ≥ this                             |
+| Early-stop high          | 90%                   | Terminate validation early if LOS ≥ this (clear win)         |
+| Early-stop low           | 10%                   | Terminate validation early if LOS ≤ this (clear loss)        |
+| Validation TC            | (same as training TC) | Separate TC for the validation match                         |
+| Games per cycle          | 5000                  | Training games per cycle (single iteration; no engine restart) |
+
+Two eval-only binaries (`NNUE=1`, no `TDLEAF`) are compiled once at setup:
+`eval_best` loads `<net>-best.nnue` and `eval_cand` loads `<net>-cand.nnue`.
+
+**Why single iteration in loop mode**: multiple iterations restart the engine
+processes between blocks, discarding Adam momentum and variance state.  A single
+long iteration preserves the full optimiser state across the training block.
+
+Ctrl-C exits cleanly: current weights are exported and a per-cycle result table
+is printed.
 
 ---
 
-## migrate_legacy_work.py
+## older/migrate_legacy_work.py
 
 One-time backlog migration for training iterations produced before `train.py`'s
 per-run archive model existed (the pre-rename `hybrid_loop.py`, and any early
