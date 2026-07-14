@@ -4,6 +4,26 @@ All Python scripts live in `scripts/`.  Symlinks in `run/` and `learn/` allow
 them to be invoked in-place from those directories, which is the normal workflow
 since engines, `.nnue` files, and `.tdleaf.bin` files live there.
 
+| Script | Description |
+| --- | --- |
+| [`train.py`](#trainpy) | One-command hybrid-loop iteration: online self-play generation, offline threaded batch training, and gauntlet rating, with `--continue` chaining across iterations. |
+| [`match.py`](#matchpy) | Runs head-to-head or gauntlet matches between engines via fastchess/cutechess, interactively or from the CLI. |
+| [`make_training_epd.py`](#make_training_epdpy) | Generates a combined FRC + Polyglot-book opening EPD file for TDLeaf training. |
+| [`compare_nnue_learning.py`](#compare_nnue_learningpy) | Visualises NNUE weight changes between a baseline `.nnue` and a trained `.tdleaf.bin`. |
+| [`verify_fc0.py`](#verify_fc0py) | Debugging tool that recomputes FC0 outputs from a manually specified input vector to verify the forward pass. |
+| [`bayeselo_ratings.py`](#bayeselo_ratingspy) | Computes a Bayesian Elo rating list for all players in a PGN file. |
+| [`pgn_dedup.py`](#pgn_deduppy) | Removes duplicate games from one or more PGN files. |
+| [`merge_tdleaf.py`](#merge_tdleafpy) | Merges multiple `.tdleaf.bin` files with count-weighted averaging. |
+| [`pgn_winrate.py`](#pgn_winratepy) | Analyses win/draw/loss rates per N-game window for one player in a PGN file. |
+| [`pgn_elo_progress.py`](#pgn_elo_progresspy) | Tracks Elo progress over training by running bayeselo on fixed-size PGN windows. |
+| [`reset_adam.py`](#reset_adampy) | Zeroes or decays the Adam optimizer state in a `.tdleaf.bin` file. |
+| [`extract_positions.py`](#extract_positionspy) | Extracts a per-position parquet dataset from self-play PGNs for calibration analysis. |
+| [`analyze_calibration.py`](#analyze_calibrationpy) | Calibrates sigmoid temperature K and lambda decay from the parquet produced by `extract_positions.py`. |
+| [`extract_quiet_positions.py`](#extract_quiet_positionspy) | Builds an offline-training TSV position corpus from existing self-play PGNs. |
+| [`diff_tdleaf_checkpoints.py`](#diff_tdleaf_checkpointspy) | Diffs two `.tdleaf.bin` checkpoints section by section to monitor training drift. |
+| [`older/training_run.py`](#oldertraining_runpy) | Interactive TDLeaf(λ) training-run manager: network init, opponent rotation, and train-validate loop. |
+| [`older/migrate_legacy_work.py`](#oldermigrate_legacy_workpy) | One-time migration of pre-`train.py` training iterations into the current per-run archive layout. |
+
 ---
 
 ## train.py
