@@ -421,7 +421,7 @@ bool nnue_write_nnue(const char *dst_path)
             case NNUE_PRIOR_MATERIAL:
             default:
                 prior_desc = "PSQT=symmetric classical material (own=+V,enemy=-V; "
-                             "P=100 N=377 B=399 R=596 Q=1197 cp)";
+                             "P=100 N=380 B=400 R=600 Q=1200 cp)";
                 break;
         }
         snprintf(new_desc, sizeof(new_desc), "Random init; %s", prior_desc);

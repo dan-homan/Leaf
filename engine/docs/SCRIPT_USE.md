@@ -734,9 +734,9 @@ move comment (white POV, cp), game result (white POV), ply, eval depth, a stable
 game id so the trainer can split train/validation by game, and the game's true
 final ply (distance base for the trainer's result decay).  Eval and outcome are
 stored separately: the trainer's decayed λ-blend keeps λ, td_λ, and K as
-training-time hyperparameters.  Note: `ply`/`endply` here count game plies
-(every half-move), vs recorded engine plies in the in-engine dump — see the ply
-scale caveat in `TRAINING.md`.
+training-time hyperparameters.  `ply`/`endply` here count game plies (every
+half-move), matching the in-engine dump's own game-ply counting — see
+"Ply units" in `TRAINING.md`.
 
 Quiet filters: side-to-move in check, played move is a capture/promotion/check,
 missing or mate eval, |eval| cap, min-ply, fifty-move clock.  Duplicate control

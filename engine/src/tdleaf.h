@@ -27,11 +27,13 @@
 // Eligibility trace decay, expressed PER GAME-PLY.  The online trace applies
 // pow(TDLEAF_LAMBDA, dply) where dply is the game-ply gap between consecutive
 // records (2 in the two-process harness, since the engine records only its own
-// moves; 1 under internal self-play).  Value is sqrt(0.98): with dply=2 this
-// reproduces the historical per-own-move decay of 0.98 (fitted from 1.6M
-// self-play games — autocorrelation and d_t-vs-result give ~0.97–0.99), while a
-// single ONE lambda now expresses the same real-game horizon in both modes.
-static const float TDLEAF_LAMBDA           = 0.985f;  // per game ply, based on offline calibration
+// moves; 1 under internal self-play), so one lambda expresses the same
+// real-game horizon in both modes.  0.985 (down from the earlier 0.98994949 =
+// sqrt(0.98)) comes from offline batch-training convergence testing, which
+// found better convergence at 0.985; since that's close to the prior default,
+// the same constant is now used everywhere (online trace and --bt-td-lambda's
+// default alike) rather than keeping separate per-mode values.
+static const float TDLEAF_LAMBDA           = 0.985f;  // per game ply, from offline convergence testing
 static const float TDLEAF_K               = 220.0f; // sigmoid temperature (centipawns)
                                                      // MLE over 58M positions from the classical
                                                      // eval side of match_nn-fresh-260514-

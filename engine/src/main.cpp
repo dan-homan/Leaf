@@ -151,7 +151,7 @@ int main(int argc, char *argv[])
 #if NNUE
   {
     // --init-nnue: create a fresh random-initialised .nnue without reading an existing one.
-    //   PSQT = classical material (own=+V, enemy=-V; P=100 N=377 B=399 R=596 Q=1197 cp,
+    //   PSQT = classical material (own=+V, enemy=-V; P=100 N=380 B=400 R=600 Q=1200 cp,
     //   same across all 8 buckets).  Pure-PSQT: the bucketed PSQT is the sole material
     //   channel (no dense piece_val).
     // --init-nnue-noprior: PSQT = uniform 100 cp (own=+V, enemy=-V; P=N=B=R=Q=100 cp,

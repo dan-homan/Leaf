@@ -111,7 +111,7 @@ both were fully removed (Phase B of the pure-PSQT mainstreaming effort; see
 rather than merely disabled). Relevant defaults (`src/define.h`):
 
 - `NNUE_FIXED_PIECE_VALUES 1` — search keeps classical `value[]`
-  (`P=100 N=377 B=399 R=596 Q=1197`). `nnue_extract_piece_values()` still computes the
+  (`P=100 N=380 B=400 R=600 Q=1200`). `nnue_extract_piece_values()` still computes the
   PSQT-implied values for the startup banner, but **report-only**; it does not overwrite
   `value[]`.
 
@@ -181,10 +181,13 @@ change between consecutive moves exceeds `TDLEAF_SCORE_CLIP_PAWNS × max(value[P
 
 where `∇_w d_t = d_t * (1 - d_t) / K * ∇_w score_t`.
 
-Defaults: `λ = √0.98 ≈ 0.98995` **per game-ply** (the trace applies `λ^dply` where
-`dply` is the game-ply gap between consecutive records — 2 in the two-process harness
-→ `λ²` = 0.98 per own-move, matching the historical decay; 1 under internal self-play,
-so one λ expresses the same real-game horizon in both modes), `K = 220 cp`. For the
+Defaults: `λ = 0.985` **per game-ply** (the trace applies `λ^dply` where `dply` is
+the game-ply gap between consecutive records — 2 in the two-process harness, since
+the engine records only its own moves; 1 under internal self-play, so one λ expresses
+the same real-game horizon in both modes), `K = 220 cp`. 0.985 (down from an earlier
+`√0.98 ≈ 0.98995`) was chosen from offline batch-training convergence testing — close
+enough to the prior default that the same constant is now used everywhere, online and
+offline alike. For the
 calibration methodology and the reusable workflow to recalibrate either value in the
 future, see [Recalibrating K/λ](#recalibrating-kλ-reproducing-the-analysis) below; for
 how the current values were derived and revised over time, see
@@ -835,16 +838,20 @@ fen  cp  result  ply  depth  gid  [endply]
 | `gid` | stable game id — the trainer splits train/validation **by game** |
 | `endply` | *(optional)* the game's true final ply — exact distance base for the result decay. When absent, the trainer falls back to the per-`gid` max ply seen in the corpus (short by the quiet-filtered game tail, a mild ~uniform over-weighting of the result). Both corpus producers write it since 2026-07-04. |
 
-**Ply scale caveat:** the in-engine dump counts *recorded engine plies* (one per
-own move — the same per-TD-step scale the online `TDLEAF_LAMBDA` trace uses),
-while PGN extraction counts *game plies* (every half-move). Each corpus is
-internally consistent, but the result decay runs ~2× faster per game on
-PGN-extracted corpora — for those, the scale-matched value is
-`--bt-td-lambda ≈ √0.98 ≈ 0.99`. Avoid mixing the two sources in one decayed
-training run. (The K/λ calibration pipeline — `extract_positions.py` /
-`analyze_calibration.py` — also fits λ per *game ply*: its 0.986–0.995 band
-equals the engine's 0.98-per-recorded-ply ≈ 0.990-per-game-ply, so online λ
-matches the calibration exactly in consistent units.)
+**Ply units:** both corpus producers write true **game plies** (every half-move)
+in the `ply`/`endply` columns (game-ply λ^Δ era, since 2026-07-07) — the
+in-engine dump's `ply` is the engine's own game-ply counter at record time, not
+a per-record index, so it lines up exactly with PGN extraction's half-move
+counting. The online trace uses the same convention: `dply` in
+`tdleaf_update_after_game` is the true game-ply gap between consecutive records
+(2 in the two-process harness, since each engine only records its own moves; 1
+under internal self-play). `TDLEAF_LAMBDA` (0.985) is therefore a single
+per-game-ply constant valid unchanged as `--bt-td-lambda` for either corpus
+type — no conversion needed, and no reason to mix the two sources differently
+in one decayed training run. (The K/λ calibration pipeline —
+`extract_positions.py` / `analyze_calibration.py` — also fits λ directly per
+*game ply* from PGNs, which is why its fitted band is directly comparable to
+`TDLEAF_LAMBDA` without a conversion.)
 
 **The depth-0 rule:** records with `depth == 0` (leaf-dump rows, whose `cp` is the
 net's *own static eval* at dump time, acting as a magnitude anchor) get their own
@@ -898,14 +905,14 @@ session, trains on the given TSVs, writes per-epoch snapshots, and exits:
 ```sh
 ./Leaf_vbt --batch-train corpus_a.tsv,corpus_b.tsv --bt-out myrun \
            [--bt-epochs 3] [--bt-lambda 0.7] [--bt-leaf-lambda <λ>] \
-           [--bt-td-lambda 0.98] [--bt-K 220] [--bt-lr 0.25] \
+           [--bt-td-lambda 0.985] [--bt-K 220] [--bt-lr 0.25] \
            [--bt-batch 512] [--bt-val 0.05] [--bt-seed 42] [--bt-max 0] \
            [--bt-threads 8] [--bt-clip-every 64] [--bt-loss-gamma 1.0]
 ```
 
 > **Current defaults:** `--bt-K 220` cp with the default pure λ-return target —
 > `--bt-lambda` and `--bt-leaf-lambda` default to `1.0` and stay dormant scale knobs;
-> `--bt-td-lambda` (default `TDLEAF_LAMBDA` ≈ 0.98995) is the single knob of record for
+> `--bt-td-lambda` (default `TDLEAF_LAMBDA` = 0.985) is the single knob of record for
 > outcome-weight decay. When calibrating `--bt-td-lambda` on a **new** corpus, don't
 > reuse a value blindly — check the trainer's printed mean decay and aim for a mean
 > outcome mass ≈ 0.25–0.33 (see
@@ -926,7 +933,7 @@ Design principles:
   calibrated at any decay). `λ_eff` is `--bt-lambda` for root rows and
   `--bt-leaf-lambda` for leaf rows; `N` is the game's final ply (`endply`
   column, or per-game corpus max as fallback); `--bt-td-lambda` defaults to
-  `TDLEAF_LAMBDA` (0.98, `tdleaf.h`) so offline targets reconstruct the same
+  `TDLEAF_LAMBDA` (0.985, `tdleaf.h`) so offline targets reconstruct the same
   λ-returns the online games were trained on, and `1.0` reproduces the flat
   blend `p = λ·result + (1−λ)·σ` bit-for-bit. Squared error in probability
   space (the same update form as the TD rule); all of λ/td_λ/K are
@@ -1127,7 +1134,7 @@ directory is derived from that path, not from `run/`.
 
 `--bt-K 220` with the default pure λ-return target is the current consolidation
 recipe: `--bt-lambda` and `--bt-leaf-lambda` default to `1.0` and stay dormant scale
-knobs, and `--bt-td-lambda` (default `TDLEAF_LAMBDA` ≈ 0.98995) is the single knob of
+knobs, and `--bt-td-lambda` (default `TDLEAF_LAMBDA` = 0.985) is the single knob of
 record for how fast the outcome term's weight decays away from the game end.
 `--bt-threads 8` (the default) gives single-process, staleness-free consolidation
 speed. When calibrating `--bt-td-lambda` on a **new** corpus, don't reuse a value
@@ -1295,7 +1302,9 @@ See [Adam Optimizer](#adam-optimizer) above.
 `K` and `λ` were originally calibrated empirically from self-play games using
 maximum-likelihood sigmoid fitting (for `K`) and autocorrelation/decay fitting (for
 `λ`) — see `docs/history/TRAINING_HISTORY.md` for the methodology and results that
-produced the current `K = 220 cp`, `λ ≈ 0.98995` defaults. The same pipeline is
+produced the current `K = 220 cp` default and the original `λ ≈ 0.98995` value —
+later revised to `λ = 0.985` from offline batch-training convergence testing (see
+`docs/history/TRAINING_HISTORY.md`). The same pipeline is
 reusable to recalibrate either value against a new corpus of self-play or reference
 games:
 

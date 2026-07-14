@@ -142,7 +142,7 @@ int nnue_evaluate(const NNUEAccumulator &acc, int stm, int piece_count);
 // description, and main.cpp reads CLI flags before deciding whether the build
 // supports init mode.  nnue_init_zero_weights itself lives under TDLEAF.
 //   NNUE_PRIOR_MATERIAL  — PSQT = classical material only (own=+V, enemy=-V,
-//                          P=100 N=377 B=399 R=596 Q=1197 cp), all 8 buckets equal.
+//                          P=100 N=380 B=400 R=600 Q=1200 cp), all 8 buckets equal.
 //                          piece_val = 0 (learns corrections).
 //   NNUE_PRIOR_NOPRIOR   — PSQT = uniform 100 cp (P=N=B=R=Q=100, symmetric own/enemy),
 //                          piece_val = 0.  Materially blind from move 1 but

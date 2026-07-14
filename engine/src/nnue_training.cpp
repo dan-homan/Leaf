@@ -392,7 +392,7 @@ void nnue_init_zero_weights(int prior_mode)
 
     // ---- FT weights: random; PSQT: classical material (if !noprior), else zero ----
     // PSQT provides the base material signal.  Despite sigmoid saturation for large
-    // material advantages (sigmoid(1197/290) ≈ 0.985), PSQT recovers from corrosive
+    // material advantages (sigmoid(1200/290) ≈ 0.984), PSQT recovers from corrosive
     // gradients because its 180,224 parameters are updated HETEROGENEOUSLY and SPARSELY:
     // each (king_sq, piece_sq) feature row is updated only when that exact configuration
     // appears in a leaf position.  Different features erode at different rates; positional
@@ -443,7 +443,7 @@ void nnue_init_zero_weights(int prior_mode)
         // N/B/R/Q differentiate via PSQT updates during training; the engine is
         // materially blind from move 1 but never sees value[PAWN] clamp to 1.
         static const float MATERIAL_CP_NORMAL[6] = {
-            100.f, 377.f, 399.f, 596.f, 1197.f, 0.f,
+            100.f, 380.f, 400.f, 600.f, 1200.f, 0.f,
         };
         static const float MATERIAL_CP_NOPRIOR[6] = {
             100.f, 100.f, 100.f, 100.f, 100.f, 0.f,
@@ -532,9 +532,9 @@ void nnue_init_zero_weights(int prior_mode)
                                      "(own=+V,enemy=-V; P=N=B=R=Q=100 cp) (noprior)";
     else if (classical)  psqt_desc = "classical material + 4-stage piece-square tables "
                                      "(gstage-interpolated across 8 buckets; "
-                                     "P=100 N=377 B=399 R=596 Q=1197 cp + pst)";
+                                     "P=100 N=380 B=400 R=600 Q=1200 cp + pst)";
     else                 psqt_desc = "symmetric classical material "
-                                     "(own=+V,enemy=-V; P=100 N=377 B=399 R=596 Q=1197 cp)";
+                                     "(own=+V,enemy=-V; P=100 N=380 B=400 R=600 Q=1200 cp)";
     printf("NNUE TDLeaf: FC weights=N(0,{%.0f,%.0f,%.0f}) passthrough[15]=0; "
            "FT weights=N(0,%.0f); biases=zero; "
            "PSQT=%s (sole material channel)\n",
