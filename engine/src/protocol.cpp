@@ -305,6 +305,16 @@ void parse_command()
     { cin >> inboard >> ms >> castle >> ep; game.setboard(inboard, ms, castle, ep);  }
   else if(!strcmp(response, "accepted")) { cin.getline(line, 256); }  // ignore accepted command
   else if(!strcmp(response, "rejected")) { cin.getline(line, 256); }  // ignore rejected command
+  // no-op: the interface already defaults to interactive when neither "uci"
+  // nor "xboard" is the first command received
+  else if(!strcmp(response, "interactive")) { }
+  else if(!strcmp(response, "netinfo")) {
+#if NNUE
+    nnue_print_diag_info();
+#else
+    cout << "Classical evaluation build (no NNUE)\n";
+#endif
+  }
   // if command is a move
   else if(!strcmp(response, "usermove")) { 
     cin >> response; 

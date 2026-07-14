@@ -669,8 +669,6 @@ void nnue_init_fp32_weights()
     if (m_psqt_w)  memset(m_psqt_w,  0, psqt_sz * sizeof(float));
     t_adam = 0;
 
-    printf("NNUE TDLeaf: FP32 weights initialised (%d stacks + FT/PSQT + FT biases)\n", NNUE_LAYER_STACKS);
-
     // Touch the LR-multiplier singleton so any envvar overrides log at startup
     // (visibility before kicking off a long training run), not after the first
     // batch.  No effect when all multipliers are at default 1.0.
@@ -2517,7 +2515,10 @@ bool nnue_load_fc_weights(const char *path)
         tdleaf_release_lock(lock_fd);
         // Sync FP32 copies and zero counts (v1 has no count data).
         nnue_init_fp32_weights();
-        printf("TDLeaf: loaded v1 FC weights from %s (will upgrade to v2 on next save)\n", path);
+        snprintf(nnue_diag.tdleaf_summary, sizeof(nnue_diag.tdleaf_summary),
+                 "TDLeaf: loaded v1 FC weights from %s (will upgrade to v2 on next save)", path);
+        nnue_diag.tdleaf_loaded = true;
+        strncpy(nnue_diag.tdleaf_path, path, sizeof(nnue_diag.tdleaf_path) - 1);
         return true;
     }
 
@@ -2786,21 +2787,28 @@ bool nnue_load_fc_weights(const char *path)
     nnue_requantize_fc();
 
     if (version == TDLEAF_VERSION)
-        printf("TDLeaf: loaded v%u weights from %s (%d FT rows, %d FT-v rows, adam_v=%s, adam_m=%s, t_adam=%u, content_hash=0x%08X)\n",
-               TDLEAF_VERSION, path, n_ft_loaded, n_ft_v_loaded,
-               adam_v_loaded ? "yes" : "no", adam_m_loaded ? "yes" : "no", t_adam, nnue_content_hash);
+        snprintf(nnue_diag.tdleaf_summary, sizeof(nnue_diag.tdleaf_summary),
+                 "TDLeaf: loaded v%u weights from %s (%d FT rows, %d FT-v rows, adam_v=%s, adam_m=%s, t_adam=%u, content_hash=0x%08X)",
+                 TDLEAF_VERSION, path, n_ft_loaded, n_ft_v_loaded,
+                 adam_v_loaded ? "yes" : "no", adam_m_loaded ? "yes" : "no", t_adam, nnue_content_hash);
     else if (version >= 5u)
-        printf("TDLeaf: loaded v%u weights from %s (%d FT rows, adam_v=%s, adam_m=%s, t_adam=%u, will upgrade to v%u on next save — piece_val/slot-mean fields discarded)\n",
-               version, path, n_ft_loaded,
-               adam_v_loaded ? "yes" : "no", adam_m_loaded ? "yes" : "no", t_adam, TDLEAF_VERSION);
+        snprintf(nnue_diag.tdleaf_summary, sizeof(nnue_diag.tdleaf_summary),
+                 "TDLeaf: loaded v%u weights from %s (%d FT rows, adam_v=%s, adam_m=%s, t_adam=%u, will upgrade to v%u on next save — piece_val/slot-mean fields discarded)",
+                 version, path, n_ft_loaded,
+                 adam_v_loaded ? "yes" : "no", adam_m_loaded ? "yes" : "no", t_adam, TDLEAF_VERSION);
     else if (version == 4u)
-        printf("TDLeaf: loaded v4 weights from %s (%d FT rows, will upgrade to v%u on next save)\n",
-               path, n_ft_loaded, TDLEAF_VERSION);
+        snprintf(nnue_diag.tdleaf_summary, sizeof(nnue_diag.tdleaf_summary),
+                 "TDLeaf: loaded v4 weights from %s (%d FT rows, will upgrade to v%u on next save)",
+                 path, n_ft_loaded, TDLEAF_VERSION);
     else if (version == 3u)
-        printf("TDLeaf: loaded v3 weights from %s (%d FT rows, will upgrade to v%u on next save)\n",
-               path, n_ft_loaded, TDLEAF_VERSION);
+        snprintf(nnue_diag.tdleaf_summary, sizeof(nnue_diag.tdleaf_summary),
+                 "TDLeaf: loaded v3 weights from %s (%d FT rows, will upgrade to v%u on next save)",
+                 path, n_ft_loaded, TDLEAF_VERSION);
     else
-        printf("TDLeaf: loaded v2 FC weights from %s (will upgrade to v%u on next save)\n", path, TDLEAF_VERSION);
+        snprintf(nnue_diag.tdleaf_summary, sizeof(nnue_diag.tdleaf_summary),
+                 "TDLeaf: loaded v2 FC weights from %s (will upgrade to v%u on next save)", path, TDLEAF_VERSION);
+    nnue_diag.tdleaf_loaded = true;
+    strncpy(nnue_diag.tdleaf_path, path, sizeof(nnue_diag.tdleaf_path) - 1);
     return true;
 }
 

@@ -134,45 +134,40 @@ static bool nnue_load_stream(MemStream *s)
     uint32_t version   = read_u32(s);
     uint32_t file_hash = read_u32(s);
     uint32_t desc_size = read_u32(s);
-    printf("NNUE: version=0x%08X  hash=0x%08X  desc_size=%u\n",
-           version, file_hash, desc_size);
+    nnue_diag.version   = version;
+    nnue_diag.file_hash = file_hash;
 
     if (desc_size > 0) {
         char *desc = new char[desc_size + 1];
         size_t nr  = ms_read(s, desc, desc_size);
         desc[nr]   = '\0';
-        printf("NNUE: architecture: %s\n", desc);
+        strncpy(nnue_diag.arch_desc, desc, sizeof(nnue_diag.arch_desc) - 1);
         delete[] desc;
         if (nr != desc_size) { ms_close(s); return false; }
     }
 
     // Feature Transformer
     uint32_t ft_hash = read_u32(s);
-    printf("NNUE: ft_hash=0x%08X\n", ft_hash);
+    nnue_diag.ft_hash = ft_hash;
 
     nnue_alloc_arrays();  // no-op if already allocated
 
-    printf("NNUE: reading FT biases [%d int16] ...\n", NNUE_HALF_DIMS);
     if (!read_leb128_i16(s, ft_biases, NNUE_HALF_DIMS)) {
         printf("NNUE: FT bias read failed\n"); ms_close(s); return false;
     }
 
     size_t ft_w = (size_t)NNUE_FT_INPUTS * NNUE_HALF_DIMS;
-    printf("NNUE: reading FT weights [%zu int16] ...\n", ft_w);
     if (!read_leb128_i16(s, ft_weights, ft_w)) {
         printf("NNUE: FT weight read failed\n"); ms_close(s); return false;
     }
 
     // Fingerprint the loaded FT weights now, before any training modifies them.
     nnue_update_content_hash();
-    printf("NNUE: content hash=0x%08X\n", nnue_content_hash);
 
     size_t psqt_w = (size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS;
-    printf("NNUE: reading PSQT weights [%zu int32] ...\n", psqt_w);
     if (!read_leb128_i32(s, psqt_weights, psqt_w)) {
         printf("NNUE: PSQT weight read failed\n"); ms_close(s); return false;
     }
-    printf("NNUE: FT + PSQT loaded OK\n");
 
     // Network: 8 layer stacks.
     // Each stack begins with a 4-byte hash (no separate net_hash before the stacks).
@@ -180,8 +175,6 @@ static bool nnue_load_stream(MemStream *s)
     //   stack_hash(4) + FC0_bias(16*4) + FC0_wt(16*3072) +
     //   FC1_bias(32*4) + FC1_wt(32*32) + FC2_bias(4) + FC2_wt(32)
     //   = 4 + 64 + 49152 + 128 + 1024 + 4 + 32 = 50408 bytes
-    printf("NNUE: reading %d layer stacks ...\n", NNUE_LAYER_STACKS);
-
     for (int st = 0; st < NNUE_LAYER_STACKS; st++) {
         uint32_t stack_hash = read_u32(s);
         nnue_stack_hashes[st] = stack_hash;  // saved for nnue_write_nnue()
@@ -237,7 +230,6 @@ static bool nnue_load_stream(MemStream *s)
 
     ms_close(s);
     nnue_available = true;
-    printf("NNUE: all %d stacks loaded OK\n", NNUE_LAYER_STACKS);
 #if TDLEAF
     nnue_init_fp32_weights();
 #endif

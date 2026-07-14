@@ -241,8 +241,6 @@ int main(int argc, char *argv[])
         nnue_load(NNUE_NET);
       }
 #endif
-      if (nnue_available) write_out("NNUE evaluation loaded.\n");
-      else                write_out("NNUE file not found, using classical evaluation.\n");
 #if TDLEAF
       if (nnue_available) {
         // Attempt to load previously learned weights (companion .tdleaf.bin file).
@@ -252,9 +250,10 @@ int main(int argc, char *argv[])
         bool loaded = nnue_load_fc_weights(tdleaf_path);
         if (!loaded)
             loaded = nnue_load_fc_weights(NNUE_TDLEAF_BIN);
-        if (!loaded)
-          fprintf(stderr, "TDLeaf: no weights file found — using pretrained .nnue weights.\n"
-                          "TDLeaf: run with --init-nnue --write-nnue <file> to create a fresh net.\n");
+        // No weights file found: nnue_diag.tdleaf_loaded stays false; the
+        // hint to run --init-nnue is shown on demand by the `netinfo` command
+        // rather than printed unconditionally here.
+        (void)loaded;
       }
 #endif
     }
@@ -262,8 +261,10 @@ int main(int argc, char *argv[])
 #if NNUE
   // Extract PSQT-derived piece values and update the search's value[] array.
   // Must be called after both nnue_load() and nnue_load_fc_weights() complete
-  // so that any piece_val correction from .tdleaf.bin is included.
-  if (nnue_available) nnue_extract_piece_values();
+  // so that any piece_val correction from .tdleaf.bin is included.  Silent at
+  // startup (verbose=false) — the `netinfo` command re-extracts and prints
+  // these live via nnue_print_diag_info().
+  if (nnue_available) nnue_extract_piece_values(false);
 #endif
 #if NNUE && TDLEAF
   // --batch-train <tsv[,tsv...]>: offline supervised training on quiet-position
@@ -433,6 +434,34 @@ int main(int argc, char *argv[])
       close_hash();
       return 0;
     }
+  }
+
+  //-------------------------------------------------------------------
+  // Single startup identification line — replaces the old unconditional
+  // NNUE/TDLeaf load dump (version/hash/architecture/per-stack progress/
+  // piece values), which is now silent by default and available on demand
+  // via the `netinfo` command.  Printed once here, before protocol
+  // auto-detection, so it shows up regardless of whether the caller turns
+  // out to be a UCI GUI, an xboard GUI, or a human typing.
+  //-------------------------------------------------------------------
+  {
+    std::string startup_line = "Leaf v";
+    startup_line += VERS;
+    startup_line += VERS2;
+#if NNUE
+    startup_line += " | NNUE: ";
+    startup_line += nnue_available ? nnue_get_loaded_path() : "not found (classical evaluation)";
+#if TDLEAF
+    if (nnue_available && nnue_diag.tdleaf_loaded) {
+      startup_line += " | TDLeaf: ";
+      startup_line += nnue_diag.tdleaf_path;
+    }
+#endif
+#endif
+    startup_line += " | interface: xboard, uci, interactive";
+    cout << startup_line << "\n";
+    cout.flush();
+    if (proto.logging) proto.logfile << startup_line << "\n";
   }
 
 #if FLTK_GUI
@@ -925,6 +954,8 @@ void help()
  cout <<   "\n   hash n         -> set total hash to n megabytes";
  cout <<   "\n   build          -> build a new opening book from a pgn file";
  cout <<   "\n   edit_book      -> directly edit the current opening book";
+ cout <<   "\n   netinfo        -> show full NNUE/TDLeaf load diagnostics";
+ cout <<   "\n   interactive    -> no-op (already the default interface)";
 
  cout << "\n\n";
 }

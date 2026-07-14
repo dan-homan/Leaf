@@ -95,6 +95,13 @@ static void nnue_update_content_hash()
     nnue_content_hash = nnue_fnv1a_u32(ft_weights, ft_bytes);
 }
 
+// Load-time diagnostics (see nnue.h) — populated silently, printed on demand
+// by the `netinfo` command via nnue_print_diag_info().
+NNUEDiagInfo nnue_diag;
+
+const char* nnue_get_loaded_path() { return nnue_loaded_path; }
+uint32_t    nnue_get_content_hash() { return nnue_content_hash; }
+
 // Forward declaration for the PSQT FP32 shadow weights (the sole trainable
 // material channel under pure-PSQT).  Defined as static ~1300 lines below.
 static float *psqt_weights_f32 = nullptr;
@@ -845,4 +852,30 @@ void nnue_extract_piece_values(bool verbose)
         printf("NNUE: piece values from PSQT%s: P=%d N=%d B=%d R=%d Q=%d cp\n",
                NNUE_FIXED_PIECE_VALUES ? " (report only; search uses classical)" : "",
                ext[0], ext[1], ext[2], ext[3], ext[4]);
+}
+
+// ---------------------------------------------------------------------------
+// nnue_print_diag_info — the `netinfo` command's handler.  Prints the load
+// diagnostics captured silently in nnue_diag at startup, plus a live
+// (re-extracted) piece-value report so it reflects any drift since load.
+// ---------------------------------------------------------------------------
+void nnue_print_diag_info()
+{
+    if (!nnue_available) { printf("NNUE: not loaded (classical evaluation)\n"); return; }
+
+    printf("NNUE: %s (version=0x%08X hash=0x%08X ft_hash=0x%08X content_hash=0x%08X)\n",
+           nnue_get_loaded_path(), nnue_diag.version, nnue_diag.file_hash,
+           nnue_diag.ft_hash, nnue_get_content_hash());
+    if (nnue_diag.arch_desc[0])
+        printf("NNUE: architecture: %s\n", nnue_diag.arch_desc);
+
+#if TDLEAF
+    if (nnue_diag.tdleaf_loaded)
+        printf("%s\n", nnue_diag.tdleaf_summary);
+    else
+        printf("TDLeaf: no weights file found — using pretrained .nnue weights.\n"
+               "TDLeaf: run with --init-nnue --write-nnue <file> to create a fresh net.\n");
+#endif
+
+    nnue_extract_piece_values(true);
 }

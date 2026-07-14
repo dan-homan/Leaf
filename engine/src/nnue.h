@@ -87,6 +87,32 @@ void nnue_alloc_arrays();
 // Load a HalfKAv2_hm .nnue file. Returns true on success.
 bool nnue_load(const char *path);
 
+// ---------------------------------------------------------------------------
+// Load-time diagnostics — populated silently during nnue_load()/
+// nnue_load_from_memory() and, in TDLEAF builds, nnue_load_fc_weights().
+// Startup no longer prints these as they're captured (no reload needed to
+// inspect them later); the `netinfo` command prints them on demand via
+// nnue_print_diag_info().
+// ---------------------------------------------------------------------------
+struct NNUEDiagInfo {
+    uint32_t version = 0, file_hash = 0, ft_hash = 0;
+    char     arch_desc[256] = "";
+    bool     tdleaf_loaded = false;
+    char     tdleaf_path[FILENAME_MAX] = "";
+    char     tdleaf_summary[256] = "";   // preformatted "TDLeaf: loaded vN ..." line
+};
+extern NNUEDiagInfo nnue_diag;
+
+// Path the currently-loaded .nnue came from ("" / "(embedded)" as applicable).
+const char* nnue_get_loaded_path();
+
+// FNV1a hash of the currently-loaded FT weights (fingerprint at load time).
+uint32_t nnue_get_content_hash();
+
+// Print the full NNUE/TDLeaf load diagnostics captured in nnue_diag, plus a
+// live (re-extracted) PSQT piece-value report.  The `netinfo` command's handler.
+void nnue_print_diag_info();
+
 // Extract average piece values from loaded PSQT (+ piece_val correction if TDLEAF)
 // and overwrite value[1..5] in score.h with the result in centipawns.
 // Call after nnue_load() and, in TDLEAF builds, after nnue_load_fc_weights().
