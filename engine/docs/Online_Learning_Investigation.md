@@ -296,30 +296,34 @@ Designed to restore the early-regime channel inside the blend structure
   shapes only the outcome weight w.  At 0.7 the trace horizon is ~3 records
   (~6 game-plies in the harness) — local event credit with strong damping,
   vs the legacy trace's ~65-record horizon.  `λ_trace = 0` reproduces blend
-  exactly (with the prediction gate in place of the cp gate).
-- **Prediction gate** (replaces the cp gate in this mode): the trace flows
-  through record t only if the opponent played the engine's PREDICTED reply
-  (search t's pv[1]).  Verified by position hash, nearly free: the PV walk in
-  `tdleaf_record_ply` snapshots `cur.hcode` after pv[0] (`key_own`) and after
-  pv[0]+pv[1] (`key_reply`) into the TDRecord; at update time the transition
-  is predicted iff the next record's `root_key` equals `key_reply` (dply 2,
-  harness) or `key_own` (dply 1, internal self-play — trivially true, so the
-  gate only bites in the harness).  PVs shorter than 2 plies count as
-  unpredicted.
-- **Gate semantics: an unpredicted reply breaks the trace** (`trace_t = 0`,
+  exactly (with the widened gate below in place of blend's cp-only gate).
+- **Trace gate — predicted OR quiet**: the trace flows through record t if
+  the opponent played the engine's PREDICTED reply (search t's pv[1]) OR the
+  transition was quiet (`|Δcp| ≤ TDLEAF_QUIET_CP`, same 60 cp default and env
+  override as blend).  Only transitions that are both loud AND uncalculated
+  break it — a swing the engine foresaw is calculated signal, a quiet
+  transition is harmless regardless of prediction, and only genuine surprises
+  (blunders, unforeseen tactics) sever the credit chain.  Prediction is
+  verified by position hash, nearly free: the PV walk in `tdleaf_record_ply`
+  snapshots `cur.hcode` after pv[0] (`key_own`) and after pv[0]+pv[1]
+  (`key_reply`) into the TDRecord; at update time the transition is predicted
+  iff the next record's `root_key` equals `key_reply` (dply 2, harness) or
+  `key_own` (dply 1, internal self-play — trivially true, so the prediction
+  half only bites in the harness).  PVs shorter than 2 plies count as
+  unpredicted.  (First implementation gated on prediction alone — ~42% flow;
+  the widened gate was adopted the same day.)
+- **Break semantics: a gated-out transition breaks the trace** (`trace_t = 0`,
   propagating upstream through the recursion) **but the record still trains
-  on its outcome term.**  So the trace is credit assignment strictly along
-  lines the engine calculated; prediction rate throttles only the
-  eval-difference channel, and no sample is ever discarded — addressing both
-  the sample-loss and lost-loud-event concerns in one stroke.  No cp gate and
-  no score clip in this mode: predicted swings are calculated, not
-  accidental.
-- Telemetry: batch-apply line reports cumulative `predicted %` — effectively
-  a free policy-stability meter.
+  on its outcome term.**  The gate throttles only the eval-difference
+  channel, and no sample is ever discarded — addressing both the sample-loss
+  and lost-loud-event concerns in one stroke.  No score clip in this mode:
+  predicted swings are calculated, not accidental.
+- Telemetry: batch-apply line reports cumulative `trace-gate % pass` plus
+  `predicted %` — the latter is effectively a free policy-stability meter.
 
-Smoke (depth-5 self-play, stale default net): predicted 42–43% of
-transitions; expect higher at depth 6 with a mature net, rising as the net
-stabilizes.
+Smoke (depth-5 self-play, stale default net): trace-gate ~75% pass, of which
+predicted 40–43%; expect prediction higher at depth 6 with a mature net,
+rising as the net stabilizes.
 
 ## Status / next steps
 

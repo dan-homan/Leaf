@@ -170,7 +170,9 @@ static float td_trace_lambda = TDLEAF_TRACE_LAMBDA;
 static long  td_blend_used   = 0;                // blend: transitions passing the quiet gate
 static long  td_blend_skip   = 0;                // blend: transitions rejected by it
 static long  td_pred_hit     = 0;                // hybrid: predicted opponent replies
-static long  td_pred_miss    = 0;                // hybrid: unpredicted (trace broken)
+static long  td_pred_miss    = 0;                // hybrid: unpredicted replies
+static long  td_gate_pass    = 0;                // hybrid: trace flowed (predicted OR quiet)
+static long  td_gate_break   = 0;                // hybrid: trace broken (loud AND unpredicted)
 
 static int tdleaf_target_mode()
 {
@@ -184,8 +186,9 @@ static int tdleaf_target_mode()
             fprintf(stderr, "TDLeaf: target=blend (two-point lambda blend), "
                             "quiet gate %.0f cp\n", (double)td_quiet_cp);
         else if (td_target_mode == 2)
-            fprintf(stderr, "TDLeaf: target=hybrid (blend + prediction-gated trace), "
-                            "trace lambda %.2f\n", (double)td_trace_lambda);
+            fprintf(stderr, "TDLeaf: target=hybrid (blend + gated trace), "
+                            "trace lambda %.2f, gate: predicted or |dcp| <= %.0f cp\n",
+                    (double)td_trace_lambda, (double)td_quiet_cp);
     }
     return td_target_mode;
 }
@@ -223,13 +226,13 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result,
     if (target_mode == 2) {
         // Hybrid target: e_t = w·(result − d_t) + (1−w)·trace_t with a short,
         // strongly damped trace in the bootstrap slot (see tdleaf.h).  The
-        // trace flows through record t only when the opponent played the
-        // reply the engine PREDICTED (search t's pv[1], verified by hash) —
-        // credit assignment strictly along lines the engine calculated.  An
-        // unpredicted reply breaks the trace (trace_t = 0, and the break
-        // propagates upstream through the recursion) but the record still
-        // trains on its outcome term.  No cp gate and no score clip here:
-        // predicted swings are calculated, not accidental.
+        // trace flows through record t when the opponent played the reply the
+        // engine PREDICTED (search t's pv[1], verified by hash) OR the
+        // transition was quiet (|Δcp| ≤ TDLEAF_QUIET_CP) — i.e. it is broken
+        // only by loud, uncalculated transitions.  A break (trace_t = 0)
+        // propagates upstream through the recursion, but the record still
+        // trains on its outcome term.  No score clip here: predicted swings
+        // are calculated, not accidental.
         const int N_ply = rec.plies[T - 1].game_ply;
         static float tr[MAX_GAME_PLY];
         tr[T - 1] = 0.0f;
@@ -237,12 +240,15 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result,
             int dply = rec.plies[t + 1].game_ply - rec.plies[t].game_ply;
             h_code expected = (dply == 1) ? rec.plies[t].key_own
                             : (dply == 2) ? rec.plies[t].key_reply : 0;
-            if (expected != 0 && expected == rec.plies[t + 1].root_key) {
+            bool predicted = (expected != 0 && expected == rec.plies[t + 1].root_key);
+            if (predicted) td_pred_hit++; else td_pred_miss++;
+            float delta_cp = fabsf(score_w_cp[t + 1] - score_w_cp[t]);
+            if (predicted || delta_cp <= td_quiet_cp) {
                 tr[t] = (d[t + 1] - d[t]) + td_trace_lambda * tr[t + 1];
-                td_pred_hit++;
+                td_gate_pass++;
             } else {
                 tr[t] = 0.0f;
-                td_pred_miss++;
+                td_gate_break++;
             }
         }
         for (int t = 0; t < T - 1; t++) {
@@ -513,12 +519,13 @@ void tdleaf_update_after_game(TDGameRecord &rec, float result, const char *save_
                     td_batch_pending, T, (double)result,
                     100.0 * (double)td_blend_used / (double)(td_blend_used + td_blend_skip),
                     td_blend_used, td_blend_used + td_blend_skip);
-        else if (td_target_mode == 2 && (td_pred_hit + td_pred_miss) > 0)
+        else if (td_target_mode == 2 && (td_gate_pass + td_gate_break) > 0)
             fprintf(stderr, "TDLeaf: applied batch of %d game(s), latest %d plies (result=%.1f), "
-                            "predicted %.1f%% (%ld/%ld transitions)\n",
+                            "trace-gate %.1f%% pass (predicted %.1f%%, %ld/%ld transitions)\n",
                     td_batch_pending, T, (double)result,
+                    100.0 * (double)td_gate_pass / (double)(td_gate_pass + td_gate_break),
                     100.0 * (double)td_pred_hit / (double)(td_pred_hit + td_pred_miss),
-                    td_pred_hit, td_pred_hit + td_pred_miss);
+                    td_gate_pass, td_gate_pass + td_gate_break);
         else
             fprintf(stderr, "TDLeaf: applied batch of %d game(s), latest %d plies (result=%.1f)\n",
                     td_batch_pending, T, (double)result);

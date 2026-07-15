@@ -77,12 +77,13 @@ static const float TDLEAF_ID_VAR_SIGMA2  = 10000.0f;
 // TDLEAF_LAMBDA (which shapes only the outcome weight w); ~0.7 gives an
 // effective lookahead of ~3 records with strong damping, restoring local
 // backward credit for calculated events without letting distant eval pairs
-// leak into e_t.  Gate: the trace flows through record t only if the
-// opponent played the engine's PREDICTED reply (search t's pv[1]), verified
-// by hash — an unpredicted reply sets trace_t = 0 (the break propagates
+// leak into e_t.  Gate: the trace flows through record t if the opponent
+// played the engine's PREDICTED reply (search t's pv[1], verified by hash)
+// OR the transition was quiet (|Δcp| ≤ TDLEAF_QUIET_CP) — only loud,
+// uncalculated transitions break it.  A break sets trace_t = 0 (propagating
 // upstream), but the record still trains on its outcome term.  λ_trace = 0
-// reproduces blend with the prediction gate in place of the cp gate.
-// Env override: TDLEAF_TRACE_LAMBDA.
+// reproduces blend with this widened gate.
+// Env overrides: TDLEAF_TRACE_LAMBDA, TDLEAF_QUIET_CP.
 static const float TDLEAF_QUIET_CP       = 60.0f;
 static const float TDLEAF_TRACE_LAMBDA   = 0.7f;
 // Gradient clipping: if global L2 norm of all gradients exceeds this threshold,
