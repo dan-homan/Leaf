@@ -56,6 +56,35 @@ static const float TDLEAF_SCORE_CLIP_PAWNS = 1.0f;
 // Expressed in cp²: 10000 corresponds to a 100 cp std-dev reference.
 // Larger values are more tolerant of ID score instability.
 static const float TDLEAF_ID_VAR_SIGMA2  = 10000.0f;
+// Alternative learning targets (opt-in: env TDLEAF_TARGET=blend|hybrid).
+//
+// blend — local two-point target:
+//     e_t = w·(result − d_t) + (1−w)·(d_{t+1} − d_t),   w = λ^(N − game_ply_t)
+// (N = last recorded root game-ply, matching the TSV dump's result-decay
+// reference), gated by transition quietness: records where the white-POV
+// score moved more than TDLEAF_QUIET_CP between consecutive searches
+// contribute no gradient.  The gate must be the DIRECT consecutive-score
+// test — the opponent moves between records, so position-quietness at t
+// cannot certify the transition.  Env override: TDLEAF_QUIET_CP.
+//
+// hybrid — blend with a short, strongly damped eligibility trace in the
+// bootstrap slot:
+//     e_t = w·(result − d_t) + (1−w)·trace_t
+//     trace_t = (d_{t+1} − d_t) + λ_trace·trace_{t+1}   (trace_{T−1} = 0)
+// d_t + trace_t telescopes to (1−λ_trace)·Σ λ_trace^k·d_{t+1+k} — a
+// normalized geometric average of the next ~1/(1−λ_trace) records' evals —
+// so targets stay calibrated.  λ_trace is deliberately unrelated to
+// TDLEAF_LAMBDA (which shapes only the outcome weight w); ~0.7 gives an
+// effective lookahead of ~3 records with strong damping, restoring local
+// backward credit for calculated events without letting distant eval pairs
+// leak into e_t.  Gate: the trace flows through record t only if the
+// opponent played the engine's PREDICTED reply (search t's pv[1]), verified
+// by hash — an unpredicted reply sets trace_t = 0 (the break propagates
+// upstream), but the record still trains on its outcome term.  λ_trace = 0
+// reproduces blend with the prediction gate in place of the cp gate.
+// Env override: TDLEAF_TRACE_LAMBDA.
+static const float TDLEAF_QUIET_CP       = 60.0f;
+static const float TDLEAF_TRACE_LAMBDA   = 0.7f;
 // Gradient clipping: if global L2 norm of all gradients exceeds this threshold,
 // scale all gradients by max_norm/norm.  Set to 0 to disable.
 static const float TDLEAF_GRAD_CLIP_NORM = 1.0f;
@@ -172,6 +201,15 @@ struct TDRecord {
                                         // between consecutive records = 2 in the harness
                                         // (own moves only), 1 under internal self-play.
                                         // Drives the pow(lambda, dply) trace decay.
+    // Prediction-gate keys (TDLEAF_TARGET=hybrid).  Captured during the PV
+    // walk: root position hash, hash after pv[0] (own move), hash after
+    // pv[0]+pv[1] (predicted opponent reply; 0 if the PV is shorter).  The
+    // transition t→t+1 counts as PREDICTED when the next record's root_key
+    // matches key_own (dply 1, internal self-play) or key_reply (dply 2,
+    // two-process harness).
+    h_code  root_key;
+    h_code  key_own;
+    h_code  key_reply;
     float   id_score_variance;         // variance of last N ID depth scores (cp²); 0 if < 2 depths
     // Active feature indices at the leaf position (indexed by actual perspective 0=BLACK,1=WHITE).
     // Used for FT and PSQT gradient backprop.

@@ -59,6 +59,7 @@ void tdleaf_record_ply(TDGameRecord &rec,
     NNUEAccumulator acc_b;              // scratch for next step
     position cur = root_pos;
     int pv_len = 0;
+    h_code key_own = 0, key_reply = 0;  // prediction-gate keys (hybrid target)
 
     for (int k = 0; k < MAXD && pv[k].t != NOMOVE; k++) {
         position next = cur;
@@ -68,6 +69,8 @@ void tdleaf_record_ply(TDGameRecord &rec,
         cur   = next;
         acc_a = acc_b;
         pv_len++;
+        if      (pv_len == 1) key_own   = cur.hcode;
+        else if (pv_len == 2) key_reply = cur.hcode;
     }
     // acc_a now holds the fully computed leaf accumulator; cur is the leaf position.
 
@@ -120,6 +123,9 @@ void tdleaf_record_ply(TDGameRecord &rec,
     r.wtm               = leaf_wtm;
     r.root_wtm          = (bool)root_pos.wtm;  // per-record root STM (POV for the dump)
     r.game_ply          = game_ply;            // 1-based game-ply of the root position
+    r.root_key          = root_pos.hcode;      // prediction-gate keys (hybrid target)
+    r.key_own           = key_own;
+    r.key_reply         = key_reply;
     r.stack             = (pc - 1) / 4;
     r.id_score_variance = id_var;
     r.pos               = cur;  // store leaf position for Flavor A replay
@@ -153,6 +159,38 @@ void tdleaf_record_ply(TDGameRecord &rec,
 }
 
 // ---------------------------------------------------------------------------
+// Learning-target selection.  Default (0) is the classic lambda-decayed
+// eligibility trace; TDLEAF_TARGET=blend (1) is the two-point blend target;
+// TDLEAF_TARGET=hybrid (2) is blend with a short prediction-gated trace in
+// the bootstrap slot (see tdleaf.h).  Read from the environment once.
+// ---------------------------------------------------------------------------
+static int   td_target_mode  = -1;               // -1 until env is read
+static float td_quiet_cp     = TDLEAF_QUIET_CP;
+static float td_trace_lambda = TDLEAF_TRACE_LAMBDA;
+static long  td_blend_used   = 0;                // blend: transitions passing the quiet gate
+static long  td_blend_skip   = 0;                // blend: transitions rejected by it
+static long  td_pred_hit     = 0;                // hybrid: predicted opponent replies
+static long  td_pred_miss    = 0;                // hybrid: unpredicted (trace broken)
+
+static int tdleaf_target_mode()
+{
+    if (td_target_mode < 0) {
+        const char *v = getenv("TDLEAF_TARGET");
+        td_target_mode = (v && strcmp(v, "blend")  == 0) ? 1
+                       : (v && strcmp(v, "hybrid") == 0) ? 2 : 0;
+        if ((v = getenv("TDLEAF_QUIET_CP")) && *v)     td_quiet_cp     = (float)atof(v);
+        if ((v = getenv("TDLEAF_TRACE_LAMBDA")) && *v) td_trace_lambda = (float)atof(v);
+        if (td_target_mode == 1)
+            fprintf(stderr, "TDLeaf: target=blend (two-point lambda blend), "
+                            "quiet gate %.0f cp\n", (double)td_quiet_cp);
+        else if (td_target_mode == 2)
+            fprintf(stderr, "TDLeaf: target=hybrid (blend + prediction-gated trace), "
+                            "trace lambda %.2f\n", (double)td_trace_lambda);
+    }
+    return td_target_mode;
+}
+
+// ---------------------------------------------------------------------------
 // tdleaf_accumulate_game — steps 1-3: compute d[], e[], accumulate gradients.
 // Does NOT apply or save.  Called by both tdleaf_update_after_game and replay.
 // ---------------------------------------------------------------------------
@@ -181,20 +219,80 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result,
 
     static float e[MAX_GAME_PLY];
     e[T - 1] = result - d[T - 1];
-    for (int t = T - 2; t >= 0; t--) {
-        float delta_d  = d[t + 1] - d[t];
+    const int target_mode = tdleaf_target_mode();
+    if (target_mode == 2) {
+        // Hybrid target: e_t = w·(result − d_t) + (1−w)·trace_t with a short,
+        // strongly damped trace in the bootstrap slot (see tdleaf.h).  The
+        // trace flows through record t only when the opponent played the
+        // reply the engine PREDICTED (search t's pv[1], verified by hash) —
+        // credit assignment strictly along lines the engine calculated.  An
+        // unpredicted reply breaks the trace (trace_t = 0, and the break
+        // propagates upstream through the recursion) but the record still
+        // trains on its outcome term.  No cp gate and no score clip here:
+        // predicted swings are calculated, not accidental.
+        const int N_ply = rec.plies[T - 1].game_ply;
+        static float tr[MAX_GAME_PLY];
+        tr[T - 1] = 0.0f;
+        for (int t = T - 2; t >= 0; t--) {
+            int dply = rec.plies[t + 1].game_ply - rec.plies[t].game_ply;
+            h_code expected = (dply == 1) ? rec.plies[t].key_own
+                            : (dply == 2) ? rec.plies[t].key_reply : 0;
+            if (expected != 0 && expected == rec.plies[t + 1].root_key) {
+                tr[t] = (d[t + 1] - d[t]) + td_trace_lambda * tr[t + 1];
+                td_pred_hit++;
+            } else {
+                tr[t] = 0.0f;
+                td_pred_miss++;
+            }
+        }
+        for (int t = 0; t < T - 1; t++) {
+            int dend = N_ply - rec.plies[t].game_ply;
+            if (dend < 0) dend = 0;
+            float w = powf(lambda, (float)dend);
+            e[t] = w * (result - d[t]) + (1.0f - w) * tr[t];
+        }
+    } else if (target_mode == 1) {
+        // Two-point blend target: e_t = w·(result − d_t) + (1−w)·(d_{t+1} − d_t)
+        // with w = λ^(N − game_ply_t) — the outcome's weight decays with
+        // game-ply distance from the end, the remainder bootstraps from the
+        // NEXT search's score only.  Local per record (no trace recursion), so
+        // distant eval swings never leak into e_t.  Gated on transition
+        // quietness (direct consecutive-score test; the opponent's intervening
+        // reply means position-quietness at t cannot certify the transition):
+        // loud records get e_t = 0 and contribute no gradient.  The score-
+        // change clip is subsumed by the gate.  N = last recorded root
+        // game-ply, so the final record's w = λ^0 = 1 reproduces the
+        // outcome-only e[T−1] above.
+        const int N_ply = rec.plies[T - 1].game_ply;
+        for (int t = 0; t < T - 1; t++) {
+            float delta_cp = fabsf(score_w_cp[t + 1] - score_w_cp[t]);
+            if (delta_cp > td_quiet_cp) {
+                e[t] = 0.0f;
+                td_blend_skip++;
+                continue;
+            }
+            td_blend_used++;
+            int dend = N_ply - rec.plies[t].game_ply;
+            if (dend < 0) dend = 0;
+            float w = powf(lambda, (float)dend);
+            e[t] = w * (result - d[t]) + (1.0f - w) * (d[t + 1] - d[t]);
+        }
+    } else {
+        for (int t = T - 2; t >= 0; t--) {
+            float delta_d  = d[t + 1] - d[t];
 
-        float delta_cp = fabsf(score_w_cp[t + 1] - score_w_cp[t]);
-        if (delta_cp > score_clip_cp && delta_cp > 0.0f)
-            delta_d *= score_clip_cp / delta_cp;
-        // Decay per GAME-PLY: pow(lambda, dply).  dply = 2 in the two-process
-        // harness (own moves only), 1 under internal self-play — so one lambda
-        // expresses the same real-game horizon in both modes.  Guard dply >= 1
-        // against any out-of-order/duplicate ply.
-        int dply = rec.plies[t + 1].game_ply - rec.plies[t].game_ply;
-        if (dply < 1) dply = 1;
-        float trace_decay = (dply == 1) ? lambda : powf(lambda, (float)dply);
-        e[t] = delta_d + trace_decay * e[t + 1];
+            float delta_cp = fabsf(score_w_cp[t + 1] - score_w_cp[t]);
+            if (delta_cp > score_clip_cp && delta_cp > 0.0f)
+                delta_d *= score_clip_cp / delta_cp;
+            // Decay per GAME-PLY: pow(lambda, dply).  dply = 2 in the two-process
+            // harness (own moves only), 1 under internal self-play — so one lambda
+            // expresses the same real-game horizon in both modes.  Guard dply >= 1
+            // against any out-of-order/duplicate ply.
+            int dply = rec.plies[t + 1].game_ply - rec.plies[t].game_ply;
+            if (dply < 1) dply = 1;
+            float trace_decay = (dply == 1) ? lambda : powf(lambda, (float)dply);
+            e[t] = delta_d + trace_decay * e[t + 1];
+        }
     }
 
     // 3. For each ply, run FP32 forward pass + accumulate gradients
@@ -409,8 +507,21 @@ void tdleaf_update_after_game(TDGameRecord &rec, float result, const char *save_
                 fprintf(stderr, "TDLeaf: failed to save weights to %s\n", save_path);
         }
 
-        fprintf(stderr, "TDLeaf: applied batch of %d game(s), latest %d plies (result=%.1f)\n",
-                td_batch_pending, T, (double)result);
+        if (td_target_mode == 1 && (td_blend_used + td_blend_skip) > 0)
+            fprintf(stderr, "TDLeaf: applied batch of %d game(s), latest %d plies (result=%.1f), "
+                            "quiet-accept %.1f%% (%ld/%ld transitions)\n",
+                    td_batch_pending, T, (double)result,
+                    100.0 * (double)td_blend_used / (double)(td_blend_used + td_blend_skip),
+                    td_blend_used, td_blend_used + td_blend_skip);
+        else if (td_target_mode == 2 && (td_pred_hit + td_pred_miss) > 0)
+            fprintf(stderr, "TDLeaf: applied batch of %d game(s), latest %d plies (result=%.1f), "
+                            "predicted %.1f%% (%ld/%ld transitions)\n",
+                    td_batch_pending, T, (double)result,
+                    100.0 * (double)td_pred_hit / (double)(td_pred_hit + td_pred_miss),
+                    td_pred_hit, td_pred_hit + td_pred_miss);
+        else
+            fprintf(stderr, "TDLeaf: applied batch of %d game(s), latest %d plies (result=%.1f)\n",
+                    td_batch_pending, T, (double)result);
         td_batch_pending = 0;
     } else {
         fprintf(stderr, "TDLeaf: accumulated %d-ply game (result=%.1f), batch %d/%d\n",
