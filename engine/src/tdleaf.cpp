@@ -34,6 +34,10 @@ static bool tdleaf_dump_wanted()
     return wanted == 1;
 }
 
+// Defined with the learning-target selection block below; needed here so
+// tdleaf_record_ply can snapshot root data when root learning is on.
+static bool tdleaf_root_enabled();
+
 // ---------------------------------------------------------------------------
 // tdleaf_record_ply — walk the PV to the leaf, then snapshot its accumulator
 // ---------------------------------------------------------------------------
@@ -131,8 +135,10 @@ void tdleaf_record_ply(TDGameRecord &rec,
     r.pos               = cur;  // store leaf position for Flavor A replay
     r.id_depth          = (int8_t)((search_depth < 1) ? 1 :
                                    (search_depth > 127) ? 127 : search_depth);
-    if (tdleaf_dump_wanted()) {
-        // Root snapshot + static eval for the root-row TSV dump.
+    const bool want_root = tdleaf_root_enabled();
+    if (tdleaf_dump_wanted() || want_root) {
+        // Root snapshot + static eval for the root-row TSV dump and for
+        // online root learning (TDLEAF_ROOT=1).
         r.root_pos = root_pos;
         int pc_root = 0;
         for (int sd = 0; sd < 2; sd++)
@@ -140,6 +146,29 @@ void tdleaf_record_ply(TDGameRecord &rec,
                 pc_root += root_pos.plist[sd][pt][0];
         pc_root = (pc_root < 1) ? 1 : (pc_root > 32) ? 32 : pc_root;
         r.root_static = nnue_evaluate(root_acc, (int)root_pos.wtm, pc_root);
+        if (want_root) {
+            // Root gradient snapshot: accumulator, PSQT sums, stack, and
+            // active features — mirrors the leaf snapshot so the update pass
+            // can run nnue_forward_fp32 + nnue_accumulate_gradients on the
+            // root exactly as it does on the leaf.
+            memcpy(r.root_acc[0],  root_acc.acc[0],  NNUE_HALF_DIMS * sizeof(int16_t));
+            memcpy(r.root_acc[1],  root_acc.acc[1],  NNUE_HALF_DIMS * sizeof(int16_t));
+            memcpy(r.root_psqt[0], root_acc.psqt[0], NNUE_PSQT_BKTS * sizeof(int32_t));
+            memcpy(r.root_psqt[1], root_acc.psqt[1], NNUE_PSQT_BKTS * sizeof(int32_t));
+            r.root_stack = (pc_root - 1) / 4;
+            for (int p = 0; p < 2; p++) {
+                int ksq = root_pos.plist[p][KING][1];
+                r.root_n_ft[p] = 0;
+                for (int sd = 0; sd < 2; sd++)
+                    for (int pt = PAWN; pt <= KING; pt++)
+                        for (int i = 1; i <= root_pos.plist[sd][pt][0]; i++) {
+                            if (r.root_n_ft[p] >= NNUE_MAX_FT_PER_PERSP) goto root_ft_done;
+                            int fi = halfkav2_feature(p, ksq, root_pos.plist[sd][pt][i], pt, sd);
+                            if (fi >= 0) r.root_ft_idx[p][r.root_n_ft[p]++] = fi;
+                        }
+                root_ft_done:;
+            }
+        }
     }
 
     // Enumerate active features at the leaf position for FT/PSQT backprop.
@@ -173,6 +202,10 @@ static long  td_pred_hit     = 0;                // hybrid: predicted opponent r
 static long  td_pred_miss    = 0;                // hybrid: unpredicted replies
 static long  td_gate_pass    = 0;                // hybrid: trace flowed (predicted OR quiet)
 static long  td_gate_break   = 0;                // hybrid: trace broken (loud AND unpredicted)
+static int   td_root         = 0;                // TDLEAF_ROOT=1: online root learning
+static float td_root_weight  = TDLEAF_ROOT_WEIGHT;
+static long  td_root_used    = 0;                // root records passing the quiet gate
+static long  td_root_skip    = 0;                // root records rejected by it
 
 static int tdleaf_target_mode()
 {
@@ -182,6 +215,13 @@ static int tdleaf_target_mode()
                        : (v && strcmp(v, "hybrid") == 0) ? 2 : 0;
         if ((v = getenv("TDLEAF_QUIET_CP")) && *v)     td_quiet_cp     = (float)atof(v);
         if ((v = getenv("TDLEAF_TRACE_LAMBDA")) && *v) td_trace_lambda = (float)atof(v);
+        if ((v = getenv("TDLEAF_ROOT")) && *v && atoi(v) != 0) td_root = 1;
+        if ((v = getenv("TDLEAF_ROOT_WEIGHT")) && *v)  td_root_weight  = (float)atof(v);
+        if (td_root && td_target_mode == 0) {
+            fprintf(stderr, "TDLeaf: TDLEAF_ROOT=1 requires TDLEAF_TARGET=blend|hybrid "
+                            "— root learning disabled\n");
+            td_root = 0;
+        }
         if (td_target_mode == 1)
             fprintf(stderr, "TDLeaf: target=blend (two-point lambda blend), "
                             "quiet gate %.0f cp\n", (double)td_quiet_cp);
@@ -189,8 +229,20 @@ static int tdleaf_target_mode()
             fprintf(stderr, "TDLeaf: target=hybrid (blend + gated trace), "
                             "trace lambda %.2f, gate: predicted or |dcp| <= %.0f cp\n",
                     (double)td_trace_lambda, (double)td_quiet_cp);
+        if (td_root)
+            fprintf(stderr, "TDLeaf: root learning enabled (weight %.2f, "
+                            "gate |static-search| <= %.0f cp)\n",
+                    (double)td_root_weight, (double)td_quiet_cp);
     }
     return td_target_mode;
+}
+
+// Root learning enablement for tdleaf_record_ply (triggers env init on the
+// first recorded ply, before the first game's update runs).
+static bool tdleaf_root_enabled()
+{
+    tdleaf_target_mode();
+    return td_root == 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -303,6 +355,8 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result,
 
     // 3. For each ply, run FP32 forward pass + accumulate gradients
     const float cp_factor = 100.0f / 5776.0f;
+    const bool  root_learn = (td_root == 1 && target_mode >= 1);
+    const int   N_ply_end  = rec.plies[T - 1].game_ply;
 
     for (int t = 0; t < T; t++) {
         float sig_grad = d[t] * (1.0f - d[t]) / TDLEAF_K;
@@ -317,26 +371,73 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result,
         float id_weight = 1.0f / (1.0f + rec.plies[t].id_score_variance / TDLEAF_ID_VAR_SIGMA2);
         float grad_scale = e[t] * sig_grad * cp_factor * wtm_sign * id_weight;
 
-        if (grad_scale == 0.0f) continue;
+        if (grad_scale != 0.0f) {
+            NNUEActivations act;
+            act.stack = rec.plies[t].stack;
+            nnue_forward_fp32(rec.plies[t].acc, rec.plies[t].psqt,
+                              rec.plies[t].wtm, act);
+            memcpy(act.acc_raw[0], rec.plies[t].acc[0], NNUE_HALF_DIMS * sizeof(int16_t));
+            memcpy(act.acc_raw[1], rec.plies[t].acc[1], NNUE_HALF_DIMS * sizeof(int16_t));
+            act.n_ft[0] = rec.plies[t].n_ft[0];
+            act.n_ft[1] = rec.plies[t].n_ft[1];
+            memcpy(act.ft_idx[0], rec.plies[t].ft_idx[0], rec.plies[t].n_ft[0] * sizeof(int));
+            memcpy(act.ft_idx[1], rec.plies[t].ft_idx[1], rec.plies[t].n_ft[1] * sizeof(int));
 
-        NNUEActivations act;
-        act.stack = rec.plies[t].stack;
-        nnue_forward_fp32(rec.plies[t].acc, rec.plies[t].psqt,
-                          rec.plies[t].wtm, act);
-        memcpy(act.acc_raw[0], rec.plies[t].acc[0], NNUE_HALF_DIMS * sizeof(int16_t));
-        memcpy(act.acc_raw[1], rec.plies[t].acc[1], NNUE_HALF_DIMS * sizeof(int16_t));
-        act.n_ft[0] = rec.plies[t].n_ft[0];
-        act.n_ft[1] = rec.plies[t].n_ft[1];
-        memcpy(act.ft_idx[0], rec.plies[t].ft_idx[0], rec.plies[t].n_ft[0] * sizeof(int));
-        memcpy(act.ft_idx[1], rec.plies[t].ft_idx[1], rec.plies[t].n_ft[1] * sizeof(int));
+            // Dense piece value gradient: stm_count − opp_count per piece type.
+            int stm_p = rec.plies[t].wtm ? 1 : 0;
+            for (int pt = PAWN; pt <= KING; pt++)
+                act.piece_count_diff[pt - 1] = (int8_t)(rec.plies[t].pos.plist[stm_p][pt][0]
+                                                       - rec.plies[t].pos.plist[stm_p ^ 1][pt][0]);
 
-        // Dense piece value gradient: stm_count − opp_count per piece type.
-        int stm_p = rec.plies[t].wtm ? 1 : 0;
-        for (int pt = PAWN; pt <= KING; pt++)
-            act.piece_count_diff[pt - 1] = (int8_t)(rec.plies[t].pos.plist[stm_p][pt][0]
-                                                   - rec.plies[t].pos.plist[stm_p ^ 1][pt][0]);
+            nnue_accumulate_gradients(act, grad_scale, replay_mode);
+        }
 
-        nnue_accumulate_gradients(act, grad_scale, replay_mode);
+        // Online root learning (TDLEAF_ROOT=1, blend/hybrid): second gradient
+        // at the ROOT position — the online mirror of the offline corpus root
+        // rows.  e_root = w·(result − d_root) + (1−w)·(d_leaf − d_root): pull
+        // the root's static eval toward the outcome-blended search score
+        // (search-amplified self-distillation).  Gated on root quietness
+        // |root_static − score_root_stm| ≤ TDLEAF_QUIET_CP — a within-search
+        // test (no opponent move intervenes), matching the TSV dump's root
+        // gate.  Runs independently of the leaf error (including on records
+        // whose leaf gradient was gated out).
+        if (root_learn) {
+            const TDRecord &r = rec.plies[t];
+            if (fabsf((float)(r.root_static - r.score_root_stm)) > td_quiet_cp) {
+                td_root_skip++;
+            } else {
+                td_root_used++;
+                float root_w_cp = r.root_wtm ?  (float)r.root_static
+                                             : -(float)r.root_static;
+                float d_root    = 1.0f / (1.0f + expf(-root_w_cp / TDLEAF_K));
+                int dend = N_ply_end - r.game_ply;
+                if (dend < 0) dend = 0;
+                float w      = powf(lambda, (float)dend);
+                float e_root = w * (result - d_root) + (1.0f - w) * (d[t] - d_root);
+                float root_sig_grad = d_root * (1.0f - d_root) / TDLEAF_K;
+                float root_sign     = r.root_wtm ? -1.0f : 1.0f;
+                float root_scale    = e_root * root_sig_grad * cp_factor
+                                      * root_sign * id_weight * td_root_weight;
+                if (root_scale != 0.0f) {
+                    NNUEActivations act;
+                    act.stack = r.root_stack;
+                    nnue_forward_fp32(r.root_acc, r.root_psqt, r.root_wtm, act);
+                    memcpy(act.acc_raw[0], r.root_acc[0], NNUE_HALF_DIMS * sizeof(int16_t));
+                    memcpy(act.acc_raw[1], r.root_acc[1], NNUE_HALF_DIMS * sizeof(int16_t));
+                    act.n_ft[0] = r.root_n_ft[0];
+                    act.n_ft[1] = r.root_n_ft[1];
+                    memcpy(act.ft_idx[0], r.root_ft_idx[0], r.root_n_ft[0] * sizeof(int));
+                    memcpy(act.ft_idx[1], r.root_ft_idx[1], r.root_n_ft[1] * sizeof(int));
+
+                    int stm_p = r.root_wtm ? 1 : 0;
+                    for (int pt = PAWN; pt <= KING; pt++)
+                        act.piece_count_diff[pt - 1] = (int8_t)(r.root_pos.plist[stm_p][pt][0]
+                                                               - r.root_pos.plist[stm_p ^ 1][pt][0]);
+
+                    nnue_accumulate_gradients(act, root_scale, replay_mode);
+                }
+            }
+        }
     }
 }
 
@@ -529,6 +630,10 @@ void tdleaf_update_after_game(TDGameRecord &rec, float result, const char *save_
         else
             fprintf(stderr, "TDLeaf: applied batch of %d game(s), latest %d plies (result=%.1f)\n",
                     td_batch_pending, T, (double)result);
+        if (td_root == 1 && (td_root_used + td_root_skip) > 0)
+            fprintf(stderr, "TDLeaf: root-accept %.1f%% (%ld/%ld records)\n",
+                    100.0 * (double)td_root_used / (double)(td_root_used + td_root_skip),
+                    td_root_used, td_root_used + td_root_skip);
         td_batch_pending = 0;
     } else {
         fprintf(stderr, "TDLeaf: accumulated %d-ply game (result=%.1f), batch %d/%d\n",
@@ -601,8 +706,12 @@ static void tdleaf_refresh_scores(TDGameRecord &rec)
 void tdleaf_replay(TDGameRecord &rec, float result, const char *save_path)
 {
     if (rec.n_plies < TDLEAF_MIN_PLIES) return;
+    // Skip the ring-buffer copy entirely when replay is disabled (the settled
+    // recipe: TDLEAF_REPLAY_K=0).  TDGameRecord is several MB — copying into
+    // the 8-slot buffer would page in ~40 MB of BSS per process for nothing.
+    if (tdleaf_replay_k <= 0) return;
 
-    // Always push the completed game into the ring buffer.
+    // Push the completed game into the ring buffer.
     int slot = td_replay_head;
     td_replay_buf[slot].rec    = rec;
     td_replay_buf[slot].result = result;

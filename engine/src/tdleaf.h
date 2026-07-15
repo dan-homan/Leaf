@@ -84,8 +84,20 @@ static const float TDLEAF_ID_VAR_SIGMA2  = 10000.0f;
 // upstream), but the record still trains on its outcome term.  λ_trace = 0
 // reproduces blend with this widened gate.
 // Env overrides: TDLEAF_TRACE_LAMBDA, TDLEAF_QUIET_CP.
+//
+// Online root learning (TDLEAF_ROOT=1, blend/hybrid modes only) adds a second
+// gradient per record at the ROOT position — the online mirror of the offline
+// corpus root rows (search-amplified labels):
+//     e_root_t = w·(result − d_root_t) + (1−w)·(d_t − d_root_t)
+// where d_root_t is the root's own static eval (sigmoid space) and d_t the
+// record's search score; same w as the leaf error.  Gated on root quietness
+// |root_static − score_root_stm| ≤ TDLEAF_QUIET_CP (a within-search test —
+// no opponent move intervenes, so static-vs-search is the correct gate here).
+// No trace on the root error: the search itself supplies the lookahead.
+// TDLEAF_ROOT_WEIGHT (default 1.0) scales the root gradient contribution.
 static const float TDLEAF_QUIET_CP       = 60.0f;
 static const float TDLEAF_TRACE_LAMBDA   = 0.7f;
+static const float TDLEAF_ROOT_WEIGHT    = 1.0f;
 // Gradient clipping: if global L2 norm of all gradients exceeds this threshold,
 // scale all gradients by max_norm/norm.  Set to 0 to disable.
 static const float TDLEAF_GRAD_CLIP_NORM = 1.0f;
@@ -219,13 +231,23 @@ struct TDRecord {
     // Leaf position for Flavor A replay: allows full accumulator rebuild from
     // current FT weights during replay, rather than using stale accumulators.
     position pos;
-    // Root-position snapshot for the TSV dump (TDLEAF_DUMP_TSV): the root's
-    // search score (score_root_stm) is a search-amplified label for root_pos,
-    // unlike the leaf's static eval which is self-distillation.  root_static
-    // is the root's STATIC eval (STM POV) — |root_static − score_root_stm|
-    // is the root quietness test.  Filled only when dumping is enabled.
+    // Root-position snapshot for the TSV dump (TDLEAF_DUMP_TSV) and online
+    // root learning (TDLEAF_ROOT=1): the root's search score (score_root_stm)
+    // is a search-amplified label for root_pos, unlike the leaf's static eval
+    // which is self-distillation.  root_static is the root's STATIC eval
+    // (STM POV) — |root_static − score_root_stm| is the root quietness test.
+    // Filled when dumping or root learning is enabled.
     position root_pos;
     int      root_static;
+    // Root gradient snapshot (TDLEAF_ROOT=1 only): accumulator, PSQT sums,
+    // active features, and stack index of the ROOT position, mirroring the
+    // leaf snapshot above so nnue_forward_fp32/nnue_accumulate_gradients can
+    // run on the root exactly as they do on the leaf.
+    int16_t root_acc [2][NNUE_HALF_DIMS];
+    int32_t root_psqt[2][NNUE_PSQT_BKTS];
+    int     root_ft_idx[2][NNUE_MAX_FT_PER_PERSP];
+    int8_t  root_n_ft[2];
+    int     root_stack;
     int8_t   id_depth;    // ID iteration count ≈ achieved search depth
 };
 

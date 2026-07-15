@@ -325,15 +325,71 @@ Smoke (depth-5 self-play, stale default net): trace-gate ~75% pass, of which
 predicted 40–43%; expect prediction higher at depth 6 with a mature net,
 rising as the net stabilizes.
 
+## Hybrid A/B at the 1e5 mark (`material_260714h2`, 2026-07-15)
+
+Same 1e5 recipe, `TDLEAF_TARGET=hybrid` with the widened gate.  Combined pool
+(different anchor set from the Part-1 pool, so compare within this table):
+
+| | trace (260708) | blend (260714) | hybrid (260714h2) |
+|---|---|---|---|
+| tdleaf (post-online) | +61 | −58 | **+19** |
+| final (post-offline) | +185 | +25 | **+91** |
+
+The hybrid recovered roughly two-thirds of the online-phase gap to the legacy
+trace (−119 → −42) and half the final gap, while post-online val MSE stayed at
+the offline fixed point (the blend property that matters).  Reading: the
+prediction-gated short trace restores most of the early-regime loud-event
+channel without reopening the long-horizon noise path.
+
+## Online root learning (`TDLEAF_ROOT=1`, 2026-07-15)
+
+The remaining channel offline had and online lacked: the corpus ROOT rows'
+search-amplified labels.  Now mirrored online — a second gradient per record
+at the root position (blend/hybrid modes only; legacy warns and disables):
+
+    e_root_t = w·(result − d_root_t) + (1−w)·(d_t − d_root_t)
+
+- `d_root_t` = root's own static eval (sigmoid space, from `root_static`
+  captured at record time); `d_t` = the record's search score (the existing
+  leaf label); same `w = λ^(N − game_ply_t)` as the leaf error.  The
+  `(1−w)(d_t − d_root_t)` term is search-amplified self-distillation — pull
+  the static eval toward what depth-6 search concluded from this exact
+  position.  No trace on the root error: the search itself is the lookahead.
+- Gate: `|root_static − score_root_stm| ≤ TDLEAF_QUIET_CP` — a WITHIN-search
+  test (no opponent move intervenes), matching the TSV dump's root gate; the
+  transition-quietness argument does not apply here.
+- Plumbing: `tdleaf_record_ply` snapshots the root accumulator/PSQT/features/
+  stack into the TDRecord (`root_acc` was already a parameter); the update
+  pass runs `nnue_forward_fp32` + `nnue_accumulate_gradients` on the root
+  exactly as on the leaf, signed by `root_wtm`, scaled by
+  `id_weight × TDLEAF_ROOT_WEIGHT` (env, default 1.0).  Root gradients apply
+  even on records whose leaf error was gated out.  Nothing new persists —
+  `.tdleaf.bin` v12 unchanged.
+- Memory: TDRecord +4.4 KB (~+4.4 MB on the live game record).  Side fix
+  found during sizing: `tdleaf_replay` copied every finished game into the
+  8-slot ring buffer even with replay disabled (`TDLEAF_REPLAY_K=0`), paging
+  in ~40 MB of dead BSS per process — now an early return when
+  `tdleaf_replay_k <= 0`.
+- Telemetry: `root-accept %` line at each batch apply.
+- Smoke (depth-5, stale default net): hybrid+root and blend+root run with
+  root-accept ~54–56%; legacy+root refuses cleanly; hybrid-without-root
+  unchanged.  Expect higher accept on mature nets at depth 6.
+
+Prediction: if online root+leaf learning fully replicates the offline
+objective, the offline epoch ladder should collapse toward zero on late
+iterations — at which point consolidation can be shortened or skipped and the
+loop economics change.
+
 ## Status / next steps
 
-- All three modes smoke-tested (isolated scratch dir; legacy path verified
-  unchanged).  Committed on `tdleaf-score-trace` (898ff44).
-- Next: 1e5 sanity run with `TDLEAF_TARGET=hybrid` for a three-way comparison
-  at the same mark (trace +88 / blend −36 / hybrid ?).
+- Committed on `tdleaf-score-trace`: targets (898ff44), doc (43f50d1),
+  widened hybrid gate (2efc810), online root learning (this commit).
+- Next: 1e5 sanity with `TDLEAF_TARGET=hybrid TDLEAF_ROOT=1` — watch the
+  tdleaf-phase Elo close toward the trace's mark and the epoch ladder shrink.
 - Then the design-target test: 1M games from `material_260708-5e6g_final`,
-  candidate target vs legacy — the question is holding/gaining where the
-  trace lost −71.
+  best candidate vs legacy — the question is holding/gaining where the trace
+  lost −71.
 - Open A/Bs queued behind the target choice: drop `id_weight` in
-  blend/hybrid; offline `--epochs 2` for late iterations; online LR decay
-  across the chain (complementary to any target change).
+  blend/hybrid; `TDLEAF_ROOT_WEIGHT` sweep; offline `--epochs 2` for late
+  iterations; online LR decay across the chain (complementary to any target
+  change).
