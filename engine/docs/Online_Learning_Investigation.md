@@ -632,13 +632,19 @@ search(E) > E again, restoring headroom by construction.
 
 ## 3.7 Recommendations
 
-1. **Stop online weight updates at this maturity** — generate with a
-   `TDLEAF_READONLY=1` pair.  This matters more than Part 1's framing
-   suggested: displacement doesn't just cost the online phase its Elo, it
-   *poisons the labels* for the offline phase and any future consolidation.
-   A readonly-generated corpus is labeled by the seed itself; consolidating
-   on it is the clean, unconfounded test of whether *any* d6 signal remains
-   (predicted: ~0).
+1. **Stop online weight updates at this maturity** — generate with a frozen
+   pair: `TDLEAF_FREEZE=1` (runtime env var, added 2026-07-16 for exactly
+   this experiment; records + dumps the corpus but skips all gradient
+   updates and `.tdleaf.bin` writes).  NOT the compile-time
+   `TDLEAF_READONLY=1` flag, which compiles out the record/update hooks and
+   therefore dumps no corpus — and which silently does nothing when exported
+   as an env var (discovered the hard way: the first attempt at this run
+   exported it and the pair kept learning).  This matters more than Part 1's
+   framing suggested: displacement doesn't just cost the online phase its
+   Elo, it *poisons the labels* for the offline phase and any future
+   consolidation.  A frozen-generated corpus is labeled by the seed itself;
+   consolidating on it is the clean, unconfounded test of whether *any* d6
+   signal remains (predicted: ~0).
 2. **Next iteration at depth 8.**  ~250–400k games at d8 costs about the same
    as 1M at d6 and each label carries genuinely new information.  Both the
    saturation theory and the historical d6→d8 bump predict this is where the

@@ -206,6 +206,7 @@ static int   td_root         = 0;                // TDLEAF_ROOT=1: online root l
 static float td_root_weight  = TDLEAF_ROOT_WEIGHT;
 static long  td_root_used    = 0;                // root records passing the quiet gate
 static long  td_root_skip    = 0;                // root records rejected by it
+static int   td_freeze       = 0;                // TDLEAF_FREEZE=1: record + dump, no updates
 
 static int tdleaf_target_mode()
 {
@@ -217,6 +218,7 @@ static int tdleaf_target_mode()
         if ((v = getenv("TDLEAF_TRACE_LAMBDA")) && *v) td_trace_lambda = (float)atof(v);
         if ((v = getenv("TDLEAF_ROOT")) && *v && atoi(v) != 0) td_root = 1;
         if ((v = getenv("TDLEAF_ROOT_WEIGHT")) && *v)  td_root_weight  = (float)atof(v);
+        if ((v = getenv("TDLEAF_FREEZE")) && *v && atoi(v) != 0) td_freeze = 1;
         if (td_root && td_target_mode == 0) {
             fprintf(stderr, "TDLeaf: TDLEAF_ROOT=1 requires TDLEAF_TARGET=blend|hybrid "
                             "— root learning disabled\n");
@@ -233,8 +235,24 @@ static int tdleaf_target_mode()
             fprintf(stderr, "TDLeaf: root learning enabled (weight %.2f, "
                             "gate |static-search| <= %.0f cp)\n",
                     (double)td_root_weight, (double)td_quiet_cp);
+        if (td_freeze)
+            fprintf(stderr, "TDLeaf: TDLEAF_FREEZE=1 — weights frozen "
+                            "(recording + TSV dump only; no gradient updates, "
+                            "no .tdleaf.bin writes)\n");
     }
     return td_target_mode;
+}
+
+// Runtime freeze (TDLEAF_FREEZE=1 env): play and dump exactly as a learning
+// binary would, but skip gradient accumulation, weight application, and all
+// .tdleaf.bin writes.  Unlike the compile-time TDLEAF_READONLY flag (which
+// compiles out the record/update hooks entirely, so no corpus is dumped),
+// this keeps the corpus dump alive — it exists for generate-only hybrid-loop
+// iterations where the labels must come from a fixed net.
+static bool tdleaf_frozen()
+{
+    tdleaf_target_mode();   // triggers the one-time env read
+    return td_freeze == 1;
 }
 
 // Root learning enablement for tdleaf_record_ply (triggers env init on the
@@ -601,6 +619,11 @@ void tdleaf_update_after_game(TDGameRecord &rec, float result, const char *save_
     // that feed the TD update, so corpus and learning stay consistent.
     tdleaf_dump_game(rec, result);
 
+    // Frozen (TDLEAF_FREEZE=1): the dump above still runs, but no gradients
+    // accumulate — so no batch ever applies, and tdleaf_flush_batch stays a
+    // no-op.  The .tdleaf.bin is never touched.
+    if (tdleaf_frozen()) return;
+
     tdleaf_accumulate_game(rec, result);
     td_batch_pending++;
 
@@ -709,7 +732,7 @@ void tdleaf_replay(TDGameRecord &rec, float result, const char *save_path)
     // Skip the ring-buffer copy entirely when replay is disabled (the settled
     // recipe: TDLEAF_REPLAY_K=0).  TDGameRecord is several MB — copying into
     // the 8-slot buffer would page in ~40 MB of BSS per process for nothing.
-    if (tdleaf_replay_k <= 0) return;
+    if (tdleaf_replay_k <= 0 || tdleaf_frozen()) return;
 
     // Push the completed game into the ring buffer.
     int slot = td_replay_head;

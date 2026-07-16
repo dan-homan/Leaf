@@ -710,6 +710,18 @@ When dumping is enabled, `tdleaf_record_ply` additionally snapshots the root
 position and computes its static eval (one extra `nnue_evaluate` per recorded
 ply; skipped entirely when the env var is unset).
 
+**Generate-only play (`TDLEAF_FREEZE=1`, env):** freezes the weights at
+runtime — games are recorded and dumped exactly as in a learning run, but
+gradient accumulation, weight application, and all `.tdleaf.bin` writes are
+skipped, so the corpus labels come from a fixed net.  This is the tool for
+generate-only hybrid-loop iterations (see Part 3 of
+`Online_Learning_Investigation.md`).  Do **not** use the compile-time
+`TDLEAF_READONLY=1` flag for this: it compiles out the record/update hooks
+entirely, so a READONLY binary plays with frozen weights but **dumps no
+corpus** (it exists for rating/inference binaries that load a `.tdleaf.bin`
+pair).  Note the name: `TDLEAF_READONLY` is *only* a compile flag — exporting
+it as an env var does nothing.
+
 ---
 
 ### Outcome-Imbalance Drift — Guidance

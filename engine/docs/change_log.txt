@@ -1,5 +1,19 @@
 Changes since 2017_12_24
 
+2026_07_16 -- TDLEAF_FREEZE=1 (runtime env var): play + record + TSV-dump
+               exactly as a learning binary, but skip gradient accumulation,
+               weight application, and all .tdleaf.bin writes — the tool for
+               generate-only hybrid-loop iterations where corpus labels must
+               come from a fixed net (Part 3 recommendation 1).  Needed
+               because the compile-time TDLEAF_READONLY=1 flag compiles out
+               the record/update hooks entirely (no corpus dump), and
+               exporting TDLEAF_READONLY as an env var silently does nothing.
+               Gates: early return in tdleaf_update_after_game after the dump
+               (nothing accumulates, so batch apply / save / flush all stay
+               no-ops) and in tdleaf_replay before the ring-buffer copy.
+               Startup notice on stderr; smoke-tested (4-game fastchess run:
+               notice prints, zero batch applies, .tdleaf.bin md5 unchanged,
+               leaf+root TSVs dumped).  Documented in TRAINING.md.
 2026_07_16 -- Online-learning investigation Part 3 (docs/
                Online_Learning_Investigation.md): the 1M-game design-target
                test from the 5e6g seed lost online under all three targets
