@@ -393,3 +393,282 @@ loop economics change.
   blend/hybrid; `TDLEAF_ROOT_WEIGHT` sweep; offline `--epochs 2` for late
   iterations; online LR decay across the chain (complementary to any target
   change).
+
+*(The design-target test ran 2026-07-15/16 — results and a substantially
+revised picture in Part 3 below.  In particular, Part 1's "offline reliably
+extracts +80 that online missed" conclusion is corrected there.)*
+
+---
+
+# Part 3 — The design-target test, the seed-consolidation control, and what the offline gain actually is (2026-07-16)
+
+Both new targets ran the design-target test from Part 2: 1M-game online
+continuations from `material_260708-5e6g_final` (the chain's best net, "the
+seed" below), followed by the standard offline consolidation.  Analysis
+sequence (Claude Code session, 2026-07-16): the online losses replicated
+across targets → per-bucket weight forensics → a direct label-quality test of
+the endgame-staleness hypothesis (D. Homan) → a seed-consolidation control
+that overturned Part 1's interpretation of the offline gain.
+
+## 3.1 The design-target test failed: the online loss is target-independent
+
+| Online run (1M games, d6, from the 5e6g seed) | tdleaf vs seed (500g) | offline ladder gain (picked ep) | final vs seed (400g) |
+|---|---|---|---|
+| legacy trace (Part 1, →5e6) | −71 | +116 | — |
+| `TDLEAF_TARGET=hybrid` + `TDLEAF_ROOT=1` (`material_260708-6e6g`) | −50 | +88 (ep4 of 83/88/73/88/59/84) | +18 |
+| `TDLEAF_TARGET=blend`, no root (`material_260708b-6e6g`) | −95 | +100 (ep4 of 89/80/79/100) | −8 |
+
+Three independent 1M-game runs from the identical seed, three completely
+different error formulas (65-record eligibility trace / local one-step blend /
+prediction-gated short trace with root distillation), all losing 50–95 Elo
+online.  Under Part 1's zero-mean-random-walk model this is a ~1% event.  The
+online loss is **systematic** and lives in the shared update machinery, not
+the target math.  Part 1's framing needed one correction to see why:
+
+**A fixed-LR stochastic update process started from a validated optimum has
+strictly negative expected Elo even with a perfectly unbiased gradient.**  The
+seed is not a random point — it is the epoch-ladder-selected best of an
+offline consolidation, i.e. a local Elo optimum (plus ~+10–15 of max-of-N
+selection luck; the ladders now pick among epochs whose val MSE is *identical*
+to 4 decimal places, so the pick is pure noise selection).  Displacing it by
+any radius loses Elo roughly quadratically in the radius, regardless of
+direction.  The online phase at the current fixed Adam LRs guarantees a
+displacement of roughly constant radius (the stationary noise ball).  Early in
+the chain the real signal dwarfed that cost (+355 at 1e5); by 5e6 the signal
+is ~0 and the cost is unchanged, so *every* continuation loses — "systematic
+in expectation, random in direction."  −50/−71/−95 are draws of the
+displacement magnitude, not three discoveries of the same bad direction.
+
+Shared-machinery amplifiers of the displacement radius, all absent offline
+(candidate list for later mitigation, none yet individually confirmed):
+
+1. **Correlated batch-8 same-game updates** — all of one game's records land
+   in one batch; late-game records carry the same-sign outcome error onto the
+   same rows dozens of times per batch (see 3.4).
+2. **~13–16 concurrent writers with stale-baseline delta merging** (t_adam
+   +9.4k per process ≈ 75k games/process over 1M games) — ~W× the effective
+   single-writer LR near a fixed point; the same staleness physics that killed
+   the sharded offline trainer.
+3. **Phase-boundary Adam-v mismatch** — the online phase inherits `v` from
+   the offline trainer's batch-512 gradients, ~8× smaller in noise scale than
+   online's batch-8 gradients, so every process opens the run with
+   step-clip-sized updates until `v` re-adapts.  (`t_ft_session` guards FT
+   against exactly this; the FC/PSQT Adam state has no equivalent.)
+   Checkable with a `TDLEAF_LOG_STEP_CLIPS=1` build.
+
+Ruled out for these runs: label corruption from UCI self-adjudication
+(generation runs `--no-adjudication`, so results come from natural
+terminations where the terminal-position checks are reliable); gate
+starvation (accept rates healthy, and the very differently-gated targets
+landed the same); the Part-1 fc1-bias-drift canary (online shifted fc1_bias
+coherently +61 mean, but offline pushed it *further the same direction* +38 —
+whatever offline repairs, it is not the bias creep).
+
+## 3.2 Bucket forensics: where the online damage lives
+
+`scripts/bucket_phase_analysis.py` breaks each phase diff down by
+HalfKAv2_hm material bucket (0 = 1–4 pieces = deep endgame … 7 = 29–32 =
+opening), using the persisted per-weight update counts to separate exposure
+from per-update violence, and computes per bucket how much of the online
+displacement the offline phase *reverses* (projection; negative = repair,
+positive = confirm-and-extend).  Replicated findings across both runs:
+
+- **Online per-update PSQT movement is ~2× more violent in the deep-endgame
+  bucket**: med |dw|/√updates 12.7 (bucket 0) falling to ~6.8 (buckets 5–7)
+  for hybrid; 10.6 → 5.6 for blend.  Offline moves the same rows ~3× more
+  gently (~2.0–2.5 everywhere).
+- **Offline actively reverses online's low-bucket FC-stack movement**:
+  fc0_bias projection in bucket 1 = **−0.80 (hybrid) and −0.83 (blend)**;
+  the bucket-0 fc2 output bias moved −182/−112 online and was pushed back
+  +365/+225 offline.  In buckets 4–7 the projections are *positive*
+  (+0.35…+0.75) — offline confirms online's opening/middlegame direction.
+- Online's large endgame PSQT displacement is nearly **orthogonal** to
+  offline's movement (cos ≈ −0.1): neither confirmed nor repaired, it
+  persists into the final net as unvetted noise (hybrid's online phase moved
+  one PSQT row by 17,739 raw — 77% of the median |weight| — vs max ~3,900 in
+  every other phase).
+
+So by the offline objective's lights, online's low-material learning was
+counterproductive while its opening/middlegame learning was directionally
+right — consistent with an endgame-specific pathology.
+
+## 3.3 Endgame-staleness hypothesis: tested at the label level and rejected
+
+Hypothesis (D. Homan): depth-6 PV-leaf targets are "stale" — the leaf is 6+
+plies off-game, horizon effects steer the game elsewhere, so game-derived
+corrections are misdirected — worst in endgames where depth 6 is very short;
+motivated by earlier pure-TDLeaf generations where d6 plateaued and switching
+to d8 gave a clear bump.  Proposed fix: game-phase-dependent depth limits.
+
+Direct test (`scripts/label_quality_by_bucket.py`, 1.2M root rows sampled
+from the hybrid run's corpus): per bucket, how well do the depth-6 search
+scores actually predict game outcomes?
+
+| bucket | MSE(outcome), K=220 | \|cp\|≥150 converts to win | advantaged side loses | mean plies to game end |
+|---|---|---|---|---|
+| 0 (deep endgame) | **0.011** | **91.8%** | **0.0%** | 33 |
+| 1 | 0.029 | 82.9% | 0.4% | 70 |
+| 2 | 0.049 | 84.4% | 2.2% | 80 |
+| 3 | 0.078 | 83.9% | 4.7% | 87 |
+| 4 | 0.115 | 80.7% | 8.2% | 97 |
+| 5 | 0.151 | 77.2% | 11.9% | 107 |
+| 6 | 0.185 | 72.3% | 17.0% | 118 |
+| 7 (opening) | **0.207** | **66.5%** | **22.8%** | 132 |
+
+Depth-6 **endgame labels are the cleanest in the corpus by an order of
+magnitude** — a ≥150 cp endgame advantage converts 92% of the time and
+essentially never loses.  The stalest labels are in the *opening*, where the
+outcome is 132 plies of play away.  Leaf-row MSE tracks root-row MSE within
+~5% in every bucket — if stale leaf positions were absorbing off-trajectory
+corrections, their static evals would be less outcome-consistent than the
+root search scores, and they are not.  The endgame-staleness mechanism, as
+stated, is contradicted.  (The d6→d8 historical bump has a different
+explanation — see 3.6.)
+
+## 3.4 Reinterpretation: endgame *correlation*, not endgame *staleness*
+
+The mechanism that fits both 3.2 and 3.3: endgame records are the tail of
+every game — dozens of near-identical positions hitting the *same* PSQT rows
+and the *same* FC stack — and by then the outcome weight `w = λ^(N−ply)` has
+gone to ~1, so every late record in a game carries the **same-sign** error on
+the **same parameters**, all inside one batch (batch = 8 games).  Sharp labels
+do not help when the update is a coherent 30-hit hammer on one bucket's
+weights: Adam's `m` spikes, steps run near the clip, and the phase overshoots
+along per-game directions.  Offline's global shuffle is precisely the
+antidote — each endgame position's gradient is averaged against 511 unrelated
+positions — which is why offline both moves those weights ~3× more gently
+*and* reverses online's displacement there.  The violence and the reversal
+are overshoot signatures, not wrong-label signatures.
+
+Phase-dependent depth limits are therefore not the indicated fix (they buy
+better labels where labels are already cleanest).  Mechanism-targeted A/Bs,
+in order of cost: `TDLEAF_BATCH_SIZE` 8 → 64 (dilutes within-game coherence,
+free); per-bucket down-weighting or record subsampling for buckets ≤ 2
+online; online LR decay (blunt-instrument fix for the overall displacement).
+Note: if depth reallocation is ever wanted, switching training games from
+fixed-depth to fixed-nodes gives phase-adaptive depth for free (narrow
+endgame trees search deeper at constant cost).
+
+## 3.5 The seed-consolidation control: the offline "+80–116" was repair, not signal
+
+Part 1 left two readings of the reliable offline gain open.  World A: it is
+mostly *repair* of the online displacement.  World B: it is fresh-signal
+extraction that would accrue from any starting point — in which case online
+learning is pure downside and could simply be skipped.  The discriminating
+experiment turned out to need no new games at all: batch-train the
+**undisplaced seed** on the hybrid run's existing corpus — the *identical
+data* whose consolidation "gained +88" from the displaced start — and ladder
+each epoch against the seed itself:
+
+```sh
+gzip -kdc material_260708-6e6g_work/corpus.tsv.gz > corpus_6e6g.tsv
+python3 train.py --tag seedctl-260716 --skip-online \
+    --net nn-material_260708.nnue \
+    --state material_260708-5e6g_final.tdleaf.bin \
+    --corpus corpus_6e6g.tsv \
+    --epochs 2 --bt-K 220 --bt-threads 8 \
+    --gauntlet-epochs --no-final-gauntlet
+```
+
+Result (1000 games/epoch vs the seed):
+
+| | W/L/D | Elo vs seed |
+|---|---|---|
+| epoch 1 | 298/434/268 | **−48 ± 11** |
+| epoch 2 | 361/380/259 | −7 ± 11 |
+
+Consolidating the seed on a fresh 1M-game corpus does not gain +88 — it
+**loses 48 Elo at epoch 1** and claws back to −7 at epoch 2.  World A is
+confirmed decisively, and then some: the offline gains throughout the late
+chain were repair of online self-damage measured against a damaged baseline;
+the fresh-signal content of 1M new depth-6 games for this net is **zero
+within noise**.  The loop at this maturity is a treadmill — online damages,
+offline repairs, the ladder picks a lucky epoch — netting +18/−8 per
+iteration.
+
+## 3.6 Why epoch 1 *loses*: the corpus distills its generator
+
+The −48 is not mere diffusion.  Three measurements lock together:
+
+1. **The corpus objective prefers the displaced generator over the stronger
+   seed.**  Baseline val MSE(blend) on the identical corpus: displaced
+   post-online net 0.00901, seed 0.00972.  The −50 Elo net fits the data
+   better than the +0 net — because it *made* the data: the cp labels are its
+   search scores.
+2. **Consolidating the seed drags it toward the generator.**
+   `scripts/distill_alignment.py` projects the seed's ep1 movement (B) onto
+   the generator's online displacement (A = post-online − seed):
+   **cos(A,B) = +0.67…+0.80 in every major section** (fc0_bias +0.67,
+   fc1_bias +0.72, ft_w +0.69, PSQT +0.75 overall and +0.62…+0.80 per
+   bucket), with ep1 replicating ~40–50% of the generator's displacement
+   vector.  Epoch 2's partial Elo recovery came mostly from the fc2 output
+   biases snapping back (cos(A, ep2−ep1) = −0.72 there) while the bulk kept
+   drifting generator-ward.
+3. The Elo landed accordingly: seed dragged ~halfway toward a −50 net → −48.
+
+Caveat: part of the +0.7 alignment could be "any trainer on this data
+distribution moves in correlated directions" rather than pure label
+distillation; the readonly-generation control below de-confounds it (labels
+from the seed itself → consolidation movement should align with nothing and
+Elo should not drop).
+
+**The unified picture.**  The engine of the whole hybrid loop has always been
+the bootstrap **E ← search_d6(E)**: a depth-6 search of the current eval is a
+better evaluator than the eval itself, so distilling search scores (plus
+outcome anchoring) improves the net — while search_d6(E) is meaningfully
+better than E.  The flat epoch ladders, epoch-1-does-everything, and now
+seedctl ≈ 0 all say the static eval has converged to depth-6 search on quiet
+positions: **the d6 bootstrap is saturated.**  Past that point the only
+content left in a corpus's score labels is the generator's own noise and
+displacement, so the online phase displaces the generator, the corpus
+faithfully records the displaced net's evaluations, and offline consolidation
+propagates that displacement to whatever net is trained on it.  The loop
+cannot climb above its generator any more.
+
+This also puts the historical d6-plateau → d8-bump observation in its correct
+frame: not phase-dependent leaf staleness (3.3 — endgame labels are the
+cleanest), but **global bootstrap saturation** — deeper search makes
+search(E) > E again, restoring headroom by construction.
+
+## 3.7 Recommendations
+
+1. **Stop online weight updates at this maturity** — generate with a
+   `TDLEAF_READONLY=1` pair.  This matters more than Part 1's framing
+   suggested: displacement doesn't just cost the online phase its Elo, it
+   *poisons the labels* for the offline phase and any future consolidation.
+   A readonly-generated corpus is labeled by the seed itself; consolidating
+   on it is the clean, unconfounded test of whether *any* d6 signal remains
+   (predicted: ~0).
+2. **Next iteration at depth 8.**  ~250–400k games at d8 costs about the same
+   as 1M at d6 and each label carries genuinely new information.  Both the
+   saturation theory and the historical d6→d8 bump predict this is where the
+   next real gain lives.
+3. If online learning is ever re-enabled in the late regime, attack the
+   displacement machinery (3.1/3.4), verified by mid-phase Elo checkpoints of
+   the live state (the damage-timing curve discriminates the boundary
+   transient from noise-ball diffusion) and a `TDLEAF_LOG_STEP_CLIPS=1`
+   build; targets themselves are exonerated.
+4. Optional replicate: seedctl on the blend run's corpus
+   (`material_260708b-6e6g_work/corpus.tsv.gz`, generator displaced −95
+   rather than −50) — distillation predicts a *worse* ep1 than −48.
+5. Measurement hygiene: with val MSE identical across epochs, the
+   ladder-max pick carries ~+10–15 Elo of pure selection inflation, baked
+   into every seed and erased by every continuation — drop to `--epochs 2`
+   (done here) and treat small final-vs-seed deltas accordingly.
+
+## Methodology notes (Part 3)
+
+- Head-to-heads: `learn/match_Leaf_vmaterial_260708{,b}-6e6g-tdleaf_vs_*.pgn`
+  (500 games each), scored with `bayeselo_ratings.py`; sidecars
+  `learn/material_260708{,b}-6e6g_final.json` for ladders and final
+  gauntlets.
+- Per-bucket phase forensics: `scripts/bucket_phase_analysis.py <seed>
+  <post_online> <final>`, where post-online is
+  `<tag>_work/train/nn-material_260708.tdleaf.bin`.
+- Label quality: `gzip -cd <work>/corpus.tsv.gz | awk 'NR % 40 == 0' |
+  python3 scripts/label_quality_by_bucket.py` (root rows = depth > 0;
+  result column is White-POV {0, 0.5, 1}, cp is White-POV).
+- Distillation alignment: `scripts/distill_alignment.py` (paths hardcoded to
+  this experiment's four states; seedctl epoch states survive in
+  `learn/seedctl-260716_work/train/`).
+- Baseline/epoch val MSEs: `<tag>_work/train/train.log` of each run.

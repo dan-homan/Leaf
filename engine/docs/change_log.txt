@@ -1,5 +1,28 @@
 Changes since 2017_12_24
 
+2026_07_16 -- Online-learning investigation Part 3 (docs/
+               Online_Learning_Investigation.md): the 1M-game design-target
+               test from the 5e6g seed lost online under all three targets
+               (trace -71 / hybrid+root -50 / blend -95) — the late-chain
+               online loss is target-independent and systematic-in-
+               expectation (fixed-LR displacement from a ladder-selected
+               optimum).  Endgame-staleness hypothesis tested at the label
+               level and rejected (d6 endgame labels are the CLEANEST in the
+               corpus: 92% conversion of >=150cp advantages in bucket 0 vs
+               67% in bucket 7); the endgame-concentrated online damage is
+               correlation overshoot (same-game batch-8 outcome hammering),
+               not stale labels.  Seed-consolidation control (seedctl-260716,
+               no new games): batch-training the UNDISPLACED seed on the
+               hybrid run's own corpus loses -48 Elo at ep1 (-7 at ep2) —
+               Part 1's "offline reliably extracts +80" was repair of online
+               self-damage, not fresh signal, and the corpus DISTILLS ITS
+               GENERATOR (seed's ep1 movement aligns cos +0.67..+0.80 with
+               the generator's online displacement; the corpus objective
+               fits the displaced generator better than the stronger seed).
+               Conclusion: the d6 bootstrap E <- search_d6(E) is saturated;
+               recommendations: TDLEAF_READONLY generation, next iteration
+               at depth 8.  New forensic scripts: bucket_phase_analysis.py,
+               label_quality_by_bucket.py, distill_alignment.py.
 2026_07_12 -- hybrid_loop.py renamed train.py.  --continue <prev_tag> chains
                --net/--state/--gauntlet-anchors and cumulative_games from a
                new <tag>_final.json sidecar, so a multi-invocation training
