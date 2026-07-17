@@ -25,6 +25,7 @@
 #include "../src/nnue_training.cpp"
 #include "../src/tdleaf.cpp"
 #include "../src/nnue_batch_train.cpp"
+#include "../src/selfplay.cpp"
 #endif
 #include "../src/check.cpp"
 #include "../src/book.cpp"

@@ -266,8 +266,29 @@ struct TDGameRecord {
 };
 
 // ---------------------------------------------------------------------------
+// Score-history adjudication constants — cutechess/fastchess defaults
+// (-resign movecount=6 score=600, -draw movenumber=40 movecount=8 score=10).
+// Shared by tdleaf_self_adjudicate (UCI harness games) and the internal
+// selfplay adjudicator (selfplay.cpp) so both modes stay in sync.
+// ---------------------------------------------------------------------------
+static const int TDLEAF_RESIGN_PLIES     = 6;
+static const int TDLEAF_RESIGN_CP        = 600;
+static const int TDLEAF_DRAW_PLIES       = 8;
+static const int TDLEAF_DRAW_CP          = 10;
+static const int TDLEAF_DRAW_MOVE_NUMBER = 40;
+
+// ---------------------------------------------------------------------------
 // Public interface
 // ---------------------------------------------------------------------------
+
+// Draw by insufficient mating material: no pawns/rooks/queens and at most one
+// minor per side.  Mirrors fastchess's standalone rule (slightly over-broad on
+// KNvKB, which cannot force mate in normal play anyway).
+bool tdleaf_insufficient_material(const struct position &p);
+
+// Internal self-play driver (selfplay.cpp), dispatched from main() on
+// --selfplay.  Plays whole games in-process with TDLeaf recording every ply.
+int selfplay_main(int argc, char *argv[]);
 
 // Record one ply after each ts.search() call.
 // Walks the principal variation to the leaf position; records the leaf

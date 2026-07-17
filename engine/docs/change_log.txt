@@ -1,5 +1,34 @@
 Changes since 2017_12_24
 
+2026_07_17 -- Internal self-play driver (--selfplay), Stage 0 of the
+               single-optimizer training architecture (new src/selfplay.cpp,
+               TDLEAF builds only).  Plays whole games inside one process:
+               both sides searched by the same net, tdleaf_record_ply after
+               EVERY search (records alternate root STM, game-ply gap 1 —
+               the pow(lambda, dply) trace and hybrid key_own prediction
+               gate already handle this), exact in-engine result detection
+               (mate/stalemate/50-move/3-rep/insufficient material/max-ply)
+               plus fastchess-faithful resign/draw adjudication on the
+               alternating record stream (constants hoisted to tdleaf.h,
+               shared with tdleaf_self_adjudicate; insufficient-material
+               check extracted as tdleaf_insufficient_material).  Openings
+               from plain 4-field EPD lines (setboard is X-FEN/Shredder-FEN
+               ready, so FRC works); --epd-offset/--epd-stride stripe one
+               file across N processes; --epd-shuffle for deterministic
+               shuffling.  Per-game reset mirrors ucinewgame (full hash
+               realloc — TT probes match on key only, so stale cross-game
+               entries WOULD be probed otherwise).  TDLEAF_FREEZE=1 +
+               TDLEAF_DUMP_TSV give frozen corpus generation (one process
+               replaces a fastchess pair; no UCI adjudication ambiguity);
+               unfrozen gives live online learning with unchanged 8-game
+               batch semantics.  Also fixed a latent missing-brace bug in
+               tdleaf_dump_game that duplicated the TSV header when
+               appending to an existing dump file.  Validated: two identical
+               frozen runs produce byte-identical TSV content; 12-game FRC
+               smoke castles legally with zero illegal-move aborts; online
+               10-game run applies a batch + partial flush and saves to
+               --tdleaf-out; --batch-train consumes a selfplay-dumped
+               corpus; plain NNUE build unaffected.
 2026_07_17 -- train.py hardening + two features for the freeze/consolidate
                loop.  (1) --no-repeat and corpus dedup are now ALWAYS ON
                (both flags kept as deprecated no-ops); generation warns when

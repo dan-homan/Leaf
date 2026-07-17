@@ -434,6 +434,15 @@ int main(int argc, char *argv[])
       close_hash();
       return 0;
     }
+#if NNUE && TDLEAF
+    // Internal self-play training driver (selfplay.cpp); exits when done.
+    // Like `test`, any hash/cores args must precede --selfplay.
+    if(!strcmp(argv[argi], "--selfplay")) {
+      int sp_ret = selfplay_main(argc, argv);
+      close_hash();
+      return sp_ret;
+    }
+#endif
   }
 
   //-------------------------------------------------------------------

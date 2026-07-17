@@ -527,13 +527,14 @@ static void tdleaf_dump_game(const TDGameRecord &rec, float result)
                 snprintf(path, sizeof(path), "%s.%d.%s.tsv", prefix, (int)getpid(), kind);
                 FILE *f = fopen(path, "a");
                 if (f) {
-                    if (ftell(f) == 0)
+                    if (ftell(f) == 0) {
                         // Axis marker: the ply/endply columns are true GAME-ply
                         // (game-ply λ^Δ era).  --batch-train keys its result-decay
                         // axis off this line; legacy corpora without it use the
                         // old record-index axis.
                         fprintf(f, "# tdleaf-corpus axis=game-ply\n");
                         fprintf(f, "fen\tcp\tresult\tply\tdepth\tgid\tendply\n");
+                    }
                 } else {
                     fprintf(stderr, "TDLeaf: cannot open dump file %s\n", path);
                 }
@@ -827,6 +828,20 @@ void tdleaf_flush_batch(const char *save_path)
 // Engine-POV score per ply: TDRecord stores leaf STM score; if the leaf STM
 // matches rec.engine_color the leaf score is already engine-POV, else negate.
 // ---------------------------------------------------------------------------
+// Insufficient mating material: each side has no pawns/rooks/queens and at
+// most one minor piece (KvK, KvKN, KvKB, KNvK, KBvK, KNvKN, KBvKB, KNvKB).
+// Shared by UCI self-adjudication and the internal selfplay game loop.
+bool tdleaf_insufficient_material(const position &p)
+{
+    for (int side = 0; side <= 1; side++) {
+        int heavy = p.plist[side][PAWN][0] + p.plist[side][ROOK][0] +
+                    p.plist[side][QUEEN][0];
+        int minor = p.plist[side][KNIGHT][0] + p.plist[side][BISHOP][0];
+        if (heavy != 0 || minor > 1) return false;
+    }
+    return true;
+}
+
 bool tdleaf_self_adjudicate(const TDGameRecord &rec,
                             const position &final_pos,
                             const uint64_t *plist,
@@ -866,32 +881,18 @@ bool tdleaf_self_adjudicate(const TDGameRecord &rec,
         }
     }
 
-    // Insufficient mating material: each side has no pawns/rooks/queens and
-    // at most one minor piece (KvK, KvKN, KvKB, KNvK, KBvK, KNvKN, KBvKB,
-    // KNvKB).  Mirrors fastchess's standalone "draw by insufficient mating
-    // material" rule.  Slightly over-broad on KNvKB but those cannot force
-    // mate in normal play.
-    {
-        auto insuff = [](const position &p, int side) {
-            int heavy = p.plist[side][PAWN][0] + p.plist[side][ROOK][0] +
-                        p.plist[side][QUEEN][0];
-            int minor = p.plist[side][KNIGHT][0] + p.plist[side][BISHOP][0];
-            return heavy == 0 && minor <= 1;
-        };
-        if (insuff(final_pos, 0) && insuff(final_pos, 1)) {
-            out_result_white_pov = 0.5f;
-            return true;
-        }
+    if (tdleaf_insufficient_material(final_pos)) {
+        out_result_white_pov = 0.5f;
+        return true;
     }
 
     // ---- (2) Score-history self-adjudication -----------------------------
-    // Cutechess defaults: -resign movecount=6 score=600, -draw movenumber=40
-    // movecount=8 score=10.  Fastchess uses the same semantics.
-    const int RESIGN_PLIES      = 6;
-    const int RESIGN_CP         = 600;
-    const int DRAW_PLIES        = 8;
-    const int DRAW_CP           = 10;
-    const int DRAW_MOVE_NUMBER  = 40;
+    // Constants shared with the internal selfplay adjudicator (tdleaf.h).
+    const int RESIGN_PLIES      = TDLEAF_RESIGN_PLIES;
+    const int RESIGN_CP         = TDLEAF_RESIGN_CP;
+    const int DRAW_PLIES        = TDLEAF_DRAW_PLIES;
+    const int DRAW_CP           = TDLEAF_DRAW_CP;
+    const int DRAW_MOVE_NUMBER  = TDLEAF_DRAW_MOVE_NUMBER;
 
     int n = rec.n_plies;
 
