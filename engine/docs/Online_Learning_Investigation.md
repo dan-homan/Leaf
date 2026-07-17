@@ -857,6 +857,49 @@ freeze-generate/consolidate at increasing depth becomes the recipe; ~0 ⇒ the
 label ceiling is not depth-limited at this net capacity, and the
 investigation turns to architecture.
 
+## 4.6 The d8 iteration: the bootstrap reopened — and the family ladder badly understates it (2026-07-17)
+
+`material_260708-d8-1` completed: 188,000 frozen d8 games (26.0M corpus rows
+after auto-dedup — same rows-per-game as the deduped d6 corpus, confirming
+zero surviving duplication), consolidated in 2 epochs:
+
+| measurement | result |
+|---|---|
+| epoch ladder vs seed (1+0.01, 1000g) | ep1 **+10 ± 11**, ep2 **+15 ± 11** (picked ep2) |
+| final vs seed (3+0.05, 400g) | +13 ± 17 |
+| final vs `Leaf_vclassic_eval` (3+0.05, 400g) | **+57 ± 18** |
+| seed vs `Leaf_vclassic_eval` (3+0.05, 400g, direct control) | −8 ± 18 |
+
+Three findings:
+
+1. **The d8 bootstrap is open.**  The first positive consolidation of the
+   entire late chain (every d6 control read ≤ 0: −3 clean, −48 drifted,
+   −23…−89 duplicated).  E ← search_d8(E) has genuine headroom, exactly as
+   the historical d6-plateau → d8-bump observation predicted.
+2. **The iteration was data-limited, not signal-limited.**  Epoch 2 beat
+   epoch 1 (+15 vs +10) and val MSE was still falling at ep2
+   (0.006344 → 0.006106 → 0.006051) — the opposite of the late-d6
+   epoch-1-does-everything pattern.  26M rows is a fifth of what the d6
+   iterations trained on; the 188k-game cap is the book size, not a law.
+   Next iteration: bigger fresh-seed book (the generator recipe provides
+   unlimited disjoint lines), `--continue` from the d8-1 final, `--epochs 3`.
+3. **Within-family matches severely compress real improvements.**  The
+   triangle: d8-final is +13 over the seed head-to-head, but +57 vs classic
+   while the seed measures −8 vs classic (direct control) — i.e. **~+65 of
+   style-robust gain showing as +13 within the family**.  Family games (46%
+   draws here) are decided inside blind spots both nets inherited from the
+   same lineage; a tactically foreign opponent probes what actually changed.
+   Consequences for measurement hygiene: the epoch ladder (NNUE-vs-seed)
+   remains fine for epoch *selection* (relative ordering within a run), but
+   iterations must be judged by a foreign-anchor gauntlet —
+   `Leaf_vclassic_eval` should stay in `--gauntlet-anchors` for the whole
+   chain, ideally joined by a second anchor of a different style to avoid
+   overfitting the metric to classic specifically.
+
+Status: the freeze-generate → consolidate loop at d8 is the recipe of
+record; the chain continues from `material_260708-d8-1_final` with an
+expanded book.
+
 ## Methodology notes (Part 4)
 
 - Game-signature duplication: `awk` extraction of `[FEN]`+`[PlyCount]`+
@@ -874,3 +917,7 @@ investigation turns to architecture.
   replicate.
 - Freeze smoke test and gate placement: commit cc74ebd; duplication tooling:
   commit 3140cb2.
+- d8 iteration (4.6): sidecar `learn/material_260708-d8-1_final.json`
+  (ladder + gauntlets), trainer log
+  `learn/material_260708-d8-1_work/train/train.log` (corpus size, val MSEs);
+  seed-vs-classic direct control: `learn/seed_vs_classic_3s.pgn`.

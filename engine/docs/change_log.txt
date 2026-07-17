@@ -1,5 +1,19 @@
 Changes since 2017_12_24
 
+2026_07_17 -- Online-learning investigation 4.6: the first d8 iteration
+               (material_260708-d8-1, 188k frozen games, 26.0M deduped rows,
+               2 epochs) reopened the bootstrap — first positive
+               consolidation of the late chain (ladder +10/+15 vs seed; all
+               d6 controls read <= 0).  Data-limited, not signal-limited
+               (ep2 > ep1, val MSE still falling).  Key measurement finding:
+               within-family matches compress real gains ~5x — d8-final is
+               +13 vs the seed head-to-head but +57 vs classic_eval while
+               the seed directly measures -8 vs classic (~+65 style-robust
+               gain).  Judge iterations by a foreign-anchor gauntlet (keep
+               Leaf_vclassic_eval in --gauntlet-anchors); the family epoch
+               ladder is for epoch selection only.  Recipe of record going
+               forward: freeze-generate -> consolidate at d8, bigger
+               fresh-seed book per iteration, --continue chaining.
 2026_07_16 -- Online-learning investigation Part 4 (docs/
                Online_Learning_Investigation.md): the frozen-generation
                control closed the d6 loop — a fresh 1M-game corpus labeled
