@@ -1,5 +1,22 @@
 Changes since 2017_12_24
 
+2026_07_16 -- train.py: --no-repeat (forwards match.py --no-repeat during
+               generation) and --dedup-corpus (drop corpus rows identical in
+               every field except gid during phase-4 assembly; auto-enabled
+               when TDLEAF_FREEZE is set).  Motivated by the frozen-pair
+               determinism landmine found in the material_260708r-6e6g run:
+               two identical frozen engines replay the exact same game from
+               each opening — including the color-swapped -repeat game — so
+               the 1M-game run produced only 188,571 distinct games (= the
+               opening book size, mean 5.3 copies).  The duplicates carry
+               different gids and therefore straddle the batch trainer's
+               by-game train/val split: val MSE fell monotonically (0.0078 ->
+               0.0049) while the epoch ladder collapsed (-23 -> -89 over 4
+               epochs) — memorization rewarded by a leaked validation set.
+               Deduping the same corpus and re-consolidating the seed read
+               -3 +/- 11 (flat), confirming the crash was pure duplication
+               overfitting.  For frozen generation, cap --games at the
+               opening count and pass --no-repeat.
 2026_07_16 -- TDLEAF_FREEZE=1 (runtime env var): play + record + TSV-dump
                exactly as a learning binary, but skip gradient accumulation,
                weight application, and all .tdleaf.bin writes — the tool for

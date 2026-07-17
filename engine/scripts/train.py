@@ -96,6 +96,7 @@ Run from engine/learn/.  Artifacts land in learn/ and <tag>_work/:
 
 import argparse
 import gzip
+import hashlib
 import json
 import math
 import os
@@ -348,6 +349,23 @@ def main():
     ap.add_argument("--depth", type=int, default=8)
     ap.add_argument("--concurrency", type=int, default=9)
     ap.add_argument("--openings", default="training_openings.epd")
+    ap.add_argument("--no-repeat", action="store_true",
+                    help="Play each opening once during generation (match.py "
+                         "--no-repeat).  Essential for frozen pairs "
+                         "(TDLEAF_FREEZE=1): two identical deterministic "
+                         "engines replay the exact same game from an opening "
+                         "every time it comes up — including the color-swapped "
+                         "repeat — so anything beyond one game per opening is "
+                         "duplicated compute.  Cap --games at the opening "
+                         "count.")
+    ap.add_argument("--dedup-corpus", action="store_true",
+                    help="Drop duplicate corpus rows (identical in every "
+                         "field except gid) during corpus assembly.  "
+                         "Auto-enabled when TDLEAF_FREEZE is set in the "
+                         "environment — frozen-pair generation duplicates "
+                         "whole games, and duplicates straddle the by-game "
+                         "train/val split (they carry different gids), so "
+                         "training on them both overfits and leaks validation.")
     ap.add_argument("--quiet-cp", type=int, default=60,
                     help="TDLEAF_DUMP_QUIET_CP for the dump (default 60)")
     # offline consolidation
@@ -534,13 +552,15 @@ def main():
         pgn_out = work / f"match_{args.tag}_d{args.depth}.pgn"
         log(f"online generation: {args.games} games at depth {args.depth} "
             f"(dump -> {work}/{args.tag}.*)")
-        sh(["python3", SCRIPT_DIR / "match.py",
-            "Leaf_vtrain_hl_a", "Leaf_vtrain_hl_b",
-            "-n", args.games, "-c", args.concurrency,
-            "--depth1", args.depth, "--depth2", args.depth,
-            "--openings", args.openings, "--fischer-random",
-            "--no-adjudication", "--pgn-out", pgn_out],
-           cwd=LEARN_DIR, env=env)
+        gen_cmd = ["python3", SCRIPT_DIR / "match.py",
+                   "Leaf_vtrain_hl_a", "Leaf_vtrain_hl_b",
+                   "-n", args.games, "-c", args.concurrency,
+                   "--depth1", args.depth, "--depth2", args.depth,
+                   "--openings", args.openings, "--fischer-random",
+                   "--no-adjudication", "--pgn-out", pgn_out]
+        if args.no_repeat:
+            gen_cmd.append("--no-repeat")
+        sh(gen_cmd, cwd=LEARN_DIR, env=env)
 
         # Phase 3: checkpoint post-generation state
         ckpt = LEARN_DIR / f"{netbase}.tdleaf.bin-{args.tag}-online"
@@ -588,9 +608,20 @@ def main():
             "run — the ply column means different things; train them separately")
     game_ply_axis = axes.pop()
     corpus_path = work / "corpus.tsv"
+    # Frozen-pair generation duplicates whole games (deterministic engines
+    # replay each opening identically), and the duplicates carry different
+    # gids — so they land on both sides of the trainer's by-game train/val
+    # split.  Dedup on every field except gid.  Auto-enabled under
+    # TDLEAF_FREEZE; a no-op-with-overhead on learning corpora (~1.01x dup).
+    dedup = args.dedup_corpus or bool(os.environ.get("TDLEAF_FREEZE"))
+    if dedup and not args.dedup_corpus:
+        log("TDLEAF_FREEZE set — enabling corpus row dedup")
     log(f"assembling {len(inputs)} corpus file(s) -> {corpus_path.name} "
-        f"(axis={'game-ply' if game_ply_axis else 'legacy record-index'}) ...")
+        f"(axis={'game-ply' if game_ply_axis else 'legacy record-index'}"
+        f"{', dedup' if dedup else ''}) ...")
     rows = 0
+    dropped = 0
+    seen = set()
     with open(corpus_path, "w") as out:
         if game_ply_axis:
             out.write("# tdleaf-corpus axis=game-ply\n")
@@ -599,9 +630,22 @@ def main():
                 for line in f:
                     if line.startswith("#") or line.startswith("fen\t"):
                         continue
+                    if dedup:
+                        p = line.split("\t")
+                        # fen cp result ply depth gid endply — drop gid (5)
+                        key = hashlib.md5(
+                            "\t".join(p[:5] + p[6:]).encode()).digest()
+                        if key in seen:
+                            dropped += 1
+                            continue
+                        seen.add(key)
                     out.write(line)
                     rows += 1
-    log(f"{rows:,} positions assembled")
+    del seen
+    if dedup:
+        log(f"{rows:,} positions assembled ({dropped:,} duplicate rows dropped)")
+    else:
+        log(f"{rows:,} positions assembled")
 
     # ---- Phase 5: offline consolidation (single threaded process) ---------
     tdir = work / "train"
