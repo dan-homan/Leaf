@@ -662,6 +662,11 @@ search(E) > E again, restoring headroom by construction.
    into every seed and erased by every continuation — drop to `--epochs 2`
    (done here) and treat small final-vs-seed deltas accordingly.
 
+*(Recommendation 1 ran the same day and closed the question — with two
+detours that were themselves informative (a frozen-pair duplication landmine
+and a book-diversity hypothesis, both resolved).  Recommendation 4's
+blend-corpus replicate was mooted by the direct control.  See Part 4.)*
+
 ## Methodology notes (Part 3)
 
 - Head-to-heads: `learn/match_Leaf_vmaterial_260708{,b}-6e6g-tdleaf_vs_*.pgn`
@@ -678,3 +683,194 @@ search(E) > E again, restoring headroom by construction.
   this experiment's four states; seedctl epoch states survive in
   `learn/seedctl-260716_work/train/`).
 - Baseline/epoch val MSEs: `<tag>_work/train/train.log` of each run.
+
+---
+
+# Part 4 — The frozen-generation control, the duplication landmine, and the book-diversity test (2026-07-16)
+
+Part 3's recommendation 1 (generate with frozen weights, consolidate, measure
+the true fresh-signal content of d6 data) ran the same day.  It took three
+attempts to get a clean number — each failure was itself informative — and the
+day ended with the d6 loop formally closed, a second hypothesis (opening-book
+diversity, D. Homan) tested and retired, and the loop tooling hardened for
+the d8 iteration.
+
+## 4.1 TDLEAF_FREEZE — and the env-var trap that motivated it
+
+The first frozen run was launched with `export TDLEAF_READONLY=1`, which does
+nothing: `TDLEAF_READONLY` is a compile-time flag, and the env vars that do
+work at runtime (`TDLEAF_TARGET`, `TDLEAF_ROOT`) made the pair a normal
+learning run.  Discovered ~25 minutes in via the live `.tdleaf.bin`'s
+advancing Adam counters; run killed, work dir deleted (its dumps would have
+been globbed into any `--force` rerun's corpus).
+
+A compiled READONLY binary would not have worked either: the
+`#if !TDLEAF_READONLY` guards compile out the record/update hooks entirely,
+so a READONLY pair plays frozen but **dumps no corpus**.  The fix is
+`TDLEAF_FREEZE=1` (runtime env var, commit cc74ebd): records and dumps
+exactly as a learning binary, but skips gradient accumulation, weight
+application, and every `.tdleaf.bin` write path (gate after the dump call in
+`tdleaf_update_after_game`; with nothing accumulated, batch apply / save /
+exit flush are all naturally no-ops).  Smoke-verified: startup notice, zero
+batch applies, byte-identical `.tdleaf.bin` md5, leaf+root TSVs dumped.
+
+## 4.2 The frozen run crashed — and the crash was a duplication artifact
+
+`material_260708r-6e6g`: 1M frozen games at d6 from the seed, standard
+consolidation, ladder vs the seed (= pretrain, since the state never moves):
+
+| epoch | W/L/D | Elo vs seed | val MSE(blend) |
+|---|---|---|---|
+| (baseline) | | | 0.007830 |
+| 1 | 327/394/279 | −23 ± 11 | 0.006273 |
+| 2 | 282/452/266 | −60 ± 11 | 0.005642 |
+| 3 | 256/466/278 | −74 ± 11 | 0.005239 |
+| 4 | 253/505/242 | −89 ± 11 | 0.004938 |
+
+Monotone Elo collapse while val MSE *fell* 37% — the only run in the chain
+where val ever moved after epoch 1.  Diagnosis (game-signature analysis,
+FEN+PlyCount+Result per game):
+
+- The 1M-game PGN contains **exactly 188,571 distinct games — precisely the
+  line count of `training_openings.epd`** (mean 5.3 plays per opening,
+  max 6).  Two identical deterministic engines at fixed depth replay the
+  same game from an opening every time it comes up, **including the
+  color-swapped `-repeat` game** (same net on both sides ⇒ the swap changes
+  nothing).  The learning-pair 6e6g run, same book and game count: 990,870
+  distinct — the online weight drift Part 3 indicted was also the only
+  source of game diversity.
+- The duplicates carry different gids, so they land on **both sides of the
+  trainer's by-game train/val split**.  The falling "val" MSE was the
+  trainer memorizing 188k unique games at ~5.3 effective epochs per nominal
+  epoch (~21 by ep4), graded by a leaked validation set.
+- Baseline val MSE 0.00783 was the lowest ever seen in the chain — the seed
+  nearly predicts its own labels; the corpus was clean, just 5.3× smaller
+  than nominal and ground in 4 epochs deep.
+
+## 4.3 The dedup control: the d6 loop is closed
+
+Dropping duplicate rows (identical in every field except gid) cut the corpus
+134,048,352 → 25,144,224 rows (5.33×, matching the game-level count) and the
+seed was re-consolidated on it (`seedctl-dedup`):
+
+| epoch | Elo vs seed | val MSE(blend) |
+|---|---|---|
+| (baseline) | | 0.007845 |
+| 1 | **−3 ± 11** | 0.007638 |
+| 2 | −10 ± 11 | 0.007571 |
+
+Flat.  A fresh 1M-game d6 corpus, labeled by the seed itself, deduplicated,
+adds **nothing** — the unconfounded closure of the d6 loop (and retroactive
+confirmation that 4.2's crash was pure duplication overfitting; same data
+minus duplicates is simply zero).  The frozen run's final gauntlet agreed:
+−21 ± 27 vs the seed (it promoted ep1 ≈ −23).  `material_260708-5e6g_final`
+remains the chain's best state; the r-run and both 6e6g finals should never
+seed a `--continue` chain.
+
+Taken with Part 3: fresh d6 data contains zero extractable signal for this
+net whether labels are clean (this control) or generator-drifted (seedctl,
+−48), and the only thing that ever made late-chain consolidation look
+productive (+80–116) was repairing online damage.
+
+## 4.4 The book-diversity hypothesis: tested and retired
+
+Hypothesis (D. Homan): `training_openings.epd` is only 188,571 lines — by
+6.5M chain games each stem has been played ~34 times, and even with games
+diverging, the repeated opening themes might bound the learnable manifold;
+perhaps *this*, not depth, is the 5e6 plateau.  Genuinely open at that
+point: every plateau measurement was equally consistent with "d6 exhausted"
+and "book exhausted at d6" (both predict fresh same-book games add 0), and —
+a confound worth recording — **every Elo number in the chain is measured on
+the training book** (`train.py` ladders and gauntlets default to
+`--openings training_openings.epd`), so book overfit would also inflate the
+measurements themselves.
+
+Two measurements answered it:
+
+1. **Literal position repetition in the learning corpus is low.**
+   Hash-partition sampling (keep all copies of a 2% FEN subset, so duplicate
+   counts are unbiased) over the 6e6g corpus, copies per distinct position
+   by ply band: 1.28 (plies 0–12), 1.10 (13–24), 1.11 (25–40), 1.12
+   (41–80), 1.31 (81+).  The only fat tail is deep endgames (one position
+   2,585×) — inherent to few-piece chess, not the book.  Any book effect
+   would have to act through theme-level generalization, not memorized
+   positions.
+
+2. **Out-of-book strength is identical to in-book strength.**  A disjoint
+   holdout book was generated with the same recipe and a different RNG seed
+   (`make_training_epd.py --total 200000 --frc-fraction 0.2
+   --random-suffix 2 --quiet-only --seed 2607`), and the seed rated vs
+   `Leaf_vclassic_eval` at 1+0.01, 1000 games per condition:
+
+   | condition | Elo |
+   |---|---|
+   | training book (run 1) | −22 ± 20 |
+   | training book (run 2, independent replicate) | −29 ± 20 |
+   | holdout book (never seen) | −29 ± 18 |
+
+   In-book pooled ≈ −26 ± 14 vs out-of-book −29 ± 18: **no book overfit at
+   all** — the net plays openings it has never seen at exactly its
+   trained-book strength.  (Classical eval knows neither book, so the
+   *difference* isolates the NNUE's book dependence.)  Two side lessons:
+   the scary-looking −29 was the **time control**, not the book — at 1+0.01
+   classic_eval's nps advantage is worth ~25–30 Elo relative to the 3+0.05
+   gauntlets where these nets measure +0/+6 vs classic; keep
+   cross-eval-type comparisons at 3+0.05 (NNUE-vs-NNUE ladders at 1+0.01
+   are fine, speed is symmetric).  And the diversity hypothesis is retired
+   in its strong form: a wider book from the same generator recipe samples
+   the theme space the net has already mastered, so a fresh-book d6 corpus
+   (Part 4's "test A") would almost certainly read ~0 and is not worth
+   generation budget.
+
+## 4.5 Where this leaves the loop: depth is the last lever standing
+
+By elimination — targets exonerated (Part 3), online learning retired
+(Part 3/4.3), book diversity retired (4.4) — the binding constraint is the
+**depth-6 label ceiling**, exactly matching the historical pure-TDLeaf
+observation that d6 plateaus broke at d8.  The loop redesign:
+
+- **New loop shape: freeze-generate → consolidate → new seed.**  No online
+  learning phase at all; the generator can never displace, so the corpus
+  labels are always the seed's own.
+- **Frozen economics:** anything beyond one game per opening is duplicated
+  compute, so the natural d8 iteration is ~188k games ≈ 750k d6-equivalents
+  at the ×4 depth cost — *cheaper* than the old 1M-game d6 iteration.
+- **Tooling (commit 3140cb2):** `train.py --no-repeat` (generation-phase
+  passthrough to `match.py`; ladders/gauntlets keep paired openings) and
+  `--dedup-corpus` (phase-4 row dedup on every field except gid,
+  **auto-enabled whenever `TDLEAF_FREEZE` is set** so the guard cannot be
+  forgotten; ~no-op on learning corpora at 1.01×).
+- The d8 iteration in flight as of this writing:
+
+```sh
+export TDLEAF_FREEZE=1
+python3 train.py --tag material_260708-d8-1 --net nn-material_260708.nnue \
+    --state material_260708-5e6g_final.tdleaf.bin \
+    --games 188000 --depth 8 --concurrency 12 --recompile --no-repeat \
+    --bt-threads 12 --epochs 2 --gauntlet-epochs \
+    --gauntlet Leaf_vclassic_eval Leaf_vmaterial_260708-5e6g-final
+```
+
+The epoch ladder rates directly against the untouched seed, so ep1 *is* the
+measurement: clearly positive ⇒ d8 labels reopen the bootstrap and
+freeze-generate/consolidate at increasing depth becomes the recipe; ~0 ⇒ the
+label ceiling is not depth-limited at this net capacity, and the
+investigation turns to architecture.
+
+## Methodology notes (Part 4)
+
+- Game-signature duplication: `awk` extraction of `[FEN]`+`[PlyCount]`+
+  `[Result]` per game from the generation PGNs, `sort | uniq -c` (frozen
+  run: 188,571 distinct / 1M; learning run: 990,870 / 1M).
+- Position repetition: hash-partition sampling (`md5(fen)[0] % 50 == 0`)
+  over the 6e6g corpus — keeps every copy of the sampled positions, so
+  per-position copy counts are exact.
+- Dedup control: gid-excluded row dedup of the r-run corpus (134.0M →
+  25.1M rows), then `train.py --skip-online --corpus ... --state <seed>`
+  with the ladder vs the incoming seed; artifacts in
+  `learn/seedctl-dedup_work/`.
+- Book test: `learn/holdout_openings.epd` (seed 2607), match PGNs
+  `learn/inbook_test.pgn` / `learn/oob_test.pgn`, plus the second in-book
+  replicate.
+- Freeze smoke test and gate placement: commit cc74ebd; duplication tooling:
+  commit 3140cb2.

@@ -1,5 +1,21 @@
 Changes since 2017_12_24
 
+2026_07_16 -- Online-learning investigation Part 4 (docs/
+               Online_Learning_Investigation.md): the frozen-generation
+               control closed the d6 loop — a fresh 1M-game corpus labeled
+               by the seed itself, deduplicated, adds -3 +/- 11 (nothing).
+               The book-diversity hypothesis was tested and retired: literal
+               position repetition in learning corpora is low (1.1-1.3
+               copies/position by ply band), and the seed rates identically
+               vs classic_eval on the 188k-line training book (-26 +/- 14
+               pooled, two 1000-game runs) and on a never-seen holdout book
+               (-29 +/- 18) at 1+0.01 — no book overfit (side lesson: the
+               1+0.01 TC itself shifts NNUE-vs-classic ~25-30 Elo relative
+               to 3+0.05; keep cross-eval-type gauntlets at 3+0.05).  By
+               elimination the binding constraint is the d6 label ceiling;
+               new loop shape is freeze-generate -> consolidate (no online
+               phase), and the first d8 iteration (~188k games, one per
+               opening) is the next step.
 2026_07_16 -- train.py: --no-repeat (forwards match.py --no-repeat during
                generation) and --dedup-corpus (drop corpus rows identical in
                every field except gid during phase-4 assembly; auto-enabled
