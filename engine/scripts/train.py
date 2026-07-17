@@ -350,22 +350,20 @@ def main():
     ap.add_argument("--concurrency", type=int, default=9)
     ap.add_argument("--openings", default="training_openings.epd")
     ap.add_argument("--no-repeat", action="store_true",
-                    help="Play each opening once during generation (match.py "
-                         "--no-repeat).  Essential for frozen pairs "
-                         "(TDLEAF_FREEZE=1): two identical deterministic "
-                         "engines replay the exact same game from an opening "
-                         "every time it comes up — including the color-swapped "
-                         "repeat — so anything beyond one game per opening is "
-                         "duplicated compute.  Cap --games at the opening "
-                         "count.")
+                    help="DEPRECATED no-op: generation now always passes "
+                         "match.py --no-repeat (no fastchess -games 2 -repeat "
+                         "pair).  Note --no-repeat does NOT guarantee opening "
+                         "uniqueness by itself — fastchess cycles a shuffled "
+                         "book order, so openings recycle once --games "
+                         "exceeds the book size (train.py warns).")
     ap.add_argument("--dedup-corpus", action="store_true",
-                    help="Drop duplicate corpus rows (identical in every "
-                         "field except gid) during corpus assembly.  "
-                         "Auto-enabled when TDLEAF_FREEZE is set in the "
-                         "environment — frozen-pair generation duplicates "
-                         "whole games, and duplicates straddle the by-game "
-                         "train/val split (they carry different gids), so "
-                         "training on them both overfits and leaks validation.")
+                    help="DEPRECATED no-op: corpus assembly now always drops "
+                         "duplicate rows (identical in every field except "
+                         "gid).  Duplicate games straddle the trainer's "
+                         "by-game train/val split (different gids), so "
+                         "training on them both overfits and leaks "
+                         "validation; frozen deterministic pairs are the "
+                         "worst case (one unique game per opening).")
     ap.add_argument("--quiet-cp", type=int, default=60,
                     help="TDLEAF_DUMP_QUIET_CP for the dump (default 60)")
     # offline consolidation
@@ -390,6 +388,14 @@ def main():
     ap.add_argument("--bt-loss-gamma", type=float, default=None,
                     help="Focal-gamma loss exponent (d(1-d))^gamma: "
                          "1.0=MSE (default), 0.0=cross-entropy, 0.5=between")
+    ap.add_argument("--bt-rows", choices=["leaf", "root", "both"],
+                    default="both",
+                    help="Which corpus rows to train on, by the depth column "
+                         "(leaf = static-eval rows, depth 0; root = "
+                         "search-score rows, depth > 0).  Filtered at trainer "
+                         "load, so the archived corpus.tsv.gz stays complete "
+                         "and row-mode sweeps can rerun from one corpus via "
+                         "--skip-online --corpus (default: both)")
     # gauntlet
     ap.add_argument("--gauntlet", nargs="*", default=[],
                     help="Opponent binaries in learn/ for the FINAL gauntlet "
@@ -412,6 +418,18 @@ def main():
                          "offline training (post-online checkpoint, or the "
                          "incoming state under --skip-online) — measures what "
                          "consolidation added.  Independent of --gauntlet.")
+    ap.add_argument("--gauntlet-tdleaf", action="store_true",
+                    help="Also rate the net as it ENTERED offline training "
+                         "(post-online checkpoint, or the incoming state "
+                         "under --skip-online): save it permanently to "
+                         "learn/ as <tag>-tdleaf.nnue + Leaf_v<tag>-tdleaf "
+                         "and run it through the same final gauntlet "
+                         "(opponents, --gauntlet-games, --tc).  Gives every "
+                         "run a same-conditions baseline so per-iteration "
+                         "deltas read directly from one sidecar.  Under "
+                         "TDLEAF_FREEZE this net is identical to the "
+                         "incoming seed — the gauntlet still measures the "
+                         "baseline under THIS run's conditions.")
     ap.add_argument("--epoch-games", type=int, default=1000,
                     help="Games per epoch-ladder match (default 1000)")
     ap.add_argument("--epoch-tc", default="1+0.01",
@@ -435,6 +453,11 @@ def main():
                          "stays uncompressed) — <tag>_work/ is never deleted "
                          "either way, this only controls pruning aggressiveness")
     args = ap.parse_args()
+
+    if args.no_repeat:
+        log("note: --no-repeat is now always on — the flag is a no-op")
+    if args.dedup_corpus:
+        log("note: --dedup-corpus is now always on — the flag is a no-op")
 
     if Path.cwd().resolve() != LEARN_DIR.resolve():
         die(f"run from {LEARN_DIR} (cwd is {Path.cwd()})")
@@ -552,15 +575,28 @@ def main():
         pgn_out = work / f"match_{args.tag}_d{args.depth}.pgn"
         log(f"online generation: {args.games} games at depth {args.depth} "
             f"(dump -> {work}/{args.tag}.*)")
-        gen_cmd = ["python3", SCRIPT_DIR / "match.py",
-                   "Leaf_vtrain_hl_a", "Leaf_vtrain_hl_b",
-                   "-n", args.games, "-c", args.concurrency,
-                   "--depth1", args.depth, "--depth2", args.depth,
-                   "--openings", args.openings, "--fischer-random",
-                   "--no-adjudication", "--pgn-out", pgn_out]
-        if args.no_repeat:
-            gen_cmd.append("--no-repeat")
-        sh(gen_cmd, cwd=LEARN_DIR, env=env)
+        # Always --no-repeat: fastchess's -games 2 -repeat pair is pure
+        # duplication for frozen pairs and unneeded color-balancing for
+        # learning pairs at 100k+ randomized openings.  --no-repeat does NOT
+        # by itself guarantee opening uniqueness: fastchess cycles a shuffled
+        # book order, so openings recycle once rounds exceed the book size —
+        # warn when --games would spill past one pass.
+        opening_file = LEARN_DIR / args.openings
+        if opening_file.is_file():
+            n_openings = sum(1 for _ in open(opening_file))
+            if args.games > n_openings:
+                log(f"WARNING: --games {args.games} exceeds the opening book "
+                    f"({n_openings} lines in {args.openings}) — openings will "
+                    f"recycle past one pass; with a frozen pair the extra "
+                    f"games are exact duplicates (dedup will drop their rows, "
+                    f"but the generation compute is wasted)")
+        sh(["python3", SCRIPT_DIR / "match.py",
+            "Leaf_vtrain_hl_a", "Leaf_vtrain_hl_b",
+            "-n", args.games, "-c", args.concurrency,
+            "--depth1", args.depth, "--depth2", args.depth,
+            "--openings", args.openings, "--fischer-random",
+            "--no-adjudication", "--no-repeat", "--pgn-out", pgn_out],
+           cwd=LEARN_DIR, env=env)
 
         # Phase 3: checkpoint post-generation state
         ckpt = LEARN_DIR / f"{netbase}.tdleaf.bin-{args.tag}-online"
@@ -608,17 +644,16 @@ def main():
             "run — the ply column means different things; train them separately")
     game_ply_axis = axes.pop()
     corpus_path = work / "corpus.tsv"
-    # Frozen-pair generation duplicates whole games (deterministic engines
-    # replay each opening identically), and the duplicates carry different
-    # gids — so they land on both sides of the trainer's by-game train/val
-    # split.  Dedup on every field except gid.  Auto-enabled under
-    # TDLEAF_FREEZE; a no-op-with-overhead on learning corpora (~1.01x dup).
-    dedup = args.dedup_corpus or bool(os.environ.get("TDLEAF_FREEZE"))
-    if dedup and not args.dedup_corpus:
-        log("TDLEAF_FREEZE set — enabling corpus row dedup")
+    # Dedup is unconditional: duplicate rows (identical in every field except
+    # gid) come from replayed games — worst case a frozen deterministic pair
+    # (one unique game per opening) — and they straddle the trainer's by-game
+    # train/val split, both overfitting and leaking validation.  Keys are
+    # 8-byte blake2b of the gid-stripped row stored as ints (~5 GB at 134M
+    # rows vs ~9 GB for full digests); a truncation collision costs one
+    # falsely-dropped row with probability ~5e-4 per 134M-row corpus.
     log(f"assembling {len(inputs)} corpus file(s) -> {corpus_path.name} "
-        f"(axis={'game-ply' if game_ply_axis else 'legacy record-index'}"
-        f"{', dedup' if dedup else ''}) ...")
+        f"(axis={'game-ply' if game_ply_axis else 'legacy record-index'}, "
+        f"dedup) ...")
     rows = 0
     dropped = 0
     seen = set()
@@ -630,22 +665,19 @@ def main():
                 for line in f:
                     if line.startswith("#") or line.startswith("fen\t"):
                         continue
-                    if dedup:
-                        p = line.split("\t")
-                        # fen cp result ply depth gid endply — drop gid (5)
-                        key = hashlib.md5(
-                            "\t".join(p[:5] + p[6:]).encode()).digest()
-                        if key in seen:
-                            dropped += 1
-                            continue
-                        seen.add(key)
+                    p = line.split("\t")
+                    # fen cp result ply depth gid endply — drop gid (5)
+                    key = int.from_bytes(hashlib.blake2b(
+                        "\t".join(p[:5] + p[6:]).encode(),
+                        digest_size=8).digest(), "little")
+                    if key in seen:
+                        dropped += 1
+                        continue
+                    seen.add(key)
                     out.write(line)
                     rows += 1
     del seen
-    if dedup:
-        log(f"{rows:,} positions assembled ({dropped:,} duplicate rows dropped)")
-    else:
-        log(f"{rows:,} positions assembled")
+    log(f"{rows:,} positions assembled ({dropped:,} duplicate rows dropped)")
 
     # ---- Phase 5: offline consolidation (single threaded process) ---------
     tdir = work / "train"
@@ -680,23 +712,41 @@ def main():
         (RUN_DIR / snap.name).unlink()
         return dest_bin, dest_net, b.name
 
-    # Epoch-ladder opponent = the net exactly as it enters offline training: the
-    # post-online checkpoint when we generated games this run, or the incoming
-    # live state under --skip-online.  Bake base .nnue + live .tdleaf.bin (the
-    # trainer's own starting state, freshly copied into tdir above) into a
-    # standalone net via the trainer binary's --write-nnue, then compile an
-    # inference binary from it.  Done before the trainer launches so the bake
-    # sees the untouched state and doesn't contend with training for cores.
+    # Pre-training baseline net = the net exactly as it enters offline
+    # training: the post-online checkpoint when we generated games this run,
+    # or the incoming live state under --skip-online.  Bake base .nnue + live
+    # .tdleaf.bin (the trainer's own starting state, freshly copied into tdir
+    # above) into a standalone net via the trainer binary's --write-nnue.
+    # Used as the epoch-ladder opponent (--gauntlet-epochs) and/or saved to
+    # learn/ as the permanent <tag>-tdleaf net (--gauntlet-tdleaf).  Done
+    # before the trainer launches so the bake sees the untouched state and
+    # doesn't contend with training for cores.
     ladder_opp_bin = ladder_opp_net = ladder_opp = None
-    if args.gauntlet_epochs:
+    tdleaf_rate_bin = None
+    if args.gauntlet_epochs or args.gauntlet_tdleaf:
         pre_nnue = tdir / f"{args.tag}_pretrain.nnue"
         log(f"baking pre-offline-training baseline net -> {pre_nnue.name}")
         sh(["./Leaf_vbt", "--write-nnue", pre_nnue.name], cwd=tdir)
         if not pre_nnue.is_file():
             die(f"failed to bake pre-training baseline {pre_nnue}")
+    if args.gauntlet_epochs:
         ladder_opp_bin, ladder_opp_net, ladder_opp = build_rating_binary(
             pre_nnue, f"{args.tag}-pretrain")
         log(f"epoch-ladder opponent: {ladder_opp} (net before offline training)")
+    if args.gauntlet_tdleaf:
+        # Permanent copy in learn/, mirroring the -final pair and the chain's
+        # historical -tdleaf naming.  Compiled against its own .nnue name (the
+        # -pretrain rating binary bakes the _pretrain.nnue filename, so it
+        # can't simply be renamed).
+        tdleaf_nnue = LEARN_DIR / f"{args.tag}-tdleaf.nnue"
+        shutil.copy2(pre_nnue, tdleaf_nnue)
+        shutil.copy2(tdleaf_nnue, RUN_DIR / tdleaf_nnue.name)
+        b = compile_binary(f"{args.tag}-tdleaf", tdleaf_nnue.name,
+                           tdleaf=False, force=True)
+        tdleaf_rate_bin = LEARN_DIR / b.name
+        shutil.move(str(b), str(tdleaf_rate_bin))
+        (RUN_DIR / tdleaf_nnue.name).unlink()
+        log(f"tdleaf-phase net saved: {tdleaf_nnue.name} + {tdleaf_rate_bin.name}")
 
     log(f"training: {args.bt_threads} threads x {args.epochs} epochs "
         f"(lr {args.bt_lr}, lambda {args.bt_lambda}, K {args.bt_K})")
@@ -712,6 +762,8 @@ def main():
         cmd += ["--bt-td-lambda", str(args.bt_td_lambda)]
     if args.bt_loss_gamma is not None:
         cmd += ["--bt-loss-gamma", str(args.bt_loss_gamma)]
+    if args.bt_rows != "both":
+        cmd += ["--bt-rows", args.bt_rows]
     logf = open(tdir / "train.log", "w")
     proc = subprocess.Popen(cmd, cwd=str(tdir),
                             stdout=subprocess.DEVNULL, stderr=logf)
@@ -834,26 +886,45 @@ def main():
     shutil.move(str(compiled_final), str(rate_bin))
     (RUN_DIR / out_nnue.name).unlink()
 
+    def run_gauntlet(bin_name, label):
+        """Rate Leaf_v<label> (binary bin_name in learn/) against every
+        opponent in gauntlet_list under the shared conditions
+        (--gauntlet-games, --tc).  Returns [(opp, (W,L,D,elo,err)), ...]."""
+        res = []
+        for opp in gauntlet_list:
+            if not (LEARN_DIR / opp).is_file():
+                log(f"WARNING: opponent {opp} not found in learn/ — skipping")
+                continue
+            pgn = work / f"match_{label}_vs_{opp.replace('Leaf_v','')}.pgn"
+            log(f"gauntlet: {label} vs {opp} ({args.gauntlet_games} games)")
+            sh(["python3", SCRIPT_DIR / "match.py", bin_name, opp,
+                "-n", args.gauntlet_games, "-c", 8, "-tc", args.tc,
+                "--openings", args.openings, "--fischer-random",
+                "--pgn-out", pgn], cwd=LEARN_DIR)
+            res.append((opp, pgn_score(pgn, label)))
+        return res
+
     results = []
+    tdleaf_results = []
     if not gauntlet_list:
         log("no gauntlet opponents (--gauntlet/--gauntlet-anchors): "
             "skipping final gauntlet matches.")
     elif args.no_final_gauntlet:
         log("--no-final-gauntlet: skipping final gauntlet matches.")
     else:
-        for opp in gauntlet_list:
-            if not (LEARN_DIR / opp).is_file():
-                log(f"WARNING: opponent {opp} not found in learn/ — skipping")
-                continue
-            pgn = work / f"match_{args.tag}-final_vs_{opp.replace('Leaf_v','')}.pgn"
-            log(f"gauntlet: vs {opp} ({args.gauntlet_games} games)")
-            sh(["python3", SCRIPT_DIR / "match.py", rate_bin.name, opp,
-                "-n", args.gauntlet_games, "-c", 8, "-tc", args.tc,
-                "--openings", args.openings, "--fischer-random",
-                "--pgn-out", pgn], cwd=LEARN_DIR)
-            results.append((opp, pgn_score(pgn, f"{args.tag}-final")))
+        # The -tdleaf baseline first (when requested), then the final — same
+        # opponents and conditions, so per-iteration deltas read directly
+        # from one run.
+        if tdleaf_rate_bin is not None:
+            tdleaf_results = run_gauntlet(tdleaf_rate_bin.name,
+                                          f"{args.tag}-tdleaf")
+        results = run_gauntlet(rate_bin.name, f"{args.tag}-final")
 
         print()
+        if tdleaf_results:
+            for line in render_gauntlet(tdleaf_rate_bin.name, tdleaf_results):
+                print(line)
+            print()
         for line in render_gauntlet(rate_bin.name, results):
             print(line)
         print()
@@ -864,6 +935,9 @@ def main():
             f.write("\n" + "\n".join(render_epoch_ladder(
                 args.tag, ladder_opp, args.epoch_games, args.epoch_tc,
                 epoch_results)) + "\n")
+        if tdleaf_results:
+            f.write("\n" + "\n".join(render_gauntlet(
+                tdleaf_rate_bin.name, tdleaf_results)) + "\n")
         if results:
             f.write("\n" + "\n".join(render_gauntlet(rate_bin.name, results)) + "\n")
 
@@ -885,10 +959,15 @@ def main():
         "bt_lambda": args.bt_lambda,
         "bt_K": args.bt_K,
         "bt_td_lambda": args.bt_td_lambda,
+        "bt_rows": args.bt_rows,
         "gauntlet_anchors": args.gauntlet_anchors,
         "epoch_ladder": [
             {"epoch": ep, "W": W, "L": L, "D": D, "elo": elo, "err": err}
             for ep, (W, L, D, elo, err) in epoch_results
+        ],
+        "tdleaf_gauntlet": [
+            {"opponent": opp, "W": W, "L": L, "D": D, "elo": elo, "err": err}
+            for opp, (W, L, D, elo, err) in tdleaf_results
         ],
         "final_gauntlet": [
             {"opponent": opp, "W": W, "L": L, "D": D, "elo": elo, "err": err}

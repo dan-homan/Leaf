@@ -318,9 +318,13 @@ def main():
                              "paired games.  Off by default (both engines play both sides "
                              "from each opening position, which is correct for training).")
     parser.add_argument("--no-repeat", action="store_true", default=False,
-                        help="Play each opening once (-rounds N, no -games 2 -repeat). "
-                             "Increases opening diversity at the cost of color-balance "
-                             "per opening.  Recommended for symmetric self-play training.")
+                        help="One game per round (-rounds N, no -games 2 -repeat): "
+                             "removes the driver's color-swapped duplicate pair per "
+                             "opening, at the cost of color-balance per opening.  "
+                             "Recommended for symmetric self-play training.  NOTE: "
+                             "this does not guarantee opening uniqueness by itself — "
+                             "fastchess cycles a shuffled book order, so openings "
+                             "recycle once total games exceed the book size.")
     parser.add_argument("--no-adjudication", action="store_true", default=False,
                         help="Disable score-based early adjudication (-draw / -resign).  "
                              "Games end only on natural conditions: mate, stalemate, "

@@ -49,6 +49,9 @@
 //              [--bt-val F]      validation fraction, BY GAME     (default 0.05)
 //              [--bt-seed N]     shuffle/split seed               (default 42)
 //              [--bt-max N]      cap on loaded positions, 0 = all (default 0)
+//              [--bt-rows R]     leaf | root | both: which corpus rows to
+//                                train on, by the depth column (0 = leaf,
+//                                >0 = root)                     (default both)
 //              [--bt-threads N]  worker threads for gradient compute (default 1)
 //              [--bt-clip-every N]  compute the L2 clip norm on every Nth batch
 //                                only (default 64; 1 = every batch).  The norm
@@ -184,6 +187,15 @@ static void bt_decode(const BTRecord &r, position &pos)
 // ---------------------------------------------------------------------------
 // TSV loader
 // ---------------------------------------------------------------------------
+// Row-type selection (--bt-rows): 0 = leaf rows only (depth == 0), 1 = root
+// rows only (depth > 0), 2 = both (default).  Filtered at load so one
+// archived corpus supports leaf/root/both sweeps without reassembly.  Note:
+// on legacy corpora with no endply column, filtering slightly shortens the
+// per-gid max-ply fallback for the result-decay distance (skipped rows don't
+// register their ply); corpora with endply (all current ones) are exact.
+static int    bt_rows_mode     = 2;
+static size_t bt_rows_filtered = 0;
+
 static bool bt_load_file(const char *path, std::vector<BTRecord> &out,
                          uint32_t gid_base, uint32_t &gid_max, size_t max_records,
                          std::vector<uint16_t> &gid_N, bool &out_game_ply_axis)
@@ -225,6 +237,8 @@ static bool bt_load_file(const char *path, std::vector<BTRecord> &out,
         if (*p != '\t') { skipped++; continue; }
         long depth = strtol(p + 1, &p, 10);
         if (*p != '\t') { skipped++; continue; }
+        if (bt_rows_mode == 0 && depth != 0) { bt_rows_filtered++; continue; }
+        if (bt_rows_mode == 1 && depth == 0) { bt_rows_filtered++; continue; }
         unsigned long gid = strtoul(p + 1, &p, 10);
         long endply = (*p == '\t') ? strtol(p + 1, nullptr, 10) : 0;
 
@@ -436,6 +450,15 @@ int nnue_batch_train(int argc, char *argv[])
         else if ((v = next("--bt-loss-gamma"))) loss_gamma = (float)atof(v);
         else if ((v = next("--bt-leaf-lambda"))) leaf_lambda = (float)atof(v);
         else if ((v = next("--bt-td-lambda")))   { td_lambda = (float)atof(v); td_lambda_explicit = true; }
+        else if ((v = next("--bt-rows"))) {
+            bt_rows_mode = (strcmp(v, "leaf") == 0) ? 0
+                         : (strcmp(v, "root") == 0) ? 1
+                         : (strcmp(v, "both") == 0) ? 2 : -1;
+            if (bt_rows_mode < 0) {
+                fprintf(stderr, "batch-train: --bt-rows must be leaf|root|both\n");
+                return 1;
+            }
+        }
     }
     if (!files) { fprintf(stderr, "batch-train: no input files\n"); return 1; }
     if (batch < 1) batch = 1;
@@ -485,11 +508,16 @@ int nnue_batch_train(int argc, char *argv[])
 
     fprintf(stderr, "batch-train: lambda=%.2f leaf_lambda=%.2f td_lambda=%.5f "
                     "K=%.0f lr_scale=%.3f batch=%d epochs=%d val=%.3f seed=%u "
-                    "threads=%d clip_every=%d loss_gamma=%.2f  axis=%s\n",
+                    "threads=%d clip_every=%d loss_gamma=%.2f  axis=%s  rows=%s\n",
             (double)lambda, (double)leaf_lambda, (double)td_lambda, (double)K,
             (double)lr_scale, batch, epochs, (double)val_frac, seed, threads,
             clip_every, (double)loss_gamma,
-            corpus_game_ply ? "game-ply" : "record-index(legacy)");
+            corpus_game_ply ? "game-ply" : "record-index(legacy)",
+            (bt_rows_mode == 0) ? "leaf" : (bt_rows_mode == 1) ? "root" : "both");
+    if (bt_rows_mode != 2)
+        fprintf(stderr, "batch-train: --bt-rows %s — %zu %s rows filtered at load\n",
+                (bt_rows_mode == 0) ? "leaf" : "root", bt_rows_filtered,
+                (bt_rows_mode == 0) ? "root" : "leaf");
 
     // ---- Result-decay lookup: decay(r) = td_lambda^(N_game - ply) --------
     // Precomputed per integer gap (gaps span 0..max game length, a few

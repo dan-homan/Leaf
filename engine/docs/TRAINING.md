@@ -714,13 +714,24 @@ ply; skipped entirely when the env var is unset).
 runtime — games are recorded and dumped exactly as in a learning run, but
 gradient accumulation, weight application, and all `.tdleaf.bin` writes are
 skipped, so the corpus labels come from a fixed net.  This is the tool for
-generate-only hybrid-loop iterations (see Part 3 of
+generate-only hybrid-loop iterations (see Parts 3–4 of
 `Online_Learning_Investigation.md`).  Do **not** use the compile-time
 `TDLEAF_READONLY=1` flag for this: it compiles out the record/update hooks
 entirely, so a READONLY binary plays with frozen weights but **dumps no
 corpus** (it exists for rating/inference binaries that load a `.tdleaf.bin`
 pair).  Note the name: `TDLEAF_READONLY` is *only* a compile flag — exporting
 it as an env var does nothing.
+
+Frozen-pair determinism caveat: two identical frozen engines replay the exact
+same game from each opening every time it comes up (including a color-swapped
+repeat — the swap changes nothing when both sides are the same net), so the
+unique-game count is capped at the opening-book size.  `train.py` guards
+this automatically: generation always runs `--no-repeat`, it warns when
+`--games` exceeds the book line count, and corpus assembly always drops
+duplicate rows (which would otherwise straddle the trainer's by-game
+train/val split and leak validation).  Still cap `--games` at the book size —
+recycled openings are wasted generation compute even though dedup protects
+the corpus.
 
 ---
 

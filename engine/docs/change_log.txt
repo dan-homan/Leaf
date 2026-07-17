@@ -1,5 +1,29 @@
 Changes since 2017_12_24
 
+2026_07_17 -- train.py hardening + two features for the freeze/consolidate
+               loop.  (1) --no-repeat and corpus dedup are now ALWAYS ON
+               (both flags kept as deprecated no-ops); generation warns when
+               --games exceeds the opening-book line count (fastchess cycles
+               a shuffled book order, so openings recycle past one pass —
+               --no-repeat alone never guaranteed uniqueness, docs
+               clarified); dedup keys shrunk to 8-byte blake2b ints (~5 GB
+               at 134M rows vs ~9 GB for md5 digests).  (2) --bt-rows
+               leaf|root|both (default both): trainer-side row filter by the
+               depth column at corpus load (nnue_batch_train.cpp), so the
+               archived corpus.tsv.gz stays complete and row-mode sweeps
+               rerun from one corpus via --skip-online --corpus; verified
+               counts match awk exactly on a 200k-row sample, rows=both is
+               the unchanged code path.  (3) --gauntlet-tdleaf: bake the
+               net as it ENTERED offline training (decoupled from
+               --gauntlet-epochs), save it permanently as
+               learn/<tag>-tdleaf.nnue + Leaf_v<tag>-tdleaf, and rate it
+               through the same final gauntlet; results in a new
+               tdleaf_gauntlet sidecar field — every run now carries its
+               own same-conditions baseline (motivated by the d8-1 triangle:
+               +57 vs classic needed a hand-run seed control to interpret).
+               bt_rows recorded in the sidecar.  End-to-end smoke run
+               passed (scratch tag: bake -> -tdleaf save -> both gauntlets
+               -> sidecar).  SCRIPT_USE.md + TRAINING.md updated.
 2026_07_17 -- Online-learning investigation 4.6: the first d8 iteration
                (material_260708-d8-1, 188k frozen games, 26.0M deduped rows,
                2 epochs) reopened the bootstrap — first positive
