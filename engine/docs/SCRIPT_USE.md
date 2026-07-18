@@ -287,11 +287,21 @@ explodes the unique count into the hundreds of thousands, preventing game replic
 in training.  Use `--quiet-only` to restrict suffix moves to non-captures (keeps
 material balanced; recommended).
 
+`--random-suffix` accepts one or more values; each position draws its suffix length
+uniformly at random from the set.  This applies to both book and FRC positions.
+
 | Suffix | Book unique | FRC unique (per replicate) |
 |--------|-------------|---------------------------|
 | 0 | ~2,500 | 960 |
 | 1 | ~60,000 | ~19,000 |
 | 2 | ~1,000,000+ | ~300,000+ |
+| 0 1 2 (mixed) | varies | varies |
+
+**Book sampling** uses a two-phase approach for speed at large targets:
+1. BFS enumerates all unique positions reachable through the book up to `--ply` depth
+   (including shallower lines where the book runs out early) — fast, done once.
+2. Weighted-samples from that leaf pool, applying suffix moves, with progress printed
+   every 10 k positions and an early-stop saturation guard (`--saturation`).
 
 Two sizing modes are available (mutually exclusive):
 
@@ -305,6 +315,9 @@ python3 make_training_epd.py
 # 2 quiet suffix moves, 21 FRC replicates + 80k book positions
 python3 make_training_epd.py --frc-replicates 21 --book-positions 80000 \
     --random-suffix 2 --quiet-only
+
+# Mixed suffix: each position gets 0, 1, or 2 moves chosen at random
+python3 make_training_epd.py --book-positions 500000 --random-suffix 0 1 2
 ```
 
 **Fraction-based** (`--total` / `--frc-fraction`):
@@ -330,19 +343,20 @@ Fraction-based sizing: `frc_replicates = max(1, round(total × frc_fraction / 96
 | `--frc-replicates K` | 1 | Samples per FRC position (explicit mode).  Without `--random-suffix`: K identical copies.  With `--random-suffix`: K unique suffix-varied samples per FRC position. |
 | `--total N` | — | Target total output size (fraction mode; use with `--frc-fraction`) |
 | `--frc-fraction F` | — | Desired FRC fraction 0.0–1.0 (fraction mode; use with `--total`) |
-| `--random-suffix K` | 0 | Random moves to play after each book/FRC position; greatly increases unique position count |
+| `--random-suffix K [K ...]` | 0 | Suffix move count(s) per position.  Pass one value for a fixed length; pass multiple to draw at random per position (e.g. `--random-suffix 0 1 2 3`).  Applies to both book and FRC positions.  Greatly increases unique position count. |
 | `--quiet-only` | off | Restrict random suffix moves to non-captures **and** filter positions by eval balance (see below) |
 | `--eval-binary FILE` | `Leaf_vclassic_eval` in script dir | Leaf binary for eval filtering; only used with `--quiet-only` |
 | `--eval-limit CP` | 50 | Discard positions where `\|score\| > CP` centipawns (default: 50 = 0.5 pawns); only used with `--quiet-only` |
 | `--eval-depth N` | 10 | Search depth for eval filtering; only used with `--quiet-only` |
 | `--eval-workers N` | cpu_count/2 | Parallel eval engine processes; only used with `--quiet-only` |
-| `--ply N` | 8 | Ply depth for book random walks |
+| `--ply N` | 8 | Ply depth for book BFS / walks |
+| `--saturation F` | 0.002 | Stop generation when a full pool pass yields fewer than `pool_size × F` new positions; lower values allow more exhaustive search near saturation |
 | `--output FILE` | `training_openings.epd` in script dir | Output EPD file |
 | `--seed N` | 42 | Random seed for reproducibility |
 
-Book positions are selected by weighted random walks (move probability ∝ Polyglot
-`weight` field), then deduplicated.  With `--random-suffix`, each walk's leaf gets
-additional random (or quiet) moves before deduplication, multiplying the unique count.
+Book positions are sampled by weighted pool draw (move probability ∝ Polyglot `weight`
+field), then deduplicated.  With `--random-suffix`, each drawn leaf gets additional
+random (or quiet) moves before deduplication, multiplying the unique count.
 FRC replication without suffix preserves intentional duplicates (for position weighting);
 with suffix, duplicates across replicates are silently dropped (rare).
 
