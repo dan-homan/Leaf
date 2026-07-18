@@ -1,5 +1,21 @@
 Changes since 2017_12_24
 
+2026_07_18 -- train.py --actor-learner-gen: Stage-1 generation integrated
+               (concurrency-1 frozen actors + one learner via
+               selfplay_run.py; single optimizer, sole .tdleaf.bin writer,
+               learner dumps the corpus; stability defaults --refresh-scores
+               and --no-adjudication baked in; --games-per-actor refresh
+               cadence; sidecar records gen_mode).  Validated by the
+               material_260708-d8t-3al3 iteration: +23±17 over its
+               d8t-2sp seed, anchors classic +80 / 5e6g +70, draws steady
+               35-40% across 188k games.  Full documentation pass:
+               TRAINING.md "Generation Modes" + online-stability rules,
+               SCRIPT_USE.md tables (train.py, selfplay_run.py),
+               CLAUDE.md (selfplay.cpp/selfplay_traj.h, three generation
+               modes, stability gotchas, env diagnostics), and
+               Online_Learning_Investigation.md Part 5 (equivalence study,
+               castle bug, the two collapses, Stage-1 validation).
+
 2026_07_18 -- selfplay_run.py: actors now pass --no-adjudication by default
                (opt back in with --adjudicate), matching train.py's
                generation.  The omission collapsed the first actor/learner

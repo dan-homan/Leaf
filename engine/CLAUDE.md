@@ -101,6 +101,8 @@ errors (unknown types, undeclared identifiers).  These are expected and can be i
 | `src/nnue_training.cpp` | TDLeaf training: FP32 shadow weights, gradients, Adam optimizer, `.tdleaf.bin` I/O (TDLEAF=1 only) |
 | `src/tdleaf.cpp` | PV walking, TD error computation (with score-change clipping + ID-stability weighting), gradient backprop, leaf/root corpus dump (`TDLEAF_DUMP_TSV`) |
 | `src/nnue_batch_train.cpp` | Offline batch trainer (`--batch-train`): supervised training on quiet-position TSV corpora, λ-blend targets, within-batch thread parallelism (`--bt-threads`) (TDLEAF=1 only) |
+| `src/selfplay.cpp` | Internal self-play driver (`--selfplay`: whole games in one process, both sides recorded every ply, exact in-engine results) and the trajectory learner (`--learn-stream`: consumes actor-emitted `.tdg` files with ONE optimizer) (TDLEAF=1 only) |
+| `src/selfplay_traj.h` | Binary `.tdg` per-game trajectory format (actor → learner): positions + search outputs + POV/gate metadata; accumulators/features/stack rebuilt exactly by `tdleaf_rebuild_record` |
 | `src/chess.h` | All major structs: `position`, `move`, `move_list`, `tree_search`, `game_rec` |
 | `src/define.h` | Compile-time constants and flag defaults (`NNUE`, `TDLEAF`, `MATERIAL_ONLY`, piece encodings, `MAXD`, `MAX_GAME_PLY`) |
 | `src/tdleaf.h` | TDLeaf hyperparameters, `TDRecord`, `TDGameRecord`, function declarations |
@@ -118,6 +120,8 @@ errors (unknown types, undeclared identifiers).  These are expected and can be i
 See `docs/TRAINING.md` for the full algorithm reference, hyperparameters, and gradient flow.
 
 **Two training modes** — online TDLeaf(λ) (below) and offline supervised consolidation of quiet-position corpora (`--batch-train` in any TDLEAF binary; corpora from `extract_quiet_positions.py` or the in-play `TDLEAF_DUMP_TSV` dump).  Together they form the hybrid loop (online generates games, offline extracts them fully, consolidated net re-enters online play) — driven end-to-end by `scripts/train.py`, including chained iterations via `--continue`.  See `docs/TRAINING.md`.
+
+**Three generation modes** for the online phase (`docs/TRAINING.md` "Generation Modes"): the legacy `match.py`/fastchess UCI pair (2-ply TD chains; UCI adjudication undersamples draws in the corpus ~40%), `--selfplay-gen` (engine-internal self-play: whole games in one process, both sides recorded, 1-ply chains, exact results, ~3.5× per-core throughput, N states merged), and `--actor-learner-gen` (the recommended Stage-1 architecture: N−1 frozen actors emit `.tdg` trajectories, ONE learner owns the optimizer — sole `.tdleaf.bin` writer, bit-exact vs single-process online given same state/env).  Driver: `scripts/selfplay_run.py` (epoch-style weight refresh via actor respawn).
 
 **Call flow:**
 - After each search: `tdleaf_record_ply()` snapshots the PV leaf accumulator, feature indices, and ID score history.
@@ -139,7 +143,9 @@ See `docs/TRAINING.md` for the full algorithm reference, hyperparameters, and gr
 - Weights persist to `.tdleaf.bin` (v12 format: adds source-`.nnue` content hash (v10); the loader still accepts v2–v11, discarding the now-removed piece-value and PSQT-slot-means fields from those older files); POSIX file locking + delta merging for concurrent training.  The save path uses section-level buffered I/O + cached dirty-row bitmaps (learning overhead ≈ +13% wall clock at depth 6).
 - TDLeaf works under BOTH protocols: xboard/CECP gets results via the protocol `result` command (`make_move()` hooks); UCI derives outcomes via `tdleaf_self_adjudicate()` in `uci_finish_game()` (terminal-position checks + score-history fallback; ambiguous games skip learning) — UCI is the default for `match.py`/fastchess training runs today.
 - Sustained training score far from 50% (e.g. vs a fixed stronger opponent) causes outcome-imbalance drift — the constant component of the TD outcome term is absorbed by FC output biases and other constant-capable channels, collapsing the net.  Self-play is immune and balanced play actively heals drift.  See "Outcome-Imbalance Drift" in `docs/TRAINING.md`; canary monitor: `scripts/diff_tdleaf_checkpoints.py`.
-- Setting `TDLEAF_DUMP_TSV=<prefix>` dumps quiet leaf+root training corpora during play (see `docs/TRAINING.md`).
+- **Online-stability rules** (each violation collapsed a full iteration; `docs/TRAINING.md` "Online-stability rules"): (1) online-learning self-play must play to **natural termination** — resign/draw adjudication + learning is a runaway decisiveness spiral; (2) TD targets must be on **current weights** — the actor/learner path requires the learner's `--refresh-scores` (trajectory scores otherwise lag by a refresh cycle).  The health canary is the **draw rate** (healthy ≈ 35–40% at d8), NOT gradient norms — both collapses kept nominal grad telemetry throughout.
+- Env diagnostics: `TDLEAF_CHECK_ACC=1` verifies walked-vs-rebuilt leaf accumulators per record (this check caught the FRC castle phantom-capture bug in `nnue_record_delta`); `TDLEAF_TRACE_UPDATE=<file>` dumps a per-record gradient trace in exact hex.
+- Setting `TDLEAF_DUMP_TSV=<prefix>` dumps quiet leaf+root training corpora during play (see `docs/TRAINING.md`).  Under `--learn-stream`, set it on the learner to dump the corpus from consumed trajectories.
 
 ### Protocol support
 
@@ -188,11 +194,19 @@ python3 scripts/match.py Leaf_vA Leaf_vB -n 200 -c 4 -tc 5+0.05
 python3 scripts/training_run.py
 
 # One full hybrid-loop iteration: generate -> consolidate -> gauntlet (from learn/)
-python3 scripts/train.py --tag iter1 --games 400000 --depth 8 \
-    --state <net>.tdleaf.bin --bt-K 220 --bt-threads 8 --gauntlet-epochs
+# --actor-learner-gen = recommended generation mode (frozen actors + ONE learner)
+python3 scripts/train.py --tag iter1 --games 188000 --depth 8 \
+    --state <net>.tdleaf.bin --actor-learner-gen --bt-K 220 --bt-threads 8 \
+    --gauntlet-epochs
 
 # Chained iteration: --continue reads the previous run's sidecar JSON
-python3 scripts/train.py --tag iter2 --continue iter1 --games 1000000 --depth 8
+python3 scripts/train.py --tag iter2 --continue iter1 --games 188000 --depth 8 \
+    --actor-learner-gen
+
+# Standalone actor/learner run (what --actor-learner-gen wraps; from learn/)
+python3 scripts/selfplay_run.py --binary Leaf_vtrain_hl_a --epd training_openings.epd \
+    --actors 8 --depth 8 --games-per-actor 1000 --total-games 100000 \
+    --traj-dir traj_run1 --refresh-scores
 
 # Bayesian Elo ratings (one or more PGN files combined)
 python3 scripts/bayeselo_ratings.py file1.pgn file2.pgn --min 20 --report
@@ -241,8 +255,8 @@ per invocation, with `--continue` to chain iterations without re-specifying `--n
 
 ```sh
 cd learn/
-python3 train.py --tag iter1 --games 400000 --depth 8 --bt-K 220 --bt-threads 8 \
-    --gauntlet-epochs --gauntlet Leaf_vclassic_eval
+python3 train.py --tag iter1 --games 188000 --depth 8 --actor-learner-gen \
+    --bt-K 220 --bt-threads 8 --gauntlet-epochs --gauntlet Leaf_vclassic_eval
 ```
 
 See `docs/TRAINING.md` for the full workflow and `docs/SCRIPT_USE.md` for the option

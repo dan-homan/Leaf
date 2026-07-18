@@ -921,3 +921,97 @@ expanded book.
   (ladder + gauntlets), trainer log
   `learn/material_260708-d8-1_work/train/train.log` (corpus size, val MSEs);
   seed-vs-classic direct control: `learn/seed_vs_classic_3s.pgn`.
+
+# Part 5 — Internal self-play, the equivalence study, and the actor/learner split (2026-07-17/18)
+
+The two-process harness was replaced from underneath the loop.  Branch:
+`internal-selfplay`; the staged design (game loop → actor/learner → optional
+in-process threads) and the anti-goal — never again N optimizer states merged
+after the fact (the offline trainer's sharding pathology) — are recorded in
+the plan sidecars and `docs/TRAINING.md` "Generation Modes".
+
+## 5.1 Stage 0: the engine plays itself in one process
+
+`--selfplay` (src/selfplay.cpp): whole games in-process, both sides recorded
+every ply (dply=1 — the `pow(λ, dply)` trace from the score-trace branch
+absorbs the change with no retune), exact in-engine results.  Deterministic at
+fixed depth; FRC openings work because `setboard` was already
+X-FEN/Shredder-FEN complete.
+
+## 5.2 The equivalence study: no TD-error collapse, and a corpus bias found
+
+5k frozen d8 games per arm vs the fastchess pair on the live net
+(`learn/eqstudy_260717_work/RESULTS.md`):
+
+- Same-side (gap-2) |Δd| ratio internal/baseline = **0.931** — the
+  negamax-consistency concern is dead; the gated TT-salt mechanism was
+  **rejected permanently** (do not build it).
+- **The pair path undersamples draws ~40%** (corpus 21.0% vs 35.1% played):
+  UCI self-adjudication skips ambiguous games, which are disproportionately
+  draws.  Every prior corpus was decisive-skewed; internal self-play matches
+  the true mix (33.2% vs ~33%).
+- +29% rows/game, ~3.5× per-core throughput, identical lengths/quiet-accept/
+  |Δcp| distributions.  `train.py --selfplay-gen` landed with this study.
+
+First production iteration (`material_260708-d8t-2sp`, online d8 trace-target,
+1-ply chains, draw-complete corpus): final **+34±17 over its d8t-1 seed**,
+foreign anchor 46→+77 vs classic; the online phase lost only −24 vs seed
+(d8t-1's had lost −56) — less systematic online damage, as predicted.
+
+## 5.3 Stage 1: one optimizer, and a bit-exactness gate that paid for itself
+
+Actors (frozen, `--traj-out`) emit binary `.tdg` trajectories; ONE learner
+(`--learn-stream`, sole `.tdleaf.bin` writer) rebuilds records exactly and
+runs the online update.  The acceptance gate — learner must reproduce a
+single-process online run **byte-for-byte** — initially failed, and the trace
+led to a real engine bug present in every FRC game ever played: on castles
+whose destination held the castling side's own rook (or the king itself,
+from==to), `nnue_record_delta` subtracted a phantom enemy piece from the
+opponent-perspective accumulator, corrupting search evals until the opponent's
+next king move and online-TDLeaf gradients throughout (offline corpora were
+clean — FEN rebuilds).  Fixed; gate now passes; permanent diagnostics
+`TDLEAF_CHECK_ACC=1` / `TDLEAF_TRACE_UPDATE=<file>`.
+
+## 5.4 Two online-stability landmines, one iteration each
+
+- **d8t-3al (collapse #1 — adjudication):** the driver left resign/draw
+  adjudication on.  Feedback spiral: evals inflate → earlier resignations →
+  short outcome-dominated trajectories → more inflation.  60%→97%
+  resignations, ~27-ply games, entry net 0/400 vs everything — with nominal
+  gradient norms and pinned PSQT material throughout.  Online self-play must
+  play to natural termination.
+- **d8t-3al2 (collapse #2 — score staleness):** adjudication off, still
+  drifted 37%→12% draws by 40k games.  Epoch-refresh actors ship scores up to
+  a refresh cycle stale (~9k games learner-side vs ~8 in the merge path),
+  delaying the eval-scale negative feedback.  Fix: learner `--refresh-scores`
+  (Flavor-A re-evaluation of leaf statics with current weights at consume
+  time).  Aborted at the 75-minute canary.
+- **The canary of record is the draw rate** (healthy ≈ 35–40% at d8, held
+  rock-steady by every good run), not gradient telemetry — both collapses
+  never tripped a grad monitor.
+
+## 5.5 Stage 1 validated in production
+
+`material_260708-d8t-3al3` (8 actors + learner w/ refresh-scores, castle-fix
+binaries, 188k d8 games in 4h26m): draws steady 35–40% end-to-end; final
+**+23±17 over its d8t-2sp seed** (LOS 97%), anchors classic +80 / 5e6g +70.
+The single-optimizer path is equal-or-better to the 9-writer merge and is now
+`train.py --actor-learner-gen` (stability defaults baked in; sidecar records
+`gen_mode`).  Chain head: `material_260708-d8t-3al3_final`.
+
+Caveat for the next comparison: d8t-3al3 is the first iteration carrying the
+castle fix, so its delta vs d8t-2sp mixes fix + architecture + iteration.
+
+## Methodology notes (Part 5)
+
+- Equivalence study: `learn/eqstudy_260717_work/` (RESULTS.md, analyze_eq.py,
+  both arms' TSV dumps).
+- Bit-exactness matrix: online±emission and learner×2 all byte-compared;
+  per-record gradient traces in exact hex (`TDLEAF_TRACE_UPDATE`) localized
+  the castle bug to two records with identical Δaccsum.
+- Collapse forensics: `learn/material_260708-d8t-3al_work/` (kept),
+  actor logs' per-generation W/D/L + termination lines are the draw-rate
+  canary source; healthy reference trajectory in
+  `material_260708-d8t-2sp_work/selfplay_*.log` (37% flat).
+- Sidecars: `material_260708-d8t-2sp_final.json`,
+  `material_260708-d8t-3al3_final.json`.

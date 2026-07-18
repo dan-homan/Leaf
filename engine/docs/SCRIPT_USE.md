@@ -91,7 +91,9 @@ pruning for one run. A failed run's `<tag>_work/` is never touched. See
 | `--depth N`                                  | 8                                                      | Fixed search depth for generation                            |
 | `--concurrency N`                            | 9                                                      | Concurrent games                                             |
 | `--openings FILE`                            | `training_openings.epd`                                | Opening set (FRC)                                            |
-| `--selfplay-gen`                             | off                                                    | Generate with the engine's internal self-play driver (`--selfplay`) instead of match.py/fastchess pairs: `--concurrency` single-process engines stripe a deterministically shuffled opening book (seed from tag) and each plays whole games in-process. Both sides recorded (game-ply gap 1), exact in-engine results — no UCI adjudication ambiguity (the pair path undersamples draws in the corpus by ~40%), ~29% more rows/game, ~3.5× per-core throughput, no PGN. Requires helper binaries with the `--selfplay` driver (guarded; `--recompile` if stale). Validated: `learn/eqstudy_260717_work/RESULTS.md` |
+| `--selfplay-gen`                             | off                                                    | Generate with the engine's internal self-play driver (`--selfplay`) instead of match.py/fastchess pairs: `--concurrency` single-process engines stripe a deterministically shuffled opening book (seed from tag) and each plays whole games in-process. Both sides recorded (game-ply gap 1), exact in-engine results — no UCI adjudication ambiguity (the pair path undersamples draws in the corpus by ~40%), ~29% more rows/game, ~3.5× per-core throughput, no PGN. Requires helper binaries with the `--selfplay` driver (guarded; `--recompile` if stale). Validated: `learn/eqstudy_260717_work/RESULTS.md`. Each process still learns independently (multi-writer merge) — prefer `--actor-learner-gen` |
+| `--actor-learner-gen`                        | off                                                    | Generate via `selfplay_run.py`: `--concurrency`−1 **frozen** actors emit `.tdg` trajectories, ONE learner consumes them with a single optimizer (sole `.tdleaf.bin` writer, learner dumps the corpus). Stability defaults baked in: actors `--no-adjudication`, learner `--refresh-scores` — both mandatory online (see TRAINING.md "Online-stability rules"). Epoch-style weight refresh via `--games-per-actor`. Validated: `material_260708-d8t-3al3` (+23±17 over seed, draws steady 35–40%) |
+| `--games-per-actor N`                        | 1000                                                   | Actor respawn cadence for `--actor-learner-gen` (= weight-refresh interval) |
 | `--no-repeat`                                | **always on** (flag = deprecated no-op)                | Generation always forwards `match.py --no-repeat` (no fastchess `-games 2 -repeat` color-swapped pair — pure duplication for frozen pairs, unneeded at 100k+ randomized openings for learning pairs). NOTE: this does *not* guarantee opening uniqueness by itself — fastchess cycles a shuffled book order, so openings recycle once `--games` exceeds the book size (train.py warns) |
 | `--dedup-corpus`                             | **always on** (flag = deprecated no-op)                | Corpus assembly always drops duplicate rows (identical in every field except gid). Duplicate games straddle the trainer's by-game train/val split (different gids), so training on them both overfits and leaks validation; frozen deterministic pairs are the worst case (one unique game per opening) |
 | `--quiet-cp N`                               | 60                                                     | `TDLEAF_DUMP_QUIET_CP` for the dump                          |
@@ -150,10 +152,14 @@ python3 selfplay_run.py --binary Leaf_vtrain_hl_a --epd training_openings.epd \
 | `--tdleaf-out PATH` | live companion | Learner state file |
 | `--publish PATH` / `--publish-every G` | off / 512 | Bake a `.nnue` every G games |
 | `--seed N` / `--delete-consumed` | 1 / archive | Shuffle seed base / delete instead of archive |
+| `--refresh-scores` | off (**always pass it for online runs**) | Learner re-evaluates leaf statics with current weights at consume time. Without it, trajectory scores lag the learner by a refresh cycle and online TD drifts toward extreme decisiveness (d8t-3al2: 37%→12% draws by 40k games) |
+| `--adjudicate` | off | Enable actor resign/draw adjudication. Leave OFF for online learning — adjudication + learning is a runaway spiral (d8t-3al: 97% resignations, 27-ply games, dead net) |
 
-The learner inherits `TDLEAF_*` env (target mode etc.).  Bit-exactness
-property: with identical starting state and env, `--learn-stream` over an
-online run's trajectories reproduces that run's `.tdleaf.bin` byte-for-byte.
+The learner inherits `TDLEAF_*` env (target mode etc.; set `TDLEAF_DUMP_TSV`
+to have the learner dump the corpus).  Bit-exactness property: with identical
+starting state and env, `--learn-stream` over an online run's trajectories
+reproduces that run's `.tdleaf.bin` byte-for-byte.  `train.py
+--actor-learner-gen` wraps this driver with the safe defaults.
 
 ## match.py
 

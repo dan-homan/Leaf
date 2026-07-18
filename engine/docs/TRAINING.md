@@ -1041,6 +1041,74 @@ what concurrent *online* self-play training still uses (see
 
 ---
 
+## Generation Modes — Internal Self-Play and the Actor/Learner Split
+
+Three ways to generate training games, selectable per `train.py` run:
+
+| Mode | Flag | Processes | Optimizer states | Notes |
+|---|---|---|---|---|
+| UCI pair (legacy) | *(default)* | 2 engines/game under fastchess | N, merged via multi-writer `.tdleaf.bin` | 2-ply TD chains; UCI self-adjudication skips ambiguous games — **undersamples draws in the corpus by ~40%** (21% dumped vs 35% played; see `learn/eqstudy_260717_work/RESULTS.md`) |
+| Internal self-play | `--selfplay-gen` | N striped single engines | N, merged | Engine `--selfplay` driver: whole games in one process, both sides recorded (1-ply TD chains), exact in-engine results, ~3.5× per-core throughput |
+| **Actor/learner** | `--actor-learner-gen` | N−1 frozen actors + **1 learner** | **1** | The settled Stage-1 architecture: single optimizer, sole state writer, no merge in the training hot path |
+
+### The engine's internal self-play driver (`--selfplay`)
+
+`Leaf_vX --selfplay --epd FILE --games N --depth D [--epd-offset K --epd-stride S]
+[--epd-shuffle SEED] [--traj-out DIR] [--no-adjudication] [--max-ply P] [--tdleaf-out PATH]`
+
+Plays whole games in-process: openings from plain 4-field EPD lines (FRC-ready),
+`tdleaf_record_ply` after **every** search (records alternate root STM; the
+`pow(λ, dply)` trace handles the 1-ply gap automatically), exact terminal
+detection (mate/stalemate/50-move/3-rep/insufficient material/max-ply) plus
+optional fastchess-style resign/draw adjudication.  Per-game reset mirrors
+`ucinewgame` (full hash realloc — TT probes match on key only).  Deterministic:
+a game is a pure function of (opening, depth, net) at 1 thread.  Learning env
+is unchanged from harness play: `TDLEAF_FREEZE=1` + `TDLEAF_DUMP_TSV` = frozen
+corpus generation; unfrozen = live online learning.
+
+### The actor/learner split (`.tdg` trajectories + `--learn-stream`)
+
+Actors run frozen with `--traj-out DIR`, writing one binary `.tdg` file per
+learned game (write-then-rename; `src/selfplay_traj.h`): positions, search
+outputs, and POV/gate metadata only — accumulators, features, and stack
+indices are rebuilt by the learner (`tdleaf_rebuild_record`), which is **exact**
+(integer accumulator rebuilds equal the incremental PV-walk snapshots; verify
+any change with `TDLEAF_CHECK_ACC=1`).  The learner
+(`--learn-stream DIR [--total-games N] [--refresh-scores] [--publish X.nnue]`)
+consumes files oldest-first, validates magic/version/net-content-hash, and runs
+the **exact online update** — with identical starting state and env it
+reproduces a single-process online run's `.tdleaf.bin` byte-for-byte (the
+Stage-1 bit-exactness gate; it caught the FRC castle accumulator bug).
+
+`scripts/selfplay_run.py` drives the ensemble with epoch-style weight refresh:
+the learner's state saves are atomic, and actors exit every `--games-per-actor`
+games and respawn, reloading the latest state.
+
+### Online-stability rules (hard-won; both cost a full iteration to learn)
+
+1. **Play to natural termination.**  With learning in the loop, resign/draw
+   adjudication forms a runaway spiral: evals inflate → games resign earlier →
+   truncated outcome-dominated trajectories inflate evals further.  The
+   `d8t-3al` collapse: 60%→97% resignations, ~27-ply games, entry net 0/400 vs
+   every opponent — while **gradient norms stayed nominal throughout** and PSQT
+   material stayed pinned.  Frozen generation tolerates adjudication (no loop).
+2. **Keep TD targets on current weights.**  Epoch-refresh actors ship scores up
+   to a refresh cycle stale (~9k games learner-side vs ~8 in the merge path),
+   delaying the eval-scale feedback that keeps online TD self-correcting; the
+   `d8t-3al2` run drifted from 37% to 12% draws within 40k games.  The learner
+   must run `--refresh-scores` (re-evaluate leaf statics with current weights
+   at consume time — the replay Flavor-A machinery).
+
+**The health canary is the draw rate** (plus game length), not gradient
+telemetry: healthy self-play holds a steady ~35–40% draws at d8; a sustained
+slide toward decisiveness means the loop is inflating.  Both failures were
+invisible to grad-norm/clip monitors.
+
+`train.py --actor-learner-gen` bakes both rules in (actors get
+`--no-adjudication`, the learner gets `--refresh-scores`).  Validated by the
+`material_260708-d8t-3al3` iteration: draws steady 35–40% across 188k games,
+final net +23±17 over its seed, foreign anchor +80 vs classic.
+
 ## The Hybrid Loop Workflow — `scripts/train.py`
 
 One command per hybrid-loop iteration, run from `engine/learn/`:
@@ -1076,9 +1144,12 @@ this script encodes.
    state next to `--net`, after a content-hash pairing pre-flight (refuses to
    promote a `.tdleaf.bin` trained against a different base `.nnue`) and a backup
    of whatever state was live.
-2. **Online generation** — self-play games at `--depth` (default 8) via
-   `match.py`, with `TDLEAF_DUMP_TSV` corpus dumping enabled; TDLeaf keeps
-   learning throughout, exactly like any other online session.
+2. **Online generation** — self-play games at `--depth` (default 8), with
+   `TDLEAF_DUMP_TSV` corpus dumping enabled; TDLeaf keeps learning throughout.
+   Three modes (see [Generation Modes](#generation-modes--internal-self-play-and-the-actorlearner-split)):
+   the legacy `match.py`/fastchess pair (default), `--selfplay-gen` (striped
+   internal self-play, multi-writer merge), or `--actor-learner-gen` (frozen
+   actors + one learner, single optimizer — the recommended mode).
 3. **Post-generation checkpoint** — the post-online `.tdleaf.bin` is saved and
    a piece-value drift canary is run against it.
 4. **Assemble corpus** — dump files (plus any `--corpus` files) are
