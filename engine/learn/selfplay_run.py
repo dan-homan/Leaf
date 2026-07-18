@@ -1,0 +1,1 @@
+../scripts/selfplay_run.py
