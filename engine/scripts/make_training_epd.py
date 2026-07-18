@@ -83,27 +83,31 @@ def apply_random_suffix(board, k, quiet_only, rng):
         board.push(rng.choice(moves))
 
 
-def all_frc_epds(replicates, random_suffix, quiet_only, seed):
+def all_frc_epds(replicates, suffix_set, quiet_only, seed):
     """Return EPD strings derived from all 960 FRC starting positions.
 
-    When random_suffix == 0:
+    suffix_set is a list of ints; each position draws its suffix length
+    uniformly at random from that list.
+
+    When all values in suffix_set are 0:
       Each position is included exactly `replicates` times (intentional
       weighting; no deduplication).
 
-    When random_suffix > 0:
+    When any value > 0:
       For each replicate pass, each FRC position gets a fresh random suffix walk
       (the RNG advances sequentially so each replicate produces different moves).
       Duplicate EPDs across replicates are silently skipped (rare); the returned
       list may be slightly shorter than 960 × replicates.
     """
     rng = random.Random(seed)
-    if random_suffix > 0:
+    if any(k > 0 for k in suffix_set):
         seen = set()
         epds = []
         for _ in range(replicates):
             for idx in range(FRC_COUNT):
                 board = chess.Board.from_chess960_pos(idx)
-                apply_random_suffix(board, random_suffix, quiet_only, rng)
+                k = rng.choice(suffix_set)
+                apply_random_suffix(board, k, quiet_only, rng)
                 epd = board.epd()
                 if epd not in seen:
                     seen.add(epd)
@@ -185,9 +189,12 @@ def enumerate_book_leaves(reader, ply):
 
 
 def generate_from_pool(pool_boards, pool_weights, n_target,
-                       random_suffix, quiet_only, seed,
+                       suffix_set, quiet_only, seed,
                        saturation_fraction=0.002):
     """Generate n_target unique EPD strings from a pool of starting boards.
+
+    suffix_set is a list of ints; each attempt draws its suffix length
+    uniformly at random from that list.
 
     Weighted-samples from pool_boards (using pool_weights), applies random
     suffix moves, and deduplicates by EPD.  Progress is printed every 10 k
@@ -195,8 +202,8 @@ def generate_from_pool(pool_boards, pool_weights, n_target,
     than pool_size * saturation_fraction new positions, indicating the
     position space is nearly exhausted.
 
-    When random_suffix == 0, returns up to min(n_target, pool_size) EPDs
-    directly (no suffix generation needed).
+    When all values in suffix_set are 0, returns up to min(n_target, pool_size)
+    EPDs directly (no suffix generation needed).
     """
     rng = random.Random(seed)
     pool_size = len(pool_boards)
@@ -205,7 +212,7 @@ def generate_from_pool(pool_boards, pool_weights, n_target,
         return []
 
     # No suffix: return pool EPDs directly (weighted order)
-    if random_suffix == 0:
+    if all(k == 0 for k in suffix_set):
         order = list(range(pool_size))
         rng.shuffle(order)
         return [pool_boards[i].epd() for i in order[:n_target]]
@@ -237,13 +244,14 @@ def generate_from_pool(pool_boards, pool_weights, n_target,
                 break
             attempts += 1
 
-            # Weighted sample
+            # Weighted sample from pool
             r = rng.random()
             idx = bisect.bisect_left(cumulative, r)
             idx = min(idx, pool_size - 1)
 
             board = pool_boards[idx].copy()
-            apply_random_suffix(board, random_suffix, quiet_only, rng)
+            k = rng.choice(suffix_set)
+            apply_random_suffix(board, k, quiet_only, rng)
 
             if not list(board.legal_moves):
                 continue
@@ -283,7 +291,7 @@ def generate_from_pool(pool_boards, pool_weights, n_target,
     return positions
 
 
-def sample_book_positions(book_path, n_target, ply, random_suffix, quiet_only, seed):
+def sample_book_positions(book_path, n_target, ply, suffix_set, quiet_only, seed):
     """Sample up to n_target unique EPD strings from a Polyglot opening book.
 
     Two-phase approach:
@@ -292,6 +300,9 @@ def sample_book_positions(book_path, n_target, ply, random_suffix, quiet_only, s
          the sum of path probabilities — fast BFS, done once.
       2. Weighted-sample from that leaf pool, apply random suffix moves, and
          deduplicate.  Progress is reported every 10 k positions.
+
+    suffix_set is a list of ints; each attempt draws its suffix length
+    uniformly at random from that list.
 
     Returns a list of EPD strings (may be shorter than n_target if the position
     space is exhausted before reaching the target).
@@ -309,7 +320,7 @@ def sample_book_positions(book_path, n_target, ply, random_suffix, quiet_only, s
 
     return generate_from_pool(
         boards, weights, n_target,
-        random_suffix, quiet_only,
+        suffix_set, quiet_only,
         seed=seed,
     )
 
@@ -449,8 +460,9 @@ def main():
 Without --random-suffix, normbk02.bin at ply 8 yields ~2500 unique positions.
 Adding suffix moves explodes the unique count:
 
-  --random-suffix 1  →  ~60k unique book + ~19k unique FRC positions
-  --random-suffix 2  →  ~1M+ unique book + ~300k+ unique FRC positions
+  --random-suffix 1    →  ~60k unique book + ~19k unique FRC positions
+  --random-suffix 2    →  ~1M+ unique book + ~300k+ unique FRC positions
+  --random-suffix 0 2  →  mix of bare book positions and 2-suffix positions
 
 Book sampling uses a two-phase approach for speed at large targets:
   1. BFS enumerates all unique book positions up to --ply depth (including
@@ -468,6 +480,10 @@ Sizing modes (mutually exclusive):
   Explicit:
     python3 make_training_epd.py --frc-replicates 21 --book-positions 80000 \\
         --random-suffix 2 --quiet-only
+
+  Mixed suffix lengths (each position gets one value drawn at random):
+    python3 make_training_epd.py --book-positions 500000 \\
+        --random-suffix 0 1 2 3
 
   Fraction-based (auto-compute frc_replicates and book_positions):
     python3 make_training_epd.py --total 100000 --frc-fraction 0.20 \\
@@ -495,9 +511,11 @@ Sizing modes (mutually exclusive):
                              "auto-computes --frc-replicates and --book-positions")
 
     # Suffix / quality
-    parser.add_argument("--random-suffix", type=int, default=0, metavar="K",
+    parser.add_argument("--random-suffix", type=int, nargs="+", default=[0], metavar="K",
                         help="Random moves to play after each book/FRC position "
-                             "(default: 0).  Greatly increases unique position count.")
+                             "(default: 0).  Pass multiple values to draw the suffix "
+                             "length at random per position, e.g. --random-suffix 0 1 2 3.  "
+                             "Greatly increases unique position count.")
     parser.add_argument("--quiet-only", action="store_true", default=False,
                         help="Restrict random suffix moves to non-captures AND "
                              "filter output positions to those within --eval-limit cp "
@@ -556,8 +574,9 @@ Sizing modes (mutually exclusive):
 
     if frc_replicates < 1:
         parser.error("--frc-replicates must be at least 1.")
-    if args.random_suffix < 0:
-        parser.error("--random-suffix must be >= 0.")
+    if any(k < 0 for k in args.random_suffix):
+        parser.error("--random-suffix values must be >= 0.")
+    suffix_set = args.random_suffix   # list of ints, possibly length 1
     if args.eval_limit < 0:
         parser.error("--eval-limit must be >= 0.")
     if args.eval_depth < 1:
@@ -582,15 +601,20 @@ Sizing modes (mutually exclusive):
             print(f"    perl src/comp.pl classic_eval OVERWRITE")
             print(f"  Proceeding without eval filter.")
 
-    suffix_desc = (f"{args.random_suffix} {'quiet ' if args.quiet_only else ''}random move(s)"
-                   if args.random_suffix > 0 else "none")
+    q = "quiet " if args.quiet_only else ""
+    if all(k == 0 for k in suffix_set):
+        suffix_desc = "none"
+    elif len(suffix_set) == 1:
+        suffix_desc = f"{suffix_set[0]} {q}random move(s)"
+    else:
+        suffix_desc = f"random from {{{','.join(str(k) for k in suffix_set)}}} {q}moves"
 
     # --- FRC positions ---
     frc_label = f"960 × {frc_replicates} replicates" if frc_replicates > 1 else "960 × 1"
     print(f"Generating FRC positions: {frc_label}, suffix: {suffix_desc} ...")
     frc_epds = all_frc_epds(
         replicates=frc_replicates,
-        random_suffix=args.random_suffix,
+        suffix_set=suffix_set,
         quiet_only=args.quiet_only,
         seed=args.seed,
     )
@@ -605,7 +629,7 @@ Sizing modes (mutually exclusive):
                   f"at ply {args.ply}, suffix: {suffix_desc} ...")
             book_epds = sample_book_positions(
                 book_path, book_positions, args.ply,
-                args.random_suffix, args.quiet_only,
+                suffix_set, args.quiet_only,
                 seed=args.seed + 1,
             )
             print(f"  Done: {len(book_epds):,} unique book-derived positions.")
@@ -644,9 +668,8 @@ Sizing modes (mutually exclusive):
     book_kept = total - frc_kept
 
     print(f"\nWritten {total:,} positions → {output_path}")
-    if args.random_suffix > 0:
-        q = "quiet " if args.quiet_only else ""
-        print(f"  Suffix: {args.random_suffix} {q}random move(s) per position")
+    if not all(k == 0 for k in suffix_set):
+        print(f"  Suffix: {suffix_desc}")
     if eval_binary:
         print(f"  Eval filter: ±{args.eval_limit} cp  (depth {args.eval_depth})")
     print(f"\nUse with cutechess-cli:")
