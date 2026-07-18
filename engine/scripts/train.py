@@ -363,7 +363,25 @@ def main():
                          "gap 1), exact in-engine results (no UCI adjudication "
                          "ambiguity, no draw undersampling), ~3.5x per-core "
                          "throughput, no PGN.  Validated equivalent in "
-                         "learn/eqstudy_260717_work/RESULTS.md.")
+                         "learn/eqstudy_260717_work/RESULTS.md.  NOTE: each "
+                         "process learns independently and the N states merge "
+                         "through the multi-writer .tdleaf.bin protocol; "
+                         "prefer --actor-learner-gen for a single optimizer.")
+    ap.add_argument("--actor-learner-gen", action="store_true",
+                    help="Generate via scripts/selfplay_run.py: concurrency-1 "
+                         "FROZEN actor engines play internal self-play and emit "
+                         ".tdg trajectories; ONE learner engine consumes them "
+                         "with a single optimizer (sole .tdleaf.bin writer — no "
+                         "multi-writer merge) and dumps the corpus TSVs.  "
+                         "Learner runs with --refresh-scores (targets on "
+                         "current weights) and actors with --no-adjudication — "
+                         "both mandatory for online stability (see "
+                         "docs/TRAINING.md).  Epoch-style weight refresh: "
+                         "actors respawn every --games-per-actor games.  "
+                         "Validated by the material_260708-d8t-3al3 iteration.")
+    ap.add_argument("--games-per-actor", type=int, default=1000,
+                    help="Actor respawn cadence for --actor-learner-gen "
+                         "(weight-refresh interval; default 1000)")
     ap.add_argument("--no-repeat", action="store_true",
                     help="DEPRECATED no-op: generation now always passes "
                          "match.py --no-repeat (no fastchess -games 2 -repeat "
@@ -542,11 +560,15 @@ def main():
         die(f"base net not found: {net_path}")
 
     # ---- Binaries --------------------------------------------------------
+    if args.selfplay_gen and args.actor_learner_gen:
+        die("--selfplay-gen and --actor-learner-gen are mutually exclusive")
+
     bt_bin = compile_binary("bt", args.net, tdleaf=True, force=args.recompile)
     if not args.skip_online:
         tr_a = compile_binary("train_hl_a", args.net, tdleaf=True, force=args.recompile)
         shutil.copy2(tr_a, LEARN_DIR / tr_a.name)
-        if not args.selfplay_gen:      # selfplay plays both sides in one process
+        if not (args.selfplay_gen or args.actor_learner_gen):
+            # internal self-play plays both sides in one process — no hl_b
             tr_b = compile_binary("train_hl_b", args.net, tdleaf=True, force=args.recompile)
             shutil.copy2(tr_b, LEARN_DIR / tr_b.name)
 
@@ -606,7 +628,35 @@ def main():
                     f"recycle past one pass; with a frozen pair the extra "
                     f"games are exact duplicates (dedup will drop their rows, "
                     f"but the generation compute is wasted)")
-        if args.selfplay_gen:
+        if args.actor_learner_gen:
+            # Stage-1 actor/learner: selfplay_run.py drives concurrency-1
+            # frozen actors + one learner (single optimizer, sole state
+            # writer).  The learner inherits this env, so it produces the
+            # corpus dump; actors are forced frozen by the driver.
+            blob = (LEARN_DIR / "Leaf_vtrain_hl_a").read_bytes()
+            if b"--learn-stream" not in blob:
+                die("Leaf_vtrain_hl_a predates the --learn-stream driver — "
+                    "rerun with --recompile")
+            seed = zlib.crc32(args.tag.encode()) & 0x7FFFFFFF
+            n_actors = max(1, int(args.concurrency) - 1)
+            traj_dir = work / "traj"
+            traj_dir.mkdir(exist_ok=True)
+            log(f"actor/learner generation: {n_actors} actors + 1 learner "
+                f"(refresh every {args.games_per_actor} games/actor, "
+                f"seed {seed}); logs -> {traj_dir}/")
+            sh(["python3", SCRIPT_DIR / "selfplay_run.py",
+                "--binary", "Leaf_vtrain_hl_a",
+                "--epd", args.openings,
+                "--actors", n_actors,
+                "--depth", args.depth,
+                "--games-per-actor", args.games_per_actor,
+                "--total-games", args.games,
+                "--traj-dir", traj_dir,
+                "--tdleaf-out", f"{netbase}.tdleaf.bin",
+                "--delete-consumed", "--refresh-scores",
+                "--seed", seed],
+               cwd=LEARN_DIR, env=env)
+        elif args.selfplay_gen:
             # Internal self-play: N striped single-process engines, each
             # playing whole games in-process (both sides, exact results).
             # Deterministic book shuffle (seeded from the tag) + offset/stride
@@ -1011,6 +1061,9 @@ def main():
         "date": time.strftime("%Y-%m-%d"),
         "games_this_iter": games_this_iter,
         "cumulative_games": cumulative_games,
+        "gen_mode": ("skip-online" if args.skip_online else
+                     "actor-learner" if args.actor_learner_gen else
+                     "selfplay" if args.selfplay_gen else "pair"),
         "depth": args.depth,
         "epochs": args.epochs,
         "picked_epoch": pick_ep,
