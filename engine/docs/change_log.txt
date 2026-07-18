@@ -1,5 +1,50 @@
 Changes since 2017_12_24
 
+2026_07_17 -- FIX: FRC castling corrupted the opponent-perspective NNUE
+               accumulator in nnue_record_delta.  Castling never captures,
+               but the generic capture test fired when the king's
+               destination held the castling side's OWN rook (FRC) or the
+               king itself (FRC from==to), subtracting a phantom enemy
+               piece from the opponent's incremental accumulator (mover's
+               perspective was safe — full refresh on king moves).  The
+               corruption persisted until the opponent's next king move
+               and fed BOTH search evals (all four nnue_record_delta call
+               sites) and online-TDLeaf leaf-accumulator gradients in
+               every FRC training game to date; offline corpora were
+               clean (the batch trainer rebuilds accumulators from FEN).
+               Classical chess was unaffected (g1/c1 always empty on a
+               legal standard castle).  Found by the Stage-1 bit-exactness
+               gate: the trajectory learner's from-scratch rebuilds
+               diverged from the online walk only on castle-in-PV records.
+               New env diagnostics: TDLEAF_CHECK_ACC=1 (walked-vs-rebuilt
+               leaf accumulator verification per record) and
+               TDLEAF_TRACE_UPDATE=<file> (per-record gradient trace).
+2026_07_17 -- Stage 1 actor/learner training split: N frozen actors emit
+               binary per-game trajectories, ONE learner owns the
+               optimizer (single .tdleaf.bin writer — no multi-writer
+               merge in the training hot path).  New src/selfplay_traj.h
+               (.tdg format: positions + search outputs + POV/gate
+               metadata; accumulators/features/stack rebuilt by the
+               learner via the new tdleaf_rebuild_record, also now used
+               by replay Flavor A).  selfplay.cpp: --traj-out DIR emits
+               write-then-rename .tdg per learned game with backpressure
+               (--traj-max-pending); --learn-stream DIR consumes files
+               oldest-first, validates magic/version/net-content-hash,
+               runs the exact online update, archives to done/ (or
+               --delete), optional --publish <nnue> --publish-every G,
+               stops on --total-games or a STOP sentinel.  record_ply
+               grew a capture-root hook so trajectories always carry
+               root_pos/root_static.  scripts/selfplay_run.py drives
+               actors + learner with epoch-style refresh (learner state
+               saves are atomic; actors exit every --games-per-actor and
+               respawn, reloading the latest state; fresh shuffle seed
+               per generation).  Validation: online run with emission ==
+               online run without (side-effect free); learner runs
+               deterministic; and after the FRC castle fix the learner
+               reproduces a 20-game online run BIT-IDENTICALLY from
+               trajectories alone.  Driver smoke: 2 actors + learner,
+               30 games, respawn + publish + clean shutdown.
+
 2026_07_17 -- Internal-vs-two-process equivalence study (5k frozen d8 games
                per arm, live nn-material_260708 net, same openings/env;
                learn/eqstudy_260717_work/RESULTS.md + analyze_eq.py):

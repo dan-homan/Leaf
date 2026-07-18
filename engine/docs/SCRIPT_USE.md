@@ -123,6 +123,38 @@ pruning for one run. A failed run's `<tag>_work/` is never touched. See
 
 ---
 
+## selfplay_run.py
+
+Stage-1 actor/learner training driver: N frozen actor engines play internal
+self-play (`--selfplay --traj-out`) emitting binary `.tdg` per-game
+trajectories; one learner engine (`--learn-stream`) consumes them in arrival
+order and owns the optimizer (single `.tdleaf.bin` writer).  Epoch-style
+weight refresh: actors exit every `--games-per-actor` games and respawn,
+reloading the learner's latest atomic state save.  Run from `learn/`:
+
+```sh
+python3 selfplay_run.py --binary Leaf_vtrain_hl_a --epd training_openings.epd \
+    --actors 8 --depth 8 --games-per-actor 1000 --total-games 100000 \
+    --traj-dir traj_run1
+```
+
+| Option | Default | Meaning |
+|--------|---------|---------|
+| `--binary NAME` | required | Training binary in cwd (needs `--selfplay`/`--learn-stream`) |
+| `--epd FILE` | required | Opening book |
+| `--actors N` | 4 | Frozen actor processes (TDLEAF_FREEZE forced) |
+| `--depth D` | 8 | Fixed search depth |
+| `--games-per-actor M` | 1000 | Actor respawn cadence = weight-refresh interval |
+| `--total-games N` | required | Learner stop budget |
+| `--traj-dir DIR` | `traj` | `.tdg` handoff dir (`STOP` sentinel stops early) |
+| `--tdleaf-out PATH` | live companion | Learner state file |
+| `--publish PATH` / `--publish-every G` | off / 512 | Bake a `.nnue` every G games |
+| `--seed N` / `--delete-consumed` | 1 / archive | Shuffle seed base / delete instead of archive |
+
+The learner inherits `TDLEAF_*` env (target mode etc.).  Bit-exactness
+property: with identical starting state and env, `--learn-stream` over an
+online run's trajectories reproduces that run's `.tdleaf.bin` byte-for-byte.
+
 ## match.py
 
 Run a head-to-head match or gauntlet between chess engines using a tournament

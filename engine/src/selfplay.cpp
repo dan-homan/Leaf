@@ -23,8 +23,12 @@
 #if TDLEAF
 
 #include <vector>
+#include <string>
 #include <random>
 #include <algorithm>
+#include <dirent.h>
+#include <sys/stat.h>
+#include "selfplay_traj.h"
 
 struct SelfplayEpdLine {
     char board[128];
@@ -45,6 +49,8 @@ struct SelfplayConfig {
     bool     adjudicate;
     bool     verbose;
     char     tdleaf_out[FILENAME_MAX];
+    const char *traj_dir;     // Stage 1: emit per-game .tdg files here (NULL = off)
+    int      traj_max_pending; // backpressure: sleep while this many .tdg await the learner
 };
 
 struct SelfplayStats {
@@ -145,6 +151,79 @@ static bool selfplay_adjudicate(const TDGameRecord &rec, int game_T, float &resu
         if (drawish) { result_w = 0.5f; return true; }
     }
     return false;
+}
+
+// ---------------------------------------------------------------------------
+// Trajectory emission (Stage 1 actor side): one .tdg file per completed game,
+// written as <name>.tdg.tmp then rename()d so the learner never sees partials.
+// Ships only positions + search outputs + POV/gate metadata; the learner
+// rebuilds accumulators/features/stack via tdleaf_rebuild_record.
+// ---------------------------------------------------------------------------
+static int selfplay_count_tdg(const char *dir)
+{
+    DIR *d = opendir(dir);
+    if (!d) return 0;
+    int n = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) != nullptr) {
+        size_t l = strlen(e->d_name);
+        if (l > 4 && strcmp(e->d_name + l - 4, ".tdg") == 0) n++;
+    }
+    closedir(d);
+    return n;
+}
+
+static bool selfplay_write_traj(const SelfplayConfig &cfg, const TDGameRecord &rec,
+                                float result_w, uint32_t seq)
+{
+    // Backpressure: don't let the emit directory grow unboundedly if the
+    // learner falls behind (each file is ~100 KB).
+    while (selfplay_count_tdg(cfg.traj_dir) >= cfg.traj_max_pending)
+        usleep(500000);
+
+    char fin[FILENAME_MAX], tmp[FILENAME_MAX];
+    snprintf(fin, sizeof(fin), "%s/g-%05d-%08u.tdg",
+             cfg.traj_dir, (int)(getpid() % 100000), seq);
+    snprintf(tmp, sizeof(tmp), "%s.tmp", fin);
+    FILE *f = fopen(tmp, "wb");
+    if (!f) {
+        fprintf(stderr, "selfplay: cannot write trajectory %s\n", tmp);
+        return false;
+    }
+    TDTrajHeader h;
+    h.magic             = TDTRAJ_MAGIC;
+    h.version           = TDTRAJ_VERSION;
+    h.nnue_content_hash = nnue_get_content_hash();
+    h.result_white_pov  = result_w;
+    h.n_records         = rec.n_plies;
+    h.gid               = (((uint32_t)getpid() & 0xFFF) << 20) | (seq & 0xFFFFF);
+    bool ok = fwrite(&h, sizeof(h), 1, f) == 1;
+    for (int t = 0; ok && t < rec.n_plies; t++) {
+        const TDRecord &r = rec.plies[t];
+        TDTrajRecord tr;
+        memset(&tr, 0, sizeof(tr));
+        tr.pos               = r.pos;
+        tr.root_pos          = r.root_pos;
+        tr.score_stm         = r.score_stm;
+        tr.score_root_stm    = r.score_root_stm;
+        tr.root_static       = r.root_static;
+        tr.game_ply          = r.game_ply;
+        tr.root_key          = r.root_key;
+        tr.key_own           = r.key_own;
+        tr.key_reply         = r.key_reply;
+        tr.id_score_variance = r.id_score_variance;
+        tr.id_depth          = r.id_depth;
+        tr.wtm               = (uint8_t)r.wtm;
+        tr.root_wtm          = (uint8_t)r.root_wtm;
+        ok = fwrite(&tr, sizeof(tr), 1, f) == 1;
+    }
+    fclose(f);
+    if (!ok || rename(tmp, fin) != 0) {
+        fprintf(stderr, "selfplay: trajectory write failed for %s\n", fin);
+        remove(tmp);
+        return false;
+    }
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -251,6 +330,8 @@ int selfplay_main(int argc, char *argv[])
     cfg.shuffle    = false;
     cfg.adjudicate = true;
     cfg.verbose    = false;
+    cfg.traj_dir   = nullptr;
+    cfg.traj_max_pending = 500;
     snprintf(cfg.tdleaf_out, sizeof(cfg.tdleaf_out), "%s%s",
              engine_cfg.exec_path, NNUE_TDLEAF_BIN);
 
@@ -267,8 +348,19 @@ int selfplay_main(int argc, char *argv[])
         else if (!strcmp(argv[ai], "--tdleaf-out") && ai + 1 < argc) {
             snprintf(cfg.tdleaf_out, sizeof(cfg.tdleaf_out), "%s", argv[++ai]);
         }
+        else if (!strcmp(argv[ai], "--traj-out") && ai + 1 < argc) cfg.traj_dir = argv[++ai];
+        else if (!strcmp(argv[ai], "--traj-max-pending") && ai + 1 < argc)
+            cfg.traj_max_pending = atoi(argv[++ai]);
         else if (!strcmp(argv[ai], "--no-adjudication")) cfg.adjudicate = false;
         else if (!strcmp(argv[ai], "--verbose"))         cfg.verbose    = true;
+    }
+    if (cfg.traj_dir) {
+        struct stat stbuf;
+        if (stat(cfg.traj_dir, &stbuf) != 0 || !S_ISDIR(stbuf.st_mode)) {
+            fprintf(stderr, "selfplay: --traj-out %s is not a directory\n", cfg.traj_dir);
+            return 1;
+        }
+        tdleaf_capture_root = true;   // .tdg ships root_pos/root_static
     }
 
     if (!cfg.epd_path) {
@@ -354,6 +446,13 @@ int selfplay_main(int argc, char *argv[])
                         game.td_game.n_plies, TDLEAF_MIN_PLIES_REP);
                 st.skipped_short++;
             } else {
+                // Emit the trajectory for exactly the games that reach the
+                // update (same skip gates), so a learner replaying the .tdg
+                // stream sees the identical game sequence — the basis of the
+                // bit-exactness equivalence with online learning.
+                if (cfg.traj_dir)
+                    selfplay_write_traj(cfg, game.td_game, result_w,
+                                        (uint32_t)(st.played - 1));
                 tdleaf_update_after_game(game.td_game, result_w, cfg.tdleaf_out);
                 tdleaf_replay(game.td_game, result_w, cfg.tdleaf_out);
             }
@@ -382,6 +481,201 @@ int selfplay_main(int argc, char *argv[])
             st.term_mate, st.term_stale, st.term_fifty, st.term_rep,
             st.term_material, st.term_maxply, st.term_resign, st.term_drawadj,
             st.term_error);
+    return 0;
+}
+
+// ===========================================================================
+// Stage 1 learner (--learn-stream): consume actor-emitted .tdg trajectories
+// in arrival order and run the EXACT online update with one optimizer — the
+// single-writer replacement for N processes merging into one .tdleaf.bin.
+// ===========================================================================
+
+struct LearnerConfig {
+    const char *dir;
+    char  tdleaf_out[FILENAME_MAX];
+    long  total_games;      // 0 = run until a <dir>/STOP sentinel appears
+    bool  delete_consumed;  // default: archive consumed files to <dir>/done/
+    const char *publish;    // optional: bake current weights to this .nnue
+    int   publish_every;    // games between bakes
+    bool  refresh_scores;   // Flavor A: re-eval leaf statics with current weights
+};
+
+static void learner_publish(const char *path)
+{
+    char tmp[FILENAME_MAX];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    if (nnue_write_nnue(tmp) && rename(tmp, path) == 0)
+        fprintf(stderr, "learner: published %s\n", path);
+    else
+        fprintf(stderr, "learner: failed to publish %s\n", path);
+}
+
+// Process one .tdg file: validate, rebuild records, run the online update.
+// Returns false for malformed/mismatched files (logged; caller still archives
+// them so they are never rescanned).
+static bool learner_process_file(const char *path, TDGameRecord *grec,
+                                 const LearnerConfig &cfg)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) { fprintf(stderr, "learner: cannot open %s\n", path); return false; }
+    TDTrajHeader h;
+    if (fread(&h, sizeof(h), 1, f) != 1 ||
+        h.magic != TDTRAJ_MAGIC || h.version != TDTRAJ_VERSION ||
+        h.n_records < 1 || h.n_records > MAX_GAME_PLY) {
+        fprintf(stderr, "learner: bad header in %s — skipping\n", path);
+        fclose(f);
+        return false;
+    }
+    if (h.nnue_content_hash != nnue_get_content_hash()) {
+        fprintf(stderr, "learner: %s was generated against a different base net "
+                        "(hash 0x%08X != 0x%08X) — skipping\n",
+                path, h.nnue_content_hash, nnue_get_content_hash());
+        fclose(f);
+        return false;
+    }
+
+    const bool want_root = tdleaf_root_enabled();   // learner's own env decides
+    for (int t = 0; t < h.n_records; t++) {
+        TDTrajRecord tr;
+        if (fread(&tr, sizeof(tr), 1, f) != 1) {
+            fprintf(stderr, "learner: truncated %s at record %d — skipping\n", path, t);
+            fclose(f);
+            return false;
+        }
+        TDRecord &r = grec->plies[t];
+        r.pos               = tr.pos;
+        r.root_pos          = tr.root_pos;
+        r.score_stm         = tr.score_stm;
+        r.score_root_stm    = tr.score_root_stm;
+        r.root_static       = tr.root_static;
+        r.game_ply          = tr.game_ply;
+        r.root_key          = tr.root_key;
+        r.key_own           = tr.key_own;
+        r.key_reply         = tr.key_reply;
+        r.id_score_variance = tr.id_score_variance;
+        r.id_depth          = tr.id_depth;
+        r.wtm               = (bool)tr.wtm;
+        r.root_wtm          = (bool)tr.root_wtm;
+        tdleaf_rebuild_record(r, cfg.refresh_scores, want_root);
+    }
+    fclose(f);
+    grec->n_plies      = h.n_records;
+    grec->engine_color = -1;   // meaningless for alternating-STM trajectories
+
+    tdleaf_update_after_game(*grec, h.result_white_pov, cfg.tdleaf_out);
+    tdleaf_replay(*grec, h.result_white_pov, cfg.tdleaf_out);
+    grec->n_plies = 0;
+    return true;
+}
+
+int learner_main(int argc, char *argv[])
+{
+    LearnerConfig cfg;
+    cfg.dir             = nullptr;
+    cfg.total_games     = 0;
+    cfg.delete_consumed = false;
+    cfg.publish         = nullptr;
+    cfg.publish_every   = 512;
+    cfg.refresh_scores  = false;
+    snprintf(cfg.tdleaf_out, sizeof(cfg.tdleaf_out), "%s%s",
+             engine_cfg.exec_path, NNUE_TDLEAF_BIN);
+
+    for (int ai = 1; ai < argc; ai++) {
+        if (!strcmp(argv[ai], "--learn-stream") && ai + 1 < argc) cfg.dir = argv[++ai];
+        else if (!strcmp(argv[ai], "--tdleaf-out") && ai + 1 < argc)
+            snprintf(cfg.tdleaf_out, sizeof(cfg.tdleaf_out), "%s", argv[++ai]);
+        else if (!strcmp(argv[ai], "--total-games") && ai + 1 < argc)
+            cfg.total_games = atol(argv[++ai]);
+        else if (!strcmp(argv[ai], "--publish") && ai + 1 < argc) cfg.publish = argv[++ai];
+        else if (!strcmp(argv[ai], "--publish-every") && ai + 1 < argc)
+            cfg.publish_every = atoi(argv[++ai]);
+        else if (!strcmp(argv[ai], "--delete"))         cfg.delete_consumed = true;
+        else if (!strcmp(argv[ai], "--refresh-scores")) cfg.refresh_scores  = true;
+    }
+
+    if (!cfg.dir) { fprintf(stderr, "learner: --learn-stream <dir> is required\n"); return 1; }
+    if (!nnue_available) { fprintf(stderr, "learner: requires a loaded NNUE network\n"); return 1; }
+    struct stat sb;
+    if (stat(cfg.dir, &sb) != 0 || !S_ISDIR(sb.st_mode)) {
+        fprintf(stderr, "learner: %s is not a directory\n", cfg.dir);
+        return 1;
+    }
+    char done_dir[FILENAME_MAX], stop_path[FILENAME_MAX];
+    snprintf(done_dir, sizeof(done_dir), "%s/done", cfg.dir);
+    snprintf(stop_path, sizeof(stop_path), "%s/STOP", cfg.dir);
+    if (!cfg.delete_consumed) mkdir(done_dir, 0755);
+
+    TDGameRecord *grec = new TDGameRecord;   // ~10 MB — heap, reused per game
+    grec->n_plies = 0;
+
+    fprintf(stderr, "learner: consuming %s -> %s (%s consumed files; "
+                    "stop: %s%s)\n",
+            cfg.dir, cfg.tdleaf_out,
+            cfg.delete_consumed ? "deleting" : "archiving",
+            cfg.total_games ? "game budget or " : "", "STOP sentinel");
+
+    long consumed = 0, rejected = 0;
+    int  since_publish = 0;
+    bool stopping = false;
+    while (!stopping) {
+        // Collect pending .tdg files, oldest first (mtime, then name).
+        std::vector<std::pair<std::pair<long, std::string>, std::string> > files;
+        DIR *d = opendir(cfg.dir);
+        if (d) {
+            struct dirent *e;
+            while ((e = readdir(d)) != nullptr) {
+                size_t l = strlen(e->d_name);
+                if (l <= 4 || strcmp(e->d_name + l - 4, ".tdg") != 0) continue;
+                char p[FILENAME_MAX];
+                snprintf(p, sizeof(p), "%s/%s", cfg.dir, e->d_name);
+                struct stat fs;
+                if (stat(p, &fs) != 0) continue;
+                files.push_back({{(long)fs.st_mtime, std::string(e->d_name)},
+                                 std::string(e->d_name)});
+            }
+            closedir(d);
+        }
+        std::sort(files.begin(), files.end());
+
+        if (files.empty()) {
+            if (stat(stop_path, &sb) == 0) break;
+            usleep(300000);
+            continue;
+        }
+
+        for (auto &fe : files) {
+            char path[FILENAME_MAX];
+            snprintf(path, sizeof(path), "%s/%s", cfg.dir, fe.second.c_str());
+            bool ok = learner_process_file(path, grec, cfg);
+            if (cfg.delete_consumed) {
+                remove(path);
+            } else {
+                char dst[FILENAME_MAX];
+                snprintf(dst, sizeof(dst), "%s/%s", done_dir, fe.second.c_str());
+                rename(path, dst);
+            }
+            if (ok) {
+                consumed++;
+                since_publish++;
+                if (consumed % 100 == 0)
+                    fprintf(stderr, "learner: %ld games consumed\n", consumed);
+                if (cfg.publish && since_publish >= cfg.publish_every) {
+                    learner_publish(cfg.publish);
+                    since_publish = 0;
+                }
+                if (cfg.total_games && consumed >= cfg.total_games) { stopping = true; break; }
+            } else {
+                rejected++;
+            }
+            if (stat(stop_path, &sb) == 0) { stopping = true; break; }
+        }
+    }
+
+    tdleaf_flush_batch(cfg.tdleaf_out);
+    if (cfg.publish) learner_publish(cfg.publish);
+    fprintf(stderr, "learner: done — %ld games consumed, %ld rejected\n",
+            consumed, rejected);
+    delete grec;
     return 0;
 }
 

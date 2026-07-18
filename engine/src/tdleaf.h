@@ -290,6 +290,22 @@ bool tdleaf_insufficient_material(const struct position &p);
 // --selfplay.  Plays whole games in-process with TDLeaf recording every ply.
 int selfplay_main(int argc, char *argv[]);
 
+// Trajectory learner (selfplay.cpp), dispatched from main() on --learn-stream:
+// consumes actor-emitted .tdg game files in arrival order and runs the exact
+// online update with ONE optimizer (single .tdleaf.bin writer).
+int learner_main(int argc, char *argv[]);
+
+// Reconstruct a TDRecord's derived snapshot fields (leaf accumulator/PSQT,
+// active features, stack; optionally the root gradient snapshot) from its
+// stored position(s) using the current weights.  refresh_score additionally
+// re-evaluates score_stm (replay Flavor A).  Bit-exact vs the online-recorded
+// snapshot when weights are unchanged.
+void tdleaf_rebuild_record(struct TDRecord &r, bool refresh_score, bool rebuild_root);
+
+// Set by selfplay.cpp when --traj-out is active: forces tdleaf_record_ply to
+// capture root_pos/root_static (shipped in the .tdg format).
+extern bool tdleaf_capture_root;
+
 // Record one ply after each ts.search() call.
 // Walks the principal variation to the leaf position; records the leaf
 // accumulator, leaf wtm, and leaf-perspective score (not the root's).

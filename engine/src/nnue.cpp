@@ -327,7 +327,11 @@ void nnue_record_delta(NNUEAccumulator &acc,
         if (fi >= 0) acc.add[opp_sd][acc.n_add[opp_sd]++] = fi;
 
         // King capture: remove the captured piece from the opponent's accumulator.
-        if (capt_pt) {
+        // NOT for castling: the king's destination can hold the castling side's
+        // OWN rook (FRC) or the king itself (FRC from==to) — sq[to] is then an
+        // own piece, not a capture, and subtracting it as an enemy piece
+        // corrupted the opponent-perspective accumulator (phantom feature).
+        if (capt_pt && !(mtype & CASTLE)) {
             fi = halfkav2_feature(opp_sd, opp_king, to, capt_pt, mover_sd ^ 1);
             if (fi >= 0) acc.sub[opp_sd][acc.n_sub[opp_sd]++] = fi;
         }

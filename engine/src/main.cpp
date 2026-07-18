@@ -442,6 +442,13 @@ int main(int argc, char *argv[])
       close_hash();
       return sp_ret;
     }
+    // Trajectory learner (selfplay.cpp): consume actor .tdg files with one
+    // optimizer; exits when its stop condition fires.
+    if(!strcmp(argv[argi], "--learn-stream")) {
+      int ln_ret = learner_main(argc, argv);
+      close_hash();
+      return ln_ret;
+    }
 #endif
   }
 

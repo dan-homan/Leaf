@@ -37,6 +37,12 @@ static bool tdleaf_dump_wanted()
 // Defined with the learning-target selection block below; needed here so
 // tdleaf_record_ply can snapshot root data when root learning is on.
 static bool tdleaf_root_enabled();
+static void tdleaf_dump_fen(const position &pos, bool wtm, char *out);
+
+// Set by selfplay.cpp when trajectory emission (--traj-out) is active: the
+// .tdg format ships root_pos/root_static, so record_ply must capture them
+// even when neither the TSV dump nor root learning would.
+bool tdleaf_capture_root = false;
 
 // ---------------------------------------------------------------------------
 // tdleaf_record_ply — walk the PV to the leaf, then snapshot its accumulator
@@ -117,6 +123,41 @@ void tdleaf_record_ply(TDGameRecord &rec,
         id_var /= id_score_count;
     }
 
+    // Diagnostic (env TDLEAF_CHECK_ACC=1): verify the incrementally walked
+    // leaf accumulator equals a from-scratch rebuild of the leaf position —
+    // the invariant the trajectory learner's tdleaf_rebuild_record relies on
+    // for bit-exact gradient reconstruction.
+    {
+        static int check_acc = -1;
+        if (check_acc < 0) {
+            const char *p = getenv("TDLEAF_CHECK_ACC");
+            check_acc = (p && *p && *p != '0') ? 1 : 0;
+        }
+        if (check_acc) {
+            NNUEAccumulator fresh;
+            nnue_init_accumulator(fresh, cur);
+            bool p_ok[2], q_ok[2];
+            for (int p = 0; p < 2; p++) {
+                p_ok[p] = memcmp(fresh.acc[p],  acc_a.acc[p],
+                                 NNUE_HALF_DIMS * sizeof(int16_t)) == 0;
+                q_ok[p] = memcmp(fresh.psqt[p], acc_a.psqt[p],
+                                 NNUE_PSQT_BKTS * sizeof(int32_t)) == 0;
+            }
+            if (!p_ok[0] || !p_ok[1] || !q_ok[0] || !q_ok[1]) {
+                char fen[110];
+                tdleaf_dump_fen(cur, leaf_wtm, fen);
+                fprintf(stderr, "TDLeaf CHECK_ACC MISMATCH ply=%d pv_len=%d "
+                                "accB=%d accW=%d psqtB=%d psqtW=%d  pv=",
+                        game_ply, pv_len,
+                        (int)p_ok[0], (int)p_ok[1], (int)q_ok[0], (int)q_ok[1]);
+                for (int k = 0; k < pv_len; k++)
+                    fprintf(stderr, "%d>%d/t%d ", (int)pv[k].b.from,
+                            (int)pv[k].b.to, (int)pv[k].b.type);
+                fprintf(stderr, " leaf=%s\n", fen);
+            }
+        }
+    }
+
     TDRecord &r = rec.plies[rec.n_plies++];
     memcpy(r.acc[0],  acc_a.acc[0],  NNUE_HALF_DIMS  * sizeof(int16_t));
     memcpy(r.acc[1],  acc_a.acc[1],  NNUE_HALF_DIMS  * sizeof(int16_t));
@@ -136,7 +177,7 @@ void tdleaf_record_ply(TDGameRecord &rec,
     r.id_depth          = (int8_t)((search_depth < 1) ? 1 :
                                    (search_depth > 127) ? 127 : search_depth);
     const bool want_root = tdleaf_root_enabled();
-    if (tdleaf_dump_wanted() || want_root) {
+    if (tdleaf_dump_wanted() || want_root || tdleaf_capture_root) {
         // Root snapshot + static eval for the root-row TSV dump and for
         // online root learning (TDLEAF_ROOT=1).
         r.root_pos = root_pos;
@@ -376,6 +417,19 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result,
     const bool  root_learn = (td_root == 1 && target_mode >= 1);
     const int   N_ply_end  = rec.plies[T - 1].game_ply;
 
+    // Diagnostic (env TDLEAF_TRACE_UPDATE=<file>): append one line per record
+    // with every quantity that feeds the gradient, floats in exact hex — for
+    // diffing the online arm against the trajectory learner.
+    static FILE *trace_f = nullptr;
+    {
+        static int trace_init = 0;
+        if (!trace_init) {
+            trace_init = 1;
+            const char *p = getenv("TDLEAF_TRACE_UPDATE");
+            if (p && *p) trace_f = fopen(p, "a");
+        }
+    }
+
     for (int t = 0; t < T; t++) {
         float sig_grad = d[t] * (1.0f - d[t]) / TDLEAF_K;
         // wtm_sign converts ∂d_t/∂w (white-POV utility we want to ascend)
@@ -388,6 +442,23 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result,
         float wtm_sign = rec.plies[t].wtm ? -1.0f : 1.0f;
         float id_weight = 1.0f / (1.0f + rec.plies[t].id_score_variance / TDLEAF_ID_VAR_SIGMA2);
         float grad_scale = e[t] * sig_grad * cp_factor * wtm_sign * id_weight;
+
+        if (trace_f) {
+            const TDRecord &r = rec.plies[t];
+            long acc_sum = 0;
+            for (int p = 0; p < 2; p++)
+                for (int i = 0; i < NNUE_HALF_DIMS; i++) acc_sum += r.acc[p][i];
+            long ft_sum = 0;
+            for (int p = 0; p < 2; p++)
+                for (int i = 0; i < r.n_ft[p]; i++) ft_sum += r.ft_idx[p][i];
+            fprintf(trace_f,
+                    "t=%d ply=%d stack=%d wtm=%d score=%d var=%a e=%a gs=%a "
+                    "accsum=%ld nft=%d/%d ftsum=%ld\n",
+                    t, r.game_ply, r.stack, (int)r.wtm, r.score_stm,
+                    (double)r.id_score_variance, (double)e[t], (double)grad_scale,
+                    acc_sum, (int)r.n_ft[0], (int)r.n_ft[1], ft_sum);
+            fflush(trace_f);
+        }
 
         if (grad_scale != 0.0f) {
             NNUEActivations act;
@@ -680,6 +751,87 @@ static int           td_replay_head  = 0;  // next slot to write
 static int           td_replay_count = 0;  // slots filled (saturates at BUF_N)
 
 // ---------------------------------------------------------------------------
+// tdleaf_rebuild_record — reconstruct the derived snapshot fields of a
+// TDRecord from its stored position(s) using the CURRENT weights: leaf
+// accumulator/PSQT sums, active features, stack index, and (optionally) the
+// root gradient snapshot from root_pos.  Shared by replay Flavor A
+// (refresh_score=true: also re-evaluate score_stm so d[t] reflects the
+// current network) and the trajectory learner (which ships only positions +
+// scores; refresh off preserves exact online semantics).
+//
+// Integer accumulator rebuilds equal the incremental PV-walked snapshots
+// exactly (same FT weight rows, integer adds), so with unchanged weights this
+// reproduces the online-recorded snapshot bit-for-bit.
+// ---------------------------------------------------------------------------
+void tdleaf_rebuild_record(TDRecord &r, bool refresh_score, bool rebuild_root)
+{
+    // Rebuild leaf accumulator from the stored position.
+    NNUEAccumulator fresh_acc;
+    nnue_init_accumulator(fresh_acc, r.pos);
+    memcpy(r.acc[0],  fresh_acc.acc[0],  NNUE_HALF_DIMS  * sizeof(int16_t));
+    memcpy(r.acc[1],  fresh_acc.acc[1],  NNUE_HALF_DIMS  * sizeof(int16_t));
+    memcpy(r.psqt[0], fresh_acc.psqt[0], NNUE_PSQT_BKTS * sizeof(int32_t));
+    memcpy(r.psqt[1], fresh_acc.psqt[1], NNUE_PSQT_BKTS * sizeof(int32_t));
+
+    // Re-enumerate active features (must match rebuilt accumulator).
+    for (int p = 0; p < 2; p++) {
+        int ksq = r.pos.plist[p][KING][1];
+        r.n_ft[p] = 0;
+        for (int sd = 0; sd < 2; sd++)
+            for (int pt = PAWN; pt <= KING; pt++)
+                for (int i = 1; i <= r.pos.plist[sd][pt][0]; i++) {
+                    if (r.n_ft[p] >= NNUE_MAX_FT_PER_PERSP) goto ft_done_rebuild;
+                    int fi = halfkav2_feature(p, ksq, r.pos.plist[sd][pt][i], pt, sd);
+                    if (fi >= 0) r.ft_idx[p][r.n_ft[p]++] = fi;
+                }
+        ft_done_rebuild:;
+    }
+
+    // Stack index — same piece-count formula as tdleaf_record_ply's leaf path
+    // (kings as the constant 2, PAWN..QUEEN from the piece lists).  The bucket
+    // (pc-1)/4 is what the eval consumes, so this matches the historical
+    // replay re-eval at pc = stack*4 + 2 exactly.
+    int pc = 2;
+    for (int sd = 0; sd < 2; sd++)
+        for (int pt = PAWN; pt <= QUEEN; pt++)
+            pc += r.pos.plist[sd][pt][0];
+    pc = (pc < 1) ? 1 : (pc > 32) ? 32 : pc;
+    r.stack = (pc - 1) / 4;
+
+    if (refresh_score)
+        r.score_stm = nnue_evaluate_acc_raw(r.acc, r.psqt, (int)r.wtm, pc);
+
+    if (rebuild_root) {
+        // Root gradient snapshot from root_pos — mirrors tdleaf_record_ply's
+        // want_root block (root piece count includes kings via the KING list).
+        NNUEAccumulator root_fresh;
+        nnue_init_accumulator(root_fresh, r.root_pos);
+        memcpy(r.root_acc[0],  root_fresh.acc[0],  NNUE_HALF_DIMS  * sizeof(int16_t));
+        memcpy(r.root_acc[1],  root_fresh.acc[1],  NNUE_HALF_DIMS  * sizeof(int16_t));
+        memcpy(r.root_psqt[0], root_fresh.psqt[0], NNUE_PSQT_BKTS * sizeof(int32_t));
+        memcpy(r.root_psqt[1], root_fresh.psqt[1], NNUE_PSQT_BKTS * sizeof(int32_t));
+        int pc_root = 0;
+        for (int sd = 0; sd < 2; sd++)
+            for (int pt = PAWN; pt <= KING; pt++)
+                pc_root += r.root_pos.plist[sd][pt][0];
+        pc_root = (pc_root < 1) ? 1 : (pc_root > 32) ? 32 : pc_root;
+        r.root_stack = (pc_root - 1) / 4;
+        for (int p = 0; p < 2; p++) {
+            int ksq = r.root_pos.plist[p][KING][1];
+            r.root_n_ft[p] = 0;
+            for (int sd = 0; sd < 2; sd++)
+                for (int pt = PAWN; pt <= KING; pt++)
+                    for (int i = 1; i <= r.root_pos.plist[sd][pt][0]; i++) {
+                        if (r.root_n_ft[p] >= NNUE_MAX_FT_PER_PERSP) goto root_ft_done_rebuild;
+                        int fi = halfkav2_feature(p, ksq, r.root_pos.plist[sd][pt][i], pt, sd);
+                        if (fi >= 0) r.root_ft_idx[p][r.root_n_ft[p]++] = fi;
+                    }
+            root_ft_done_rebuild:;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // tdleaf_refresh_scores — rewrite score_stm in every ply of rec using
 // the current quantized weights.  Must be called before tdleaf_accumulate_game
 // in each replay pass so d[t] reflects the current network, not stale weights.
@@ -690,36 +842,8 @@ static int           td_replay_count = 0;  // slots filled (saturates at BUF_N)
 // ---------------------------------------------------------------------------
 static void tdleaf_refresh_scores(TDGameRecord &rec)
 {
-    for (int t = 0; t < rec.n_plies; t++) {
-        TDRecord &r = rec.plies[t];
-
-        // Rebuild accumulator from stored position using current FT weights.
-        NNUEAccumulator fresh_acc;
-        nnue_init_accumulator(fresh_acc, r.pos);
-        memcpy(r.acc[0],  fresh_acc.acc[0],  NNUE_HALF_DIMS  * sizeof(int16_t));
-        memcpy(r.acc[1],  fresh_acc.acc[1],  NNUE_HALF_DIMS  * sizeof(int16_t));
-        memcpy(r.psqt[0], fresh_acc.psqt[0], NNUE_PSQT_BKTS * sizeof(int32_t));
-        memcpy(r.psqt[1], fresh_acc.psqt[1], NNUE_PSQT_BKTS * sizeof(int32_t));
-
-        // Re-enumerate active features (must match rebuilt accumulator).
-        for (int p = 0; p < 2; p++) {
-            int ksq = r.pos.plist[p][KING][1];
-            r.n_ft[p] = 0;
-            for (int sd = 0; sd < 2; sd++)
-                for (int pt = PAWN; pt <= KING; pt++)
-                    for (int i = 1; i <= r.pos.plist[sd][pt][0]; i++) {
-                        if (r.n_ft[p] >= NNUE_MAX_FT_PER_PERSP) goto ft_done_refresh;
-                        int fi = halfkav2_feature(p, ksq, r.pos.plist[sd][pt][i], pt, sd);
-                        if (fi >= 0) r.ft_idx[p][r.n_ft[p]++] = fi;
-                    }
-            ft_done_refresh:;
-        }
-
-        // Re-evaluate score from rebuilt accumulator.
-        int pc = r.stack * 4 + 2;
-        pc = (pc < 1) ? 1 : (pc > 32) ? 32 : pc;
-        r.score_stm = nnue_evaluate_acc_raw(r.acc, r.psqt, (int)r.wtm, pc);
-    }
+    for (int t = 0; t < rec.n_plies; t++)
+        tdleaf_rebuild_record(rec.plies[t], true, false);
 }
 
 // ---------------------------------------------------------------------------
