@@ -59,6 +59,14 @@ def main():
                     help="Base opening-shuffle seed")
     ap.add_argument("--delete-consumed", action="store_true",
                     help="Learner deletes consumed .tdg (default: archive to done/)")
+    ap.add_argument("--refresh-scores", action="store_true",
+                    help="Learner re-evaluates leaf statics with CURRENT weights "
+                         "at consume time (Flavor A).  Recommended: without it, "
+                         "trajectory scores lag the learner by up to a refresh "
+                         "cycle, delaying the eval-scale feedback that keeps "
+                         "online TD self-correcting — the d8t-3al2 run drifted "
+                         "to 12%% draws (healthy runs hold ~37%%) within 40k "
+                         "games from exactly this lag.")
     ap.add_argument("--adjudicate", action="store_true",
                     help="Enable actor resign/draw adjudication.  OFF by default "
                          "to match the recipe (train.py generation passes "
@@ -85,6 +93,8 @@ def main():
                         "--publish-every", str(args.publish_every)]
     if args.delete_consumed:
         learner_cmd += ["--delete"]
+    if args.refresh_scores:
+        learner_cmd += ["--refresh-scores"]
 
     learner_log = open(traj / "learner.log", "a")
     learner = subprocess.Popen(learner_cmd, stdout=learner_log,
