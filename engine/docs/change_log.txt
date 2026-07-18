@@ -1,5 +1,28 @@
 Changes since 2017_12_24
 
+2026_07_17 -- Internal-vs-two-process equivalence study (5k frozen d8 games
+               per arm, live nn-material_260708 net, same openings/env;
+               learn/eqstudy_260717_work/RESULTS.md + analyze_eq.py):
+               (1) NO TD-error collapse — same-side (gap-2) |Δd| ratio
+               internal/baseline = 0.931, so the negamax-consistency concern
+               is empirically dead and the gated TT-salt decorrelation
+               mechanism will NOT be built.  (2) The pair path's UCI
+               self-adjudication skips ambiguous games — disproportionately
+               draws — so its corpus carries 21.0% draws vs 35.1% actual;
+               internal matches its true mix (33.2% vs ~33%).  Outcome-blend
+               targets have been training against a decisive-skewed outcome
+               distribution; internal self-play removes the bias.  (3) +29%
+               rows per game generated, ~3.5x per-core throughput, zero
+               timeouts/ambiguity; game lengths, quiet-accept rates, and
+               |Δcp| distributions match.  train.py grew --selfplay-gen
+               (striped internal-selfplay generation replacing the
+               match.py/fastchess pair; deterministic tag-seeded book
+               shuffle; stale-binary guard; hl_b no longer compiled in this
+               mode) — validated end-to-end with a generate-only smoke.
+               Also fixed the piece-value drift canary, dead since the
+               startup banner went silent: it now sends `netinfo` instead
+               of expecting the banner unconditionally.  SCRIPT_USE.md
+               updated.
 2026_07_17 -- Internal self-play driver (--selfplay), Stage 0 of the
                single-optimizer training architecture (new src/selfplay.cpp,
                TDLEAF builds only).  Plays whole games inside one process:

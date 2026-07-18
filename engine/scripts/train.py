@@ -104,6 +104,7 @@ import re
 import shutil
 import signal
 import subprocess
+import zlib
 import sys
 import time
 from pathlib import Path
@@ -205,7 +206,9 @@ def piece_value_canary(binary, cwd, label):
     the outcome-imbalance pathology (see docs/TRAINING.md).  Report-only under
     NNUE_FIXED_PIECE_VALUES; never constrains training."""
     try:
-        out = subprocess.run([f"./{binary}"], cwd=str(cwd), input="quit\n",
+        # netinfo prints the piece-value banner on demand (startup went silent
+        # when the unconditional load dump was removed).
+        out = subprocess.run([f"./{binary}"], cwd=str(cwd), input="netinfo\nquit\n",
                              capture_output=True, text=True, timeout=60).stdout
     except (OSError, subprocess.SubprocessError) as e:
         log(f"piece-value canary ({label}): could not run {binary}: {e}")
@@ -349,6 +352,18 @@ def main():
     ap.add_argument("--depth", type=int, default=8)
     ap.add_argument("--concurrency", type=int, default=9)
     ap.add_argument("--openings", default="training_openings.epd")
+    ap.add_argument("--selfplay-gen", action="store_true",
+                    help="Generate with the engine's internal self-play driver "
+                         "(--selfplay) instead of match.py/fastchess pairs: "
+                         "--concurrency single-threaded engine processes stripe "
+                         "the opening book (offset i, stride N over a "
+                         "deterministically shuffled order) and each plays "
+                         "whole games in-process.  Same net/state/depth/dump "
+                         "env as the pair path; both sides recorded (game-ply "
+                         "gap 1), exact in-engine results (no UCI adjudication "
+                         "ambiguity, no draw undersampling), ~3.5x per-core "
+                         "throughput, no PGN.  Validated equivalent in "
+                         "learn/eqstudy_260717_work/RESULTS.md.")
     ap.add_argument("--no-repeat", action="store_true",
                     help="DEPRECATED no-op: generation now always passes "
                          "match.py --no-repeat (no fastchess -games 2 -repeat "
@@ -530,9 +545,10 @@ def main():
     bt_bin = compile_binary("bt", args.net, tdleaf=True, force=args.recompile)
     if not args.skip_online:
         tr_a = compile_binary("train_hl_a", args.net, tdleaf=True, force=args.recompile)
-        tr_b = compile_binary("train_hl_b", args.net, tdleaf=True, force=args.recompile)
         shutil.copy2(tr_a, LEARN_DIR / tr_a.name)
-        shutil.copy2(tr_b, LEARN_DIR / tr_b.name)
+        if not args.selfplay_gen:      # selfplay plays both sides in one process
+            tr_b = compile_binary("train_hl_b", args.net, tdleaf=True, force=args.recompile)
+            shutil.copy2(tr_b, LEARN_DIR / tr_b.name)
 
     # ---- Phase 1: promote state -----------------------------------------
     if args.state:
@@ -590,13 +606,56 @@ def main():
                     f"recycle past one pass; with a frozen pair the extra "
                     f"games are exact duplicates (dedup will drop their rows, "
                     f"but the generation compute is wasted)")
-        sh(["python3", SCRIPT_DIR / "match.py",
-            "Leaf_vtrain_hl_a", "Leaf_vtrain_hl_b",
-            "-n", args.games, "-c", args.concurrency,
-            "--depth1", args.depth, "--depth2", args.depth,
-            "--openings", args.openings, "--fischer-random",
-            "--no-adjudication", "--no-repeat", "--pgn-out", pgn_out],
-           cwd=LEARN_DIR, env=env)
+        if args.selfplay_gen:
+            # Internal self-play: N striped single-process engines, each
+            # playing whole games in-process (both sides, exact results).
+            # Deterministic book shuffle (seeded from the tag) + offset/stride
+            # keeps the processes' opening slices disjoint.
+            # A binary predating the --selfplay flag would fall through the
+            # engine's arg loop into interactive mode and hang reading stdin —
+            # same literal-string probe as binary_baked_net_matches.
+            if b"--selfplay" not in (LEARN_DIR / "Leaf_vtrain_hl_a").read_bytes():
+                die("Leaf_vtrain_hl_a predates the --selfplay driver — "
+                    "rerun with --recompile")
+            seed = zlib.crc32(args.tag.encode()) & 0x7FFFFFFF
+            nproc = max(1, int(args.concurrency))
+            per   = [args.games // nproc + (1 if i < args.games % nproc else 0)
+                     for i in range(nproc)]
+            log(f"selfplay generation: {nproc} striped processes "
+                f"(shuffle seed {seed}); logs -> {work}/selfplay_<i>.log")
+            procs = []
+            for i in range(nproc):
+                if per[i] == 0:
+                    continue
+                cmd = ["./Leaf_vtrain_hl_a", "--selfplay",
+                       "--epd", args.openings,
+                       "--epd-shuffle", str(seed),
+                       "--epd-offset", str(i), "--epd-stride", str(nproc),
+                       "--games", str(per[i]), "--depth", str(args.depth),
+                       "--no-adjudication",
+                       "--tdleaf-out", f"{netbase}.tdleaf.bin"]
+                lf = open(work / f"selfplay_{i}.log", "w")
+                procs.append((subprocess.Popen(cmd, cwd=str(LEARN_DIR),
+                                               env=env, stdout=lf, stderr=lf),
+                              lf, i))
+            failed = 0
+            for p, lf, i in procs:
+                rc = p.wait()
+                lf.close()
+                if rc != 0:
+                    failed += 1
+                    log(f"selfplay process {i} FAILED (rc={rc}) — see "
+                        f"{work}/selfplay_{i}.log")
+            if failed:
+                die(f"{failed} selfplay generation process(es) failed")
+        else:
+            sh(["python3", SCRIPT_DIR / "match.py",
+                "Leaf_vtrain_hl_a", "Leaf_vtrain_hl_b",
+                "-n", args.games, "-c", args.concurrency,
+                "--depth1", args.depth, "--depth2", args.depth,
+                "--openings", args.openings, "--fischer-random",
+                "--no-adjudication", "--no-repeat", "--pgn-out", pgn_out],
+               cwd=LEARN_DIR, env=env)
 
         # Phase 3: checkpoint post-generation state
         ckpt = LEARN_DIR / f"{netbase}.tdleaf.bin-{args.tag}-online"
