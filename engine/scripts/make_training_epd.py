@@ -29,8 +29,19 @@
 #
 # Run from learn/ (or scripts/) after placing normbk02.bin in learn/.
 #
+# Book sampling (two-phase):
+#   Phase 1 — enumerate_book_leaves() BFS-walks the polyglot book up to --ply depth,
+#     collecting every unique position reachable (including shallower lines where the
+#     book runs out), with a probability weight equal to the sum over all paths that
+#     lead there.  This is fast and done once.
+#   Phase 2 — generate_from_pool() weighted-samples from the leaf pool, applies random
+#     suffix moves, and deduplicates by EPD.  Progress is reported every 10 k positions.
+#     A saturation guard stops early if a full pass through the pool yields too few
+#     new positions.
+#
 
 import argparse
+import bisect
 import os
 import random
 import re
@@ -106,71 +117,201 @@ def all_frc_epds(replicates, random_suffix, quiet_only, seed):
     return epds
 
 
+def enumerate_book_leaves(reader, ply):
+    """BFS through a Polyglot book up to `ply` depth.
+
+    Returns (boards, weights) where:
+      boards   — list of chess.Board objects (one per unique position)
+      weights  — parallel list of floats; weight[i] = sum of path probabilities
+                 over all routes through the book that reach boards[i]
+
+    Positions where the book has no moves before `ply` depth is reached are
+    included as leaves (shallower lines), giving a larger and more diverse pool.
+    Transpositions (same position reached via different move orders) are merged:
+    their weights are summed, and the board object from the first visit is kept.
+
+    The BFS deduplicates by EPD at each depth level to avoid exponential blowup
+    from transpositions.
+    """
+    # level: dict  epd -> (board, accumulated_path_weight)
+    start_board = chess.Board()
+    level = {start_board.epd(): (start_board, 1.0)}
+
+    # all_leaves: positions where the book ran out before reaching `ply`
+    all_leaves = {}   # epd -> (board, weight)
+
+    for _depth in range(ply):
+        next_level = {}
+        for epd, (board, weight) in level.items():
+            entries = list(reader.find_all(board))
+            if not entries:
+                # Book has no moves here — collect as a leaf
+                if epd in all_leaves:
+                    all_leaves[epd] = (all_leaves[epd][0], all_leaves[epd][1] + weight)
+                else:
+                    all_leaves[epd] = (board.copy(), weight)
+                continue
+
+            total_w = sum(e.weight for e in entries)
+            if total_w == 0:
+                total_w = len(entries)   # treat zero-weight entries as uniform
+
+            for e in entries:
+                prob = (e.weight if e.weight > 0 else 1) / total_w
+                child = board.copy()
+                child.push(e.move)
+                child_epd = child.epd()
+                child_weight = weight * prob
+                if child_epd in next_level:
+                    prev_board, prev_w = next_level[child_epd]
+                    next_level[child_epd] = (prev_board, prev_w + child_weight)
+                else:
+                    next_level[child_epd] = (child, child_weight)
+
+        level = next_level
+        if not level:
+            break   # book exhausted at this depth
+
+    # Positions remaining in `level` at the target depth are also leaves
+    for epd, (board, weight) in level.items():
+        if epd in all_leaves:
+            all_leaves[epd] = (all_leaves[epd][0], all_leaves[epd][1] + weight)
+        else:
+            all_leaves[epd] = (board.copy(), weight)
+
+    boards  = [b for b, _w in all_leaves.values()]
+    weights = [w for _b, w in all_leaves.values()]
+    return boards, weights
+
+
+def generate_from_pool(pool_boards, pool_weights, n_target,
+                       random_suffix, quiet_only, seed,
+                       saturation_fraction=0.002):
+    """Generate n_target unique EPD strings from a pool of starting boards.
+
+    Weighted-samples from pool_boards (using pool_weights), applies random
+    suffix moves, and deduplicates by EPD.  Progress is printed every 10 k
+    positions.  Stops early when a full pass through the pool yields fewer
+    than pool_size * saturation_fraction new positions, indicating the
+    position space is nearly exhausted.
+
+    When random_suffix == 0, returns up to min(n_target, pool_size) EPDs
+    directly (no suffix generation needed).
+    """
+    rng = random.Random(seed)
+    pool_size = len(pool_boards)
+
+    if pool_size == 0:
+        return []
+
+    # No suffix: return pool EPDs directly (weighted order)
+    if random_suffix == 0:
+        order = list(range(pool_size))
+        rng.shuffle(order)
+        return [pool_boards[i].epd() for i in order[:n_target]]
+
+    # Build cumulative weight array for O(log n) weighted sampling
+    total_w = sum(pool_weights)
+    if total_w > 0:
+        cumulative = []
+        cum = 0.0
+        for w in pool_weights:
+            cum += w / total_w
+            cumulative.append(cum)
+    else:
+        step = 1.0 / pool_size
+        cumulative = [(i + 1) * step for i in range(pool_size)]
+
+    seen      = set()
+    positions = []
+    attempts  = 0
+    cycle     = 0
+    last_prog = 0
+    min_yield = max(1, int(pool_size * saturation_fraction))
+
+    while len(positions) < n_target:
+        cycle_start = len(positions)
+
+        for _ in range(pool_size):
+            if len(positions) >= n_target:
+                break
+            attempts += 1
+
+            # Weighted sample
+            r = rng.random()
+            idx = bisect.bisect_left(cumulative, r)
+            idx = min(idx, pool_size - 1)
+
+            board = pool_boards[idx].copy()
+            apply_random_suffix(board, random_suffix, quiet_only, rng)
+
+            if not list(board.legal_moves):
+                continue
+
+            epd = board.epd()
+            if epd not in seen:
+                seen.add(epd)
+                positions.append(epd)
+
+                n_found = len(positions)
+                if n_found - last_prog >= 10_000:
+                    pct = n_found / n_target * 100
+                    print(f"\r  Found {n_found:,} / {n_target:,} "
+                          f"({pct:.1f}%)  cycle {cycle + 1}, "
+                          f"{attempts:,} attempts",
+                          end="", flush=True)
+                    last_prog = n_found
+
+        cycle_new = len(positions) - cycle_start
+        cycle += 1
+
+        if cycle_new < min_yield:
+            print(f"\n  Saturation: {cycle_new} new positions in cycle {cycle} "
+                  f"(threshold {min_yield}). Stopping.")
+            break
+
+    # Final progress line
+    n_found = len(positions)
+    pct = n_found / n_target * 100 if n_target else 100
+    print(f"\r  Found {n_found:,} / {n_target:,} ({pct:.1f}%)  "
+          f"{cycle} cycle(s), {attempts:,} attempts       ")
+
+    if n_found < n_target:
+        print(f"  Note: only {n_found:,} unique positions found "
+              f"(requested {n_target:,}).")
+
+    return positions
+
+
 def sample_book_positions(book_path, n_target, ply, random_suffix, quiet_only, seed):
     """Sample up to n_target unique EPD strings from a Polyglot opening book.
 
-    Each sample is a weighted random walk of `ply` half-moves from the start
-    position, optionally followed by `random_suffix` random (or quiet) moves.
-    Positions are deduplicated by EPD string.
+    Two-phase approach:
+      1. Enumerate all unique positions reachable through the book up to `ply`
+         depth (including shallower lines where the book runs out), weighted by
+         the sum of path probabilities — fast BFS, done once.
+      2. Weighted-sample from that leaf pool, apply random suffix moves, and
+         deduplicate.  Progress is reported every 10 k positions.
 
-    Returns a list of EPD strings (may be shorter than n_target if the book
-    has insufficient branching even after suffix moves).
+    Returns a list of EPD strings (may be shorter than n_target if the position
+    space is exhausted before reaching the target).
     """
-    rng = random.Random(seed)
-    seen = set()
-    positions = []
-    max_attempts = n_target * 25
-
     try:
         reader = chess.polyglot.open_reader(book_path)
     except Exception as e:
         print(f"Error: cannot open book {book_path}: {e}", file=sys.stderr)
         return []
 
-    attempts = 0
-    while len(positions) < n_target and attempts < max_attempts:
-        attempts += 1
-        board = chess.Board()
-        ok = True
-        for _ in range(ply):
-            entries = list(reader.find_all(board))
-            if not entries:
-                ok = False
-                break
-            total_w = sum(e.weight for e in entries)
-            if total_w == 0:
-                entry = rng.choice(entries)
-            else:
-                r = rng.randint(0, total_w - 1)
-                cum = 0
-                entry = entries[-1]
-                for e in entries:
-                    cum += e.weight
-                    if r < cum:
-                        entry = e
-                        break
-            board.push(entry.move)
-
-        if not ok:
-            continue
-
-        if random_suffix > 0:
-            apply_random_suffix(board, random_suffix, quiet_only, rng)
-
-        if not list(board.legal_moves):
-            continue
-
-        epd = board.epd()
-        if epd not in seen:
-            seen.add(epd)
-            positions.append(epd)
-
+    print(f"  Enumerating book leaves at ply {ply} ...", end="", flush=True)
+    boards, weights = enumerate_book_leaves(reader, ply)
     reader.close()
+    print(f" {len(boards):,} unique positions found.")
 
-    if len(positions) < n_target:
-        print(f"  Note: only {len(positions):,} unique positions found "
-              f"(requested {n_target:,}; {attempts:,} attempts).")
-    return positions
+    return generate_from_pool(
+        boards, weights, n_target,
+        random_suffix, quiet_only,
+        seed=seed,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -311,6 +452,12 @@ Adding suffix moves explodes the unique count:
   --random-suffix 1  →  ~60k unique book + ~19k unique FRC positions
   --random-suffix 2  →  ~1M+ unique book + ~300k+ unique FRC positions
 
+Book sampling uses a two-phase approach for speed at large targets:
+  1. BFS enumerates all unique book positions up to --ply depth (including
+     shallower lines where the book runs out) — fast, done once.
+  2. Weighted-samples from that leaf pool, applying suffix moves, with
+     progress printed every 10k positions and early-stop on saturation.
+
 --quiet-only: restricts suffix moves to non-captures AND filters the output
 by a Leaf eval binary (default: Leaf_vclassic_eval), keeping only positions
 within --eval-limit cp of even (scored at depth 10 by default).
@@ -375,7 +522,12 @@ Sizing modes (mutually exclusive):
 
     # Book walk / output
     parser.add_argument("--ply", type=int, default=8,
-                        help="Ply depth for book random walks (default: 8)")
+                        help="Ply depth for book walks (default: 8)")
+    parser.add_argument("--saturation", type=float, default=0.002, metavar="F",
+                        help="Stop when a full pool pass yields fewer than "
+                             "pool_size × F new positions (default: 0.002).  "
+                             "Lower values allow more exhaustive search at the cost "
+                             "of more attempts near saturation.")
     parser.add_argument("--output", default=None, metavar="FILE",
                         help="Output EPD file "
                              "(default: training_openings.epd alongside this script)")
