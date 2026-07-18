@@ -1,5 +1,21 @@
 Changes since 2017_12_24
 
+2026_07_18 -- selfplay_run.py: actors now pass --no-adjudication by default
+               (opt back in with --adjudicate), matching train.py's
+               generation.  The omission collapsed the first actor/learner
+               iteration (material_260708-d8t-3al): with learning in the
+               loop, adjudicated self-play forms a feedback spiral —
+               resignations rose 60%%→97%% of games, draw adjudications fell
+               187→4 per thousand, games shrank to ~27 plies, and the
+               truncated outcome-dominated trajectories inflated FC eval
+               confidence until the entry net lost 400/400 vs every
+               gauntlet opponent (PSQT material stayed pinned at P=126 —
+               not material drift; gradient norms stayed nominal
+               throughout, so no clip ever fired).  Live state was
+               restored from material_260708-d8t-2sp_final.  Lesson: any
+               generation mode that learns online must play games to
+               natural termination.
+
 2026_07_17 -- FIX: FRC castling corrupted the opponent-perspective NNUE
                accumulator in nnue_record_delta.  Castling never captures,
                but the generic capture test fired when the king's

@@ -59,6 +59,15 @@ def main():
                     help="Base opening-shuffle seed")
     ap.add_argument("--delete-consumed", action="store_true",
                     help="Learner deletes consumed .tdg (default: archive to done/)")
+    ap.add_argument("--adjudicate", action="store_true",
+                    help="Enable actor resign/draw adjudication.  OFF by default "
+                         "to match the recipe (train.py generation passes "
+                         "--no-adjudication): with learning in the loop, "
+                         "adjudicated games form a feedback spiral — evals grow "
+                         "more extreme, resignations come earlier, truncated "
+                         "outcome-heavy trajectories push evals further "
+                         "(d8t-3al collapsed this way: 60%%→97%% resignations, "
+                         "27-ply games, entry net lost 400/400).")
     args = ap.parse_args()
 
     binary = Path(args.binary)
@@ -99,6 +108,8 @@ def main():
                "--games", str(args.games_per_actor),
                "--depth", str(args.depth),
                "--traj-out", str(traj)]
+        if not args.adjudicate:
+            cmd.append("--no-adjudication")
         lf = open(traj / f"actor_{slot}.log", "a")
         p = subprocess.Popen(cmd, env=actor_env, stdout=lf, stderr=lf)
         actors[slot] = (p, lf)
