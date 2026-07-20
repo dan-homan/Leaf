@@ -1,6 +1,17 @@
 # Simplification Plan — Consolidating Around Actor/Learner Self-Play
 
-**Status:** Phases 1–2 landed (2026-07-20); Phase 3 proposed.
+**Status:** Phases 1–2 landed (2026-07-20); Phase 3 partially landed.
+
+> **Phase 3 (in progress).** **Both legacy generation modes were removed** (revising
+> the Phase-2 "demote, keep" decision): `--selfplay-gen` and `--uci-pair-gen` are
+> gone, along with their `train.py` flags, branches, the `gen_mode` resolution, and
+> the `hl_b` binary compile.  The actor/learner split is now the sole generation mode
+> (no mode flag; `--actor-learner-gen` was also removed).  The engine's internal
+> `--selfplay` driver stays (per-actor engine of the split); `match.py` stays (the
+> gauntlet/rating tool).  **Consequence:** with no concurrent writers left in the
+> training pipeline, retiring the in-engine multi-writer merge is now unblocked (it
+> was gated on dropping `--uci-pair-gen`).  Still open: the merge → atomic-write
+> rewrite (its own byte-exact change) and the replay ring-buffer (`TDLEAF_REPLAY_K=0`).
 
 > **Phase 2 done.** `train.py` now defaults to the actor/learner split; the two
 > other modes are demoted behind explicit legacy flags — `--selfplay-gen`
@@ -29,9 +40,9 @@ understand and harder to misuse in a training run.
 
 **Two guiding decisions (settled):**
 
-1. The two non-actor/learner generation modes (UCI-pair via `match.py`, and
-   `--selfplay-gen`) are **demoted, not deleted** — kept working behind flags, but
-   actor/learner becomes the default and the only documented-as-supported path.
+1. Actor/learner becomes the sole generation path.  (Phase 2 demoted the other two
+   modes behind legacy flags; Phase 3 then removed both — `--selfplay-gen` and
+   `--uci-pair-gen` — leaving actor/learner as the only mode, with no mode flag.)
 2. The training binary **hard-errors** at startup if any unknown / retired `TDLEAF_*`
    environment variable is set. Leftover env vars are the exact "mistake under
    unexpected conditions" this plan is meant to prevent.
@@ -148,13 +159,20 @@ check plus `TDLEAF_CHECK_ACC=1` are the guardrails.
 
 ## Phase 3 — Deeper cleanups (evaluate separately; do not bundle)
 
-- **In-engine concurrent-write merge.** With actor/learner as sole writer, the
-  POSIX-lock + delta-merge machinery in the `.tdleaf.bin` save/load hot path
-  (`nnue_training.cpp`) is no longer exercised by the default pipeline — it existed for
-  `--selfplay-gen`'s N-writer merge. Candidate to simplify to a plain atomic write, but
-  it is correctness-critical *and* still used by the (now-legacy but retained)
-  `--selfplay-gen` mode. **Treat as its own reviewed change; keep for now.**
-  (`merge_tdleaf.py`, the offline run-merger, is independent and stays.)
+- **Remove both legacy generation modes** — **DONE.** `--selfplay-gen` and
+  `--uci-pair-gen` (and the redundant `--actor-learner-gen`) are gone, along with their
+  `train.py` branches, the `gen_mode` resolution, and the `hl_b` binary compile.  The
+  engine's internal `--selfplay` driver stays (per-actor engine of the split); `match.py`
+  stays (gauntlet/rating tool).  `merge_tdleaf.py` is unaffected — a standalone Python
+  tool that parses the `.tdleaf.bin`/`.nnue` byte formats itself (no engine invocation);
+  only *format* changes would ever require matching it.
+- **In-engine concurrent-write merge** — **now unblocked; not yet done.**  The
+  POSIX-lock + delta-merge machinery in the `.tdleaf.bin` save path (`nnue_training.cpp`)
+  is no longer exercised concurrently by the pipeline (the single learner is the sole
+  writer).  It can be simplified to a plain atomic write — but it is still *the* save
+  mechanism (every save, including `--init-nnue`, goes through it), so this is its own
+  reviewed change with a byte-exact regression (à la Phase 1).  (`merge_tdleaf.py`, the
+  offline run-merger, is independent and stays.)
 - **Compile-flag audit.** `TDLEAF_REPLAY_K` is hard-disabled (=0): retire the replay
   ring-buffer unless it's being resurrected. Confirm `TDLEAF_LOG_STEP_CLIPS` and
   `MATERIAL_ONLY` still earn their keep. `TDLEAF_READONLY` stays (inference builds).

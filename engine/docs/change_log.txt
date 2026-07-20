@@ -1,5 +1,22 @@
 Changes since 2017_12_24
 
+2026_07_20 -- Simplification Phase 3 (partial): removed BOTH legacy generation
+               modes, making the actor/learner split the sole path (revising the
+               Phase-2 "demote, keep" decision).  Dropped from train.py the
+               --selfplay-gen (striped multi-writer) and --uci-pair-gen
+               (match.py/fastchess engine pair) modes, the redundant
+               --actor-learner-gen flag, the gen_mode resolution, and the
+               Leaf_vtrain_hl_b binary compile (only the UCI pair needed it).
+               Online TDLeaf learning now runs 100% through the single learner
+               fed by frozen actor threads.  The engine's internal --selfplay
+               driver is unchanged (per-actor engine of the split); match.py is
+               retained as the gauntlet/rating tool.  Docs updated (TRAINING.md,
+               SCRIPT_USE.md, engine/CLAUDE.md, TODO.md, SIMPLIFICATION_PLAN.md).
+               Consequence: with no concurrent writers left in the pipeline,
+               retiring the in-engine multi-writer .tdleaf.bin merge (to a plain
+               atomic write) is now unblocked — its own byte-exact change, still
+               open.  merge_tdleaf.py (offline, standalone Python) is unaffected.
+
 2026_07_20 -- Simplification Phase 2: consolidated training generation on the
                actor/learner split.  train.py now runs actor/learner by DEFAULT
                (--actor-learner-gen is optional); the other two modes are

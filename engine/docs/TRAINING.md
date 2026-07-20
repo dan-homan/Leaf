@@ -96,7 +96,7 @@ The learner can optionally dump root and leaf node training corpora (.tsv files)
 TDLEAF_DUMP_TSV=iter2 python3 selfplay_run.py --binary Leaf_vtrain_hl_a ...
 ```
 
-writes two per-process files at game end:  `iter2.<pid>.root.tsv`  and `iter2.<pid>.leaf.tsv`.  See [Offline Consolidation — Batch Training](#offline-consolidation--batch-training) below for how to use training corpora for offline training.  (The legacy `match.py` UCI engine-pair path still works via `train.py --uci-pair-gen`; see [Generation Modes](#generation-modes--internal-self-play-and-the-actorlearner-split).)
+writes two per-process files at game end:  `iter2.<pid>.root.tsv`  and `iter2.<pid>.leaf.tsv`.  See [Offline Consolidation — Batch Training](#offline-consolidation--batch-training) below for how to use training corpora for offline training.
 
 ---
 
@@ -584,31 +584,16 @@ FT weight counts remain max-based (`max(file, ours)`) because per-weight delta c
 would require 92 MB; FT counts use global bias correction so exact counts are less
 critical.
 
-#### Usage with match.py
+#### Concurrent multi-writer training is retired
 
-The recommended way to run training is via `scripts/train.py` (the hybrid-loop
-driver, which defaults to the actor/learner split and handles binary compilation,
-generation, consolidation, and gauntlet automatically).  The notes below cover the
-legacy `--uci-pair-gen` path, driven by `match.py` directly for manual control.
-(The older interactive `training_run.py` manager is archived under `scripts/older/`.)
-
-When running parallel self-play via `match.py` (fastchess by default, `cutechess-cli`
-via `--driver=cutechess`) with multiple concurrent TDLEAF instances, add `--wait MS`
-to insert a pause between games. This reduces
-contention on the `.tdleaf.bin.lock` file and gives each instance time to complete its
-write cycle before the next game starts.
-
-For symmetric self-play (both engines learning from the same `.tdleaf.bin`), use
-`--no-repeat` to play each opening once (maximising position diversity) rather than the
-default which replays each opening twice for color balance:
-
-```sh
-# Symmetric self-play — each opening once, maximum diversity
-python3 match.py Leaf_vtrain_a Leaf_vtrain_b -n 200 -c 4 --wait 500 --no-repeat
-
-# Asymmetric (learner vs. read-only reference) — default repeat for color balance
-python3 match.py Leaf_vtrain_a Leaf_vtrain_ro -n 200 -c 4 --wait 500
-```
+The lock + delta-merge machinery above exists because Leaf once trained with many
+engine instances writing the same `.tdleaf.bin` concurrently (the `match.py` pair
+and `--selfplay-gen` paths).  Those modes were removed: training now runs through
+the **actor/learner split**, whose single learner is the sole writer, so the
+concurrent-write path is no longer exercised by the pipeline (it remains as the
+engine's save mechanism; simplifying it to a plain atomic write is a tracked
+follow-up — see `docs/SIMPLIFICATION_PLAN.md`).  `match.py` is now purely the
+gauntlet/rating tool.
 
 ---
 
@@ -1047,13 +1032,18 @@ what concurrent *online* self-play training still uses (see
 
 ## Generation Modes — Internal Self-Play and the Actor/Learner Split
 
-The **actor/learner split is the default and only supported generation mode** (`train.py` runs it when no legacy flag is given; `--actor-learner-gen` is the now-optional explicit flag).  Two legacy modes are retained behind explicit flags but unsupported.
+The **actor/learner split is the only generation mode**: `N−1` frozen actors play
+internal self-play and emit `.tdg` trajectories, and **one** learner consumes them
+with a single optimizer — the sole `.tdleaf.bin` writer, so there is no multi-writer
+merge in the training path.  `train.py` always generates this way (no mode flag).
 
-| Mode | Flag | Processes | Optimizer states | Notes |
-|---|---|---|---|---|
-| **Actor/learner** | *(default)* / `--actor-learner-gen` | N−1 frozen actors + **1 learner** | **1** | The settled Stage-1 architecture: single optimizer, sole state writer, no merge in the training hot path |
-| Internal self-play (legacy) | `--selfplay-gen` | N striped single engines | N, merged | Engine `--selfplay` driver: whole games in one process, both sides recorded (1-ply TD chains), exact in-engine results, ~3.5× per-core throughput.  N independent optimizers merge via the multi-writer `.tdleaf.bin` protocol |
-| UCI pair (legacy) | `--uci-pair-gen` | 2 engines/game under fastchess | N, merged via multi-writer `.tdleaf.bin` | 2-ply TD chains; UCI self-adjudication skips ambiguous games — **undersamples draws in the corpus by ~40%** (21% dumped vs 35% played; see `learn/eqstudy_260717_work/RESULTS.md`) |
+The two former alternatives were removed once actor/learner became the settled
+architecture: the `match.py`/fastchess **UCI engine pair** (2 engines/game, N
+optimizers merged via the multi-writer `.tdleaf.bin` protocol; UCI self-adjudication
+undersampled draws in the corpus by ~40%) and **`--selfplay-gen`** (N independent
+striped `--selfplay` engines, also merged).  The engine's internal `--selfplay`
+driver that both used lives on as the per-actor engine of the split.  `match.py`
+itself remains — it is the gauntlet/rating tool, not a training generator.
 
 ### The engine's internal self-play driver (`--selfplay`)
 
@@ -1108,8 +1098,8 @@ telemetry: healthy self-play holds a steady ~35–40% draws at d8; a sustained
 slide toward decisiveness means the loop is inflating.  Both failures were
 invisible to grad-norm/clip monitors.
 
-`train.py --actor-learner-gen` bakes both rules in (actors get
-`--no-adjudication`, the learner gets `--refresh-scores`).  Validated by the
+`train.py` bakes both rules in (actors get `--no-adjudication`, the learner gets
+`--refresh-scores`).  Validated by the
 `material_260708-d8t-3al3` iteration: draws steady 35–40% across 188k games,
 final net +23±17 over its seed, foreign anchor +80 vs classic.
 
@@ -1150,9 +1140,8 @@ this script encodes.
    of whatever state was live.
 2. **Online generation** — self-play games at `--depth` (default 8), with
    `TDLEAF_DUMP_TSV` corpus dumping enabled; TDLeaf keeps learning throughout.
-   The default and only supported mode is the actor/learner split (frozen actors
-   + one learner, single optimizer); the legacy `--selfplay-gen` and
-   `--uci-pair-gen` modes are retained behind explicit flags (see
+   Generation is always the actor/learner split (frozen actors + one learner,
+   single optimizer — the only mode; see
    [Generation Modes](#generation-modes--internal-self-play-and-the-actorlearner-split)).
 3. **Post-generation checkpoint** — the post-online `.tdleaf.bin` is saved and
    a piece-value drift canary is run against it.

@@ -23,9 +23,12 @@ STM + game-ply λ^Δ), and **Phases D and E have since landed:**
 - **Phase E — single Adam stream** shipped as the **actor/learner split**
   (`--traj-out` / `--learn-stream`, driven by `scripts/selfplay_run.py`): N−1
   frozen actors emit `.tdg` trajectories, ONE learner owns the optimizer.  This is
-  now the default `train.py` generation mode.  Fully retiring the in-engine
-  multi-writer `.tdleaf.bin` merge protocol (only the legacy `--selfplay-gen`
-  path still needs it) is tracked as Phase 3 in `docs/SIMPLIFICATION_PLAN.md`.
+  now the sole `train.py` generation mode (the multi-writer `--selfplay-gen` and
+  `--uci-pair-gen` paths were removed).  With no concurrent writers left in the
+  pipeline, simplifying the in-engine multi-writer `.tdleaf.bin` merge protocol to
+  a plain atomic write is now unblocked — tracked as Phase 3 in
+  `docs/SIMPLIFICATION_PLAN.md` (its own reviewed change; the merge is still the
+  save mechanism, so it needs a byte-exact regression).
 
 ### Open items
 

@@ -121,7 +121,7 @@ See `docs/TRAINING.md` for the full algorithm reference, hyperparameters, and gr
 
 **Two training modes** — online TDLeaf(λ) (below) and offline supervised consolidation of quiet-position corpora (`--batch-train` in any TDLEAF binary; corpora from `extract_quiet_positions.py` or the in-play `TDLEAF_DUMP_TSV` dump).  Together they form the hybrid loop (online generates games, offline extracts them fully, consolidated net re-enters online play) — driven end-to-end by `scripts/train.py`, including chained iterations via `--continue`.  See `docs/TRAINING.md`.
 
-**Generation for the online phase** (`docs/TRAINING.md` "Generation Modes").  The **default and only supported mode is the actor/learner split** (`train.py` default; `--actor-learner-gen` is the now-optional explicit flag): N−1 frozen actors emit `.tdg` trajectories, ONE learner owns the optimizer — sole `.tdleaf.bin` writer, bit-exact vs single-process online given same state/env.  Driver: `scripts/selfplay_run.py` (epoch-style weight refresh via actor respawn).  Two **legacy modes** are retained behind explicit flags but unsupported: `--selfplay-gen` (engine-internal self-play, N independent optimizers merged via the multi-writer `.tdleaf.bin` protocol) and `--uci-pair-gen` (the original `match.py`/fastchess UCI engine pair; UCI adjudication undersamples draws in the corpus ~40%).
+**Generation for the online phase** (`docs/TRAINING.md` "Generation Modes").  The **only mode is the actor/learner split** (`train.py` always uses it — no generation-mode flag): N−1 frozen actors emit `.tdg` trajectories, ONE learner owns the optimizer — sole `.tdleaf.bin` writer, bit-exact vs single-process online given same state/env.  Driver: `scripts/selfplay_run.py` (epoch-style weight refresh via actor respawn).  The two former modes (`--uci-pair-gen`, the `match.py`/fastchess UCI engine pair; and `--selfplay-gen`, N striped independent engines) were removed — both were multi-writer, merging N optimizers into one `.tdleaf.bin`.  The engine's internal `--selfplay` driver they used is still the per-actor engine of the split; `match.py` remains as the gauntlet/rating tool.
 
 **Call flow:**
 - After each search: `tdleaf_record_ply()` snapshots the PV leaf accumulator, feature indices, and ID score history.
@@ -141,7 +141,7 @@ See `docs/TRAINING.md` for the full algorithm reference, hyperparameters, and gr
 - FC0 passthrough row (output 15) is **zero-initialized**; gradient flows through it normally.
 - FT uses RMSProp (no m), not full Adam.  Session-local `t_ft_session` prevents oversized steps after restart.
 - Weights persist to `.tdleaf.bin` (v12 format: adds source-`.nnue` content hash (v10); the loader still accepts v2–v11, discarding the now-removed piece-value and PSQT-slot-means fields from those older files); POSIX file locking + delta merging for concurrent training.  The save path uses section-level buffered I/O + cached dirty-row bitmaps (learning overhead ≈ +13% wall clock at depth 6).
-- TDLeaf works under BOTH protocols: xboard/CECP gets results via the protocol `result` command (`make_move()` hooks); UCI derives outcomes via `tdleaf_self_adjudicate()` in `uci_finish_game()` (terminal-position checks + score-history fallback; ambiguous games skip learning) — UCI is the protocol used by the legacy `match.py`/fastchess pair path (`--uci-pair-gen`).  The default actor/learner path plays in-engine self-play with exact in-process results (no UCI adjudication).
+- TDLeaf works under BOTH protocols: xboard/CECP gets results via the protocol `result` command (`make_move()` hooks); UCI derives outcomes via `tdleaf_self_adjudicate()` in `uci_finish_game()` (terminal-position checks + score-history fallback; ambiguous games skip learning).  The training path (actor/learner internal self-play) uses exact in-process results, not UCI adjudication — the self-adjudication path now matters only for UCI play outside training (e.g. GUI/analysis).
 - Sustained training score far from 50% (e.g. vs a fixed stronger opponent) causes outcome-imbalance drift — the constant component of the TD outcome term is absorbed by FC output biases and other constant-capable channels, collapsing the net.  Self-play is immune and balanced play actively heals drift.  See "Outcome-Imbalance Drift" in `docs/TRAINING.md`; canary monitor: `scripts/diff_tdleaf_checkpoints.py`.
 - **Online-stability rules** (each violation collapsed a full iteration; `docs/TRAINING.md` "Online-stability rules"): (1) online-learning self-play must play to **natural termination** — resign/draw adjudication + learning is a runaway decisiveness spiral; (2) TD targets must be on **current weights** — the actor/learner path requires the learner's `--refresh-scores` (trajectory scores otherwise lag by a refresh cycle).  The health canary is the **draw rate** (healthy ≈ 35–40% at d8), NOT gradient norms — both collapses kept nominal grad telemetry throughout.
 - Env diagnostics: `TDLEAF_CHECK_ACC=1` verifies walked-vs-rebuilt leaf accumulators per record (this check caught the FRC castle phantom-capture bug in `nnue_record_delta`); `TDLEAF_TRACE_UPDATE=<file>` dumps a per-record gradient trace in exact hex.
@@ -198,10 +198,9 @@ python3 scripts/train.py --tag iter1 --games 188000 --depth 8 \
     --gauntlet-epochs
 
 # Chained iteration: --continue reads the previous run's sidecar JSON
-python3 scripts/train.py --tag iter2 --continue iter1 --games 188000 --depth 8 \
-    --actor-learner-gen
+python3 scripts/train.py --tag iter2 --continue iter1 --games 188000 --depth 8
 
-# Standalone actor/learner run (what --actor-learner-gen wraps; from learn/)
+# Standalone actor/learner run (what train.py's generation phase wraps; from learn/)
 python3 scripts/selfplay_run.py --binary Leaf_vtrain_hl_a --epd training_openings.epd \
     --actors 8 --depth 8 --games-per-actor 1000 --total-games 100000 \
     --traj-dir traj_run1 --refresh-scores

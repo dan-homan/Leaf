@@ -31,9 +31,11 @@ since engines, `.nnue` files, and `.tdleaf.bin` files live there.
 One command per hybrid-loop iteration: promote a consolidated state → online
 self-play generation with leaf/root corpus dumping → checkpoint → assemble
 corpus → threaded single-process offline training → best-epoch promotion →
-gauntlet with an Elo table.  Non-interactive; run from `learn/`.  Helper
-binaries (`Leaf_vbt`, `Leaf_vtrain_hl_a/b`) are auto-compiled.  See
-`TRAINING.md` for the concepts and the manual runbook it encodes.
+gauntlet with an Elo table.  Non-interactive; run from `learn/`.  Generation is
+always the **actor/learner split** (frozen actors + one learner, via
+`selfplay_run.py`) — there is no generation-mode flag.  Helper binaries
+(`Leaf_vbt`, `Leaf_vtrain_hl_a`) are auto-compiled.  See `TRAINING.md` for the
+concepts and the manual runbook it encodes.
 
 ```sh
 # Full iteration: generate 400k d8 games, consolidate (settled gen-3+ recipe:
@@ -91,11 +93,8 @@ pruning for one run. A failed run's `<tag>_work/` is never touched. See
 | `--depth N`                                  | 8                                                      | Fixed search depth for generation                            |
 | `--concurrency N`                            | 9                                                      | Concurrent games                                             |
 | `--openings FILE`                            | `training_openings.epd`                                | Opening set (FRC)                                            |
-| `--actor-learner-gen`                        | **default** (assumed when no legacy flag)              | Generate via `selfplay_run.py`: `--concurrency`−1 **frozen** actors emit `.tdg` trajectories, ONE learner consumes them with a single optimizer (sole `.tdleaf.bin` writer, learner dumps the corpus). Stability defaults baked in: actors `--no-adjudication`, learner `--refresh-scores` — both mandatory online (see TRAINING.md "Online-stability rules"). Epoch-style weight refresh via `--games-per-actor`. Validated: `material_260708-d8t-3al3` (+23±17 over seed, draws steady 35–40%). This is the only supported mode; the flag is now optional |
-| `--games-per-actor N`                        | 1000                                                   | Actor respawn cadence for `--actor-learner-gen` (= weight-refresh interval) |
-| `--selfplay-gen`                             | off (LEGACY, unsupported)                              | Legacy: the engine's internal self-play driver (`--selfplay`), `--concurrency` single-process engines striping a shuffled opening book, each playing whole games in-process. Both sides recorded, exact in-engine results, ~3.5× per-core throughput, no PGN. Each process learns independently and the N states merge via the multi-writer `.tdleaf.bin` protocol — prefer the default actor/learner split. Requires helper binaries with the `--selfplay` driver (`--recompile` if stale) |
-| `--uci-pair-gen`                             | off (LEGACY, unsupported)                              | Legacy: the original `match.py`/fastchess UCI engine-pair path (hl_a vs hl_b, two engines/game, PGN output). UCI self-adjudication undersamples draws in the dumped corpus by ~40%; prefer the default actor/learner split |
-| `--no-repeat`                                | **always on** (flag = deprecated no-op)                | Generation always forwards `match.py --no-repeat` (no fastchess `-games 2 -repeat` color-swapped pair — pure duplication for frozen pairs, unneeded at 100k+ randomized openings for learning pairs). NOTE: this does *not* guarantee opening uniqueness by itself — fastchess cycles a shuffled book order, so openings recycle once `--games` exceeds the book size (train.py warns) |
+| `--games-per-actor N`                        | 1000                                                   | Actor respawn cadence / weight-refresh interval for the actor/learner split |
+| `--no-repeat`                                | deprecated no-op                                       | Kept for backward compatibility; the actor/learner split plays each opening once (striped across actors), so there is no fastchess pairing to suppress |
 | `--dedup-corpus`                             | **always on** (flag = deprecated no-op)                | Corpus assembly always drops duplicate rows (identical in every field except gid). Duplicate games straddle the trainer's by-game train/val split (different gids), so training on them both overfits and leaks validation; frozen deterministic pairs are the worst case (one unique game per opening) |
 | `--quiet-cp N`                               | 60                                                     | `TDLEAF_DUMP_QUIET_CP` for the dump                          |
 | `--skip-train`                               | off                                                    | Generate-only                                                |
@@ -156,11 +155,11 @@ python3 selfplay_run.py --binary Leaf_vtrain_hl_a --epd training_openings.epd \
 | `--refresh-scores` | off (**always pass it for online runs**) | Learner re-evaluates leaf statics with current weights at consume time. Without it, trajectory scores lag the learner by a refresh cycle and online TD drifts toward extreme decisiveness (d8t-3al2: 37%→12% draws by 40k games) |
 | `--adjudicate` | off | Enable actor resign/draw adjudication. Leave OFF for online learning — adjudication + learning is a runaway spiral (d8t-3al: 97% resignations, 27-ply games, dead net) |
 
-The learner inherits `TDLEAF_*` env (target mode etc.; set `TDLEAF_DUMP_TSV`
-to have the learner dump the corpus).  Bit-exactness property: with identical
-starting state and env, `--learn-stream` over an online run's trajectories
-reproduces that run's `.tdleaf.bin` byte-for-byte.  `train.py
---actor-learner-gen` wraps this driver with the safe defaults.
+The learner inherits the parent env (e.g. set `TDLEAF_DUMP_TSV` to have the
+learner dump the corpus).  Bit-exactness property: with identical starting state
+and env, `--learn-stream` over an online run's trajectories reproduces that run's
+`.tdleaf.bin` byte-for-byte.  `train.py`'s generation phase wraps this driver with
+the safe defaults.
 
 ## match.py
 

@@ -352,46 +352,20 @@ def main():
     ap.add_argument("--depth", type=int, default=8)
     ap.add_argument("--concurrency", type=int, default=9)
     ap.add_argument("--openings", default="training_openings.epd")
-    ap.add_argument("--actor-learner-gen", action="store_true",
-                    help="DEFAULT generation mode (this flag is optional — it is "
-                         "assumed when no legacy mode is selected).  Generate via "
-                         "scripts/selfplay_run.py: concurrency-1 FROZEN actor "
-                         "engines play internal self-play and emit .tdg "
-                         "trajectories; ONE learner engine consumes them with a "
-                         "single optimizer (sole .tdleaf.bin writer — no "
-                         "multi-writer merge) and dumps the corpus TSVs.  "
-                         "Learner runs with --refresh-scores (targets on "
-                         "current weights) and actors with --no-adjudication — "
-                         "both mandatory for online stability (see "
-                         "docs/TRAINING.md).  Epoch-style weight refresh: "
-                         "actors respawn every --games-per-actor games.  "
-                         "Validated by the material_260708-d8t-3al3 iteration.")
-    ap.add_argument("--selfplay-gen", action="store_true",
-                    help="LEGACY generation mode (retained, unsupported): the "
-                         "engine's internal self-play driver (--selfplay) with "
-                         "--concurrency single-threaded engine processes striping "
-                         "the opening book, each playing whole games in-process.  "
-                         "Both sides recorded (game-ply gap 1), exact in-engine "
-                         "results, ~3.5x per-core throughput, no PGN.  NOTE: each "
-                         "process learns independently and the N states merge "
-                         "through the multi-writer .tdleaf.bin protocol — prefer "
-                         "the default actor/learner split for a single optimizer.")
-    ap.add_argument("--uci-pair-gen", action="store_true",
-                    help="LEGACY generation mode (retained, unsupported): the "
-                         "original match.py/fastchess UCI engine-pair path (two "
-                         "engines per game, hl_a vs hl_b, PGN output).  UCI "
-                         "self-adjudication undersamples draws in the dumped "
-                         "corpus by ~40%%; prefer the default actor/learner split.")
+    # Online generation is always the actor/learner split (scripts/selfplay_run.py):
+    # concurrency-1 FROZEN actors play internal self-play and emit .tdg trajectories;
+    # ONE learner consumes them with a single optimizer (sole .tdleaf.bin writer, no
+    # multi-writer merge) and dumps the corpus TSVs.  Learner runs --refresh-scores
+    # and actors --no-adjudication (both mandatory for online stability, see
+    # docs/TRAINING.md).  There is no other generation mode.
     ap.add_argument("--games-per-actor", type=int, default=1000,
-                    help="Actor respawn cadence for --actor-learner-gen "
-                         "(weight-refresh interval; default 1000)")
+                    help="Actor respawn cadence / weight-refresh interval "
+                         "(default 1000)")
     ap.add_argument("--no-repeat", action="store_true",
-                    help="DEPRECATED no-op: generation now always passes "
-                         "match.py --no-repeat (no fastchess -games 2 -repeat "
-                         "pair).  Note --no-repeat does NOT guarantee opening "
-                         "uniqueness by itself — fastchess cycles a shuffled "
-                         "book order, so openings recycle once --games "
-                         "exceeds the book size (train.py warns).")
+                    help="DEPRECATED no-op (kept for backward compatibility; the "
+                         "actor/learner split plays each opening once, striped "
+                         "across actors — there is no fastchess -games 2 -repeat "
+                         "pairing to suppress).")
     ap.add_argument("--dedup-corpus", action="store_true",
                     help="DEPRECATED no-op: corpus assembly now always drops "
                          "duplicate rows (identical in every field except "
@@ -562,28 +536,13 @@ def main():
     if not net_path.is_file():
         die(f"base net not found: {net_path}")
 
-    # ---- Resolve generation mode ----------------------------------------
-    # The actor/learner split (single optimizer, sole .tdleaf.bin writer) is the
-    # default and only supported mode; --selfplay-gen and --uci-pair-gen are
-    # retained as explicit legacy options.
-    if args.uci_pair_gen and args.selfplay_gen:
-        die("--uci-pair-gen and --selfplay-gen are mutually exclusive")
-    if args.actor_learner_gen and (args.uci_pair_gen or args.selfplay_gen):
-        die("--actor-learner-gen cannot be combined with a legacy generation "
-            "flag (--selfplay-gen / --uci-pair-gen)")
-    gen_mode = ("uci-pair"      if args.uci_pair_gen else
-                "selfplay"      if args.selfplay_gen else
-                "actor-learner")   # default (also when --actor-learner-gen given)
-
     # ---- Binaries --------------------------------------------------------
+    # Only train_hl_a is needed: the actor/learner split runs frozen actors and
+    # one learner, all from the same binary.
     bt_bin = compile_binary("bt", args.net, tdleaf=True, force=args.recompile)
     if not args.skip_online:
         tr_a = compile_binary("train_hl_a", args.net, tdleaf=True, force=args.recompile)
         shutil.copy2(tr_a, LEARN_DIR / tr_a.name)
-        if gen_mode == "uci-pair":
-            # Only the legacy UCI engine-pair path plays two engines per game.
-            tr_b = compile_binary("train_hl_b", args.net, tdleaf=True, force=args.recompile)
-            shutil.copy2(tr_b, LEARN_DIR / tr_b.name)
 
     # ---- Phase 1: promote state -----------------------------------------
     if args.state:
@@ -621,105 +580,44 @@ def main():
         env = dict(os.environ)
         env["TDLEAF_DUMP_TSV"] = str(work / args.tag)
         env["TDLEAF_DUMP_QUIET_CP"] = str(args.quiet_cp)
-        # PGN lives in <tag>_work/ (kept, gzip'd at end of run) rather than a
-        # flat learn/pgn/ tree — the work dir is the permanent per-run archive.
-        pgn_out = work / f"match_{args.tag}_d{args.depth}.pgn"
         log(f"online generation: {args.games} games at depth {args.depth} "
             f"(dump -> {work}/{args.tag}.*)")
-        # Always --no-repeat: fastchess's -games 2 -repeat pair is pure
-        # duplication for frozen pairs and unneeded color-balancing for
-        # learning pairs at 100k+ randomized openings.  --no-repeat does NOT
-        # by itself guarantee opening uniqueness: fastchess cycles a shuffled
-        # book order, so openings recycle once rounds exceed the book size —
-        # warn when --games would spill past one pass.
+        # Actors stripe the shuffled opening book; openings recycle once --games
+        # exceeds the book size (the extra games repeat openings) — warn.
         opening_file = LEARN_DIR / args.openings
         if opening_file.is_file():
             n_openings = sum(1 for _ in open(opening_file))
             if args.games > n_openings:
                 log(f"WARNING: --games {args.games} exceeds the opening book "
                     f"({n_openings} lines in {args.openings}) — openings will "
-                    f"recycle past one pass; with a frozen pair the extra "
-                    f"games are exact duplicates (dedup will drop their rows, "
-                    f"but the generation compute is wasted)")
-        if gen_mode == "actor-learner":
-            # Stage-1 actor/learner: selfplay_run.py drives concurrency-1
-            # frozen actors + one learner (single optimizer, sole state
-            # writer).  The learner inherits this env, so it produces the
-            # corpus dump; actors are forced frozen by the driver.
-            blob = (LEARN_DIR / "Leaf_vtrain_hl_a").read_bytes()
-            if b"--learn-stream" not in blob:
-                die("Leaf_vtrain_hl_a predates the --learn-stream driver — "
-                    "rerun with --recompile")
-            seed = zlib.crc32(args.tag.encode()) & 0x7FFFFFFF
-            n_actors = max(1, int(args.concurrency) - 1)
-            traj_dir = work / "traj"
-            traj_dir.mkdir(exist_ok=True)
-            log(f"actor/learner generation: {n_actors} actors + 1 learner "
-                f"(refresh every {args.games_per_actor} games/actor, "
-                f"seed {seed}); logs -> {traj_dir}/")
-            sh(["python3", SCRIPT_DIR / "selfplay_run.py",
-                "--binary", "Leaf_vtrain_hl_a",
-                "--epd", args.openings,
-                "--actors", n_actors,
-                "--depth", args.depth,
-                "--games-per-actor", args.games_per_actor,
-                "--total-games", args.games,
-                "--traj-dir", traj_dir,
-                "--tdleaf-out", f"{netbase}.tdleaf.bin",
-                "--delete-consumed", "--refresh-scores",
-                "--seed", seed],
-               cwd=LEARN_DIR, env=env)
-        elif gen_mode == "selfplay":
-            # Internal self-play: N striped single-process engines, each
-            # playing whole games in-process (both sides, exact results).
-            # Deterministic book shuffle (seeded from the tag) + offset/stride
-            # keeps the processes' opening slices disjoint.
-            # A binary predating the --selfplay flag would fall through the
-            # engine's arg loop into interactive mode and hang reading stdin —
-            # same literal-string probe as binary_baked_net_matches.
-            if b"--selfplay" not in (LEARN_DIR / "Leaf_vtrain_hl_a").read_bytes():
-                die("Leaf_vtrain_hl_a predates the --selfplay driver — "
-                    "rerun with --recompile")
-            seed = zlib.crc32(args.tag.encode()) & 0x7FFFFFFF
-            nproc = max(1, int(args.concurrency))
-            per   = [args.games // nproc + (1 if i < args.games % nproc else 0)
-                     for i in range(nproc)]
-            log(f"selfplay generation: {nproc} striped processes "
-                f"(shuffle seed {seed}); logs -> {work}/selfplay_<i>.log")
-            procs = []
-            for i in range(nproc):
-                if per[i] == 0:
-                    continue
-                cmd = ["./Leaf_vtrain_hl_a", "--selfplay",
-                       "--epd", args.openings,
-                       "--epd-shuffle", str(seed),
-                       "--epd-offset", str(i), "--epd-stride", str(nproc),
-                       "--games", str(per[i]), "--depth", str(args.depth),
-                       "--no-adjudication",
-                       "--tdleaf-out", f"{netbase}.tdleaf.bin"]
-                lf = open(work / f"selfplay_{i}.log", "w")
-                procs.append((subprocess.Popen(cmd, cwd=str(LEARN_DIR),
-                                               env=env, stdout=lf, stderr=lf),
-                              lf, i))
-            failed = 0
-            for p, lf, i in procs:
-                rc = p.wait()
-                lf.close()
-                if rc != 0:
-                    failed += 1
-                    log(f"selfplay process {i} FAILED (rc={rc}) — see "
-                        f"{work}/selfplay_{i}.log")
-            if failed:
-                die(f"{failed} selfplay generation process(es) failed")
-        else:
-            # Legacy UCI engine-pair path (gen_mode == "uci-pair").
-            sh(["python3", SCRIPT_DIR / "match.py",
-                "Leaf_vtrain_hl_a", "Leaf_vtrain_hl_b",
-                "-n", args.games, "-c", args.concurrency,
-                "--depth1", args.depth, "--depth2", args.depth,
-                "--openings", args.openings, "--fischer-random",
-                "--no-adjudication", "--no-repeat", "--pgn-out", pgn_out],
-               cwd=LEARN_DIR, env=env)
+                    f"recycle past one pass")
+        # Stage-1 actor/learner: selfplay_run.py drives concurrency-1 frozen
+        # actors + one learner (single optimizer, sole state writer).  The
+        # learner inherits this env, so it produces the corpus dump; actors are
+        # forced frozen by the driver.
+        blob = (LEARN_DIR / "Leaf_vtrain_hl_a").read_bytes()
+        if b"--learn-stream" not in blob:
+            die("Leaf_vtrain_hl_a predates the --learn-stream driver — "
+                "rerun with --recompile")
+        seed = zlib.crc32(args.tag.encode()) & 0x7FFFFFFF
+        n_actors = max(1, int(args.concurrency) - 1)
+        traj_dir = work / "traj"
+        traj_dir.mkdir(exist_ok=True)
+        log(f"actor/learner generation: {n_actors} actors + 1 learner "
+            f"(refresh every {args.games_per_actor} games/actor, "
+            f"seed {seed}); logs -> {traj_dir}/")
+        sh(["python3", SCRIPT_DIR / "selfplay_run.py",
+            "--binary", "Leaf_vtrain_hl_a",
+            "--epd", args.openings,
+            "--actors", n_actors,
+            "--depth", args.depth,
+            "--games-per-actor", args.games_per_actor,
+            "--total-games", args.games,
+            "--traj-dir", traj_dir,
+            "--tdleaf-out", f"{netbase}.tdleaf.bin",
+            "--delete-consumed", "--refresh-scores",
+            "--seed", seed],
+           cwd=LEARN_DIR, env=env)
 
         # Phase 3: checkpoint post-generation state
         ckpt = LEARN_DIR / f"{netbase}.tdleaf.bin-{args.tag}-online"
@@ -1075,7 +973,7 @@ def main():
         "date": time.strftime("%Y-%m-%d"),
         "games_this_iter": games_this_iter,
         "cumulative_games": cumulative_games,
-        "gen_mode": ("skip-online" if args.skip_online else gen_mode),
+        "gen_mode": ("skip-online" if args.skip_online else "actor-learner"),
         "depth": args.depth,
         "epochs": args.epochs,
         "picked_epoch": pick_ep,
