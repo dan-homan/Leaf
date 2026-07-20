@@ -542,11 +542,6 @@ void nnue_init_zero_weights(int prior_mode)
            psqt_desc);
 }
 
-// Forward decl — defined near nnue_apply_gradients; used here to log envvar
-// overrides at startup rather than after the first training batch.
-struct TDLeafLRMultipliers;
-static const TDLeafLRMultipliers &tdleaf_lr_multipliers();
-
 // ---------------------------------------------------------------------------
 // nnue_init_fp32_weights — dequantize int8 → float after nnue_load()
 // ---------------------------------------------------------------------------
@@ -668,11 +663,6 @@ void nnue_init_fp32_weights()
     if (v_psqt_w)  memset(v_psqt_w,  0, psqt_sz * sizeof(float));
     if (m_psqt_w)  memset(m_psqt_w,  0, psqt_sz * sizeof(float));
     t_adam = 0;
-
-    // Touch the LR-multiplier singleton so any envvar overrides log at startup
-    // (visibility before kicking off a long training run), not after the first
-    // batch.  No effect when all multipliers are at default 1.0.
-    (void)tdleaf_lr_multipliers();
 }
 
 // ---------------------------------------------------------------------------
@@ -1003,64 +993,6 @@ void nnue_gradbuf_merge_ft_rows(NNUEGradBuf *w, int lo, int hi)
 }
 
 // ---------------------------------------------------------------------------
-// Runtime LR overrides (read once from environment).
-//
-// TDLEAF_LR_{FC,FT,FT_BIAS,PSQT} multiply the corresponding TDLEAF_ADAM_*_LR0
-// constant.  TDLEAF_FREEZE_PASSTHROUGH=1 holds the FC0 passthrough row
-// (output NNUE_L0_DIRECT = 15, weights + bias) at its init value — gradient and
-// Adam state for those weights are zeroed before clipping/apply, so they stay
-// exactly stationary.  Defaults are all 1.0 (no override).
-//
-// Intended for LR sweeps without recompiling.  Example:
-//   TDLEAF_LR_PSQT=0.1 TDLEAF_LR_FT=3.0 ./Leaf_vtrain ...
-//   TDLEAF_FREEZE_PASSTHROUGH=1 ./Leaf_vtrain ...
-// ---------------------------------------------------------------------------
-struct TDLeafLRMultipliers {
-    float fc, fc2, fc_bias, ft, ft_bias, psqt;
-    bool  freeze_passthrough;   // FC0 row NNUE_L0_DIRECT (15) weights+bias held at init
-};
-static const TDLeafLRMultipliers &tdleaf_lr_multipliers()
-{
-    static const TDLeafLRMultipliers m = []() {
-        auto read_env = [](const char *name, float def) {
-            const char *v = getenv(name);
-            if (!v || !*v) return def;
-            char *end = nullptr;
-            float f = strtof(v, &end);
-            return (end == v) ? def : f;
-        };
-        auto read_bool_env = [](const char *name) {
-            const char *v = getenv(name);
-            return v && (*v == '1' || *v == 't' || *v == 'T' || *v == 'y' || *v == 'Y');
-        };
-        TDLeafLRMultipliers x;
-        x.fc      = read_env("TDLEAF_LR_FC",      1.0f);  // FC0/FC1 weights
-        x.fc2     = read_env("TDLEAF_LR_FC2",     1.0f);  // FC2 (final 32→1) weights
-        x.fc_bias = read_env("TDLEAF_LR_FC_BIAS", 1.0f);  // FC biases (all three)
-        x.ft      = read_env("TDLEAF_LR_FT",      1.0f);
-        x.ft_bias = read_env("TDLEAF_LR_FT_BIAS", 1.0f);
-        x.psqt    = read_env("TDLEAF_LR_PSQT",    1.0f);
-        x.freeze_passthrough = read_bool_env("TDLEAF_FREEZE_PASSTHROUGH");
-        bool any = (x.fc != 1.0f || x.fc2 != 1.0f || x.fc_bias != 1.0f
-                    || x.ft != 1.0f || x.ft_bias != 1.0f
-                    || x.psqt != 1.0f || x.freeze_passthrough);
-        if (any) {
-            fprintf(stderr, "TDLeaf LR overrides:");
-            if (x.fc      != 1.0f) fprintf(stderr, " FC=%.4g",      (double)x.fc);
-            if (x.fc2     != 1.0f) fprintf(stderr, " FC2=%.4g",     (double)x.fc2);
-            if (x.fc_bias != 1.0f) fprintf(stderr, " FC_BIAS=%.4g", (double)x.fc_bias);
-            if (x.ft      != 1.0f) fprintf(stderr, " FT=%.4g",      (double)x.ft);
-            if (x.ft_bias != 1.0f) fprintf(stderr, " FT_BIAS=%.4g", (double)x.ft_bias);
-            if (x.psqt    != 1.0f) fprintf(stderr, " PSQT=%.4g",  (double)x.psqt);
-            if (x.freeze_passthrough) fprintf(stderr, " PASSTHROUGH=frozen");
-            fprintf(stderr, "\n");
-        }
-        return x;
-    }();
-    return m;
-}
-
-// ---------------------------------------------------------------------------
 // Pre-clip gradient-norm telemetry.  Tracks call count, fire count, running
 // min/mean/max, and a log-spaced histogram so we can answer "is the L2 clip
 // guarding outliers, or just renormalising every batch?".
@@ -1118,23 +1050,6 @@ void nnue_clip_gradient_stats_report()
 // ---------------------------------------------------------------------------
 float nnue_clip_gradients(float max_norm)
 {
-    // Freeze the FC0 passthrough row (output NNUE_L0_DIRECT = 15) if requested.
-    // Zeroing here ensures: (a) passthrough gradients don't inflate the L2 norm
-    // and falsely scale down other layers' updates; (b) the per-weight `if grad
-    // != 0` guard in nnue_apply_gradients skips them, so Adam state (m, v) for
-    // passthrough weights doesn't move and the weights stay at their init value.
-    // Targets the runaway-bias pathology where TDLeaf concentrates "the eval is
-    // off by a constant" corrections into row 15 (the only FC0 row with
-    // strictly-positive activations from SqrCReLU, so its weight drift couples
-    // to a non-zero expectation rather than cancelling).
-    if (tdleaf_lr_multipliers().freeze_passthrough) {
-        for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
-            for (int i = 0; i < NNUE_L0_INPUT; i++)
-                grad_l0_w[s][NNUE_L0_DIRECT * NNUE_L0_INPUT + i] = 0.0f;
-            grad_l0_b[s][NNUE_L0_DIRECT] = 0.0f;
-        }
-    }
-
     if (max_norm <= 0.0f) return 0.0f;
 
     // Compute global L2 norm across all gradient arrays (use double to avoid overflow).
@@ -1262,21 +1177,19 @@ void nnue_apply_gradients(float lr_scale)
         : 1.0f;
 
     // Effective LRs.  lr_scale (<1.0 for replay) applied uniformly to all
-    // categories to soften replay-pass updates; live path passes 1.0.  Env-var
-    // multipliers (TDLEAF_LR_*) layered on top — read once at first call.
-    const auto &lr_mul = tdleaf_lr_multipliers();
+    // categories to soften replay-pass updates; live path passes 1.0.
     // FC LRs are split four ways:
     //   fc_lr      — FC0/FC1 weights (int8 scale ~5)
     //   fc2_lr     — FC2 weights (int8 scale ~68; final 32→1 layer)
     //   fc_bias_lr — FC0/FC1/FC2 biases (int32 scale ~1500)
     // The split lets each section move at roughly the same fractional rate
     // per Adam step despite very different weight magnitudes.
-    const float fc_lr      = lr_mul.fc      * lr_scale * warmup_factor * TDLEAF_ADAM_LR0;
-    const float fc2_lr     = lr_mul.fc2     * lr_scale * warmup_factor * TDLEAF_ADAM_FC2_LR0;
-    const float fc_bias_lr = lr_mul.fc_bias * lr_scale * warmup_factor * TDLEAF_ADAM_FC_BIAS_LR0;
-    const float ft_lr      = lr_mul.ft      * lr_scale * warmup_factor * ft_session_factor * TDLEAF_ADAM_FT_LR0;
-    const float ft_bias_lr = lr_mul.ft_bias * lr_scale * warmup_factor * TDLEAF_ADAM_FT_BIAS_LR0;
-    const float psqt_lr    = lr_mul.psqt    * lr_scale * warmup_factor * TDLEAF_ADAM_PSQT_LR0;
+    const float fc_lr      = lr_scale * warmup_factor * TDLEAF_ADAM_LR0;
+    const float fc2_lr     = lr_scale * warmup_factor * TDLEAF_ADAM_FC2_LR0;
+    const float fc_bias_lr = lr_scale * warmup_factor * TDLEAF_ADAM_FC_BIAS_LR0;
+    const float ft_lr      = lr_scale * warmup_factor * ft_session_factor * TDLEAF_ADAM_FT_LR0;
+    const float ft_bias_lr = lr_scale * warmup_factor * TDLEAF_ADAM_FT_BIAS_LR0;
+    const float psqt_lr    = lr_scale * warmup_factor * TDLEAF_ADAM_PSQT_LR0;
 
     // Full Adam step for FC layers and FT biases — per-weight bias correction.
     // bc1 (beta1=0.9): skipped at cnt>=20 (0.9^20≈0.12 → bc1≈0.88, close to 1).
@@ -1530,14 +1443,13 @@ static NNUEApplyParams nnue_apply_compute_params(float lr_scale)
     const float ft_session_factor =
         (TDLEAF_FT_SESSION_WARMUP > 0 && t_ft_session <= (uint32_t)TDLEAF_FT_SESSION_WARMUP)
         ? (float)t_ft_session / (float)TDLEAF_FT_SESSION_WARMUP : 1.0f;
-    const auto &lr_mul = tdleaf_lr_multipliers();
     NNUEApplyParams p;
-    p.fc_lr       = lr_mul.fc      * lr_scale * warmup_factor * TDLEAF_ADAM_LR0;
-    p.fc2_lr      = lr_mul.fc2     * lr_scale * warmup_factor * TDLEAF_ADAM_FC2_LR0;
-    p.fc_bias_lr  = lr_mul.fc_bias * lr_scale * warmup_factor * TDLEAF_ADAM_FC_BIAS_LR0;
-    p.ft_lr       = lr_mul.ft      * lr_scale * warmup_factor * ft_session_factor * TDLEAF_ADAM_FT_LR0;
-    p.ft_bias_lr  = lr_mul.ft_bias * lr_scale * warmup_factor * TDLEAF_ADAM_FT_BIAS_LR0;
-    p.psqt_lr     = lr_mul.psqt    * lr_scale * warmup_factor * TDLEAF_ADAM_PSQT_LR0;
+    p.fc_lr       = lr_scale * warmup_factor * TDLEAF_ADAM_LR0;
+    p.fc2_lr      = lr_scale * warmup_factor * TDLEAF_ADAM_FC2_LR0;
+    p.fc_bias_lr  = lr_scale * warmup_factor * TDLEAF_ADAM_FC_BIAS_LR0;
+    p.ft_lr       = lr_scale * warmup_factor * ft_session_factor * TDLEAF_ADAM_FT_LR0;
+    p.ft_bias_lr  = lr_scale * warmup_factor * TDLEAF_ADAM_FT_BIAS_LR0;
+    p.psqt_lr     = lr_scale * warmup_factor * TDLEAF_ADAM_PSQT_LR0;
     p.ft_bc2_cold = 1.0f - powf(TDLEAF_ADAM_BETA2, (float)ft_t);
     p.ft_bc2_warm = 1.0f - powf(TDLEAF_ADAM_BETA2, (float)t_adam);
     return p;

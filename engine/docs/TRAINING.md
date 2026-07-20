@@ -61,42 +61,42 @@ python train.py --tag iter1 --games 400000 --depth 8 \
 See [The Hybrid Loop Workflow](#the-hybrid-loop-workflow--scriptstrainpy) below, and
 `SCRIPT_USE.md` for the full option table.
 
-Manual online-training workflow, including initialization of a fresh net:
+Manual online-training workflow (what `train.py` automates), including initialization of a fresh net.  The supported generation path is the **actor/learner split** (`scripts/selfplay_run.py`): frozen actors emit `.tdg` trajectories and one learner owns the optimizer.
 
 ```sh
 # 1. Build a training binary
-perl comp.pl train NNUE=1 NNUE_NET=nn-fresh.nnue TDLEAF=1 OVERWRITE
+perl comp.pl train_hl_a NNUE=1 NNUE_NET=nn-fresh.nnue TDLEAF=1 OVERWRITE
 
 # 2. Initialize a fresh network (default material values baked into PSQT).
 #    Use --init-nnue-noprior for uniform 100 cp instead.  Delete any stale companion
 #    .tdleaf.bin FIRST — --init-nnue over an existing one merge-saves, not resets.
-./Leaf_vtrain --init-nnue --write-nnue nn-fresh.nnue
+./Leaf_vtrain_hl_a --init-nnue --write-nnue nn-fresh.nnue
 
-# 3. Run self-play matches (from run/ or learn/; UCI + fastchess is the default,
-#    game outcomes reach the learner via UCI self-adjudication).  Fixed depth with
-#    no early adjudication provides the best learning targets. 
-python match.py Leaf_vtrain_a Leaf_vtrain_b -n 50000 -c 12 -tc inf --depth1 6 --depth2 6 --no-adjudication
+# 3. Run actor/learner self-play (from learn/, with the binary installed there).
+#    Actors are frozen (TDLEAF_FREEZE=1) and the learner runs --refresh-scores;
+#    fixed depth with no early adjudication provides the best learning targets.
+python3 selfplay_run.py --binary Leaf_vtrain_hl_a --epd training_openings.epd \
+    --actors 8 --depth 8 --games-per-actor 1000 --total-games 100000 \
+    --traj-dir traj_run1 --refresh-scores
 ```
 
-The steps above will place the learned delta values in nn-fresh.tdleaf.bin which will be loaded alongside nn-fresh.nnue in future training rounds.   For a statistical and graphical analysis of the learned values use
+The steps above place the learned delta values in nn-fresh.tdleaf.bin, loaded alongside nn-fresh.nnue in future training rounds.  For a statistical and graphical analysis of the learned values use
 
 ```sh
 # Analyze current state of the learned values
 python compare_nnue_learning.py nn-fresh.nnue nn-fresh.tdleaf.bin
 
-# To run another learning round that builds upon the same net, just repeat
-# the above match.py command.  Training will pick up from the current
-# state of nn-fresh.tdleaf.bin
-python match.py Leaf_vtrain_a Leaf_vtrain_b -n 50000 -c 12 -tc inf --depth1 6 --depth2 6 --no-adjudication
+# To run another learning round that builds upon the same net, just repeat the
+# selfplay_run.py command — training picks up from nn-fresh.tdleaf.bin.
 ```
 
-Any online training match can optionally dump root and leaf node training corpa (.tsv files) to be used during offline training:
+The learner can optionally dump root and leaf node training corpora (.tsv files) for offline training by setting `TDLEAF_DUMP_TSV` in its environment:
 
 ```sh
-TDLEAF_DUMP_TSV=iter2 python match.py Leaf_vtrain_a Leaf_vtrain_b ...
+TDLEAF_DUMP_TSV=iter2 python3 selfplay_run.py --binary Leaf_vtrain_hl_a ...
 ```
 
-writes two per-process files at game end:  `iter2.<pid>.root.tsv`  and `iter2.<pid>.leaf.tsv`.  See [Offline Consolidation — Batch Training](#offline-consolidation--batch-training) below for how to use training corpa for offline training.
+writes two per-process files at game end:  `iter2.<pid>.root.tsv`  and `iter2.<pid>.leaf.tsv`.  See [Offline Consolidation — Batch Training](#offline-consolidation--batch-training) below for how to use training corpora for offline training.  (The legacy `match.py` UCI engine-pair path still works via `train.py --uci-pair-gen`; see [Generation Modes](#generation-modes--internal-self-play-and-the-actorlearner-split).)
 
 ---
 
@@ -1043,13 +1043,13 @@ what concurrent *online* self-play training still uses (see
 
 ## Generation Modes — Internal Self-Play and the Actor/Learner Split
 
-Three ways to generate training games, selectable per `train.py` run:
+The **actor/learner split is the default and only supported generation mode** (`train.py` runs it when no legacy flag is given; `--actor-learner-gen` is the now-optional explicit flag).  Two legacy modes are retained behind explicit flags but unsupported.
 
 | Mode | Flag | Processes | Optimizer states | Notes |
 |---|---|---|---|---|
-| UCI pair (legacy) | *(default)* | 2 engines/game under fastchess | N, merged via multi-writer `.tdleaf.bin` | 2-ply TD chains; UCI self-adjudication skips ambiguous games — **undersamples draws in the corpus by ~40%** (21% dumped vs 35% played; see `learn/eqstudy_260717_work/RESULTS.md`) |
-| Internal self-play | `--selfplay-gen` | N striped single engines | N, merged | Engine `--selfplay` driver: whole games in one process, both sides recorded (1-ply TD chains), exact in-engine results, ~3.5× per-core throughput |
-| **Actor/learner** | `--actor-learner-gen` | N−1 frozen actors + **1 learner** | **1** | The settled Stage-1 architecture: single optimizer, sole state writer, no merge in the training hot path |
+| **Actor/learner** | *(default)* / `--actor-learner-gen` | N−1 frozen actors + **1 learner** | **1** | The settled Stage-1 architecture: single optimizer, sole state writer, no merge in the training hot path |
+| Internal self-play (legacy) | `--selfplay-gen` | N striped single engines | N, merged | Engine `--selfplay` driver: whole games in one process, both sides recorded (1-ply TD chains), exact in-engine results, ~3.5× per-core throughput.  N independent optimizers merge via the multi-writer `.tdleaf.bin` protocol |
+| UCI pair (legacy) | `--uci-pair-gen` | 2 engines/game under fastchess | N, merged via multi-writer `.tdleaf.bin` | 2-ply TD chains; UCI self-adjudication skips ambiguous games — **undersamples draws in the corpus by ~40%** (21% dumped vs 35% played; see `learn/eqstudy_260717_work/RESULTS.md`) |
 
 ### The engine's internal self-play driver (`--selfplay`)
 
@@ -1146,10 +1146,10 @@ this script encodes.
    of whatever state was live.
 2. **Online generation** — self-play games at `--depth` (default 8), with
    `TDLEAF_DUMP_TSV` corpus dumping enabled; TDLeaf keeps learning throughout.
-   Three modes (see [Generation Modes](#generation-modes--internal-self-play-and-the-actorlearner-split)):
-   the legacy `match.py`/fastchess pair (default), `--selfplay-gen` (striped
-   internal self-play, multi-writer merge), or `--actor-learner-gen` (frozen
-   actors + one learner, single optimizer — the recommended mode).
+   The default and only supported mode is the actor/learner split (frozen actors
+   + one learner, single optimizer); the legacy `--selfplay-gen` and
+   `--uci-pair-gen` modes are retained behind explicit flags (see
+   [Generation Modes](#generation-modes--internal-self-play-and-the-actorlearner-split)).
 3. **Post-generation checkpoint** — the post-online `.tdleaf.bin` is saved and
    a piece-value drift canary is run against it.
 4. **Assemble corpus** — dump files (plus any `--corpus` files) are

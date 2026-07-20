@@ -8,34 +8,24 @@ file tracks only what's still open.
 
 ## TDLeaf(λ) Training
 
-### Internal self-play — Phases D & E (deferred; tackle together)
+### Internal self-play — Phases D & E (DELIVERED)
 
 **Full spec:** `docs/MAINSTREAM_PLAN.md` (Phases D and E).  Original design:
 `~/.claude/projects/-Users-homand-Leaf/memory/single-process-selfplay-tdleaf-plan.md`.
 
-Phases A–C of that roadmap are **done** (pure-PSQT mainstreamed + format v12; the
-gauge machinery deleted; per-record STM + game-ply λ^Δ landed and gated in the
-two-process harness — see `docs/history/TRAINING_HISTORY.md` for how that work
-went).  The remaining phases are the payoff — the first code that actually
-exercises the alternating-STM / `dply=1` paths C1/C2 built:
+Phases A–C are done (pure-PSQT + format v12, gauge machinery deleted, per-record
+STM + game-ply λ^Δ), and **Phases D and E have since landed:**
 
-- **Phase D — internal self-play (single board).**  One process plays whole games
-  against itself, records *every* ply (per-record STM, `dply=1`), and learns at
-  game end.  Benefits: 1-ply TD bootstrapping, true full-game traces, ½ the
-  processes, own the result (clean mate/rep/50-move detection, no
-  `tdleaf_self_adjudicate`), maximal outcome symmetry, and it retires the
-  FT-session-warmup-per-invocation trap.  **Decisive gate D2 first:** run internal
-  mode WITHOUT decorrelation and measure the |TD error| distribution +
-  bootstrap-vs-outcome split vs the two-process baseline — that decides whether
-  the TT salt (D3) is needed at all before spending the 500k rig (D4).
-
-- **Phase E — multi-board (contingent).**  N games in one process, one Adam
-  stream, retiring the multi-writer `.tdleaf.bin` merge protocol entirely.  Gated
-  on a bounded globals audit first (`GameContext` refactor feasibility).
-
-Reuse: `tdleaf_record_ply` (now takes per-record STM + `game_ply`),
-`tdleaf_update_after_game`, opening EPDs, and (for N processes) the merge
-protocol.  See MAINSTREAM_PLAN.md for the exact gates and sequencing.
+- **Phase D — internal self-play (single board)** shipped as the engine's
+  `--selfplay` driver (`src/selfplay.cpp`): one process plays whole games against
+  itself, records every ply (per-record STM, `dply=1`), owns the result (clean
+  terminal detection), and learns at game end.
+- **Phase E — single Adam stream** shipped as the **actor/learner split**
+  (`--traj-out` / `--learn-stream`, driven by `scripts/selfplay_run.py`): N−1
+  frozen actors emit `.tdg` trajectories, ONE learner owns the optimizer.  This is
+  now the default `train.py` generation mode.  Fully retiring the in-engine
+  multi-writer `.tdleaf.bin` merge protocol (only the legacy `--selfplay-gen`
+  path still needs it) is tracked as Phase 3 in `docs/SIMPLIFICATION_PLAN.md`.
 
 ### Open items
 
@@ -149,11 +139,17 @@ See memory for full implementation plan.
 
 # Internal Self-Play
 
+> **DELIVERED (2026-07).**  Phases D and E below shipped: Phase D as the engine's
+> `--selfplay` driver (`src/selfplay.cpp`) and Phase E as the actor/learner split
+> (`--traj-out`/`--learn-stream` via `scripts/selfplay_run.py`), now the default
+> `train.py` generation mode.  The roadmap below is retained as the historical
+> implementation spec.  Remaining follow-on (retire the in-engine multi-writer
+> merge) is Phase 3 in `docs/SIMPLIFICATION_PLAN.md`.
+
 **Date:** 2026-07-07 (Phases A–C); this file trimmed to the still-pending phases
 **Status:** Phases A–C (pure-PSQT + ply semantics) are **done** — see
 `docs/history/TRAINING_HISTORY.md` for the full experimental record, phase-by-phase
-implementation notes, and gates. Phases D–E below are **approved direction, not
-started**.
+implementation notes, and gates. Phases D–E shipped (see banner above).
 **Baseline:** branch `frozen-psqt` at commit `da9e57a` (experimental state, validated); `main` at `fa20daa`
 **Companion docs:** `docs/TRAINING.md`,
 `~/.claude/projects/-Users-homand-Leaf/memory/single-process-selfplay-tdleaf-plan.md` (original

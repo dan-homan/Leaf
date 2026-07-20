@@ -1,5 +1,41 @@
 Changes since 2017_12_24
 
+2026_07_20 -- Simplification Phase 2: consolidated training generation on the
+               actor/learner split.  train.py now runs actor/learner by DEFAULT
+               (--actor-learner-gen is optional); the other two modes are
+               demoted behind explicit legacy flags — --selfplay-gen (internal
+               self-play, multi-writer merge) and the new --uci-pair-gen (the
+               original match.py/fastchess UCI engine pair).  The hl_b binary is
+               compiled only for the --uci-pair-gen path.  Docs consolidated on
+               actor/learner: TRAINING.md (Quick Start manual workflow now uses
+               selfplay_run.py; Generation Modes table + Phases), engine/CLAUDE.md
+               (generation paragraph, env-var list, new env-guardrail note),
+               SCRIPT_USE.md (option table + older/training_run.py archived
+               banner), selfplay_run.py docstring (dropped stale TDLEAF_TARGET
+               reference).  TODO.md internal-self-play Phases D & E marked
+               DELIVERED (--selfplay driver + actor/learner split).
+
+2026_07_20 -- Simplification Phase 1: retired testing-era env-var knobs from the
+               TDLeaf code (docs/SIMPLIFICATION_PLAN.md).  Removed the opt-in
+               experimental learning targets TDLEAF_TARGET=blend|hybrid and
+               online root learning (TDLEAF_ROOT / TDLEAF_ROOT_WEIGHT /
+               TDLEAF_TRACE_LAMBDA / TDLEAF_QUIET_CP) — the classic
+               lambda-decayed eligibility trace is now the sole target; and the
+               LR-sweep multipliers TDLEAF_LR_{FC,FC2,FC_BIAS,FT,FT_BIAS,PSQT}
+               plus TDLEAF_FREEZE_PASSTHROUGH (all defaulted to 1.0/off).
+               TDRecord and the .tdg trajectory format shed the hybrid-target
+               prediction-gate keys (root_key/key_own/key_reply) and the root
+               gradient snapshot; TDTRAJ_VERSION bumped 1->2 (root_pos/
+               root_static retained for the TSV dump).  New startup guardrail
+               tdleaf_check_env(): TDLEAF builds hard-error on any TDLEAF_* env
+               var outside the allowlist (FREEZE, DUMP_TSV, DUMP_QUIET_CP,
+               DUMP_MAX_CP, CHECK_ACC, TRACE_UPDATE) and log the effective
+               training config at startup.  Verified a mathematical no-op:
+               under strict IEEE FP (no -ffast-math) a 16-game d6 single-process
+               self-play run produces a byte-identical .tdleaf.bin before/after
+               (default fast-math builds differ only by <=5e-7 weight-space FP
+               reassociation noise); TDLEAF_CHECK_ACC=1 clean.
+
 2026_07_18 -- make_training_epd.py: two-phase BFS book sampling + multi-value
                --random-suffix (scripts/, docs/).  Book leaf pool enumerated
                once via BFS (handles transpositions, includes shallower lines);

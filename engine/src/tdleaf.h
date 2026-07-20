@@ -56,48 +56,10 @@ static const float TDLEAF_SCORE_CLIP_PAWNS = 1.0f;
 // Expressed in cp²: 10000 corresponds to a 100 cp std-dev reference.
 // Larger values are more tolerant of ID score instability.
 static const float TDLEAF_ID_VAR_SIGMA2  = 10000.0f;
-// Alternative learning targets (opt-in: env TDLEAF_TARGET=blend|hybrid).
-//
-// blend — local two-point target:
-//     e_t = w·(result − d_t) + (1−w)·(d_{t+1} − d_t),   w = λ^(N − game_ply_t)
-// (N = last recorded root game-ply, matching the TSV dump's result-decay
-// reference), gated by transition quietness: records where the white-POV
-// score moved more than TDLEAF_QUIET_CP between consecutive searches
-// contribute no gradient.  The gate must be the DIRECT consecutive-score
-// test — the opponent moves between records, so position-quietness at t
-// cannot certify the transition.  Env override: TDLEAF_QUIET_CP.
-//
-// hybrid — blend with a short, strongly damped eligibility trace in the
-// bootstrap slot:
-//     e_t = w·(result − d_t) + (1−w)·trace_t
-//     trace_t = (d_{t+1} − d_t) + λ_trace·trace_{t+1}   (trace_{T−1} = 0)
-// d_t + trace_t telescopes to (1−λ_trace)·Σ λ_trace^k·d_{t+1+k} — a
-// normalized geometric average of the next ~1/(1−λ_trace) records' evals —
-// so targets stay calibrated.  λ_trace is deliberately unrelated to
-// TDLEAF_LAMBDA (which shapes only the outcome weight w); ~0.7 gives an
-// effective lookahead of ~3 records with strong damping, restoring local
-// backward credit for calculated events without letting distant eval pairs
-// leak into e_t.  Gate: the trace flows through record t if the opponent
-// played the engine's PREDICTED reply (search t's pv[1], verified by hash)
-// OR the transition was quiet (|Δcp| ≤ TDLEAF_QUIET_CP) — only loud,
-// uncalculated transitions break it.  A break sets trace_t = 0 (propagating
-// upstream), but the record still trains on its outcome term.  λ_trace = 0
-// reproduces blend with this widened gate.
-// Env overrides: TDLEAF_TRACE_LAMBDA, TDLEAF_QUIET_CP.
-//
-// Online root learning (TDLEAF_ROOT=1, blend/hybrid modes only) adds a second
-// gradient per record at the ROOT position — the online mirror of the offline
-// corpus root rows (search-amplified labels):
-//     e_root_t = w·(result − d_root_t) + (1−w)·(d_t − d_root_t)
-// where d_root_t is the root's own static eval (sigmoid space) and d_t the
-// record's search score; same w as the leaf error.  Gated on root quietness
-// |root_static − score_root_stm| ≤ TDLEAF_QUIET_CP (a within-search test —
-// no opponent move intervenes, so static-vs-search is the correct gate here).
-// No trace on the root error: the search itself supplies the lookahead.
-// TDLEAF_ROOT_WEIGHT (default 1.0) scales the root gradient contribution.
-static const float TDLEAF_QUIET_CP       = 60.0f;
-static const float TDLEAF_TRACE_LAMBDA   = 0.7f;
-static const float TDLEAF_ROOT_WEIGHT    = 1.0f;
+// The learning target is the classic λ-decayed eligibility trace (per game-ply
+// decay pow(λ, dply), with the score-change clip and ID-variance stability
+// weight above).  Earlier opt-in "blend"/"hybrid" targets and online root
+// learning were retired; see docs/history/ for that experiment.
 // Gradient clipping: if global L2 norm of all gradients exceeds this threshold,
 // scale all gradients by max_norm/norm.  Set to 0 to disable.
 static const float TDLEAF_GRAD_CLIP_NORM = 1.0f;
@@ -214,15 +176,6 @@ struct TDRecord {
                                         // between consecutive records = 2 in the harness
                                         // (own moves only), 1 under internal self-play.
                                         // Drives the pow(lambda, dply) trace decay.
-    // Prediction-gate keys (TDLEAF_TARGET=hybrid).  Captured during the PV
-    // walk: root position hash, hash after pv[0] (own move), hash after
-    // pv[0]+pv[1] (predicted opponent reply; 0 if the PV is shorter).  The
-    // transition t→t+1 counts as PREDICTED when the next record's root_key
-    // matches key_own (dply 1, internal self-play) or key_reply (dply 2,
-    // two-process harness).
-    h_code  root_key;
-    h_code  key_own;
-    h_code  key_reply;
     float   id_score_variance;         // variance of last N ID depth scores (cp²); 0 if < 2 depths
     // Active feature indices at the leaf position (indexed by actual perspective 0=BLACK,1=WHITE).
     // Used for FT and PSQT gradient backprop.
@@ -231,23 +184,14 @@ struct TDRecord {
     // Leaf position for Flavor A replay: allows full accumulator rebuild from
     // current FT weights during replay, rather than using stale accumulators.
     position pos;
-    // Root-position snapshot for the TSV dump (TDLEAF_DUMP_TSV) and online
-    // root learning (TDLEAF_ROOT=1): the root's search score (score_root_stm)
-    // is a search-amplified label for root_pos, unlike the leaf's static eval
-    // which is self-distillation.  root_static is the root's STATIC eval
-    // (STM POV) — |root_static − score_root_stm| is the root quietness test.
-    // Filled when dumping or root learning is enabled.
+    // Root-position snapshot for the TSV dump (TDLEAF_DUMP_TSV) and the .tdg
+    // trajectory format: the root's search score (score_root_stm) is a
+    // search-amplified label for root_pos, unlike the leaf's static eval which
+    // is self-distillation.  root_static is the root's STATIC eval (STM POV) —
+    // |root_static − score_root_stm| is the root quietness test.  Filled when
+    // dumping or trajectory capture is enabled.
     position root_pos;
     int      root_static;
-    // Root gradient snapshot (TDLEAF_ROOT=1 only): accumulator, PSQT sums,
-    // active features, and stack index of the ROOT position, mirroring the
-    // leaf snapshot above so nnue_forward_fp32/nnue_accumulate_gradients can
-    // run on the root exactly as they do on the leaf.
-    int16_t root_acc [2][NNUE_HALF_DIMS];
-    int32_t root_psqt[2][NNUE_PSQT_BKTS];
-    int     root_ft_idx[2][NNUE_MAX_FT_PER_PERSP];
-    int8_t  root_n_ft[2];
-    int     root_stack;
     int8_t   id_depth;    // ID iteration count ≈ achieved search depth
 };
 
@@ -296,15 +240,20 @@ int selfplay_main(int argc, char *argv[]);
 int learner_main(int argc, char *argv[]);
 
 // Reconstruct a TDRecord's derived snapshot fields (leaf accumulator/PSQT,
-// active features, stack; optionally the root gradient snapshot) from its
-// stored position(s) using the current weights.  refresh_score additionally
-// re-evaluates score_stm (replay Flavor A).  Bit-exact vs the online-recorded
-// snapshot when weights are unchanged.
-void tdleaf_rebuild_record(struct TDRecord &r, bool refresh_score, bool rebuild_root);
+// active features, stack) from its stored leaf position using the current
+// weights.  refresh_score additionally re-evaluates score_stm (replay
+// Flavor A).  Bit-exact vs the online-recorded snapshot when weights are
+// unchanged.
+void tdleaf_rebuild_record(struct TDRecord &r, bool refresh_score);
 
 // Set by selfplay.cpp when --traj-out is active: forces tdleaf_record_ply to
 // capture root_pos/root_static (shipped in the .tdg format).
 extern bool tdleaf_capture_root;
+
+// Startup guardrail + config banner (call once at main() entry in TDLEAF
+// builds).  Hard-errors on any TDLEAF_* env var outside the known allowlist;
+// then logs the effective online-training constants.
+void tdleaf_check_env();
 
 // Record one ply after each ts.search() call.
 // Walks the principal variation to the leaf position; records the leaf

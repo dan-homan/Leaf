@@ -117,6 +117,11 @@ int main(int argc, char *argv[])
   assert(0);  // testing that asserts are off
 #endif
 
+#if TDLEAF
+  // Startup guardrail: reject stray/retired TDLEAF_* env vars, log training config.
+  tdleaf_check_env();
+#endif
+
   //-------------------------------
   // Parse and record exec path
   //-------------------------------

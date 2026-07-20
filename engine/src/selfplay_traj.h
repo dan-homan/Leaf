@@ -23,7 +23,7 @@
 #define SELFPLAY_TRAJ_H
 
 static const uint32_t TDTRAJ_MAGIC   = 0x31474454;  // "TDG1"
-static const uint32_t TDTRAJ_VERSION = 1;
+static const uint32_t TDTRAJ_VERSION = 2;           // v2: dropped hybrid-target gate keys
 
 struct TDTrajHeader {
     uint32_t magic;
@@ -36,14 +36,11 @@ struct TDTrajHeader {
 
 struct TDTrajRecord {
     position pos;                 // leaf position  (acc/ft/stack rebuilt from it)
-    position root_pos;            // root position  (root snapshot rebuilt from it)
+    position root_pos;            // root position  (dumped to the root-row TSV corpus)
     int32_t  score_stm;           // leaf static eval, leaf-STM POV (cp)
     int32_t  score_root_stm;      // root search score, root-STM POV (cp)
     int32_t  root_static;         // root static eval, root-STM POV (cp)
     int32_t  game_ply;            // 1-based game-ply of the root position
-    h_code   root_key;            // prediction-gate keys (hybrid target)
-    h_code   key_own;
-    h_code   key_reply;
     float    id_score_variance;   // cp²
     int8_t   id_depth;
     uint8_t  wtm;                 // leaf STM

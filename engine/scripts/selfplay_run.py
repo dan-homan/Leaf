@@ -19,8 +19,9 @@ Run from learn/ with a training binary installed there, e.g.:
         --epd training_openings.epd --actors 8 --depth 8 \
         --games-per-actor 1000 --total-games 100000 --traj-dir traj_run1
 
-The learner inherits TDLEAF_* env (TDLEAF_TARGET etc.); actors are forced
-frozen (TDLEAF_FREEZE=1).  Stop early by creating <traj-dir>/STOP.
+The learner inherits the parent env (e.g. TDLEAF_DUMP_TSV for corpus dumping);
+actors are forced frozen (TDLEAF_FREEZE=1).  Stop early by creating
+<traj-dir>/STOP.
 """
 
 import argparse

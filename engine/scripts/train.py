@@ -352,26 +352,13 @@ def main():
     ap.add_argument("--depth", type=int, default=8)
     ap.add_argument("--concurrency", type=int, default=9)
     ap.add_argument("--openings", default="training_openings.epd")
-    ap.add_argument("--selfplay-gen", action="store_true",
-                    help="Generate with the engine's internal self-play driver "
-                         "(--selfplay) instead of match.py/fastchess pairs: "
-                         "--concurrency single-threaded engine processes stripe "
-                         "the opening book (offset i, stride N over a "
-                         "deterministically shuffled order) and each plays "
-                         "whole games in-process.  Same net/state/depth/dump "
-                         "env as the pair path; both sides recorded (game-ply "
-                         "gap 1), exact in-engine results (no UCI adjudication "
-                         "ambiguity, no draw undersampling), ~3.5x per-core "
-                         "throughput, no PGN.  Validated equivalent in "
-                         "learn/eqstudy_260717_work/RESULTS.md.  NOTE: each "
-                         "process learns independently and the N states merge "
-                         "through the multi-writer .tdleaf.bin protocol; "
-                         "prefer --actor-learner-gen for a single optimizer.")
     ap.add_argument("--actor-learner-gen", action="store_true",
-                    help="Generate via scripts/selfplay_run.py: concurrency-1 "
-                         "FROZEN actor engines play internal self-play and emit "
-                         ".tdg trajectories; ONE learner engine consumes them "
-                         "with a single optimizer (sole .tdleaf.bin writer — no "
+                    help="DEFAULT generation mode (this flag is optional — it is "
+                         "assumed when no legacy mode is selected).  Generate via "
+                         "scripts/selfplay_run.py: concurrency-1 FROZEN actor "
+                         "engines play internal self-play and emit .tdg "
+                         "trajectories; ONE learner engine consumes them with a "
+                         "single optimizer (sole .tdleaf.bin writer — no "
                          "multi-writer merge) and dumps the corpus TSVs.  "
                          "Learner runs with --refresh-scores (targets on "
                          "current weights) and actors with --no-adjudication — "
@@ -379,6 +366,22 @@ def main():
                          "docs/TRAINING.md).  Epoch-style weight refresh: "
                          "actors respawn every --games-per-actor games.  "
                          "Validated by the material_260708-d8t-3al3 iteration.")
+    ap.add_argument("--selfplay-gen", action="store_true",
+                    help="LEGACY generation mode (retained, unsupported): the "
+                         "engine's internal self-play driver (--selfplay) with "
+                         "--concurrency single-threaded engine processes striping "
+                         "the opening book, each playing whole games in-process.  "
+                         "Both sides recorded (game-ply gap 1), exact in-engine "
+                         "results, ~3.5x per-core throughput, no PGN.  NOTE: each "
+                         "process learns independently and the N states merge "
+                         "through the multi-writer .tdleaf.bin protocol — prefer "
+                         "the default actor/learner split for a single optimizer.")
+    ap.add_argument("--uci-pair-gen", action="store_true",
+                    help="LEGACY generation mode (retained, unsupported): the "
+                         "original match.py/fastchess UCI engine-pair path (two "
+                         "engines per game, hl_a vs hl_b, PGN output).  UCI "
+                         "self-adjudication undersamples draws in the dumped "
+                         "corpus by ~40%%; prefer the default actor/learner split.")
     ap.add_argument("--games-per-actor", type=int, default=1000,
                     help="Actor respawn cadence for --actor-learner-gen "
                          "(weight-refresh interval; default 1000)")
@@ -559,16 +562,26 @@ def main():
     if not net_path.is_file():
         die(f"base net not found: {net_path}")
 
-    # ---- Binaries --------------------------------------------------------
-    if args.selfplay_gen and args.actor_learner_gen:
-        die("--selfplay-gen and --actor-learner-gen are mutually exclusive")
+    # ---- Resolve generation mode ----------------------------------------
+    # The actor/learner split (single optimizer, sole .tdleaf.bin writer) is the
+    # default and only supported mode; --selfplay-gen and --uci-pair-gen are
+    # retained as explicit legacy options.
+    if args.uci_pair_gen and args.selfplay_gen:
+        die("--uci-pair-gen and --selfplay-gen are mutually exclusive")
+    if args.actor_learner_gen and (args.uci_pair_gen or args.selfplay_gen):
+        die("--actor-learner-gen cannot be combined with a legacy generation "
+            "flag (--selfplay-gen / --uci-pair-gen)")
+    gen_mode = ("uci-pair"      if args.uci_pair_gen else
+                "selfplay"      if args.selfplay_gen else
+                "actor-learner")   # default (also when --actor-learner-gen given)
 
+    # ---- Binaries --------------------------------------------------------
     bt_bin = compile_binary("bt", args.net, tdleaf=True, force=args.recompile)
     if not args.skip_online:
         tr_a = compile_binary("train_hl_a", args.net, tdleaf=True, force=args.recompile)
         shutil.copy2(tr_a, LEARN_DIR / tr_a.name)
-        if not (args.selfplay_gen or args.actor_learner_gen):
-            # internal self-play plays both sides in one process — no hl_b
+        if gen_mode == "uci-pair":
+            # Only the legacy UCI engine-pair path plays two engines per game.
             tr_b = compile_binary("train_hl_b", args.net, tdleaf=True, force=args.recompile)
             shutil.copy2(tr_b, LEARN_DIR / tr_b.name)
 
@@ -628,7 +641,7 @@ def main():
                     f"recycle past one pass; with a frozen pair the extra "
                     f"games are exact duplicates (dedup will drop their rows, "
                     f"but the generation compute is wasted)")
-        if args.actor_learner_gen:
+        if gen_mode == "actor-learner":
             # Stage-1 actor/learner: selfplay_run.py drives concurrency-1
             # frozen actors + one learner (single optimizer, sole state
             # writer).  The learner inherits this env, so it produces the
@@ -656,7 +669,7 @@ def main():
                 "--delete-consumed", "--refresh-scores",
                 "--seed", seed],
                cwd=LEARN_DIR, env=env)
-        elif args.selfplay_gen:
+        elif gen_mode == "selfplay":
             # Internal self-play: N striped single-process engines, each
             # playing whole games in-process (both sides, exact results).
             # Deterministic book shuffle (seeded from the tag) + offset/stride
@@ -699,6 +712,7 @@ def main():
             if failed:
                 die(f"{failed} selfplay generation process(es) failed")
         else:
+            # Legacy UCI engine-pair path (gen_mode == "uci-pair").
             sh(["python3", SCRIPT_DIR / "match.py",
                 "Leaf_vtrain_hl_a", "Leaf_vtrain_hl_b",
                 "-n", args.games, "-c", args.concurrency,
@@ -1061,9 +1075,7 @@ def main():
         "date": time.strftime("%Y-%m-%d"),
         "games_this_iter": games_this_iter,
         "cumulative_games": cumulative_games,
-        "gen_mode": ("skip-online" if args.skip_online else
-                     "actor-learner" if args.actor_learner_gen else
-                     "selfplay" if args.selfplay_gen else "pair"),
+        "gen_mode": ("skip-online" if args.skip_online else gen_mode),
         "depth": args.depth,
         "epochs": args.epochs,
         "picked_epoch": pick_ep,

@@ -208,9 +208,6 @@ static bool selfplay_write_traj(const SelfplayConfig &cfg, const TDGameRecord &r
         tr.score_root_stm    = r.score_root_stm;
         tr.root_static       = r.root_static;
         tr.game_ply          = r.game_ply;
-        tr.root_key          = r.root_key;
-        tr.key_own           = r.key_own;
-        tr.key_reply         = r.key_reply;
         tr.id_score_variance = r.id_score_variance;
         tr.id_depth          = r.id_depth;
         tr.wtm               = (uint8_t)r.wtm;
@@ -534,7 +531,6 @@ static bool learner_process_file(const char *path, TDGameRecord *grec,
         return false;
     }
 
-    const bool want_root = tdleaf_root_enabled();   // learner's own env decides
     for (int t = 0; t < h.n_records; t++) {
         TDTrajRecord tr;
         if (fread(&tr, sizeof(tr), 1, f) != 1) {
@@ -549,14 +545,11 @@ static bool learner_process_file(const char *path, TDGameRecord *grec,
         r.score_root_stm    = tr.score_root_stm;
         r.root_static       = tr.root_static;
         r.game_ply          = tr.game_ply;
-        r.root_key          = tr.root_key;
-        r.key_own           = tr.key_own;
-        r.key_reply         = tr.key_reply;
         r.id_score_variance = tr.id_score_variance;
         r.id_depth          = tr.id_depth;
         r.wtm               = (bool)tr.wtm;
         r.root_wtm          = (bool)tr.root_wtm;
-        tdleaf_rebuild_record(r, cfg.refresh_scores, want_root);
+        tdleaf_rebuild_record(r, cfg.refresh_scores);
     }
     fclose(f);
     grec->n_plies      = h.n_records;
