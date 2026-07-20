@@ -191,13 +191,10 @@ python3 scripts/match.py
 # Run a match — CLI mode (from run/)
 python3 scripts/match.py Leaf_vA Leaf_vB -n 200 -c 4 -tc 5+0.05
 
-# Interactive training run (from learn/)
-python3 scripts/training_run.py
-
 # One full hybrid-loop iteration: generate -> consolidate -> gauntlet (from learn/)
-# --actor-learner-gen = recommended generation mode (frozen actors + ONE learner)
+# Generation defaults to the actor/learner split (frozen actors + ONE learner)
 python3 scripts/train.py --tag iter1 --games 188000 --depth 8 \
-    --state <net>.tdleaf.bin --actor-learner-gen --bt-K 220 --bt-threads 8 \
+    --state <net>.tdleaf.bin --bt-K 220 --bt-threads 8 \
     --gauntlet-epochs
 
 # Chained iteration: --continue reads the previous run's sidecar JSON
@@ -241,29 +238,27 @@ python3 scripts/analyze_calibration.py --input learn/positions.parquet --out-dir
 
 ### Training workflow summary
 
-For straightforward online-only training, `training_run.py` handles network init,
-binary compilation, opponent rotation, checkpointing, and optional train-validate loops:
-
-```sh
-cd learn/
-python3 training_run.py
-```
-
 For the hybrid loop (online generation + offline consolidation + gauntlet, the
-recommended path for iterative training today), `train.py` drives one full iteration
-per invocation, with `--continue` to chain iterations without re-specifying `--net`/
-`--state`/opponent lists by hand:
+recommended path for iterative training), `train.py` drives one full iteration
+per invocation — defaulting to the actor/learner generation split — with
+`--continue` to chain iterations without re-specifying `--net`/`--state`/opponent
+lists by hand:
 
 ```sh
 cd learn/
-python3 train.py --tag iter1 --games 188000 --depth 8 --actor-learner-gen \
+python3 train.py --tag iter1 --games 188000 --depth 8 \
     --bt-K 220 --bt-threads 8 --gauntlet-epochs --gauntlet Leaf_vclassic_eval
 ```
 
-See `docs/TRAINING.md` for the full workflow and `docs/SCRIPT_USE.md` for the option
-tables of both scripts.
+For standalone online-only generation (no offline consolidation), use
+`scripts/selfplay_run.py` directly (the actor/learner driver that `train.py`
+wraps).  The older interactive `training_run.py` manager is archived under
+`scripts/older/`.
 
-Manual online-only workflow (equivalent to what `training_run.py` automates):
+See `docs/TRAINING.md` for the full workflow and `docs/SCRIPT_USE.md` for the option
+tables.
+
+Manual online-only workflow (equivalent to what `selfplay_run.py` automates):
 
 ```sh
 # 1. Initialise a fresh random network (optional)

@@ -21,7 +21,7 @@ since engines, `.nnue` files, and `.tdleaf.bin` files live there.
 | [`analyze_calibration.py`](#analyze_calibrationpy) | Calibrates sigmoid temperature K and lambda decay from the parquet produced by `extract_positions.py`. |
 | [`extract_quiet_positions.py`](#extract_quiet_positionspy) | Builds an offline-training TSV position corpus from existing self-play PGNs. |
 | [`diff_tdleaf_checkpoints.py`](#diff_tdleaf_checkpointspy) | Diffs two `.tdleaf.bin` checkpoints section by section to monitor training drift. |
-| [`older/training_run.py`](#oldertraining_runpy) | Interactive TDLeaf(λ) training-run manager: network init, opponent rotation, and train-validate loop. |
+| [`older/training_run.py`](#oldertraining_runpy) | **Archived.** Interactive TDLeaf(λ) training-run manager (legacy UCI-pair workflow); superseded by `train.py` / `selfplay_run.py`. |
 | [`older/migrate_legacy_work.py`](#oldermigrate_legacy_workpy) | One-time migration of pre-`train.py` training iterations into the current per-run archive layout. |
 
 ---
@@ -280,7 +280,8 @@ Generate a combined opening EPD file for TDLeaf training:
 
 The output is shuffled and ready for use with
 `-openings file=training_openings.epd format=epd order=random -variant fischerandom -noswap`.
-`training_run.py` auto-detects and uses this file when it is present in `learn/`.
+`train.py` and `selfplay_run.py` default to `training_openings.epd` (in `learn/`) as
+their opening set (`--openings`).
 
 **Why random suffix moves?**  normbk02.bin at ply 8 converges to only ~2500 unique
 positions due to transpositions.  Adding 1–2 random moves after each book/FRC leaf

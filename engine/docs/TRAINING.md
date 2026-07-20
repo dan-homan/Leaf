@@ -586,9 +586,11 @@ critical.
 
 #### Usage with match.py
 
-The recommended way to run training is via `scripts/training_run.py`, which handles
-binary compilation, opponent rotation, checkpointing, .tdleaf.bin snapshots, and
-startup backups automatically. For manual control:
+The recommended way to run training is via `scripts/train.py` (the hybrid-loop
+driver, which defaults to the actor/learner split and handles binary compilation,
+generation, consolidation, and gauntlet automatically).  The notes below cover the
+legacy `--uci-pair-gen` path, driven by `match.py` directly for manual control.
+(The older interactive `training_run.py` manager is archived under `scripts/older/`.)
 
 When running parallel self-play via `match.py` (fastchess by default, `cutechess-cli`
 via `--driver=cutechess`) with multiple concurrent TDLEAF instances, add `--wait MS`
@@ -637,8 +639,9 @@ A variant `--init-nnue-noprior` initialises **all** piece PSQT slots at 100 cp (
 own=+V, enemy=−V; P=N=B=R=Q=100 cp) instead of classical material values — materially
 blind from move 1, with N/B/R/Q differentiating from that 100 cp baseline via PSQT
 updates during training, while `value[PAWN]` stays anchored at 100 cp throughout
-(preserves SEE / material-accounting semantics). The interactive
-`scripts/training_run.py` offers all of these options when initialising a new network.
+(preserves SEE / material-accounting semantics). `scripts/train.py` exposes all of
+these priors via `--init-nnue [material|classical|noprior]` when initialising a new
+network.
 
 This calls `nnue_alloc_arrays()` + `nnue_init_fp32_weights()` + `nnue_init_zero_weights()`:
 
@@ -747,9 +750,10 @@ detail — including the incident that surfaced it and the mechanism analysis �
 `docs/history/TRAINING_HISTORY.md`.
 
 **Guidance:**
-- Keep the aggregate training score near 50% — mix stronger opponents with
-  equal/weaker ones (opponent rotation in `training_run.py`); a ~75/25
-  self-play/classic diet is stable without mirror segments.
+- Keep the aggregate training score near 50%.  The default actor/learner path is
+  self-play, so the score is balanced by construction; when mixing in a fixed
+  opponent instead, a ~75/25 self-play/classic diet is stable without mirror
+  segments.
 - Fixed-opponent games harvest one learner trajectory per game vs. self-play's
   two — their value is diversity, not volume.
 - Monitor the drift canaries between checkpoints with
@@ -1428,9 +1432,10 @@ the target mean-outcome-mass range.
 
 ## Self-Play Driver
 
-`scripts/training_run.py` manages the process of creating the necessary binaries
-(if needed), specifies a baseline `.nnue` file, and sets up online training matches
-interactively — see [Quick Start](#quick-start) above.
+`scripts/selfplay_run.py` drives a standalone actor/learner generation run: frozen
+actor engines play internal self-play and emit `.tdg` trajectories while one learner
+owns the optimizer — see [Quick Start](#quick-start) above.  (The older interactive
+`training_run.py` manager is archived under `scripts/older/`.)
 
 `scripts/train.py` drives one full hybrid-loop iteration end to end: online generation
 with corpus dumping → single-process, within-batch-threaded offline consolidation
