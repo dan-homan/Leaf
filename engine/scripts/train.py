@@ -384,7 +384,7 @@ def main():
     ap.add_argument("--bt-threads", type=int, default=8,
                     help="Worker threads for within-batch gradient compute "
                          "(single-process; default 8)")
-    ap.add_argument("--epochs", type=int, default=6)
+    ap.add_argument("--epochs", type=int, default=2)
     ap.add_argument("--bt-lr", type=float, default=0.25)
     ap.add_argument("--bt-lambda", type=float, default=1.0)
     ap.add_argument("--bt-K", type=float, default=220.0)
@@ -420,7 +420,7 @@ def main():
                          "arguments to explicitly clear the inherited list). "
                          "Combined with --gauntlet and (under --continue) "
                          "Leaf_v<PREV_TAG>-final.")
-    ap.add_argument("--gauntlet-games", type=int, default=400)
+    ap.add_argument("--gauntlet-games", type=int, default=1000)
     ap.add_argument("--tc", default="3+0.05")
     ap.add_argument("--gauntlet-epochs", action="store_true",
                     help="Fast per-epoch ladder: after each epoch's training, "
