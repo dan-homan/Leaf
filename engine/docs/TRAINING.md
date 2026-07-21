@@ -1164,7 +1164,7 @@ outcome weight mass around **0.25–0.33** (see
 
 ### Practical guidance
 
-- **Rate by gauntlet**, 300–400 games vs a fixed panel; never by validation-MSE
+- **Rate by gauntlet**, 500–1000 games vs a fixed panel; never by validation-MSE
   *level*. The MSE trajectory *shape* is still useful live: smooth = healthy
   optimizer, oscillating = step-size trouble.
 - Select the epoch by ladder (`--gauntlet-epochs`), not by assuming the last
