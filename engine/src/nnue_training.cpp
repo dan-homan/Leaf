@@ -67,34 +67,10 @@ static float (&grad_l1_b)[NNUE_LAYER_STACKS][NNUE_L1_SIZE]                 = g_g
 static float (&grad_l2_w)[NNUE_LAYER_STACKS][NNUE_L2_PADDED]               = g_grad.grad_l2_w;
 static float (&grad_l2_b)[NNUE_LAYER_STACKS]                               = g_grad.grad_l2_b;
 
-// Per-session delta accumulators: Σ of gradient changes applied to float shadows since the
-// last file sync.  On write, merged = re_read_file_value + our_delta, which correctly
-// incorporates concurrent updates from other Leaf instances.  Cleared after each sync.
-static float delta_l0_w[NNUE_LAYER_STACKS][NNUE_L0_SIZE * NNUE_L0_INPUT];
-static float delta_l0_b[NNUE_LAYER_STACKS][NNUE_L0_SIZE];
-static float delta_l1_w[NNUE_LAYER_STACKS][NNUE_L1_SIZE * NNUE_L1_PADDED];
-static float delta_l1_b[NNUE_LAYER_STACKS][NNUE_L1_SIZE];
-static float delta_l2_w[NNUE_LAYER_STACKS][NNUE_L2_PADDED];
-static float delta_l2_b[NNUE_LAYER_STACKS];
-// Per-session delta counts: incremented alongside absolute counts in nnue_apply_gradients.
-// On save, merged count = file_count + delta_count (additive, not max-based).
-// Cleared after each file sync.  FT weights keep max-based merge (counts not used
-// for per-weight BC, and 92 MB delta array would be too expensive).
-static uint32_t delta_l0_w_cnt[NNUE_LAYER_STACKS][NNUE_L0_SIZE * NNUE_L0_INPUT];
-static uint32_t delta_l0_b_cnt[NNUE_LAYER_STACKS][NNUE_L0_SIZE];
-static uint32_t delta_l1_w_cnt[NNUE_LAYER_STACKS][NNUE_L1_SIZE * NNUE_L1_PADDED];
-static uint32_t delta_l1_b_cnt[NNUE_LAYER_STACKS][NNUE_L1_SIZE];
-static uint32_t delta_l2_w_cnt[NNUE_LAYER_STACKS][NNUE_L2_PADDED];
-static uint32_t delta_l2_b_cnt[NNUE_LAYER_STACKS];
-static uint32_t delta_ft_bias_cnt[NNUE_HALF_DIMS];
-// PSQT delta counts: heap-allocated (~720 KB), parallels psqt_weights_cnt.
-static uint32_t *delta_psqt_cnt = nullptr;
-
 // FT/PSQT float shadow arrays (heap — OS lazy-paged, physical use ∝ active features)
 // ft_weights_f32 / grad_ft_w: [FT_INPUTS × HALF_DIMS]  ~92 MB each
 // psqt_weights_f32 / grad_psqt_w: [FT_INPUTS × PSQT_BKTS] ~720 KB each
 // ft_dirty: [FT_INPUTS] — which feature rows received gradient this game
-// ft_delta_f32 / psqt_delta_f32: accumulated FT/PSQT deltas since last file sync
 static float    *ft_weights_f32   = nullptr;
 // psqt_weights_f32 forward-declared near top of file (used in nnue_write_nnue)
 static uint32_t *ft_weights_cnt   = nullptr;  // update count per FT weight
@@ -104,15 +80,12 @@ static uint32_t *psqt_weights_cnt = nullptr;  // update count per PSQT weight
 static float    *&grad_ft_w       = g_grad.grad_ft_w;    // FT weight gradients
 static float    *&grad_psqt_w     = g_grad.grad_psqt_w;  // PSQT weight gradients
 static bool      *&ft_dirty       = g_grad.ft_dirty;     // which feature rows are non-zero
-static float    *ft_delta_f32     = nullptr;  // FT delta since last file sync [FT_INPUTS×HALF_DIMS]
-static float    *psqt_delta_f32   = nullptr;  // PSQT delta since last file sync [FT_INPUTS×PSQT_BKTS]
 
-// FT bias float shadow, gradient accumulator, update count, and delta (all NNUE_HALF_DIMS).
+// FT bias float shadow, gradient accumulator, and update count (all NNUE_HALF_DIMS).
 // Static (16 KB total) — no heap allocation needed.
 static float    ft_biases_f32 [NNUE_HALF_DIMS] = {};
 static float    (&grad_ft_bias)[NNUE_HALF_DIMS] = g_grad.grad_ft_bias;  // lives in g_grad
 static uint32_t ft_bias_cnt   [NNUE_HALF_DIMS] = {};
-static float    ft_bias_delta [NNUE_HALF_DIMS] = {};
 
 // ---------------------------------------------------------------------------
 // Adam moment arrays — session-local (process memory only; not saved to .tdleaf.bin).
@@ -351,14 +324,6 @@ void nnue_init_zero_weights(int prior_mode)
     memset(grad_l1_b, 0, sizeof(grad_l1_b));
     memset(grad_l2_w, 0, sizeof(grad_l2_w));
     memset(grad_l2_b, 0, sizeof(grad_l2_b));
-    // Delta counts — zero for fresh network.
-    memset(delta_l0_w_cnt, 0, sizeof(delta_l0_w_cnt));
-    memset(delta_l0_b_cnt, 0, sizeof(delta_l0_b_cnt));
-    memset(delta_l1_w_cnt, 0, sizeof(delta_l1_w_cnt));
-    memset(delta_l1_b_cnt, 0, sizeof(delta_l1_b_cnt));
-    memset(delta_l2_w_cnt, 0, sizeof(delta_l2_w_cnt));
-    memset(delta_l2_b_cnt, 0, sizeof(delta_l2_b_cnt));
-    memset(delta_ft_bias_cnt,   0, sizeof(delta_ft_bias_cnt));
 
     // Adam moment arrays — session-local, reset to zero for fresh network.
     memset(v_l0_w,    0, sizeof(v_l0_w));
@@ -512,9 +477,6 @@ void nnue_init_zero_weights(int prior_mode)
         memset(v_ft_w,    0, ft_sz   * sizeof(float));
         memset(v_psqt_w,  0, psqt_sz * sizeof(float));
         memset(m_psqt_w,  0, psqt_sz * sizeof(float));
-        // PSQT delta counts — heap allocated, parallels psqt_weights_cnt.
-        if (!delta_psqt_cnt) delta_psqt_cnt = new uint32_t[psqt_sz]();
-        memset(delta_psqt_cnt, 0, psqt_sz * sizeof(uint32_t));
     }
 
     // Sync all int8/int16/int32 inference arrays from the zeroed float shadows.
@@ -602,8 +564,6 @@ void nnue_init_fp32_weights()
         grad_ft_w        = new float   [ft_sz];
         grad_psqt_w      = new float   [psqt_sz];
         ft_dirty         = new bool    [NNUE_FT_INPUTS];
-        ft_delta_f32     = new float   [ft_sz]();    // zero-initialised
-        psqt_delta_f32   = new float   [psqt_sz]();  // zero-initialised
         // Adam heap arrays — session-local moment arrays for FT and PSQT.
         ft_v_warmed = new bool[NNUE_FT_INPUTS](); // zero-init: no rows warmed yet
         v_ft_w    = new float[ft_sz]();    // per-weight FT second moment (~92 MB, OS lazy-paged)
@@ -619,30 +579,11 @@ void nnue_init_fp32_weights()
     memset(grad_psqt_w,      0, psqt_sz * sizeof(float));
     memset(ft_dirty,         0, NNUE_FT_INPUTS * sizeof(bool));
     memset(ft_v_warmed,      0, NNUE_FT_INPUTS * sizeof(bool));
-    // Zero delta accumulators — fresh session, no pending changes yet.
-    memset(delta_l0_w,     0, sizeof(delta_l0_w));
-    memset(delta_l0_b,     0, sizeof(delta_l0_b));
-    memset(delta_l1_w,     0, sizeof(delta_l1_w));
-    memset(delta_l1_b,     0, sizeof(delta_l1_b));
-    memset(delta_l2_w,     0, sizeof(delta_l2_w));
-    memset(delta_l2_b,     0, sizeof(delta_l2_b));
-    memset(delta_l0_w_cnt, 0, sizeof(delta_l0_w_cnt));
-    memset(delta_l0_b_cnt, 0, sizeof(delta_l0_b_cnt));
-    memset(delta_l1_w_cnt, 0, sizeof(delta_l1_w_cnt));
-    memset(delta_l1_b_cnt, 0, sizeof(delta_l1_b_cnt));
-    memset(delta_l2_w_cnt, 0, sizeof(delta_l2_w_cnt));
-    memset(delta_l2_b_cnt, 0, sizeof(delta_l2_b_cnt));
-    memset(delta_ft_bias_cnt, 0, sizeof(delta_ft_bias_cnt));
-    if (!delta_psqt_cnt) delta_psqt_cnt = new uint32_t[psqt_sz]();
-    memset(delta_psqt_cnt, 0, psqt_sz * sizeof(uint32_t));
-    if (ft_delta_f32)   memset(ft_delta_f32,   0, ft_sz   * sizeof(float));
-    if (psqt_delta_f32) memset(psqt_delta_f32, 0, psqt_sz * sizeof(float));
 
     // FT bias float shadow: initialise from the loaded int16 array.
     for (int d = 0; d < NNUE_HALF_DIMS; d++) ft_biases_f32[d] = (float)ft_biases[d];
     memset(grad_ft_bias,  0, sizeof(grad_ft_bias));
     memset(ft_bias_cnt,   0, sizeof(ft_bias_cnt));
-    memset(ft_bias_delta, 0, sizeof(ft_bias_delta));
 
     // Adam moment arrays — session-local, reset at each session start.
     memset(v_l0_w,    0, sizeof(v_l0_w));
@@ -755,7 +696,7 @@ void nnue_forward_fp32(const int16_t acc[2][NNUE_HALF_DIMS],
 // grad_scale = alpha * e_t * d_t * (1-d_t) / K * (100 / 5776)
 // ---------------------------------------------------------------------------
 void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
-                               bool replay_mode, NNUEGradBuf *gb)
+                               NNUEGradBuf *gb)
 {
     if (!gb) gb = &g_grad;   // online / single-buffer default
     int s = act.stack;
@@ -820,12 +761,6 @@ void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
             gb->grad_l0_w[s][o * NNUE_L0_INPUT + i] += g_fc0_raw[o] * act.l0_in[i];
         gb->grad_l0_b[s][o] += g_fc0_raw[o];
     }
-
-    // Replay mode: skip FT weights, PSQT, and FT biases.  These three feed
-    // into nnue_init_accumulator (ft_biases directly, ft_weights/psqt via
-    // add_feat) — updating them during replay would change what the next
-    // tdleaf_refresh_scores() produces and drive a positive feedback loop.
-    if (replay_mode) return;
 
     // 1. Continue backward: FC0 inputs → accumulator → FT/PSQT weights
     // g_l0_in[i] = Σ_o g_fc0_raw[o] × l0_weights_f32[s][o×L0_INPUT+i]
@@ -1176,8 +1111,8 @@ void nnue_apply_gradients(float lr_scale)
         ? (float)t_ft_session / (float)TDLEAF_FT_SESSION_WARMUP
         : 1.0f;
 
-    // Effective LRs.  lr_scale (<1.0 for replay) applied uniformly to all
-    // categories to soften replay-pass updates; live path passes 1.0.
+    // Effective LRs.  lr_scale applied uniformly to all categories; the online
+    // path passes 1.0, the offline batch trainer passes its --bt-lr.
     // FC LRs are split four ways:
     //   fc_lr      — FC0/FC1 weights (int8 scale ~5)
     //   fc2_lr     — FC2 weights (int8 scale ~68; final 32→1 layer)
@@ -1231,20 +1166,20 @@ void nnue_apply_gradients(float lr_scale)
                 // Scaled by the SAME LR used for the gradient step so the
                 // relative pull-to-zero is constant across sections.
                 float wd = TDLEAF_WEIGHT_DECAY * fc_lr * l0_weights_f32[s][i];
-                l0_weights_f32[s][i] -= dw + wd;  delta_l0_w[s][i] -= dw + wd;
+                l0_weights_f32[s][i] -= dw + wd;
                 // Clamp float shadow to int8 range: prevents zombie weights where the float
                 // shadow drifts beyond ±127 while the requantised inference value is stuck.
                 if (l0_weights_f32[s][i] >  127.0f) l0_weights_f32[s][i] =  127.0f;
                 if (l0_weights_f32[s][i] < -127.0f) l0_weights_f32[s][i] = -127.0f;
-                l0_weights_cnt[s][i]++;  delta_l0_w_cnt[s][i]++;
+                l0_weights_cnt[s][i]++;
             }
         }
         // FC0 biases — fc_bias_lr (int32 scale ~2000)
         for (int i = 0; i < NNUE_L0_SIZE; i++) {
             if (grad_l0_b[s][i] != 0.0f) {
                 float dw = do_step(grad_l0_b[s][i], m_l0_b[s][i], v_l0_b[s][i], l0_biases_cnt[s][i], fc_bias_lr);
-                l0_biases_f32[s][i] -= dw;  delta_l0_b[s][i] -= dw;
-                l0_biases_cnt[s][i]++;  delta_l0_b_cnt[s][i]++;
+                l0_biases_f32[s][i] -= dw;
+                l0_biases_cnt[s][i]++;
             }
         }
         // FC1 weights — fc_lr (int8 scale ~9)
@@ -1252,19 +1187,19 @@ void nnue_apply_gradients(float lr_scale)
             if (grad_l1_w[s][i] != 0.0f) {
                 float dw = do_step(grad_l1_w[s][i], m_l1_w[s][i], v_l1_w[s][i], l1_weights_cnt[s][i], fc_lr);
                 float wd = TDLEAF_WEIGHT_DECAY * fc_lr * l1_weights_f32[s][i];
-                l1_weights_f32[s][i] -= dw + wd;  delta_l1_w[s][i] -= dw + wd;
+                l1_weights_f32[s][i] -= dw + wd;
                 // Clamp float shadow to int8 range (same reason as FC0).
                 if (l1_weights_f32[s][i] >  127.0f) l1_weights_f32[s][i] =  127.0f;
                 if (l1_weights_f32[s][i] < -127.0f) l1_weights_f32[s][i] = -127.0f;
-                l1_weights_cnt[s][i]++;  delta_l1_w_cnt[s][i]++;
+                l1_weights_cnt[s][i]++;
             }
         }
         // FC1 biases — fc_bias_lr (int32 scale ~1500)
         for (int i = 0; i < NNUE_L1_SIZE; i++) {
             if (grad_l1_b[s][i] != 0.0f) {
                 float dw = do_step(grad_l1_b[s][i], m_l1_b[s][i], v_l1_b[s][i], l1_biases_cnt[s][i], fc_bias_lr);
-                l1_biases_f32[s][i] -= dw;  delta_l1_b[s][i] -= dw;
-                l1_biases_cnt[s][i]++;  delta_l1_b_cnt[s][i]++;
+                l1_biases_f32[s][i] -= dw;
+                l1_biases_cnt[s][i]++;
             }
         }
         // FC2 weights — fc2_lr (int8 scale ~68; final 32→1 layer has higher
@@ -1273,18 +1208,18 @@ void nnue_apply_gradients(float lr_scale)
             if (grad_l2_w[s][i] != 0.0f) {
                 float dw = do_step(grad_l2_w[s][i], m_l2_w[s][i], v_l2_w[s][i], l2_weights_cnt[s][i], fc2_lr);
                 float wd = TDLEAF_WEIGHT_DECAY * fc2_lr * l2_weights_f32[s][i];
-                l2_weights_f32[s][i] -= dw + wd;  delta_l2_w[s][i] -= dw + wd;
+                l2_weights_f32[s][i] -= dw + wd;
                 // Clamp float shadow to int8 range (same reason as FC0/FC1).
                 if (l2_weights_f32[s][i] >  127.0f) l2_weights_f32[s][i] =  127.0f;
                 if (l2_weights_f32[s][i] < -127.0f) l2_weights_f32[s][i] = -127.0f;
-                l2_weights_cnt[s][i]++;  delta_l2_w_cnt[s][i]++;
+                l2_weights_cnt[s][i]++;
             }
         }
         // FC2 bias — fc_bias_lr (int32 scale ~860)
         if (grad_l2_b[s] != 0.0f) {
             float dw = do_step(grad_l2_b[s], m_l2_b[s], v_l2_b[s], l2_bias_cnt[s], fc_bias_lr);
-            l2_bias_f32[s] -= dw;  delta_l2_b[s] -= dw;
-            l2_bias_cnt[s]++;  delta_l2_b_cnt[s]++;
+            l2_bias_f32[s] -= dw;
+            l2_bias_cnt[s]++;
         }
     }
     memset(grad_l0_w, 0, sizeof(grad_l0_w));
@@ -1308,7 +1243,6 @@ void nnue_apply_gradients(float lr_scale)
             float    *fw  = ft_weights_f32 + (size_t)fi * NNUE_HALF_DIMS;
             float    *gw  = grad_ft_w      + (size_t)fi * NNUE_HALF_DIMS;
             uint32_t *cnt = ft_weights_cnt + (size_t)fi * NNUE_HALF_DIMS;
-            float    *fd  = ft_delta_f32 ? ft_delta_f32 + (size_t)fi * NNUE_HALF_DIMS : nullptr;
             if (v_ft_w) {
                 // Select bias correction: warm rows (v loaded from disk) use t_adam;
                 // cold rows (v=0 at startup) use min(t_adam, t_ft_session).
@@ -1325,7 +1259,7 @@ void nnue_apply_gradients(float lr_scale)
                         float dw = ft_lr * step;
                         // AdamW: decoupled weight decay (FT weights, not biases/PSQT)
                         float wd = TDLEAF_WEIGHT_DECAY * ft_lr * fw[d];
-                        fw[d] -= dw + wd;  if (fd) fd[d] -= dw + wd;
+                        fw[d] -= dw + wd;
                         cnt[d]++;
                         gw[d] = 0.0f;
                     }
@@ -1336,14 +1270,12 @@ void nnue_apply_gradients(float lr_scale)
                 float    *pw   = psqt_weights_f32 + (size_t)fi * NNUE_PSQT_BKTS;
                 float    *gpw  = grad_psqt_w      + (size_t)fi * NNUE_PSQT_BKTS;
                 uint32_t *pcnt = psqt_weights_cnt + (size_t)fi * NNUE_PSQT_BKTS;
-                float    *pd   = psqt_delta_f32 ? psqt_delta_f32 + (size_t)fi * NNUE_PSQT_BKTS : nullptr;
                 for (int b = 0; b < NNUE_PSQT_BKTS; b++) {
                     if (gpw[b] != 0.0f && m_psqt_w && v_psqt_w) {
                         size_t vi = (size_t)fi * NNUE_PSQT_BKTS + b;
                         float dw = do_step_psqt(gpw[b], m_psqt_w[vi], v_psqt_w[vi], pcnt[b]);
-                        pw[b] -= dw;  if (pd) pd[b] -= dw;
+                        pw[b] -= dw;
                         pcnt[b]++;
-                        if (delta_psqt_cnt) delta_psqt_cnt[(size_t)fi * NNUE_PSQT_BKTS + b]++;
                         gpw[b] = 0.0f;
                     }
                 }
@@ -1372,8 +1304,7 @@ void nnue_apply_gradients(float lr_scale)
         if (grad_ft_bias[d] == 0.0f) continue;
         float dw = do_step_ft_bias(grad_ft_bias[d], m_ft_bias[d], v_ft_bias[d], ft_bias_cnt[d]);
         ft_biases_f32[d] -= dw;
-        ft_bias_delta[d] -= dw;
-        ft_bias_cnt[d]++;  delta_ft_bias_cnt[d]++;
+        ft_bias_cnt[d]++;
         grad_ft_bias[d] = 0.0f;
         ft_biases[d] = (int16_t)std::max(-32767.0f,
                                 std::min( 32767.0f, roundf(ft_biases_f32[d])));
@@ -1463,45 +1394,45 @@ static void nnue_apply_fc_stack(int s, const NNUEApplyParams &p,
         if (grad_l0_w[s][i] != 0.0f) {
             float dw = nnue_adam_step(grad_l0_w[s][i], m_l0_w[s][i], v_l0_w[s][i], l0_weights_cnt[s][i], p.fc_lr, smax, sclip);
             float wd = TDLEAF_WEIGHT_DECAY * p.fc_lr * l0_weights_f32[s][i];
-            l0_weights_f32[s][i] -= dw + wd;  delta_l0_w[s][i] -= dw + wd;
+            l0_weights_f32[s][i] -= dw + wd;
             if (l0_weights_f32[s][i] >  127.0f) l0_weights_f32[s][i] =  127.0f;
             if (l0_weights_f32[s][i] < -127.0f) l0_weights_f32[s][i] = -127.0f;
-            l0_weights_cnt[s][i]++;  delta_l0_w_cnt[s][i]++;
+            l0_weights_cnt[s][i]++;
         }
     for (int i = 0; i < NNUE_L0_SIZE; i++)
         if (grad_l0_b[s][i] != 0.0f) {
             float dw = nnue_adam_step(grad_l0_b[s][i], m_l0_b[s][i], v_l0_b[s][i], l0_biases_cnt[s][i], p.fc_bias_lr, smax, sclip);
-            l0_biases_f32[s][i] -= dw;  delta_l0_b[s][i] -= dw;
-            l0_biases_cnt[s][i]++;  delta_l0_b_cnt[s][i]++;
+            l0_biases_f32[s][i] -= dw;
+            l0_biases_cnt[s][i]++;
         }
     for (int i = 0; i < NNUE_L1_SIZE * NNUE_L1_PADDED; i++)
         if (grad_l1_w[s][i] != 0.0f) {
             float dw = nnue_adam_step(grad_l1_w[s][i], m_l1_w[s][i], v_l1_w[s][i], l1_weights_cnt[s][i], p.fc_lr, smax, sclip);
             float wd = TDLEAF_WEIGHT_DECAY * p.fc_lr * l1_weights_f32[s][i];
-            l1_weights_f32[s][i] -= dw + wd;  delta_l1_w[s][i] -= dw + wd;
+            l1_weights_f32[s][i] -= dw + wd;
             if (l1_weights_f32[s][i] >  127.0f) l1_weights_f32[s][i] =  127.0f;
             if (l1_weights_f32[s][i] < -127.0f) l1_weights_f32[s][i] = -127.0f;
-            l1_weights_cnt[s][i]++;  delta_l1_w_cnt[s][i]++;
+            l1_weights_cnt[s][i]++;
         }
     for (int i = 0; i < NNUE_L1_SIZE; i++)
         if (grad_l1_b[s][i] != 0.0f) {
             float dw = nnue_adam_step(grad_l1_b[s][i], m_l1_b[s][i], v_l1_b[s][i], l1_biases_cnt[s][i], p.fc_bias_lr, smax, sclip);
-            l1_biases_f32[s][i] -= dw;  delta_l1_b[s][i] -= dw;
-            l1_biases_cnt[s][i]++;  delta_l1_b_cnt[s][i]++;
+            l1_biases_f32[s][i] -= dw;
+            l1_biases_cnt[s][i]++;
         }
     for (int i = 0; i < NNUE_L2_PADDED; i++)
         if (grad_l2_w[s][i] != 0.0f) {
             float dw = nnue_adam_step(grad_l2_w[s][i], m_l2_w[s][i], v_l2_w[s][i], l2_weights_cnt[s][i], p.fc2_lr, smax, sclip);
             float wd = TDLEAF_WEIGHT_DECAY * p.fc2_lr * l2_weights_f32[s][i];
-            l2_weights_f32[s][i] -= dw + wd;  delta_l2_w[s][i] -= dw + wd;
+            l2_weights_f32[s][i] -= dw + wd;
             if (l2_weights_f32[s][i] >  127.0f) l2_weights_f32[s][i] =  127.0f;
             if (l2_weights_f32[s][i] < -127.0f) l2_weights_f32[s][i] = -127.0f;
-            l2_weights_cnt[s][i]++;  delta_l2_w_cnt[s][i]++;
+            l2_weights_cnt[s][i]++;
         }
     if (grad_l2_b[s] != 0.0f) {
         float dw = nnue_adam_step(grad_l2_b[s], m_l2_b[s], v_l2_b[s], l2_bias_cnt[s], p.fc_bias_lr, smax, sclip);
-        l2_bias_f32[s] -= dw;  delta_l2_b[s] -= dw;
-        l2_bias_cnt[s]++;  delta_l2_b_cnt[s]++;
+        l2_bias_f32[s] -= dw;
+        l2_bias_cnt[s]++;
     }
 }
 
@@ -1519,7 +1450,6 @@ static void nnue_apply_ft_rows(const int *rows, int lo, int hi, const NNUEApplyP
         float    *fw  = ft_weights_f32 + (size_t)fi * NNUE_HALF_DIMS;
         float    *gw  = grad_ft_w      + (size_t)fi * NNUE_HALF_DIMS;
         uint32_t *cnt = ft_weights_cnt + (size_t)fi * NNUE_HALF_DIMS;
-        float    *fd  = ft_delta_f32 ? ft_delta_f32 + (size_t)fi * NNUE_HALF_DIMS : nullptr;
         if (v_ft_w) {
             const float ft_bc2 = (ft_v_warmed && ft_v_warmed[fi]) ? p.ft_bc2_warm : p.ft_bc2_cold;
             float *vw = v_ft_w + (size_t)fi * NNUE_HALF_DIMS;
@@ -1531,7 +1461,7 @@ static void nnue_apply_ft_rows(const int *rows, int lo, int hi, const NNUEApplyP
                     step = clip_adam_step(step, smax_ft, sclip_ft);
                     float dw = p.ft_lr * step;
                     float wd = TDLEAF_WEIGHT_DECAY * p.ft_lr * fw[d];
-                    fw[d] -= dw + wd;  if (fd) fd[d] -= dw + wd;
+                    fw[d] -= dw + wd;
                     cnt[d]++;
                     gw[d] = 0.0f;
                 }
@@ -1540,14 +1470,12 @@ static void nnue_apply_ft_rows(const int *rows, int lo, int hi, const NNUEApplyP
             float    *pw   = psqt_weights_f32 + (size_t)fi * NNUE_PSQT_BKTS;
             float    *gpw  = grad_psqt_w      + (size_t)fi * NNUE_PSQT_BKTS;
             uint32_t *pcnt = psqt_weights_cnt + (size_t)fi * NNUE_PSQT_BKTS;
-            float    *pd   = psqt_delta_f32 ? psqt_delta_f32 + (size_t)fi * NNUE_PSQT_BKTS : nullptr;
             for (int b = 0; b < NNUE_PSQT_BKTS; b++)
                 if (gpw[b] != 0.0f && m_psqt_w && v_psqt_w) {
                     size_t vi = (size_t)fi * NNUE_PSQT_BKTS + b;
                     float dw = nnue_adam_step(gpw[b], m_psqt_w[vi], v_psqt_w[vi], pcnt[b], p.psqt_lr, smax_psqt, sclip_psqt);
-                    pw[b] -= dw;  if (pd) pd[b] -= dw;
+                    pw[b] -= dw;
                     pcnt[b]++;
-                    if (delta_psqt_cnt) delta_psqt_cnt[(size_t)fi * NNUE_PSQT_BKTS + b]++;
                     gpw[b] = 0.0f;
                 }
         }
@@ -1563,8 +1491,7 @@ static void nnue_apply_ft_bias(const NNUEApplyParams &p, float &smax, uint64_t &
         if (grad_ft_bias[d] == 0.0f) continue;
         float dw = nnue_adam_step(grad_ft_bias[d], m_ft_bias[d], v_ft_bias[d], ft_bias_cnt[d], p.ft_bias_lr, smax, sclip);
         ft_biases_f32[d] -= dw;
-        ft_bias_delta[d] -= dw;
-        ft_bias_cnt[d]++;  delta_ft_bias_cnt[d]++;
+        ft_bias_cnt[d]++;
         grad_ft_bias[d] = 0.0f;
         ft_biases[d] = (int16_t)std::max(-32767.0f, std::min(32767.0f, roundf(ft_biases_f32[d])));
     }
@@ -1763,7 +1690,8 @@ void nnue_requantize_fc_applied()
 //
 // Version 6 additions:
 //   Adam v (second-moment) section — persists gradient scale across sessions.
-//   Multi-writer merge uses max(v_file, v_local) per element — conservative
+//   (Legacy multi-writer builds max-merged v_file/v_local on save; the single
+//   writer now writes the in-memory v directly.)  Historically: conservative
 //   and safe for concurrent training instances.
 //     uint32_t t_adam                                              (4 B)
 //     8 stacks × FC v block (raw float32, no TDLEAF_SCALE):
@@ -1785,8 +1713,9 @@ void nnue_requantize_fc_applied()
 //
 // Version 7 additions:
 //   Adam m (first-moment / momentum) section — persists gradient direction
-//   across sessions.  Multi-writer merge uses element-wise average
-//   (m_file + m_local) / 2.  FT weight m not applicable (RMSProp, no m).
+//   across sessions.  (Legacy multi-writer builds averaged (m_file+m_local)/2 on
+//   save; the single writer now writes the in-memory m directly.)  FT weight m
+//   not applicable (RMSProp, no m).
 //   8 stacks × FC m block (raw float32, signed):
 //       float32[L0_SIZE]            m_l0_b                        (64 B)
 //       float32[L0_SIZE*L0_INPUT]   m_l0_w                        (65536 B)
@@ -1809,7 +1738,7 @@ void nnue_requantize_fc_applied()
 //   dirty row has v=0 (e.g. first session from a v7 file, before any Adam
 //   step touches that row), saving it as "warmed" would produce bc2_warm≈1
 //   with v=0, giving sv≈ε and steps ~10,000× LR — catastrophic.
-//   Multi-writer merge uses max(v_file, v_local) per element (same as FC v).
+//   (Legacy multi-writer max-merged this per element, same as FC v.)
 //   On load, ft_v_warmed[fi] is set to true for restored rows so the RMSProp
 //   update uses t_adam (not t_ft_session) for bc2, since the saved v is
 //   already calibrated against t_adam steps.
@@ -1833,8 +1762,8 @@ void nnue_requantize_fc_applied()
 //   nnue_content_hash is FNV-1a over the .nnue's FT weight bytes, computed
 //   at load/init time (see nnue_update_content_hash() in nnue.cpp).
 //   On load: reject the file if the stored hash does not match the loaded .nnue.
-//   On save merge-read: abort the save rather than corrupting another worker's
-//   weights written against a different .nnue.
+//   (Legacy multi-writer builds also re-checked the hash during the save-time
+//   merge-read; with the merge gone, the load-time check is the guard.)
 //   v5–v9 files have no hash and are accepted without a check; saving promotes
 //   them to v10 with the current .nnue's hash.
 //
@@ -1885,315 +1814,38 @@ static int tdleaf_acquire_lock(const char *path, int how)
 }
 static void tdleaf_release_lock(int fd) { if (fd >= 0) close(fd); }
 
-// Counts how many saves were deferred because the lock was held by another process.
-// Accumulated deltas are NOT lost — they are flushed on the next successful save.
+// Counts saves skipped because the lock was held.  The full current state lives
+// in memory and is written whole on the next successful save, so a skip loses
+// nothing — it just defers this checkpoint.
 static uint64_t tdleaf_save_skip_count = 0;
 
 bool nnue_save_fc_weights(const char *path)
 {
-    // ---- Acquire exclusive lock (non-blocking) -------------------------
-    // If another process holds the lock, skip this save rather than blocking.
-    // Accumulated deltas are preserved in memory and flushed on the next
-    // successful save, so no training signal is lost — just deferred.
+    // ---- Acquire the write lock (non-blocking) -------------------------
+    // The learner is the sole writer, so the lock is uncontended in normal use;
+    // it is kept as a cheap guard against an accidental second concurrent writer.
+    // If somehow held, skip this checkpoint — the next save writes the full state.
     int lock_fd = tdleaf_acquire_lock(path, LOCK_EX | LOCK_NB);
     if (lock_fd == -2) {
         tdleaf_save_skip_count++;
         fprintf(stderr, "TDLeaf: lock busy — deferring save (deferred: %llu)\n",
                 (unsigned long long)tdleaf_save_skip_count);
-        return true;  // not an error; deltas will be written next time
+        return true;  // not an error; the full state is written next time
     }
     if (lock_fd < 0) {
         fprintf(stderr, "TDLeaf: cannot acquire exclusive lock for %s\n", path);
         return false;
     }
 
-    // Scratch buffers for section-level bulk I/O (sized to the largest FC
-    // section, L0_SIZE × L0_INPUT floats).  Static: saves are serialized by
-    // the exclusive lock, and within a process only one save runs at a time.
+    // Scratch buffer for section-level bulk I/O (sized to the largest FC section,
+    // L0_SIZE × L0_INPUT floats).
     static float    io_buf_f[NNUE_L0_SIZE * NNUE_L0_INPUT];
-    static uint32_t io_buf_u[NNUE_L0_SIZE * NNUE_L0_INPUT];
 
-    // ---- Re-read the current file and merge our deltas on top ----------
-    // This picks up any changes written by other concurrent Leaf instances
-    // since we last synced.  After merge, float shadows = file + our_delta.
-    FILE *cur = fopen(path, "rb");
-    if (cur) {
-        setvbuf(cur, nullptr, _IOFBF, 4u << 20);
-        uint32_t magic = 0, version = 0;
-        bool ok = (fread(&magic, 4, 1, cur) == 1 &&
-                   fread(&version, 4, 1, cur) == 1 &&
-                   magic == TDLEAF_MAGIC &&
-                   (version == TDLEAF_VERSION || version == 11u || version == 10u || version == 9u || version == 8u || version == 7u || version == 6u || version == 5u || version == 4u || version == 3u || version == 2u));
-        if (ok && version >= 10u) {
-            // v10+: header carries the source-.nnue content hash.  If another
-            // worker wrote the file against a different .nnue, abort the save
-            // rather than corrupt their weights with ours.
-            uint32_t file_content_hash = 0;
-            if (fread(&file_content_hash, 4, 1, cur) != 1) {
-                ok = false;
-            } else if (file_content_hash != nnue_content_hash) {
-                fprintf(stderr,
-                        "TDLeaf: %s was written against a different .nnue "
-                        "(file hash=0x%08X, loaded .nnue hash=0x%08X).\n"
-                        "        Aborting save to avoid corrupting the other worker's weights.\n",
-                        path, file_content_hash, nnue_content_hash);
-                fclose(cur);
-                tdleaf_release_lock(lock_fd);
-                return false;
-            }
-        }
-        if (ok) {
-            // FC section: float32 × TDLEAF_SCALE per weight, then uint32 counts.
-            // Merge: shadow = file_value + our_delta; count = file_count + our_delta_count.
-            for (int s = 0; s < NNUE_LAYER_STACKS && ok; s++) {
-                // Bulk-read each section into the scratch buffer, then merge.
-                // On a short read, merge the elements that were read (matching
-                // the old per-element behavior) and report failure.
-                auto merge_f = [&](float *shadow, float *delta, uint32_t *cnt, int n) -> bool {
-                    (void)cnt;
-                    size_t got = fread(io_buf_f, sizeof(float), n, cur);
-                    for (size_t i = 0; i < got; i++) {
-                        shadow[i] = io_buf_f[i] / TDLEAF_SCALE + delta[i];
-                        delta[i]  = 0.0f;
-                    }
-                    return got == (size_t)n;
-                };
-                // Additive count merge: cnt = file_count + delta_count.
-                // delta_cnt tracks only updates since last sync, so adding it to
-                // the file's count correctly accumulates across concurrent instances.
-                auto merge_cnt = [&](uint32_t *cnt, uint32_t *dcnt, int n) -> bool {
-                    size_t got = fread(io_buf_u, sizeof(uint32_t), n, cur);
-                    for (size_t i = 0; i < got; i++) {
-                        cnt[i] = io_buf_u[i] + dcnt[i];
-                        dcnt[i] = 0;
-                    }
-                    return got == (size_t)n;
-                };
-                ok = merge_f(l0_biases_f32[s],  delta_l0_b[s], l0_biases_cnt[s],  NNUE_L0_SIZE)
-                  && merge_cnt(l0_biases_cnt[s],  delta_l0_b_cnt[s], NNUE_L0_SIZE)
-                  && merge_f(l0_weights_f32[s], delta_l0_w[s], l0_weights_cnt[s], NNUE_L0_SIZE * NNUE_L0_INPUT)
-                  && merge_cnt(l0_weights_cnt[s], delta_l0_w_cnt[s], NNUE_L0_SIZE * NNUE_L0_INPUT)
-                  && merge_f(l1_biases_f32[s],  delta_l1_b[s], l1_biases_cnt[s],  NNUE_L1_SIZE)
-                  && merge_cnt(l1_biases_cnt[s],  delta_l1_b_cnt[s], NNUE_L1_SIZE)
-                  && merge_f(l1_weights_f32[s], delta_l1_w[s], l1_weights_cnt[s], NNUE_L1_SIZE * NNUE_L1_PADDED)
-                  && merge_cnt(l1_weights_cnt[s], delta_l1_w_cnt[s], NNUE_L1_SIZE * NNUE_L1_PADDED)
-                  && merge_f(&l2_bias_f32[s],    &delta_l2_b[s], &l2_bias_cnt[s],   1)
-                  && merge_cnt(&l2_bias_cnt[s],   &delta_l2_b_cnt[s], 1)
-                  && merge_f(l2_weights_f32[s], delta_l2_w[s], l2_weights_cnt[s], NNUE_L2_PADDED)
-                  && merge_cnt(l2_weights_cnt[s], delta_l2_w_cnt[s], NNUE_L2_PADDED);
-            }
-            // FT/PSQT sparse section (v3+).
-            if (ok && (version >= 3u) && ft_weights_f32) {
-                uint32_t n_ft_rows = 0;
-                if (fread(&n_ft_rows, sizeof(uint32_t), 1, cur) == 1) {
-                    float tmp_w[NNUE_HALF_DIMS];
-                    float tmp_p[NNUE_PSQT_BKTS];
-                    uint32_t tmp_wc[NNUE_HALF_DIMS];
-                    uint32_t tmp_pc[NNUE_PSQT_BKTS];
-                    for (uint32_t k = 0; k < n_ft_rows; k++) {
-                        uint32_t fi;
-                        if (fread(&fi, sizeof(uint32_t), 1, cur) != 1 ||
-                            fi >= (uint32_t)NNUE_FT_INPUTS) break;
-                        if (fread(tmp_w,  sizeof(float),    NNUE_HALF_DIMS, cur) != (size_t)NNUE_HALF_DIMS ||
-                            fread(tmp_wc, sizeof(uint32_t), NNUE_HALF_DIMS, cur) != (size_t)NNUE_HALF_DIMS ||
-                            fread(tmp_p,  sizeof(float),    NNUE_PSQT_BKTS, cur) != (size_t)NNUE_PSQT_BKTS ||
-                            fread(tmp_pc, sizeof(uint32_t), NNUE_PSQT_BKTS, cur) != (size_t)NNUE_PSQT_BKTS)
-                            break;
-                        // Merge FT: shadow = file_value + our_delta; count = max.
-                        float    *fw  = ft_weights_f32   + (size_t)fi * NNUE_HALF_DIMS;
-                        uint32_t *wc  = ft_weights_cnt   + (size_t)fi * NNUE_HALF_DIMS;
-                        float    *fd  = ft_delta_f32     ? ft_delta_f32   + (size_t)fi * NNUE_HALF_DIMS : nullptr;
-                        for (int d = 0; d < NNUE_HALF_DIMS; d++) {
-                            fw[d] = tmp_w[d] / TDLEAF_SCALE + (fd ? fd[d] : 0.0f);
-                            if (fd) fd[d] = 0.0f;
-                            if (tmp_wc[d] > wc[d]) wc[d] = tmp_wc[d];
-                        }
-                        // Merge PSQT: additive count merge via delta_psqt_cnt.
-                        float    *pw  = psqt_weights_f32 + (size_t)fi * NNUE_PSQT_BKTS;
-                        uint32_t *pc  = psqt_weights_cnt + (size_t)fi * NNUE_PSQT_BKTS;
-                        float    *pd  = psqt_delta_f32   ? psqt_delta_f32 + (size_t)fi * NNUE_PSQT_BKTS : nullptr;
-                        uint32_t *pdc = delta_psqt_cnt   ? delta_psqt_cnt + (size_t)fi * NNUE_PSQT_BKTS : nullptr;
-                        for (int b = 0; b < NNUE_PSQT_BKTS; b++) {
-                            pw[b] = tmp_p[b] / TDLEAF_SCALE + (pd ? pd[b] : 0.0f);
-                            if (pd) pd[b] = 0.0f;
-                            if (pdc) { pc[b] = tmp_pc[b] + pdc[b]; pdc[b] = 0; }
-                            else     { if (tmp_pc[b] > pc[b]) pc[b] = tmp_pc[b]; }
-                        }
-                    }
-                }
-                // FT bias section (v4+).
-                if (version >= 4u) {
-                    float tmp_b[NNUE_HALF_DIMS];
-                    uint32_t tmp_bc[NNUE_HALF_DIMS];
-                    if (fread(tmp_b,  sizeof(float),    NNUE_HALF_DIMS, cur) == (size_t)NNUE_HALF_DIMS &&
-                        fread(tmp_bc, sizeof(uint32_t), NNUE_HALF_DIMS, cur) == (size_t)NNUE_HALF_DIMS) {
-                        for (int d = 0; d < NNUE_HALF_DIMS; d++) {
-                            ft_biases_f32[d] = tmp_b[d] / TDLEAF_SCALE + ft_bias_delta[d];
-                            ft_bias_delta[d] = 0.0f;
-                            ft_bias_cnt[d] = tmp_bc[d] + delta_ft_bias_cnt[d];
-                            delta_ft_bias_cnt[d] = 0;
-                        }
-                    }
-                }
-                // Dense piece value section (v5-v11 only; removed in v12).
-                // Read and discard to stay byte-aligned when merging an older file.
-                if (version >= 5u && version <= 11u) {
-                    if (version >= 9u) {
-                        float tmp_pv[6]; uint32_t tmp_pvc[6];
-                        (void)fread(tmp_pv,  sizeof(float),    6, cur);
-                        (void)fread(tmp_pvc, sizeof(uint32_t), 6, cur);
-                    } else {
-                        float tmp_pv[6][NNUE_PSQT_BKTS]; uint32_t tmp_pvc[6][NNUE_PSQT_BKTS];
-                        (void)fread(tmp_pv,  sizeof(float),    6*NNUE_PSQT_BKTS, cur);
-                        (void)fread(tmp_pvc, sizeof(uint32_t), 6*NNUE_PSQT_BKTS, cur);
-                    }
-                }
-                // Adam v section (v6+): max-merge per element.
-                if (version >= 6u) {
-                    uint32_t file_t;
-                    if (fread(&file_t, sizeof(uint32_t), 1, cur) == 1) {
-                        if (file_t > t_adam) t_adam = file_t;
-                    }
-                    // FC v arrays: max-merge each element (bulk read; on a short
-                    // read merge what arrived, matching old per-element behavior).
-                    auto merge_v = [&](float *v_local, int n) {
-                        size_t got = fread(io_buf_f, sizeof(float), n, cur);
-                        for (size_t i = 0; i < got; i++)
-                            if (io_buf_f[i] > v_local[i]) v_local[i] = io_buf_f[i];
-                    };
-                    for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
-                        merge_v(v_l0_b[s], NNUE_L0_SIZE);
-                        merge_v(v_l0_w[s], NNUE_L0_SIZE * NNUE_L0_INPUT);
-                        merge_v(v_l1_b[s], NNUE_L1_SIZE);
-                        merge_v(v_l1_w[s], NNUE_L1_SIZE * NNUE_L1_PADDED);
-                        merge_v(&v_l2_b[s], 1);
-                        merge_v(v_l2_w[s], NNUE_L2_PADDED);
-                    }
-                    merge_v(v_ft_bias, NNUE_HALF_DIMS);
-                    // piece_val v (v6-v11 only; removed in v12) — read and discard.
-                    if (version <= 11u) {
-                        int n_pv = (version >= 9u) ? 6 : 6 * NNUE_PSQT_BKTS;
-                        float tmp[6 * NNUE_PSQT_BKTS];
-                        (void)fread(tmp, sizeof(float), n_pv, cur);
-                    }
-                    // Sparse PSQT v.
-                    uint32_t n_pv_rows = 0;
-                    if (fread(&n_pv_rows, sizeof(uint32_t), 1, cur) == 1 && v_psqt_w) {
-                        for (uint32_t k = 0; k < n_pv_rows; k++) {
-                            uint32_t fi;
-                            float tmp_pv[NNUE_PSQT_BKTS];
-                            if (fread(&fi, sizeof(uint32_t), 1, cur) != 1 ||
-                                fi >= (uint32_t)NNUE_FT_INPUTS) break;
-                            if (fread(tmp_pv, sizeof(float), NNUE_PSQT_BKTS, cur)
-                                != (size_t)NNUE_PSQT_BKTS) break;
-                            float *vp = v_psqt_w + (size_t)fi * NNUE_PSQT_BKTS;
-                            for (int b = 0; b < NNUE_PSQT_BKTS; b++)
-                                if (tmp_pv[b] > vp[b]) vp[b] = tmp_pv[b];
-                        }
-                    }
-                }
-                // Adam m section (v7+): average-merge per element.
-                // Workers seeing the same gradient direction reinforce each other;
-                // conflicting directions reduce toward zero (appropriate — uncertainty
-                // about direction → smaller step, not a random-direction step).
-                if (version >= 7u) {
-                    auto merge_m = [&](float *m_local, int n) {
-                        size_t got = fread(io_buf_f, sizeof(float), n, cur);
-                        for (size_t i = 0; i < got; i++)
-                            m_local[i] = 0.5f * (m_local[i] + io_buf_f[i]);
-                    };
-                    for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
-                        merge_m(m_l0_b[s], NNUE_L0_SIZE);
-                        merge_m(m_l0_w[s], NNUE_L0_SIZE * NNUE_L0_INPUT);
-                        merge_m(m_l1_b[s], NNUE_L1_SIZE);
-                        merge_m(m_l1_w[s], NNUE_L1_SIZE * NNUE_L1_PADDED);
-                        merge_m(&m_l2_b[s], 1);
-                        merge_m(m_l2_w[s], NNUE_L2_PADDED);
-                    }
-                    merge_m(m_ft_bias, NNUE_HALF_DIMS);
-                    // piece_val m (v7-v11 only; removed in v12) — read and discard.
-                    if (version <= 11u) {
-                        int n_pm = (version >= 9u) ? 6 : 6 * NNUE_PSQT_BKTS;
-                        float tmp[6 * NNUE_PSQT_BKTS];
-                        (void)fread(tmp, sizeof(float), n_pm, cur);
-                    }
-                    // Sparse PSQT m.
-                    uint32_t n_pm_rows = 0;
-                    if (fread(&n_pm_rows, sizeof(uint32_t), 1, cur) == 1 && m_psqt_w) {
-                        for (uint32_t k = 0; k < n_pm_rows; k++) {
-                            uint32_t fi;
-                            float tmp_pm[NNUE_PSQT_BKTS];
-                            if (fread(&fi, sizeof(uint32_t), 1, cur) != 1 ||
-                                fi >= (uint32_t)NNUE_FT_INPUTS) break;
-                            if (fread(tmp_pm, sizeof(float), NNUE_PSQT_BKTS, cur)
-                                != (size_t)NNUE_PSQT_BKTS) break;
-                            float *mp = m_psqt_w + (size_t)fi * NNUE_PSQT_BKTS;
-                            for (int b = 0; b < NNUE_PSQT_BKTS; b++)
-                                mp[b] = 0.5f * (mp[b] + tmp_pm[b]);
-                        }
-                    }
-                }
-                // Sparse FT v section (v8+): max-merge v_ft_w rows.
-                if (version >= 8u && v_ft_w) {
-                    uint32_t n_ftv_rows = 0;
-                    if (fread(&n_ftv_rows, sizeof(uint32_t), 1, cur) == 1) {
-                        for (uint32_t k = 0; k < n_ftv_rows; k++) {
-                            uint32_t fi;
-                            float tmp_v[NNUE_HALF_DIMS];
-                            if (fread(&fi, sizeof(uint32_t), 1, cur) != 1 ||
-                                fi >= (uint32_t)NNUE_FT_INPUTS) break;
-                            if (fread(tmp_v, sizeof(float), NNUE_HALF_DIMS, cur)
-                                != (size_t)NNUE_HALF_DIMS) break;
-                            float *vw = v_ft_w + (size_t)fi * NNUE_HALF_DIMS;
-                            for (int d = 0; d < NNUE_HALF_DIMS; d++)
-                                if (tmp_v[d] > vw[d]) vw[d] = tmp_v[d];
-                        }
-                    }
-                }
-            }
-        }
-        fclose(cur);
-        // If merge failed partway, clear remaining FC deltas so we don't double-count
-        // them on the next write.  FT deltas for un-merged rows stay (non-zero) and
-        // will be applied correctly on the next successful sync.
-        if (!ok) {
-            memset(delta_l0_w, 0, sizeof(delta_l0_w));
-            memset(delta_l0_b, 0, sizeof(delta_l0_b));
-            memset(delta_l1_w, 0, sizeof(delta_l1_w));
-            memset(delta_l1_b, 0, sizeof(delta_l1_b));
-            memset(delta_l2_w, 0, sizeof(delta_l2_w));
-            memset(delta_l2_b, 0, sizeof(delta_l2_b));
-            memset(delta_l0_w_cnt, 0, sizeof(delta_l0_w_cnt));
-            memset(delta_l0_b_cnt, 0, sizeof(delta_l0_b_cnt));
-            memset(delta_l1_w_cnt, 0, sizeof(delta_l1_w_cnt));
-            memset(delta_l1_b_cnt, 0, sizeof(delta_l1_b_cnt));
-            memset(delta_l2_w_cnt, 0, sizeof(delta_l2_w_cnt));
-            memset(delta_l2_b_cnt, 0, sizeof(delta_l2_b_cnt));
-            memset(delta_ft_bias_cnt,   0, sizeof(delta_ft_bias_cnt));
-            if (delta_psqt_cnt) memset(delta_psqt_cnt, 0, (size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS * sizeof(uint32_t));
-        }
-    } else {
-        // No existing file — first write.  Clear deltas (incorporated in shadow directly).
-        memset(delta_l0_w, 0, sizeof(delta_l0_w));
-        memset(delta_l0_b, 0, sizeof(delta_l0_b));
-        memset(delta_l1_w, 0, sizeof(delta_l1_w));
-        memset(delta_l1_b, 0, sizeof(delta_l1_b));
-        memset(delta_l2_w, 0, sizeof(delta_l2_w));
-        memset(delta_l2_b, 0, sizeof(delta_l2_b));
-        memset(delta_l0_w_cnt, 0, sizeof(delta_l0_w_cnt));
-        memset(delta_l0_b_cnt, 0, sizeof(delta_l0_b_cnt));
-        memset(delta_l1_w_cnt, 0, sizeof(delta_l1_w_cnt));
-        memset(delta_l1_b_cnt, 0, sizeof(delta_l1_b_cnt));
-        memset(delta_l2_w_cnt, 0, sizeof(delta_l2_w_cnt));
-        memset(delta_l2_b_cnt, 0, sizeof(delta_l2_b_cnt));
-        memset(delta_ft_bias_cnt,   0, sizeof(delta_ft_bias_cnt));
-        if (delta_psqt_cnt) memset(delta_psqt_cnt, 0, (size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS * sizeof(uint32_t));
-        if (ft_delta_f32)   memset(ft_delta_f32,   0, (size_t)NNUE_FT_INPUTS * NNUE_HALF_DIMS  * sizeof(float));
-        if (psqt_delta_f32) memset(psqt_delta_f32, 0, (size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS * sizeof(float));
-        memset(ft_bias_delta,   0, sizeof(ft_bias_delta));
-    }
+    // Single writer (learner): the in-memory shadows / counts / Adam v,m already
+    // hold the current trained state (maintained by the apply path), so we write
+    // them directly — no re-read / delta-merge.
 
-    // ---- Write merged content to a temp file, then atomically rename ----
+    // ---- Write content to a temp file, then atomically rename ----------
     char tmp_path[FILENAME_MAX];
     snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
     FILE *f = fopen(tmp_path, "wb");
@@ -2441,7 +2093,7 @@ bool nnue_load_fc_weights(const char *path)
     }
 
     // ---- v10+: verify source-.nnue content fingerprint matches loaded .nnue ----
-    // Prevents silently pairing weight deltas with the wrong baseline network.
+    // Prevents silently pairing trained weights with the wrong baseline network.
     // v5–v9 files predate this header and are accepted without a check; they
     // get promoted to v10 with the current .nnue's hash on the next save.
     if (version >= 10u) {
@@ -2675,25 +2327,7 @@ bool nnue_load_fc_weights(const char *path)
     memset(grad_l1_b, 0, sizeof(grad_l1_b));
     memset(grad_l2_w, 0, sizeof(grad_l2_w));
     memset(grad_l2_b, 0, sizeof(grad_l2_b));
-    // Delta accumulators start at zero after a fresh load.
-    memset(delta_l0_w, 0, sizeof(delta_l0_w));
-    memset(delta_l0_b, 0, sizeof(delta_l0_b));
-    memset(delta_l1_w, 0, sizeof(delta_l1_w));
-    memset(delta_l1_b, 0, sizeof(delta_l1_b));
-    memset(delta_l2_w, 0, sizeof(delta_l2_w));
-    memset(delta_l2_b, 0, sizeof(delta_l2_b));
-    memset(delta_l0_w_cnt, 0, sizeof(delta_l0_w_cnt));
-    memset(delta_l0_b_cnt, 0, sizeof(delta_l0_b_cnt));
-    memset(delta_l1_w_cnt, 0, sizeof(delta_l1_w_cnt));
-    memset(delta_l1_b_cnt, 0, sizeof(delta_l1_b_cnt));
-    memset(delta_l2_w_cnt, 0, sizeof(delta_l2_w_cnt));
-    memset(delta_l2_b_cnt, 0, sizeof(delta_l2_b_cnt));
-    memset(delta_ft_bias_cnt,   0, sizeof(delta_ft_bias_cnt));
-    if (delta_psqt_cnt) memset(delta_psqt_cnt, 0, (size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS * sizeof(uint32_t));
-    if (ft_delta_f32)   memset(ft_delta_f32,   0, (size_t)NNUE_FT_INPUTS * NNUE_HALF_DIMS  * sizeof(float));
-    if (psqt_delta_f32) memset(psqt_delta_f32, 0, (size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS * sizeof(float));
     memset(grad_ft_bias,    0, sizeof(grad_ft_bias));
-    memset(ft_bias_delta,   0, sizeof(ft_bias_delta));
     // ft_bias_cnt and ft_biases_f32 are populated from file in v4+; leave them.
     // For v2/v3 files, ft_biases_f32 was already initialised by nnue_init_fp32_weights.
     nnue_requantize_fc();
@@ -2725,7 +2359,7 @@ bool nnue_load_fc_weights(const char *path)
 }
 
 // ---------------------------------------------------------------------------
-// nnue_evaluate_acc_raw — evaluate from stored raw arrays (replay score refresh)
+// nnue_evaluate_acc_raw — evaluate from stored raw arrays (--refresh-scores)
 // ---------------------------------------------------------------------------
 int nnue_evaluate_acc_raw(const int16_t acc[2][NNUE_HALF_DIMS],
                            const int32_t psqt[2][NNUE_PSQT_BKTS],

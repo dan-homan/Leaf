@@ -676,7 +676,6 @@ static void uci_finish_game()
     snprintf(tdleaf_save, sizeof(tdleaf_save), "%s%s",
              engine_cfg.exec_path, NNUE_TDLEAF_BIN);
     tdleaf_update_after_game(game.td_game, td_result, tdleaf_save);
-    tdleaf_replay(game.td_game, td_result, tdleaf_save);
     game.td_game.n_plies      = 0;
     game.td_game.engine_color = -1;
 #endif

@@ -233,12 +233,8 @@ struct NNUEGradBuf;
 // Accumulate per-weight gradients for one position into a grad buffer (default:
 // the global g_grad used by the online path).
 // grad_scale = alpha * e_t * sigmoid_gradient — applied inside.
-// replay_mode: skip parameters that feed back into nnue_init_accumulator
-// (FT weights, PSQT, FT biases).  FC weights are still updated because they do
-// not feed into accumulator rebuilds.  Used by replay passes where accumulators
-// are re-derived from stored positions against current FT.
 void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
-                               bool replay_mode = false, NNUEGradBuf *gb = nullptr);
+                               NNUEGradBuf *gb = nullptr);
 
 // Per-thread gradient-buffer helpers for the offline batch trainer's
 // within-batch parallelism (see docs/BT_PARALLEL_PLAN.md).  TDLEAF-only.
@@ -261,10 +257,10 @@ float nnue_clip_gradients(float max_norm);
 void nnue_clip_gradient_stats_report();
 
 // Apply accumulated gradients (zero them afterwards).
-// lr_scale multiplies all category LRs (fc/ft/ft_bias/psqt) before
-// the Adam step.  Replay passes pass <1.0 to reduce overfitting to the small
-// replay buffer.  Adam is scale-invariant w.r.t. the gradient, so the LR is
-// the only effective knob for softening replay updates.
+// lr_scale multiplies all category LRs (fc/ft/ft_bias/psqt) before the Adam
+// step; the online path passes 1.0, the offline batch trainer passes its
+// --bt-lr.  Adam is scale-invariant w.r.t. the gradient, so the LR is the only
+// effective knob.
 void nnue_apply_gradients(float lr_scale = 1.0f);
 
 // Parallel apply for the offline batch trainer: the FC-stack and FT/PSQT-row
@@ -290,9 +286,9 @@ bool nnue_save_fc_weights(const char *path);
 // Load FC-only weights from companion file, overriding what nnue_load() loaded.
 bool nnue_load_fc_weights(const char *path);
 
-// Evaluate from raw accumulator arrays (used by TDLeaf replay to refresh
-// score_stm from stored acc[][] against current weights, without constructing
-// a full NNUEAccumulator object).
+// Evaluate from raw accumulator arrays (used by tdleaf_rebuild_record's
+// --refresh-scores path to refresh score_stm from a rebuilt acc[][] against
+// current weights, without constructing a full NNUEAccumulator object).
 int nnue_evaluate_acc_raw(const int16_t acc[2][NNUE_HALF_DIMS],
                            const int32_t psqt[2][NNUE_PSQT_BKTS],
                            int stm, int piece_count);

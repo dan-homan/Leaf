@@ -110,17 +110,6 @@
  #define TDLEAF_LOG_STEP_CLIPS 0
 #endif
 
-// epoch-based replay: after each game, run TDLEAF_REPLAY_K additional passes
-// over the last TDLEAF_REPLAY_BUF_N completed games (ring buffer).
-// Score_stm is refreshed from stored accumulators against current weights each
-// pass.  Set TDLEAF_REPLAY_K=0 to disable; preserves exact current behaviour.
-#ifndef TDLEAF_REPLAY_K
- #define TDLEAF_REPLAY_K    0   // replay passes per game (0 = disabled)
-#endif
-#ifndef TDLEAF_REPLAY_BUF_N
- #define TDLEAF_REPLAY_BUF_N 8  // ring buffer capacity (~4.5 MB × N static BSS)
-#endif
-
 // Compile-time default for chess_skill / game.knowledge_scale (1-100).
 // 100 = full strength.  Lower values weaken play in score.cpp by adding
 // noise to eval terms.  Override at compile time with KNOWLEDGE=<N> for

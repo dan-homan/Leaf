@@ -1,5 +1,28 @@
 Changes since 2017_12_24
 
+2026_07_20 -- Simplification Phase 3 (code cleanup): removed the epoch-based
+               experience-replay ring buffer (was disabled at TDLEAF_REPLAY_K=0)
+               and retired the in-engine multi-writer .tdleaf.bin merge.
+               Replay: dropped tdleaf_replay(), tdleaf_refresh_scores(), the
+               ring buffer, the now-dead replay_mode parameter throughout
+               nnue_accumulate_gradients/tdleaf_accumulate_game, the
+               TDLEAF_REPLAY_K/BUF_N/LR_SCALE constants, and all 5 call sites.
+               Merge: with the actor/learner learner the sole writer, the save
+               path (nnue_save_fc_weights) is now a direct atomic write of the
+               in-memory weights/counts/Adam v,m — removed the re-read + delta
+               accumulation (all delta_* arrays, ~93 MB incl. ft_delta_f32, and
+               their hot-path accumulation) and the max(v)/avg(m) cross-writer
+               merge.  A flock guard against accidental concurrent writers is
+               kept.  Behavior change: on reload the Adam v,m are now the
+               faithful in-memory state, not the old max/avg-merged values.
+               VALIDATED (strict-FP single-process --selfplay, 16g): exported
+               .nnue byte-identical old-vs-new (trained weights unchanged); the
+               .tdleaf.bin prefix through all weights+counts+FT+FT-bias
+               byte-identical, only the Adam v,m tail differs (as intended); the
+               dead-delta-array removal is byte-identical to the pre-cleanup
+               build.  Docs updated (TRAINING.md, engine/CLAUDE.md, README.md,
+               SIMPLIFICATION_PLAN.md).  merge_tdleaf.py (offline) unaffected.
+
 2026_07_20 -- Simplification Phase 3 (partial): removed BOTH legacy generation
                modes, making the actor/learner split the sole path (revising the
                Phase-2 "demote, keep" decision).  Dropped from train.py the

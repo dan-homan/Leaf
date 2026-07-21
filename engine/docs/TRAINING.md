@@ -328,16 +328,12 @@ without m, the optimizer has no directional bias and early gradient noise can pu
 the wrong way for thousands of games before a consistent signal accumulates. With m
 restored, the optimizer continues in the learned gradient direction from the previous session.
 
-**Multi-writer merge for v:** When multiple concurrent training instances save to the
-same `.tdleaf.bin`, v arrays are merged per-element using `max(v_file, v_local)`. This
-is conservative: a too-large v only slightly slows learning (larger denominator in
-Adam's update), while a too-small v causes instability. The max-merge is safe because
-v is always non-negative and represents gradient magnitude².
-
-**Multi-writer merge for m:** m arrays are merged per-element using the element-wise
-average `(m_file + m_local) / 2`. Workers seeing the same gradient direction reinforce
-each other; conflicting directions reduce toward zero — appropriate, since uncertainty
-about gradient direction should produce a smaller step rather than a random-direction step.
+**Adam v/m persistence (single writer):** the learner writes the in-memory v and m
+arrays to `.tdleaf.bin` directly, so a reload continues from the exact optimizer state.
+(Legacy multi-writer builds merged concurrent writers' Adam state on save — `max(v_file,
+v_local)` for v and `(m_file + m_local)/2` for m; that cross-writer merge was removed in
+the Phase-3 cleanup along with the rest of the delta-merge machinery, since the
+actor/learner learner is the sole writer.)
 
 **FT weight v and m are NOT persisted** — v is ~92 MB (too large), and FT weight updates
 are sparse enough (~3–50 per weight over 190k games) that v barely converges before process
@@ -373,7 +369,6 @@ per-weight bias correction and monitoring.
 | `TDLEAF_BATCH_SIZE` | 8 | Mini-batch: accumulate gradients across N games before each Adam step |
 | `TDLEAF_WEIGHT_DECAY` | 1e-4 | AdamW decoupled weight decay coefficient (FC + FT weights only) |
 | `TDLEAF_GRAD_CLIP_NORM` | 1.0 | Global gradient L2 norm clip threshold; 0 = disabled |
-| `TDLEAF_REPLAY_LR_SCALE` | 0.3 | Multiplicative LR scale applied during replay-pass Adam steps |
 | `TDLEAF_MIN_PLIES` | 8 | Skip games with fewer recorded TDLeaf plies than this |
 | `TDLEAF_MIN_PLIES_REP` | 40 | Skip 3-fold repetition draws with fewer plies than this |
 | `TDLEAF_SCORE_CLIP_PAWNS` | 1.0 | Clip threshold for inter-ply score-change attenuation: `score_clip_cp = SCORE_CLIP_PAWNS × max(value[PAWN], 100 cp)`. With PAWN fixed, the threshold is effectively constant at 100 cp. Set to a large value to disable |
@@ -403,9 +398,7 @@ stochastic fluctuations.
 1. `tdleaf_update_after_game()` calls `tdleaf_accumulate_game()` on every game but only
    calls `nnue_apply_gradients()` + `nnue_requantize_fc()` + save when the batch counter
    reaches `TDLEAF_BATCH_SIZE`.
-2. `tdleaf_replay()` always pushes the completed game into the ring buffer, but replay
-   passes only run on batch boundaries (when the live batch was just applied).
-3. `tdleaf_flush_batch()` applies any pending partial batch at session end (program exit
+2. `tdleaf_flush_batch()` applies any pending partial batch at session end (program exit
    or weight export), preventing gradient loss.
 
 #### Trade-offs
@@ -482,7 +475,7 @@ than skipping the version outright, so old files upgrade transparently on next s
 
 Weight values are stored at 128× resolution (divide by 128 on load) to preserve
 sub-integer drift across sessions. Adam v and m arrays are stored as raw float32 (no scaling).
-Update counts enable weighted averaging of concurrent training runs.
+Update counts drive Adam bias correction and persist alongside the weights.
 
 The Adam v section persists gradient scale across sessions so Adam doesn't cold-start
 with v=0. The Adam m section persists gradient direction so the optimizer continues in
@@ -498,9 +491,9 @@ any version upgrade.
 The v10 header stores an FNV-1a fingerprint of the source `.nnue` FT weight bytes,
 computed once at load/init time (see `nnue_update_content_hash()` in `nnue.cpp`).
 On load, if the stored hash does not match the hash of the currently-loaded `.nnue`,
-the file is refused — preventing accidental pairing of weight deltas with the wrong
-baseline network. The same check guards the merge-read phase of every save, so a
-worker running against a different `.nnue` cannot corrupt the file.
+the file is refused — preventing accidental pairing of trained weights with the wrong
+baseline network. (Legacy multi-writer builds also re-checked the hash during the
+save-time merge-read; with the merge gone, this load-time check is the guard.)
 
 V5–V9 files have no hash and are accepted without a check; saving promotes them to
 v10 carrying the current `.nnue`'s content hash. `--init-nnue` fingerprints the
@@ -511,89 +504,29 @@ freshly-initialised FT weights so the companion `.tdleaf.bin` is born consistent
 
 ---
 
-### Concurrent File Access
+### Weight Persistence — Single-Writer Atomic Write
 
-Multiple Leaf instances (e.g. several parallel self-play games) can share a single
-`.tdleaf.bin` safely via POSIX file locking and delta-based merging.
+The actor/learner learner is the sole writer of `.tdleaf.bin`, so saving is a direct
+atomic write: the file (magic, version, source-`.nnue` hash, then the in-memory FC/FT/PSQT
+weights ×128, per-weight update counts, and Adam v/m as raw float32) is written to
+`.tdleaf.bin.tmp` and `rename()`d over the target (atomic on POSIX) — no re-read, no
+delta-merge. A `flock` on a companion `.tdleaf.bin.lock` is kept only as a cheap guard
+against an accidental second concurrent writer; if it is somehow busy the checkpoint is
+skipped and the full in-memory state is written on the next save (nothing is lost). The
+save uses section-level buffered I/O with 4 MB stream buffers; measured learning overhead
+vs. a no-learning control is ~+13% wall clock at depth 6, ~10% at depth 8.
 
-The save path uses section-level buffered I/O with cached dirty-row bitmaps and 4 MB
-stream buffers. Measured on depth-6 training matches, total learning overhead vs. a
-no-learning control is ~+13% wall clock; at depth 8 it amortizes to ~10%. Saves that
-find the lock busy are deferred with deltas retained.
+The stored update counts drive Adam bias correction (`bc1`/`bc2`) and survive across
+sessions with the weights they parallel.
 
-#### Design
-
-**Problem:** If two instances both read the file, apply their gradient updates to their
-in-memory weights, and then write back, the second write silently overwrites the first
-instance's changes.
-
-**Solution:** Each instance tracks only its own accumulated weight *deltas* since the last
-file write (not the full weight values). On each write:
-
-1. Acquire `LOCK_EX` on a companion `.tdleaf.bin.lock` file.
-2. Re-read the current `.tdleaf.bin` from disk.
-3. Merge: `merged_value = file_value + our_delta` for every entry.
-4. Update the in-memory float shadows to the merged values; zero the deltas.
-5. Write the merged content to `.tdleaf.bin.tmp`.
-6. `rename(.tmp, .tdleaf.bin)` — atomic on POSIX filesystems.
-7. Release the lock (close the lock-file fd).
-
-Reads use `LOCK_SH` (multiple simultaneous readers allowed; blocked only during a write).
-
-#### Implementation Details
-
-**Lock file:** `.tdleaf.bin.lock` is a separate companion file so locking survives the
-atomic `rename()` of the main file. The lock is held only during the re-read/write cycle
-(a few milliseconds), not across the entire game.
-
-**Delta arrays** (in `nnue.cpp`):
-
-| Array | Size | Contents |
-|-------|------|----------|
-| `delta_l0_w[8][1024×16]` | 512 KB | FC0 weight deltas |
-| `delta_l0_b[8][16]` | 512 B | FC0 bias deltas |
-| `delta_l1_w[8][32×32]` | 256 KB | FC1 weight deltas |
-| `delta_l1_b[8][32]` | 1 KB | FC1 bias deltas |
-| `delta_l2_w[8][32]` | 1 KB | FC2 weight deltas |
-| `delta_l2_b[8]` | 32 B | FC2 bias deltas |
-| `ft_delta_f32` (heap) | ~92 MB | FT weight deltas (all rows) |
-| `psqt_delta_f32` (heap) | ~720 KB | PSQT weight deltas |
-| `ft_bias_delta[1024]` | 4 KB | FT bias deltas (static) |
-
-**Delta count arrays** (parallel to weight deltas, track update counts since last sync):
-
-| Array | Size | Contents |
-|-------|------|----------|
-| `delta_l0_w_cnt[8][1024×16]` | 512 KB | FC0 weight delta counts |
-| `delta_l0_b_cnt[8][16]` | 512 B | FC0 bias delta counts |
-| `delta_l1_w_cnt[8][32×32]` | 256 KB | FC1 weight delta counts |
-| `delta_l1_b_cnt[8][32]` | 1 KB | FC1 bias delta counts |
-| `delta_l2_w_cnt[8][32]` | 1 KB | FC2 weight delta counts |
-| `delta_l2_b_cnt[8]` | 32 B | FC2 bias delta counts |
-| `delta_ft_bias_cnt[1024]` | 4 KB | FT bias delta counts (static) |
-| `delta_psqt_cnt` (heap) | ~720 KB | PSQT delta counts |
-
-Deltas (both weight and count) are zeroed after each successful write (either on first
-write or after a re-read-merge write). `nnue_load_fc_weights()` also zeros all deltas
-to establish a clean baseline.
-
-**Update-count merging:** counts use additive merge: `merged = file_count + delta_count`.
-Each instance's delta count tracks only updates since the last file sync, so adding it
-to the file's count correctly accumulates across concurrent instances and training cycles.
-FT weight counts remain max-based (`max(file, ours)`) because per-weight delta counts
-would require 92 MB; FT counts use global bias correction so exact counts are less
-critical.
-
-#### Concurrent multi-writer training is retired
-
-The lock + delta-merge machinery above exists because Leaf once trained with many
-engine instances writing the same `.tdleaf.bin` concurrently (the `match.py` pair
-and `--selfplay-gen` paths).  Those modes were removed: training now runs through
-the **actor/learner split**, whose single learner is the sole writer, so the
-concurrent-write path is no longer exercised by the pipeline (it remains as the
-engine's save mechanism; simplifying it to a plain atomic write is a tracked
-follow-up — see `docs/SIMPLIFICATION_PLAN.md`).  `match.py` is now purely the
-gauntlet/rating tool.
+**History.** Leaf once supported many engine instances writing one `.tdleaf.bin`
+concurrently — the `match.py` pair and `--selfplay-gen` generation paths — via POSIX
+locking and a read-modify-write *delta-merge*: each writer tracked only its own weight
+deltas and, on save, re-read the file and applied `file + delta` (weights), additive
+count merge, `max(v_file, v_local)`, and `(m_file + m_local)/2` per element. Those
+generation modes and the entire delta-merge machinery were removed in the Phase-3
+simplification once the single actor/learner learner became the sole optimizer; see
+`docs/SIMPLIFICATION_PLAN.md`.
 
 ---
 
@@ -1024,9 +957,9 @@ Two knobs address this:
 Multi-process sharded training (`--bt-sync`) was tried and removed in favor of
 within-batch threading, which has no gradient staleness between synchronization
 points; see `docs/history/TRAINING_HISTORY.md` for why sharding was abandoned.
-The multi-process delta-merge save protocol itself remains in the engine — it's
-what concurrent *online* self-play training still uses (see
-[Concurrent File Access](#concurrent-file-access) above).
+(The multi-process delta-merge save protocol was also removed once the
+actor/learner learner became the sole writer — see
+[Weight Persistence](#weight-persistence--single-writer-atomic-write) above.)
 
 ---
 
@@ -1091,7 +1024,7 @@ games and respawn, reloading the latest state.
    delaying the eval-scale feedback that keeps online TD self-correcting; the
    `d8t-3al2` run drifted from 37% to 12% draws within 40k games.  The learner
    must run `--refresh-scores` (re-evaluate leaf statics with current weights
-   at consume time — the replay Flavor-A machinery).
+   at consume time, via `tdleaf_rebuild_record`).
 
 **The health canary is the draw rate** (plus game length), not gradient
 telemetry: healthy self-play holds a steady ~35–40% draws at d8; a sustained
@@ -1289,7 +1222,7 @@ struct TDRecord {
     float   id_score_variance;         // variance of last TD_ID_HIST ID-depth scores (cp²)
     int     ft_idx[2][NNUE_MAX_FT_PER_PERSP]; // active FT feature indices
     int8_t  n_ft[2];                   // active feature count per perspective
-    position pos;                      // leaf position for Flavor A replay
+    position pos;                      // leaf position (trajectory learner rebuild)
     // Corpus-dump fields (TDLEAF_DUMP_TSV — see "Corpus Dumping" below):
     position root_pos;                 // root snapshot (filled only when dumping)
     int      root_static;              // root STATIC eval, STM POV (root quietness test)
@@ -1370,7 +1303,7 @@ See [Adam Optimizer](#adam-optimizer) above.
 | `src/search.cpp` — after each ID iteration | Appends current `g` to `id_scores[]` ring, increments `id_score_count` |
 | `src/main.cpp` — after NNUE/TDLeaf load | `nnue_extract_piece_values()` computes PSQT-derived material values for the startup banner (report-only under `NNUE_FIXED_PIECE_VALUES`, the default — does not overwrite `value[]`) |
 | `src/main.cpp` — after `ts.search()` | `tdleaf_record_ply()` with root acc + PV + `id_scores` + `id_score_count` |
-| `src/main.cpp` — `game.over = 1` sites | `tdleaf_update_after_game()` then `tdleaf_replay()` |
+| `src/main.cpp` — `game.over = 1` sites | `tdleaf_update_after_game()` |
 | `src/main.cpp` — `new_game` / `setboard` | `td_game.n_plies = 0` |
 | `src/Leaf.cc` | `#if TDLEAF #include "tdleaf.cpp" #endif` |
 | `src/comp.pl` | `TDLEAF=1` flag → `-D TDLEAF=1` |
@@ -1382,7 +1315,6 @@ See [Adam Optimizer](#adam-optimizer) above.
 | `TDLEAF=1` | Enable all learning code |
 | `TDLEAF_READONLY=1` | Load weights but skip gradient updates (inference only) |
 | `TDLEAF_CHECK_SCORE=1` | Print direct vs propagated leaf score on every ply |
-| `TDLEAF_REPLAY_K` | Epoch-based replay passes per game after the live update (default `0` = disabled). Ablated and left off by default — see `docs/history/TRAINING_HISTORY.md` for why. |
 
 ### Recalibrating K/λ (Reproducing the analysis)
 

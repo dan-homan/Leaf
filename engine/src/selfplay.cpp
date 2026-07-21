@@ -436,7 +436,7 @@ int selfplay_main(int argc, char *argv[])
 
 #if !TDLEAF_READONLY
         // Same game-end handling as make_move(): skip degenerate early
-        // repetition draws, otherwise run the TDLeaf update + replay.
+        // repetition draws, otherwise run the TDLeaf update.
         if (nnue_available) {
             if (term == SP_TERM_REP && game.td_game.n_plies < TDLEAF_MIN_PLIES_REP) {
                 fprintf(stderr, "[TDLeaf] Skipping early 3-rep draw (%d plies < %d)\n",
@@ -451,7 +451,6 @@ int selfplay_main(int argc, char *argv[])
                     selfplay_write_traj(cfg, game.td_game, result_w,
                                         (uint32_t)(st.played - 1));
                 tdleaf_update_after_game(game.td_game, result_w, cfg.tdleaf_out);
-                tdleaf_replay(game.td_game, result_w, cfg.tdleaf_out);
             }
         }
 #endif
@@ -556,7 +555,6 @@ static bool learner_process_file(const char *path, TDGameRecord *grec,
     grec->engine_color = -1;   // meaningless for alternating-STM trajectories
 
     tdleaf_update_after_game(*grec, h.result_white_pov, cfg.tdleaf_out);
-    tdleaf_replay(*grec, h.result_white_pov, cfg.tdleaf_out);
     grec->n_plies = 0;
     return true;
 }

@@ -67,7 +67,7 @@ Key features:
 - Adam optimizer with per-section learning rates and persistent momentum across sessions (`.tdleaf.bin` v12 format)
 - Pure-PSQT material representation — a single trainable material channel, loss-anchored, with no gauge-anchoring machinery needed (an earlier dense second material channel and its anchoring mechanism were tried and later fully removed; see `engine/docs/history/TRAINING_HISTORY.md`)
 - Works under both xboard/CECP (protocol results) and UCI (in-engine self-adjudication of game outcomes); the default actor/learner path plays in-engine self-play with exact in-process results
-- Concurrent multi-instance training via POSIX file locking and delta merging
+- Single-writer `.tdleaf.bin` persistence via direct atomic write (the actor/learner learner is the sole optimizer)
 - Automated hybrid-loop iterations (online generation + offline consolidation + gauntlet, chainable via `--continue`) via `scripts/train.py`, which defaults to the actor/learner self-play split (`scripts/selfplay_run.py`)
 
 Build with `NNUE=1 TDLEAF=1`.  See [`engine/docs/TRAINING.md`](engine/docs/TRAINING.md) for the full algorithm, hyperparameter reference, and training workflow.

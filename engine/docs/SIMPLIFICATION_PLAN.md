@@ -1,8 +1,21 @@
 # Simplification Plan — Consolidating Around Actor/Learner Self-Play
 
-**Status:** Phases 1–2 landed (2026-07-20); Phase 3 partially landed.
+**Status:** Phases 1–3 landed (2026-07-20).
 
-> **Phase 3 (in progress).** **Both legacy generation modes were removed** (revising
+> **Phase 3 (code cleanup) done.** With the actor/learner learner the sole `.tdleaf.bin`
+> writer, the in-engine multi-writer merge was retired: `nnue_save_fc_weights` is now a
+> direct atomic write of the in-memory weights/counts/Adam v,m — the re-read + delta
+> accumulation (all `delta_*` arrays, ~93 MB incl. `ft_delta_f32`, and their hot-path
+> accumulation) and the `max(v)`/`avg(m)` cross-writer merge are gone (a `flock` guard
+> against accidental concurrent writers is kept).  The disabled experience-replay ring
+> buffer (`TDLEAF_REPLAY_K=0`) and its dead `replay_mode` parameter were also removed.
+> Behavior change: on reload the Adam v,m are the faithful in-memory state, not the old
+> max/avg-merged values.  **Validated** (strict-FP 16-game single-process `--selfplay`):
+> exported `.nnue` byte-identical old-vs-new (trained weights unchanged), the `.tdleaf.bin`
+> weights+counts+FT+FT-bias prefix byte-identical (only the Adam v,m tail differs, as
+> intended), and the dead-array removal byte-identical to the pre-cleanup build.
+
+> **Earlier Phase 3 step.** **Both legacy generation modes were removed** (revising
 > the Phase-2 "demote, keep" decision): `--selfplay-gen` and `--uci-pair-gen` are
 > gone, along with their `train.py` flags, branches, the `gen_mode` resolution, and
 > the `hl_b` binary compile.  The actor/learner split is now the sole generation mode
@@ -166,15 +179,19 @@ check plus `TDLEAF_CHECK_ACC=1` are the guardrails.
   stays (gauntlet/rating tool).  `merge_tdleaf.py` is unaffected — a standalone Python
   tool that parses the `.tdleaf.bin`/`.nnue` byte formats itself (no engine invocation);
   only *format* changes would ever require matching it.
-- **In-engine concurrent-write merge** — **now unblocked; not yet done.**  The
-  POSIX-lock + delta-merge machinery in the `.tdleaf.bin` save path (`nnue_training.cpp`)
-  is no longer exercised concurrently by the pipeline (the single learner is the sole
-  writer).  It can be simplified to a plain atomic write — but it is still *the* save
-  mechanism (every save, including `--init-nnue`, goes through it), so this is its own
-  reviewed change with a byte-exact regression (à la Phase 1).  (`merge_tdleaf.py`, the
-  offline run-merger, is independent and stays.)
-- **Compile-flag audit.** `TDLEAF_REPLAY_K` is hard-disabled (=0): retire the replay
-  ring-buffer unless it's being resurrected. Confirm `TDLEAF_LOG_STEP_CLIPS` and
+- **In-engine concurrent-write merge** — **DONE.**  `nnue_save_fc_weights` re-read the
+  file and applied `file + delta` (weights), additive count merge, `max(v)`, and
+  `avg(m)` per element under a `flock`; it is now a direct atomic write (`.tmp` +
+  `rename()`) of the in-memory weights/counts/Adam v,m.  Removed all `delta_*` arrays
+  (~93 MB incl. `ft_delta_f32`) and their hot-path accumulation.  The `flock` guard is
+  kept (cheap protection against an accidental second writer).  Validated weights/counts
+  byte-exact vs the old merge (exported `.nnue` identical); Adam v,m now written faithfully
+  (was max/avg-merged) — the intended, benign reload-semantics change.  (`merge_tdleaf.py`,
+  the offline run-merger, is independent and stays.)
+- **Replay ring buffer** — **DONE.**  `TDLEAF_REPLAY_K` was hard-disabled (=0); the ring
+  buffer, `tdleaf_replay()`, `tdleaf_refresh_scores()`, the `replay_mode` parameter, and
+  the `TDLEAF_REPLAY_*` constants were removed.
+- **Compile-flag audit (remaining).** Confirm `TDLEAF_LOG_STEP_CLIPS` and
   `MATERIAL_ONLY` still earn their keep. `TDLEAF_READONLY` stays (inference builds).
 
 ---

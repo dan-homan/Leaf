@@ -221,7 +221,7 @@ void tdleaf_record_ply(TDGameRecord &rec,
     r.game_ply          = game_ply;            // 1-based game-ply of the root position
     r.stack             = (pc - 1) / 4;
     r.id_score_variance = id_var;
-    r.pos               = cur;  // store leaf position for Flavor A replay
+    r.pos               = cur;  // leaf position (trajectory learner rebuilds from it)
     r.id_depth          = (int8_t)((search_depth < 1) ? 1 :
                                    (search_depth > 127) ? 127 : search_depth);
     if (tdleaf_dump_wanted() || tdleaf_capture_root) {
@@ -276,10 +276,9 @@ static bool tdleaf_frozen()
 
 // ---------------------------------------------------------------------------
 // tdleaf_accumulate_game — steps 1-3: compute d[], e[], accumulate gradients.
-// Does NOT apply or save.  Called by both tdleaf_update_after_game and replay.
+// Does NOT apply or save.  Called by tdleaf_update_after_game.
 // ---------------------------------------------------------------------------
-static void tdleaf_accumulate_game(TDGameRecord &rec, float result,
-                                   bool replay_mode = false)
+static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
 {
     int T = rec.n_plies;
 
@@ -385,7 +384,7 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result,
                 act.piece_count_diff[pt - 1] = (int8_t)(rec.plies[t].pos.plist[stm_p][pt][0]
                                                        - rec.plies[t].pos.plist[stm_p ^ 1][pt][0]);
 
-            nnue_accumulate_gradients(act, grad_scale, replay_mode);
+            nnue_accumulate_gradients(act, grad_scale);
         }
     }
 }
@@ -579,26 +578,12 @@ void tdleaf_update_after_game(TDGameRecord &rec, float result, const char *save_
 }
 
 // ---------------------------------------------------------------------------
-// Replay ring buffer
-// ---------------------------------------------------------------------------
-int tdleaf_replay_k = TDLEAF_REPLAY_K;
-
-struct TDReplayEntry {
-    TDGameRecord rec;
-    float        result;
-    bool         valid;
-};
-static TDReplayEntry td_replay_buf[TDLEAF_REPLAY_BUF_N];
-static int           td_replay_head  = 0;  // next slot to write
-static int           td_replay_count = 0;  // slots filled (saturates at BUF_N)
-
-// ---------------------------------------------------------------------------
 // tdleaf_rebuild_record — reconstruct the derived snapshot fields of a
 // TDRecord from its stored leaf position using the CURRENT weights: leaf
-// accumulator/PSQT sums, active features, stack index.  Shared by replay
-// Flavor A (refresh_score=true: also re-evaluate score_stm so d[t] reflects
-// the current network) and the trajectory learner (which ships only positions
-// + scores; refresh off preserves exact online semantics).
+// accumulator/PSQT sums, active features, stack index.  Used by the trajectory
+// learner, which ships only positions + scores (refresh off preserves exact
+// online semantics; refresh_score=true — the learner's --refresh-scores — also
+// re-evaluates score_stm so d[t] reflects the current network).
 //
 // Integer accumulator rebuilds equal the incremental PV-walked snapshots
 // exactly (same FT weight rows, integer adds), so with unchanged weights this
@@ -630,8 +615,7 @@ void tdleaf_rebuild_record(TDRecord &r, bool refresh_score)
 
     // Stack index — same piece-count formula as tdleaf_record_ply's leaf path
     // (kings as the constant 2, PAWN..QUEEN from the piece lists).  The bucket
-    // (pc-1)/4 is what the eval consumes, so this matches the historical
-    // replay re-eval at pc = stack*4 + 2 exactly.
+    // (pc-1)/4 is what the eval consumes, matching a re-eval at pc = stack*4 + 2.
     int pc = 2;
     for (int sd = 0; sd < 2; sd++)
         for (int pt = PAWN; pt <= QUEEN; pt++)
@@ -641,83 +625,6 @@ void tdleaf_rebuild_record(TDRecord &r, bool refresh_score)
 
     if (refresh_score)
         r.score_stm = nnue_evaluate_acc_raw(r.acc, r.psqt, (int)r.wtm, pc);
-}
-
-// ---------------------------------------------------------------------------
-// tdleaf_refresh_scores — rewrite score_stm in every ply of rec using
-// the current quantized weights.  Must be called before tdleaf_accumulate_game
-// in each replay pass so d[t] reflects the current network, not stale weights.
-//
-// Flavor A: rebuild accumulators from stored positions using current FT weights,
-// re-enumerate active features, and re-evaluate scores.  This ensures FT
-// gradients during replay reflect the current weights, not stale game-time values.
-// ---------------------------------------------------------------------------
-static void tdleaf_refresh_scores(TDGameRecord &rec)
-{
-    for (int t = 0; t < rec.n_plies; t++)
-        tdleaf_rebuild_record(rec.plies[t], true);
-}
-
-// ---------------------------------------------------------------------------
-// tdleaf_replay — push completed game into ring buffer, then run
-// tdleaf_replay_k additional passes over all buffered games.
-// Must be called after tdleaf_update_after_game().
-// ---------------------------------------------------------------------------
-void tdleaf_replay(TDGameRecord &rec, float result, const char *save_path)
-{
-    if (rec.n_plies < TDLEAF_MIN_PLIES) return;
-    // Skip the ring-buffer copy entirely when replay is disabled (the settled
-    // recipe: TDLEAF_REPLAY_K=0).  TDGameRecord is several MB — copying into
-    // the 8-slot buffer would page in ~40 MB of BSS per process for nothing.
-    if (tdleaf_replay_k <= 0 || tdleaf_frozen()) return;
-
-    // Push the completed game into the ring buffer.
-    int slot = td_replay_head;
-    td_replay_buf[slot].rec    = rec;
-    td_replay_buf[slot].result = result;
-    td_replay_buf[slot].valid  = true;
-    td_replay_head = (td_replay_head + 1) % TDLEAF_REPLAY_BUF_N;
-    if (td_replay_count < TDLEAF_REPLAY_BUF_N) td_replay_count++;
-
-    // Only run replay passes on batch boundaries (when td_batch_pending was
-    // just reset to 0 by tdleaf_update_after_game).  This ensures the live
-    // batch and replay batch are applied at the same cadence.
-    if (tdleaf_replay_k <= 0 || td_batch_pending != 0) return;
-
-    int n_valid = td_replay_count;
-
-    for (int pass = 0; pass < tdleaf_replay_k; pass++) {
-        // Iterate entries in chronological order (oldest first).
-        for (int i = 0; i < n_valid; i++) {
-            int idx = (td_replay_head - n_valid + i + TDLEAF_REPLAY_BUF_N)
-                      % TDLEAF_REPLAY_BUF_N;
-            TDReplayEntry &entry = td_replay_buf[idx];
-            if (!entry.valid) continue;
-
-            // Refresh scores from current weights before forming d[t].
-            tdleaf_refresh_scores(entry.rec);
-            // replay_mode: suppress FT/PSQT/FT-bias gradients (those feed into
-            // nnue_init_accumulator so updating them would race the next
-            // refresh).  FC weights are still updated because they do not feed
-            // into the accumulator rebuild.
-            tdleaf_accumulate_game(entry.rec, entry.result, /*replay_mode=*/true);
-        }
-        // Apply the summed replay gradients, then requantize so the next
-        // pass's tdleaf_refresh_scores() sees the updated weights.
-        // LR scaled down via TDLEAF_REPLAY_LR_SCALE to soften overfitting to
-        // the small replay buffer.
-        nnue_clip_gradients(TDLEAF_GRAD_CLIP_NORM);
-        nnue_apply_gradients(TDLEAF_REPLAY_LR_SCALE);
-        nnue_requantize_fc();
-    }
-
-    if (save_path && save_path[0]) {
-        if (!nnue_save_fc_weights(save_path))
-            fprintf(stderr, "TDLeaf replay: failed to save weights to %s\n", save_path);
-    }
-
-    fprintf(stderr, "TDLeaf replay: %d pass(es) x %d game(s) in buffer\n",
-            tdleaf_replay_k, n_valid);
 }
 
 // ---------------------------------------------------------------------------

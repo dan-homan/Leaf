@@ -638,7 +638,7 @@ int nnue_batch_train(int argc, char *argv[])
                 float wtm_sign   = r.wtm ? -1.0f : 1.0f;
                 float grad_scale = e * sig_grad * cp_factor * wtm_sign;
                 if (grad_scale != 0.0f)
-                    nnue_accumulate_gradients(w.act, grad_scale, false, w.gb);
+                    nnue_accumulate_gradients(w.act, grad_scale, w.gb);
             }
         });
         auto tb = std::chrono::steady_clock::now();

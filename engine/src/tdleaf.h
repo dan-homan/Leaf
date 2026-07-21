@@ -150,12 +150,6 @@ static const int   TDLEAF_FT_SESSION_WARMUP  = 100; // per-session FT LR ramp ov
                                                      // Damps FT updates during the v_ft_w accumulation phase.
 static const int   TDLEAF_BATCH_SIZE    = 8;        // accumulate gradients across N games before Adam step
 
-// Replay LR scale: multiplicative factor applied to all category LRs during
-// replay-pass Adam steps (1.0 = no softening, 0.0 = no-op replay).  Lower
-// values reduce overfitting to the small replay buffer (BUF_N games).
-// Adam is scale-invariant in the gradient, so LR is the only effective knob.
-static const float TDLEAF_REPLAY_LR_SCALE = 0.3f;
-
 // ---------------------------------------------------------------------------
 // Per-ply record: accumulator snapshot + search score
 // ---------------------------------------------------------------------------
@@ -181,8 +175,9 @@ struct TDRecord {
     // Used for FT and PSQT gradient backprop.
     int     ft_idx[2][NNUE_MAX_FT_PER_PERSP];
     int8_t  n_ft[2];
-    // Leaf position for Flavor A replay: allows full accumulator rebuild from
-    // current FT weights during replay, rather than using stale accumulators.
+    // Leaf position: lets the trajectory learner rebuild the accumulator from
+    // current FT weights (tdleaf_rebuild_record), rather than shipping/using a
+    // stale accumulator snapshot.
     position pos;
     // Root-position snapshot for the TSV dump (TDLEAF_DUMP_TSV) and the .tdg
     // trajectory format: the root's search score (score_root_stm) is a
@@ -241,9 +236,9 @@ int learner_main(int argc, char *argv[]);
 
 // Reconstruct a TDRecord's derived snapshot fields (leaf accumulator/PSQT,
 // active features, stack) from its stored leaf position using the current
-// weights.  refresh_score additionally re-evaluates score_stm (replay
-// Flavor A).  Bit-exact vs the online-recorded snapshot when weights are
-// unchanged.
+// weights.  refresh_score additionally re-evaluates score_stm (the learner's
+// --refresh-scores).  Bit-exact vs the online-recorded snapshot when weights
+// are unchanged.
 void tdleaf_rebuild_record(struct TDRecord &r, bool refresh_score);
 
 // Set by selfplay.cpp when --traj-out is active: forces tdleaf_record_ply to
@@ -277,16 +272,6 @@ void tdleaf_record_ply(TDGameRecord &rec,
 // result: game outcome from White's perspective (1.0=White wins, 0.5=draw, 0.0=Black wins).
 // Calls nnue_apply_gradients(), nnue_requantize_fc(), and nnue_save_fc_weights().
 void tdleaf_update_after_game(TDGameRecord &rec, float result, const char *save_path);
-
-// Runtime-mutable replay pass count (initialised from TDLEAF_REPLAY_K).
-// Can be changed at runtime via setvalue; set to 0 to disable replay.
-extern int tdleaf_replay_k;
-
-// Push the completed game into the replay ring buffer, then run tdleaf_replay_k
-// additional passes over all buffered games with score_stm refreshed from the
-// current weights before each pass.  Must be called after tdleaf_update_after_game().
-// No-op if tdleaf_replay_k == 0.
-void tdleaf_replay(TDGameRecord &rec, float result, const char *save_path);
 
 // Flush any pending mini-batch gradients (e.g., at session end or weight export).
 void tdleaf_flush_batch(const char *save_path);
