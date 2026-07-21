@@ -1081,7 +1081,7 @@ this script encodes.
 4. **Assemble corpus** — dump files (plus any `--corpus` files) are
    concatenated into one `corpus.tsv`, refusing to mix game-ply-axis and
    legacy record-index corpora in one run.
-5. **Threaded consolidation** — `--batch-train` runs `--epochs` (default 6)
+5. **Threaded consolidation** — `--batch-train` runs `--epochs` (default 2)
    epochs with `--bt-threads` (default 8) within-batch parallelism, writing a
    per-epoch snapshot. With `--gauntlet-epochs`, each epoch snapshot is rated
    (default 1000 games at 1+0.01) against the net **as it stood before offline
@@ -1092,7 +1092,7 @@ this script encodes.
    promoted (ties → later epoch); without it, the last epoch is used.
 7. **Compile** — a TDLEAF-off rating binary `Leaf_v<tag>-final` is compiled from
    the promoted net.
-8. **Gauntlet** — the promoted net plays `--gauntlet-games` (default 400) games
+8. **Gauntlet** — the promoted net plays `--gauntlet-games` (default 1000) games
    at `--tc` (default `3+0.05`) against the resolved opponent list, and an Elo
    table is printed and logged.
 
