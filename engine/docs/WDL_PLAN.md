@@ -1,6 +1,6 @@
 # WDL Head — Phased Implementation Plan
 
-Status: **plan agreed 2026-07-25; work not started.**
+Status: **Phases 0–1 complete (2026-07-25); Phase 2 next.**
 Supersedes the design in the `WDL-Head` branch's `WDL_HEAD.md` (mid-June).  That
 branch predates the actor/learner split, the v12 `.tdleaf.bin` format, the env
 guardrail, and the `hybrid_loop.py` → `train.py` rename — its diffs are ported
@@ -14,7 +14,7 @@ the learner is the sole `.tdleaf.bin` writer on `main`.
 
 | Decision | Choice |
 |---|---|
-| Head structure | Per-material-bucket (×8), fp32, **35 → 3** + softmax. Inputs: `fc2_in[32]` + material (STM cp, scaled) + `fifty/100`. |
+| Head structure | Per-material-bucket (×8), fp32, **34 → 3** + softmax. Inputs: `fc2_in[32]` + material (STM cp, scaled) + fifty counter (scaled). |
 | Constraint | `p_w + p_d + p_l = 1` by softmax construction. |
 | Search score (Stage C) | `score = K·logit(v)`, `v = p_w + c·p_d`, `K = TDLEAF_K = 220`, computed **in logit space** via stable log-sum-exp — never through post-softmax probabilities (tail saturation). Asymptotically linear in material ⇒ retains the unbounded material spine (no shuffling in won positions). |
 | POV | Head is STM-POV like everything else; side flip swaps `l_w ↔ l_l`, negating the score (negamax-safe at `c = 0.5`). |
@@ -84,7 +84,7 @@ Fresh branch from `main` (suggested: `wdl-head-2`).  Port by hand from
 `train.py --wdl-head` plumbing (rewritten against `train.py`, not
 `hybrid_loop.py`).
 
-- Head inputs are the new 35-vector (branch code had 33: `fc2_in` + material;
+- Head inputs are the new 34-vector (branch code had 33: `fc2_in` + material;
   add fifty).
 - Gradient stops at `fc2_in`.  **Scalar path must be byte-identical** to a
   non-WDL build — verify with the strict-FP byte-exact regression technique
@@ -104,6 +104,33 @@ Fresh branch from `main` (suggested: `wdl-head-2`).  Port by hand from
 - **Exit:** head trains on an existing corpus; calibration curves sane;
   scalar bit-identity confirmed; a gauntlet of WDL build vs plain build is a
   statistical no-op.
+
+### Phase 1 results (2026-07-25)
+
+Implemented as planned with three deviations worth recording:
+- **Head is 34→3** (the plan's "35" was an arithmetic slip): `fc2_in[32]` +
+  material + fifty.  The head forward is a SEPARATE call
+  (`nnue_wdl_head_forward`) after `nnue_forward_fp32`, so the scalar forward
+  is textually untouched.
+- **Init is exactly zero + priors** (no symmetry-breaking noise): a linear
+  output layer needs none, and against O(100) `fc2_in` activations even
+  std-0.02 noise adds ±4–5 logits of garbage that swamped the principled
+  init (caught in smoke testing).  At init from any freshly loaded `.nnue`
+  the FP32 shadows are integer-valued, so the head's material input equals
+  the int-path eval exactly; the two paths drift apart only as training
+  makes weights fractional (long-standing FP32-shadow property, and the head
+  trains/serves through the same FP32 activations, so it is self-consistent).
+- **Fifty plumbing:** the TSV dump now writes the real halfmove clock into
+  the FEN (old corpora carry 0 there); `.tdg` needed nothing (`pos.fifty`
+  ships inside the stored position).
+Verified: scalar sections of `.tdleaf.bin` (v13) and exported `.nnue`
+byte-identical to a non-WDL build after identical batch-train runs; val
+MSE/NLL identical at every epoch; WDL Brier 0.484 (init) → 0.435 (ep3) on a
+400k-row corpus sample; online `--selfplay` smoke trains the head and saves
+v13; `.nnue` trailer + v12↔v13 cross-loads all round-trip.  The Phase-1
+"gauntlet no-op" check is subsumed by byte-identity (play binaries are
+non-WDL builds anyway); `train.py --wdl-head` builds TDLEAF binaries with
+the head and records the flag in the sidecar.
 
 ## Phase 2 — Actor/learner integration (still Stage A)
 

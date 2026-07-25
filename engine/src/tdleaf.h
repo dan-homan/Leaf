@@ -124,6 +124,33 @@ static const float TDLEAF_ADAM_FT_BIAS_LR0 = 0.02f;   // FT biases  (int16, medi
                                                        // 0.001×median to limit dying-ReLU risk)
 static const float TDLEAF_ADAM_PSQT_LR0    = 13.0f;   // PSQT (int32; sized to raw ~13 319 — active
                                                        // post-centering subspace is ~665, see note above)
+#if WDL_HEAD
+// ---------------------------------------------------------------------------
+// Auxiliary WDL head (docs/WDL_PLAN.md).  Input scaling puts the two scalar
+// inputs in the same magnitude band as the [0,127] fc2_in activations.
+// ---------------------------------------------------------------------------
+static const float WDL_MAT_SCALE       = 1.0f / 16.0f; // cp → head input (±400cp → ±25)
+static const float WDL_FIFTY_SCALE     = 0.25f;        // fifty 0..100 → 0..25
+static const float TDLEAF_ADAM_WDL_LR0 = 0.001f;       // head weights + biases (fp32, ~0.01–0.05)
+static const float TDLEAF_WDL_WEIGHT   = 1.0f;         // WDL loss coefficient (per-ply grad scale)
+// Outcome-conditioned decay for the DISTRIBUTIONAL λ-return target (fitted
+// offline, docs/WDL_PLAN.md Phase 0): draw outcomes decay FASTER than
+// decisive ones (informative near the end, weak far back).  The class split
+// is draw-vs-decisive ONLY — λ_win == λ_loss always; a win/loss asymmetry
+// puts a side-to-move bias into the expected target, i.e. designed-in
+// outcome-imbalance drift (docs/TRAINING.md).
+static const float TDLEAF_WDL_LAMBDA_DEC  = 0.985f;    // == TDLEAF_LAMBDA (h=16 anchor)
+static const float TDLEAF_WDL_LAMBDA_DRAW = 0.9775f;
+// Head init reproduces current play at step zero (the WDL analogue of
+// --init-nnue-classical): the material weight alone maps l_w − l_l =
+// eval_cp / K — the same K=220 sigmoid the scalar TD loss is anchored to —
+// and the draw-logit bias matches the measured self-play draw prior
+// (p_d = e^b/(2+e^b) ≈ 0.14 at eval 0, Phase 0).  All other weights start at
+// 0 — a linear output layer needs no symmetry-breaking noise, and against
+// O(100) fc2_in activations even tiny noise swamps the logits.
+static const float WDL_INIT_MAT_W     = 1.0f / (2.0f * TDLEAF_K * WDL_MAT_SCALE);
+static const float WDL_INIT_DRAW_BIAS = -1.1f;
+#endif
 // Material representation: pure-PSQT — the bucketed PSQT is the SOLE trainable
 // material channel.  There is no dense piece_val channel and no gauge machinery
 // (pin / gradient mean-centering / post-Adam dw centering / persisted slot-mean

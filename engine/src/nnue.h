@@ -40,6 +40,21 @@ static const int NNUE_L1_PADDED   = 32;   // padded input dim (ceil(30, 16) = 32
 // FC2 (output): input = NNUE_L1_SIZE = 32 neurons
 static const int NNUE_L2_PADDED   = 32;   // padded input dim for FC2
 
+#if WDL_HEAD
+// Auxiliary WDL head (docs/WDL_PLAN.md): reads the same fc2_in[32] activation
+// as FC2 plus two scalar game-state inputs — the STM-POV cp eval (material /
+// learned-temperature channel) and the fifty-move counter — producing 3
+// logits → softmax = (p_win, p_draw, p_loss) in STM POV.
+static const int NNUE_WDL_OUT   = 3;                    // win / draw / loss
+static const int NNUE_WDL_IN    = NNUE_L2_PADDED + 2;   // fc2_in[32] + material + fifty = 34
+static const int NNUE_WDL_MAT   = NNUE_L2_PADDED;       // input index: material (cp eval)
+static const int NNUE_WDL_FIFTY = NNUE_L2_PADDED + 1;   // input index: fifty-move counter
+// Flat float count of the full head (all stacks, weights + biases) — the
+// .nnue trailer / export-import buffer size.
+static const int NNUE_WDL_FLOATS =
+    NNUE_LAYER_STACKS * (NNUE_WDL_OUT * NNUE_WDL_IN + NNUE_WDL_OUT);
+#endif
+
 // Quantization scales
 static const int NNUE_WEIGHT_SHIFT = 6;   // FC weights: raw >> 6 → [0,127] int8
 static const int NNUE_SQR_SHIFT    = 7;   // SqrCReLU: (v*v) >> 19 → [0,127]  (2*WEIGHT_SHIFT+SQR_SHIFT=19)
@@ -202,6 +217,16 @@ struct NNUEActivations {
     float fwdOut;                     // passthrough: fc0_raw[15] * 9600/8128
     float positional;                 // fc2_raw + fwdOut
     int   stack;                      // layer stack index
+#if WDL_HEAD
+    // Auxiliary WDL head activations — filled by nnue_wdl_head_forward (a
+    // SEPARATE call after nnue_forward_fp32, so scalar-only call sites never
+    // touch the head and the scalar forward stays textually identical to a
+    // non-WDL build).  All STM POV.
+    float wdl_mat;                    // head input: STM-POV cp eval × WDL_MAT_SCALE
+    float wdl_fifty;                  // head input: fifty counter × WDL_FIFTY_SCALE
+    float wdl_logits[NNUE_WDL_OUT];   // pre-softmax head outputs
+    float wdl_soft  [NNUE_WDL_OUT];   // softmax(wdl_logits): (p_w, p_d, p_l)
+#endif
     // FT/PSQT backprop fields — filled by tdleaf_update_after_game before nnue_accumulate_gradients:
     int16_t acc_raw[2][NNUE_HALF_DIMS];       // raw int16 accumulator (for SqrCReLU gradient)
     int     ft_idx[2][NNUE_MAX_FT_PER_PERSP]; // active feature indices, indexed by actual persp
@@ -235,6 +260,39 @@ struct NNUEGradBuf;
 // grad_scale = alpha * e_t * sigmoid_gradient — applied inside.
 void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
                                NNUEGradBuf *gb = nullptr);
+
+#if WDL_HEAD
+// Head forward pass — call AFTER nnue_forward_fp32 has filled act (fc2_in,
+// positional, stack, stm_persp).  Computes the material input from psqt +
+// positional (exactly the scalar score's cp formula), scales the fifty
+// counter, and fills act.wdl_logits / act.wdl_soft (STM POV).
+void nnue_wdl_head_forward(NNUEActivations &act,
+                           const int32_t psqt[2][NNUE_PSQT_BKTS], int fifty);
+
+// Accumulate the WDL head gradient for one ply.  d_logits is the softmax-CE
+// gradient (softmax(logits) − target) in STM POV; scale folds the loss weight
+// and id-stability weight.  Stage A: updates only the head's own weights
+// (grad_wdl_*), never the trunk — the fc2_in / material / fifty inputs are all
+// stop-gradient.  WDL grads also bypass nnue_clip_gradients (softmax-CE is
+// bounded, and including them would perturb the scalar clip norm).
+void nnue_accumulate_wdl_gradients(const NNUEActivations &act,
+                                   const float d_logits[NNUE_WDL_OUT],
+                                   float scale, NNUEGradBuf *gb = nullptr);
+
+// Inference-side WDL read-out for a position's raw accumulator.  Read-out
+// only — does not affect search or the scalar score.  out = {p_w, p_d, p_l},
+// STM POV, sums to 1.  wtm: White to move; fifty: halfmove clock (0..100).
+void nnue_evaluate_wdl(const int16_t acc[2][NNUE_HALF_DIMS],
+                       const int32_t psqt[2][NNUE_PSQT_BKTS],
+                       bool wtm, int piece_count, int fifty,
+                       float out[NNUE_WDL_OUT]);
+
+// Serialize / restore the full head (all stacks: weights then biases, in
+// stack order) through a caller buffer of NNUE_WDL_FLOATS floats — the
+// .nnue-trailer interface used by nnue_io.cpp.
+void nnue_wdl_export(float *buf);
+void nnue_wdl_import(const float *buf);
+#endif
 
 // Per-thread gradient-buffer helpers for the offline batch trainer's
 // within-batch parallelism (see docs/BT_PARALLEL_PLAN.md).  TDLEAF-only.

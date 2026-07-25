@@ -101,6 +101,21 @@
  #define TDLEAF_READONLY 0
 #endif
 
+// WDL_HEAD: auxiliary win/draw/loss head trained alongside the scalar eval
+// (docs/WDL_PLAN.md, Stage A).  Per-material-bucket 34→3 fp32 head reading
+// fc2_in[32] + material + fifty-move counter; distributional TD(λ) targets
+// with outcome-conditioned decay (λ_draw < λ_dec).  Requires TDLEAF=1.
+// The scalar path and search are unaffected when off (default) AND when on:
+// in Stage A the gradient stops at fc2_in (head-only learning), so a WDL
+// build produces a byte-identical scalar net to a non-WDL build.
+// Compile with -D NNUE=1 -D TDLEAF=1 -D WDL_HEAD=1.
+#ifndef WDL_HEAD
+ #define WDL_HEAD 0
+#endif
+#if WDL_HEAD && !TDLEAF
+ #error "WDL_HEAD=1 requires TDLEAF=1"
+#endif
+
 // TDLEAF_LOG_STEP_CLIPS: append one line per Adam batch to
 // <exec_path>tdleaf_telemetry.log recording per-category max |step| and clip
 // counts.  Disabled by default; set to 1 to enable (for diagnosing clip

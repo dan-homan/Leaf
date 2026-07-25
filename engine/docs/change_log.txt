@@ -1,5 +1,28 @@
 Changes since 2017_12_24
 
+2026_07_25 -- WDL head Phase 1 (branch wdl-head-2, docs/WDL_PLAN.md): auxiliary
+               win/draw/loss head, opt-in via WDL_HEAD=1 (requires TDLEAF=1).
+               Per-bucket 34->3 fp32 head reading fc2_in[32] + material (STM cp
+               eval, the learned-temperature channel) + fifty-move counter;
+               softmax over {win,draw,loss}, STM POV.  Stage A: gradient stops
+               at fc2_in — scalar net byte-identical to a non-WDL build
+               (verified: identical batch-train runs produce byte-identical
+               scalar .tdleaf.bin sections and .nnue bodies).  Training:
+               distributional TD(lambda) over the game (online path, outcome-
+               conditioned decay lambda_draw=0.9775 < lambda_dec=0.985 from the
+               Phase-0 corpus fit — draw-vs-decisive split only, never
+               win-vs-loss) and outcome-decay targets in the batch trainer
+               (WDL_Brier val metric added).  Head init reproduces current
+               play: l_w - l_l = eval/K at K=220 + measured draw prior;
+               all other weights zero.  Persistence: .tdleaf.bin v13 section
+               (head weights + Adam v,m + t_wdl; v12 files load with fresh-init
+               head; non-WDL builds accept v13, keep writing v12) and a
+               versioned trailing section in exported .nnue (LEAFWDL1 magic;
+               invisible to standard readers).  TSV dump now writes the real
+               fifty counter in the FEN halfmove field (batch trainer parses
+               it; old corpora read as 0).  New: `wdl` CLI command,
+               train.py --wdl-head.
+
 2026_07_20 -- Simplification Phase 3 (code cleanup): removed the epoch-based
                experience-replay ring buffer (was disabled at TDLEAF_REPLAY_K=0)
                and retired the in-engine multi-writer .tdleaf.bin merge.

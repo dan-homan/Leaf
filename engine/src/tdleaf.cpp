@@ -387,6 +387,83 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
             nnue_accumulate_gradients(act, grad_scale);
         }
     }
+
+#if WDL_HEAD
+    // -----------------------------------------------------------------------
+    // Auxiliary WDL head — TD(λ) over the win/draw/loss distribution
+    // (docs/WDL_PLAN.md).  White-POV λ-return recursion bootstrapped on the
+    // next ply's prediction, terminal one-hot from the game result, converted
+    // to STM POV per ply.  The trace decay is OUTCOME-CONDITIONED
+    // (λ_draw < λ_dec, fitted offline in Phase 0) — the class split is
+    // draw-vs-decisive ONLY, never win-vs-loss: λ_win == λ_loss keeps the
+    // learning rule outcome-symmetric (an asymmetry there is designed-in
+    // outcome-imbalance drift).  Stage A: gradient touches only head weights;
+    // runs its own forward passes, independent of the scalar loop above.
+    // -----------------------------------------------------------------------
+    if (T >= 1) {
+        const bool  wdl_is_draw = (result >= 0.25f && result <= 0.75f);
+        const float wdl_lambda  = wdl_is_draw ? TDLEAF_WDL_LAMBDA_DRAW
+                                              : TDLEAF_WDL_LAMBDA_DEC;
+        static float PW [MAX_GAME_PLY][NNUE_WDL_OUT];  // predicted dist, White POV
+        static float piW[MAX_GAME_PLY][NNUE_WDL_OUT];  // λ-return target, White POV
+
+        // Pass 1: predicted White-POV distribution per ply (current weights).
+        for (int t = 0; t < T; t++) {
+            NNUEActivations act;
+            act.stack = rec.plies[t].stack;
+            nnue_forward_fp32(rec.plies[t].acc, rec.plies[t].psqt,
+                              rec.plies[t].wtm, act);
+            nnue_wdl_head_forward(act, rec.plies[t].psqt,
+                                  (int)rec.plies[t].pos.fifty);
+            if (rec.plies[t].wtm) {           // STM == White: no swap
+                PW[t][0] = act.wdl_soft[0]; PW[t][1] = act.wdl_soft[1]; PW[t][2] = act.wdl_soft[2];
+            } else {                          // STM == Black: swap win/loss
+                PW[t][0] = act.wdl_soft[2]; PW[t][1] = act.wdl_soft[1]; PW[t][2] = act.wdl_soft[0];
+            }
+        }
+
+        // Terminal target = one-hot(result), White POV (0.75/0.25 thresholds
+        // match the TSV dump's result bucketing).
+        piW[T - 1][0] = (result > 0.75f) ? 1.0f : 0.0f;
+        piW[T - 1][1] = wdl_is_draw ? 1.0f : 0.0f;
+        piW[T - 1][2] = (result < 0.25f) ? 1.0f : 0.0f;
+
+        // Backward λ-return over distributions:
+        //   πW_t = (1 − λ^dply)·P_{t+1} + λ^dply·πW_{t+1}
+        // dply = game-ply gap between consecutive records (same axis as the
+        // scalar trace decay).  Convexity keeps πW_t a valid distribution.
+        for (int t = T - 2; t >= 0; t--) {
+            int dply = rec.plies[t + 1].game_ply - rec.plies[t].game_ply;
+            if (dply < 1) dply = 1;
+            float lam = (dply == 1) ? wdl_lambda : powf(wdl_lambda, (float)dply);
+            for (int o = 0; o < NNUE_WDL_OUT; o++)
+                piW[t][o] = (1.0f - lam) * PW[t + 1][o] + lam * piW[t + 1][o];
+        }
+
+        // Pass 2: forward again for activations, accumulate the head gradient.
+        for (int t = 0; t < T; t++) {
+            float tgt[NNUE_WDL_OUT];
+            if (rec.plies[t].wtm) {           // White POV → STM POV: no swap
+                tgt[0] = piW[t][0]; tgt[1] = piW[t][1]; tgt[2] = piW[t][2];
+            } else {                          // swap win/loss back for Black STM
+                tgt[0] = piW[t][2]; tgt[1] = piW[t][1]; tgt[2] = piW[t][0];
+            }
+            NNUEActivations act;
+            act.stack = rec.plies[t].stack;
+            nnue_forward_fp32(rec.plies[t].acc, rec.plies[t].psqt,
+                              rec.plies[t].wtm, act);
+            nnue_wdl_head_forward(act, rec.plies[t].psqt,
+                                  (int)rec.plies[t].pos.fifty);
+            float d_logits[NNUE_WDL_OUT];
+            for (int o = 0; o < NNUE_WDL_OUT; o++)
+                d_logits[o] = act.wdl_soft[o] - tgt[o];   // softmax-CE grad, STM POV
+            float id_weight = 1.0f / (1.0f + rec.plies[t].id_score_variance
+                                             / TDLEAF_ID_VAR_SIGMA2);
+            nnue_accumulate_wdl_gradients(act, d_logits,
+                                          TDLEAF_WDL_WEIGHT * id_weight);
+        }
+    }
+#endif  // WDL_HEAD
 }
 
 // ---------------------------------------------------------------------------
@@ -415,7 +492,9 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
 // ---------------------------------------------------------------------------
 
 // FEN board+stm from a stored position (castling/ep are not NNUE features and
-// the trainer's parser ignores them — emit "- -").
+// the trainer's parser ignores them — emit "- -").  The halfmove-clock field
+// carries the REAL fifty-move counter (a WDL head input; docs/WDL_PLAN.md) —
+// corpora dumped before that extension carry a literal 0 there.
 static void tdleaf_dump_fen(const position &pos, bool wtm, char *out)
 {
     int fi = 0;
@@ -434,7 +513,7 @@ static void tdleaf_dump_fen(const position &pos, bool wtm, char *out)
         if (run) out[fi++] = (char)('0' + run);
         if (ry) out[fi++] = '/';
     }
-    snprintf(out + fi, 16, " %c - - 0 1", wtm ? 'w' : 'b');
+    snprintf(out + fi, 16, " %c - - %d 1", wtm ? 'w' : 'b', (int)pos.fifty);
 }
 
 static void tdleaf_dump_game(const TDGameRecord &rec, float result)

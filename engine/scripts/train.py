@@ -163,6 +163,13 @@ def binary_baked_net_matches(binary, net_name):
     return net_name.encode() in blob
 
 
+# Set from --wdl-head: TDLEAF binaries (actors, learner, batch trainer) are
+# built with the auxiliary WDL head (docs/WDL_PLAN.md).  Rating/play binaries
+# (tdleaf=False) stay plain — in Stage A the head never affects play, and a
+# non-WDL loader simply ignores the .nnue trailer.
+WDL_HEAD = False
+
+
 def compile_binary(version, net_name, tdleaf, force=False):
     """Compile Leaf_v<version> in run/; returns the binary path."""
     binary = RUN_DIR / f"Leaf_v{version}"
@@ -177,6 +184,8 @@ def compile_binary(version, net_name, tdleaf, force=False):
     flags = ["NNUE=1", f"NNUE_NET={net_name}"]
     if tdleaf:
         flags.append("TDLEAF=1")
+        if WDL_HEAD:
+            flags.append("WDL_HEAD=1")
     sh(["perl", COMP_PL, version] + flags + ["OVERWRITE"], cwd=RUN_DIR)
     if not binary.exists():
         die(f"compile did not produce {binary}")
@@ -447,6 +456,13 @@ def main():
     ap.add_argument("--no-final-gauntlet", action="store_true",
                     help="Skip the final full gauntlet (with --gauntlet-epochs, "
                          "for ladder-only runs — no --gauntlet opponents needed)")
+    ap.add_argument("--wdl-head", action="store_true",
+                    help="Build all TDLEAF binaries (actors, learner, batch "
+                         "trainer) with WDL_HEAD=1 — the auxiliary win/draw/"
+                         "loss head trains alongside the scalar net "
+                         "(docs/WDL_PLAN.md Stage A; scalar path is byte-"
+                         "identical).  Usually combine with --recompile the "
+                         "first time so cached binaries are rebuilt.")
     ap.add_argument("--force", action="store_true",
                     help="Reuse an existing <tag>_work directory")
     ap.add_argument("--recompile", action="store_true",
@@ -463,6 +479,11 @@ def main():
                          "stays uncompressed) — <tag>_work/ is never deleted "
                          "either way, this only controls pruning aggressiveness")
     args = ap.parse_args()
+
+    if args.wdl_head:
+        global WDL_HEAD
+        WDL_HEAD = True
+        log("WDL head enabled: TDLEAF binaries built with WDL_HEAD=1")
 
     if args.no_repeat:
         log("note: --no-repeat is now always on — the flag is a no-op")
@@ -974,6 +995,7 @@ def main():
         "games_this_iter": games_this_iter,
         "cumulative_games": cumulative_games,
         "gen_mode": ("skip-online" if args.skip_online else "actor-learner"),
+        "wdl_head": bool(args.wdl_head),
         "depth": args.depth,
         "epochs": args.epochs,
         "picked_epoch": pick_ep,

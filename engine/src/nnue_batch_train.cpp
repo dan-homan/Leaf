@@ -108,7 +108,8 @@ struct BTRecord {
     uint32_t gid;       // game id (validation split key + per-game N lookup)
     uint8_t  depth;     // search depth of the cp label; 0 = no search label
                         // (leaf-dump rows) → weighted by --bt-leaf-lambda
-    uint8_t  pad;
+    uint8_t  fifty;     // halfmove clock from the FEN (0..100); 0 on corpora
+                        // dumped before the WDL fifty extension.  WDL head input.
     uint16_t ply;       // 1-based ply of the position (result-decay distance)
 };
 
@@ -161,6 +162,19 @@ static bool bt_parse_fen(const char *fen, BTRecord &r)
     if (*c == 'w') r.wtm = 1;
     else if (*c == 'b') r.wtm = 0;
     else return false;
+    // Optional tail: skip the castling and en-passant fields, then read the
+    // halfmove clock (the real fifty-move counter on current corpora; a
+    // literal 0 on corpora dumped before the WDL fifty extension).
+    r.fifty = 0;
+    const char *q = c + 1;
+    for (int field = 0; field < 2 && *q == ' '; field++) {
+        q++;
+        while (*q && *q != ' ' && *q != '\t' && *q != '\n') q++;
+    }
+    if (*q == ' ') {
+        long f50 = strtol(q + 1, nullptr, 10);
+        if (f50 > 0) r.fifty = (uint8_t)((f50 > 100) ? 100 : f50);
+    }
     return true;
 }
 
@@ -404,6 +418,9 @@ struct BTWorker {
     NNUEActivations  act;
     NNUEGradBuf     *gb = nullptr;
     double           se = 0.0, se2 = 0.0, nll = 0.0;
+#if WDL_HEAD
+    double           brier = 0.0;  // WDL head calibration metric (val split)
+#endif
 };
 
 // ---------------------------------------------------------------------------
@@ -534,6 +551,27 @@ int nnue_batch_train(int argc, char *argv[])
         int g = (int)gid_N[r.gid] - (int)r.ply;
         return powtab[g < 0 ? 0 : g];
     };
+#if WDL_HEAD
+    // Outcome-conditioned result decay for the WDL head target (compile-time
+    // constants, docs/WDL_PLAN.md Phase 0: draws decay faster than decisive
+    // outcomes; the split is draw-vs-decisive only, never win-vs-loss).  The
+    // λs were fitted per GAME-PLY; on a legacy record-index corpus each record
+    // spans 2 game plies, so square them (same convention as td_lambda above).
+    const float wdl_lam_dec  = corpus_game_ply ? TDLEAF_WDL_LAMBDA_DEC
+                             : TDLEAF_WDL_LAMBDA_DEC  * TDLEAF_WDL_LAMBDA_DEC;
+    const float wdl_lam_draw = corpus_game_ply ? TDLEAF_WDL_LAMBDA_DRAW
+                             : TDLEAF_WDL_LAMBDA_DRAW * TDLEAF_WDL_LAMBDA_DRAW;
+    std::vector<float> powtab_wdec(max_gap + 1), powtab_wdraw(max_gap + 1);
+    for (int g = 0; g <= max_gap; g++) {
+        powtab_wdec[g]  = powf(wdl_lam_dec,  (float)g);
+        powtab_wdraw[g] = powf(wdl_lam_draw, (float)g);
+    }
+    auto wdl_decay = [&](const BTRecord &r) {
+        int g = (int)gid_N[r.gid] - (int)r.ply;
+        if (g < 0) g = 0;
+        return (r.result2 == 1) ? powtab_wdraw[g] : powtab_wdec[g];
+    };
+#endif
     {
         double dsum = 0.0;
         for (const BTRecord &r : recs) dsum += (double)decay(r);
@@ -573,11 +611,32 @@ int nnue_batch_train(int argc, char *argv[])
         pool.run([&](int tid) {
             BTWorker &w = *workers[tid];
             w.se = w.se2 = w.nll = 0.0;
+#if WDL_HEAD
+            w.brier = 0.0;
+#endif
             size_t lo = (size_t)tid * val_idx.size() / threads;
             size_t hi = (size_t)(tid + 1) * val_idx.size() / threads;
             for (size_t k = lo; k < hi; k++) {
                 uint32_t i = val_idx[k];
+#if WDL_HEAD
+                // WDL Brier vs the game-outcome one-hot (STM POV) — the head
+                // calibration canary, diagnostic only.
+                float d  = bt_eval_record(recs[i], K, w.pos, w.acc, &w.act);
+                {
+                    const BTRecord &rr = recs[i];
+                    nnue_wdl_head_forward(w.act, w.acc.psqt, (int)rr.fifty);
+                    float tW[NNUE_WDL_OUT] = {0.0f, 0.0f, 0.0f};
+                    tW[rr.result2 == 2 ? 0 : (rr.result2 == 1 ? 1 : 2)] = 1.0f;
+                    float tgt[NNUE_WDL_OUT];
+                    if (rr.wtm) { tgt[0]=tW[0]; tgt[1]=tW[1]; tgt[2]=tW[2]; }
+                    else        { tgt[0]=tW[2]; tgt[1]=tW[1]; tgt[2]=tW[0]; }
+                    for (int o = 0; o < NNUE_WDL_OUT; o++)
+                        w.brier += (double)(w.act.wdl_soft[o] - tgt[o])
+                                 * (double)(w.act.wdl_soft[o] - tgt[o]);
+                }
+#else
                 float d  = bt_eval_record(recs[i], K, w.pos, w.acc, nullptr);
+#endif
                 float tb = bt_target(recs[i], lambda, leaf_lambda, K, decay(recs[i]));
                 float to = 0.5f * (float)recs[i].result2;
                 w.se  += (double)(tb - d) * (tb - d);
@@ -595,8 +654,15 @@ int nnue_batch_train(int argc, char *argv[])
             se_blend += workers[t]->se; se_outcome += workers[t]->se2; nll += workers[t]->nll;
         }
         double n = (double)std::max<size_t>(val_idx.size(), 1);
+#if WDL_HEAD
+        double brier = 0.0;
+        for (int t = 0; t < threads; t++) brier += workers[t]->brier;
+        fprintf(stderr, "  val MSE(blend)=%.6f  MSE(outcome)=%.6f  NLL(blend)=%.6f  WDL_Brier=%.6f  (n=%zu)\n",
+                se_blend / n, se_outcome / n, nll / n, brier / n, val_idx.size());
+#else
         fprintf(stderr, "  val MSE(blend)=%.6f  MSE(outcome)=%.6f  NLL(blend)=%.6f  (n=%zu)\n",
                 se_blend / n, se_outcome / n, nll / n, val_idx.size());
+#endif
         return se_blend / n;
     };
 
@@ -639,6 +705,30 @@ int nnue_batch_train(int argc, char *argv[])
                 float grad_scale = e * sig_grad * cp_factor * wtm_sign;
                 if (grad_scale != 0.0f)
                     nnue_accumulate_gradients(w.act, grad_scale, w.gb);
+#if WDL_HEAD
+                // Offline WDL head training (Stage A, docs/WDL_PLAN.md).
+                // Target = game-outcome one-hot weighted by the outcome-
+                // conditioned result decay λ_class^(N−ply): the distributional
+                // λ-return collapses to this when positions are trained
+                // independently (the bootstrap-complement term cancels in the
+                // softmax-CE gradient).  Head-only — the trunk is untouched.
+                {
+                    float wdec = wdl_decay(r);
+                    if (wdec != 0.0f) {
+                        nnue_wdl_head_forward(w.act, w.acc.psqt, (int)r.fifty);
+                        float tW[NNUE_WDL_OUT] = {0.0f, 0.0f, 0.0f};
+                        tW[r.result2 == 2 ? 0 : (r.result2 == 1 ? 1 : 2)] = 1.0f;
+                        float tgt[NNUE_WDL_OUT];
+                        if (r.wtm) { tgt[0]=tW[0]; tgt[1]=tW[1]; tgt[2]=tW[2]; }
+                        else       { tgt[0]=tW[2]; tgt[1]=tW[1]; tgt[2]=tW[0]; }
+                        float d_logits[NNUE_WDL_OUT];
+                        for (int o = 0; o < NNUE_WDL_OUT; o++)
+                            d_logits[o] = w.act.wdl_soft[o] - tgt[o];
+                        nnue_accumulate_wdl_gradients(w.act, d_logits,
+                                                      TDLEAF_WDL_WEIGHT * wdec, w.gb);
+                    }
+                }
+#endif
             }
         });
         auto tb = std::chrono::steady_clock::now();

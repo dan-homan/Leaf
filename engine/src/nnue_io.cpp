@@ -228,10 +228,38 @@ static bool nnue_load_stream(MemStream *s)
             { printf("NNUE: stack %d FC2 weight read failed\n", st); ms_close(s); return false; }
     }
 
+#if WDL_HEAD
+    // Optional Leaf WDL trailer — versioned section appended after the last
+    // FC stack by nnue_write_nnue.  Standard readers stop at the last stack,
+    // so the trailer is invisible to them.  Read it into a buffer now (before
+    // the stream closes); imported below AFTER nnue_init_fp32_weights, which
+    // fresh-inits the head.  Absent or dimension-mismatched trailer → the
+    // fresh-init head stands (and .tdleaf.bin v13 state overrides either way).
+    bool wdl_trailer = false;
+    static float wdl_buf[NNUE_WDL_FLOATS];
+    {
+        char m8[8];
+        uint32_t dims[3];
+        if (ms_read(s, m8, 8) == 8 && memcmp(m8, "LEAFWDL1", 8) == 0 &&
+            ms_read(s, dims, 12) == 12 &&
+            dims[0] == (uint32_t)NNUE_LAYER_STACKS &&
+            dims[1] == (uint32_t)NNUE_WDL_OUT &&
+            dims[2] == (uint32_t)NNUE_WDL_IN &&
+            ms_read(s, wdl_buf, sizeof(wdl_buf)) == sizeof(wdl_buf))
+            wdl_trailer = true;
+    }
+#endif
+
     ms_close(s);
     nnue_available = true;
 #if TDLEAF
     nnue_init_fp32_weights();
+#endif
+#if WDL_HEAD
+    if (wdl_trailer) {
+        nnue_wdl_import(wdl_buf);
+        fprintf(stderr, "NNUE: WDL head restored from .nnue trailer\n");
+    }
 #endif
     return true;
 }
@@ -502,6 +530,25 @@ bool nnue_write_nnue(const char *dst_path)
     }
 
     delete[] tmp;
+
+#if WDL_HEAD
+    // Leaf extension: trailing WDL-head section (magic + dims + fp32 weights).
+    // Standard HalfKAv2_hm readers stop at the last FC stack, so the trailer
+    // is invisible to them; Leaf's loader (nnue_load_stream) restores it, and
+    // .tdleaf.bin v13 state takes precedence over it when present.
+    {
+        static const char wdl_magic[8] = {'L','E','A','F','W','D','L','1'};
+        uint32_t dims[3] = { (uint32_t)NNUE_LAYER_STACKS,
+                             (uint32_t)NNUE_WDL_OUT, (uint32_t)NNUE_WDL_IN };
+        static float wdl_buf[NNUE_WDL_FLOATS];
+        nnue_wdl_export(wdl_buf);
+        fwrite(wdl_magic, 1, 8, dst);
+        fwrite(dims, sizeof(uint32_t), 3, dst);
+        fwrite(wdl_buf, sizeof(float), NNUE_WDL_FLOATS, dst);
+        printf("NNUE: appended WDL head trailer (%d floats)\n", NNUE_WDL_FLOATS);
+    }
+#endif
+
     fclose(dst);
     printf("NNUE: wrote %s\n", dst_path);
     return true;

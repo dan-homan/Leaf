@@ -23,6 +23,14 @@ static float l1_weights_f32[NNUE_LAYER_STACKS][NNUE_L1_SIZE * NNUE_L1_PADDED];
 static float l1_biases_f32 [NNUE_LAYER_STACKS][NNUE_L1_SIZE];
 static float l2_weights_f32[NNUE_LAYER_STACKS][NNUE_L2_PADDED];
 static float l2_bias_f32   [NNUE_LAYER_STACKS];
+#if WDL_HEAD
+// Auxiliary WDL head — fp32 weights, per material-bucket stack (34→3, see
+// docs/WDL_PLAN.md).  Not quantized: the head is off the search hot path in
+// Stage A (read-out + learning only).  Persisted in the .tdleaf.bin v13
+// section and as a trailing section of exported .nnue files.
+static float wdl_weights_f32[NNUE_LAYER_STACKS][NNUE_WDL_OUT][NNUE_WDL_IN];
+static float wdl_bias_f32   [NNUE_LAYER_STACKS][NNUE_WDL_OUT];
+#endif
 
 // Update counts — per weight/bias, incremented each game a non-zero gradient was applied.
 // Saved to / loaded from .tdleaf.bin so training history accumulates across sessions.
@@ -45,6 +53,10 @@ struct NNUEGradBuf {
     float grad_l1_b[NNUE_LAYER_STACKS][NNUE_L1_SIZE];
     float grad_l2_w[NNUE_LAYER_STACKS][NNUE_L2_PADDED];
     float grad_l2_b[NNUE_LAYER_STACKS];
+#if WDL_HEAD
+    float grad_wdl_w[NNUE_LAYER_STACKS][NNUE_WDL_OUT][NNUE_WDL_IN];
+    float grad_wdl_b[NNUE_LAYER_STACKS][NNUE_WDL_OUT];
+#endif
     float grad_ft_bias[NNUE_HALF_DIMS];
     float *grad_ft_w   = nullptr;  // heap [FT_INPUTS × HALF_DIMS] ~92 MB
     float *grad_psqt_w = nullptr;  // heap [FT_INPUTS × PSQT_BKTS] ~720 KB
@@ -66,6 +78,10 @@ static float (&grad_l1_w)[NNUE_LAYER_STACKS][NNUE_L1_SIZE * NNUE_L1_PADDED] = g_
 static float (&grad_l1_b)[NNUE_LAYER_STACKS][NNUE_L1_SIZE]                 = g_grad.grad_l1_b;
 static float (&grad_l2_w)[NNUE_LAYER_STACKS][NNUE_L2_PADDED]               = g_grad.grad_l2_w;
 static float (&grad_l2_b)[NNUE_LAYER_STACKS]                               = g_grad.grad_l2_b;
+#if WDL_HEAD
+static float (&grad_wdl_w)[NNUE_LAYER_STACKS][NNUE_WDL_OUT][NNUE_WDL_IN]   = g_grad.grad_wdl_w;
+static float (&grad_wdl_b)[NNUE_LAYER_STACKS][NNUE_WDL_OUT]                = g_grad.grad_wdl_b;
+#endif
 
 // FT/PSQT float shadow arrays (heap — OS lazy-paged, physical use ∝ active features)
 // ft_weights_f32 / grad_ft_w: [FT_INPUTS × HALF_DIMS]  ~92 MB each
@@ -113,6 +129,19 @@ static float m_l1_b[NNUE_LAYER_STACKS][NNUE_L1_SIZE]                  = {};
 static float m_l2_w[NNUE_LAYER_STACKS][NNUE_L2_PADDED]                = {};
 static float m_l2_b[NNUE_LAYER_STACKS]                                 = {};
 static float m_ft_bias[NNUE_HALF_DIMS]                                  = {};
+
+#if WDL_HEAD
+// WDL head Adam moments + step counter — persisted in the .tdleaf.bin v13
+// section (single-writer: the in-memory state is written as-is, so a reload
+// continues from the faithful optimizer state).  A single shared counter is
+// correct because the head is dense: every weight can receive gradient on
+// every apply.
+static float v_wdl_w[NNUE_LAYER_STACKS][NNUE_WDL_OUT][NNUE_WDL_IN] = {};
+static float v_wdl_b[NNUE_LAYER_STACKS][NNUE_WDL_OUT]              = {};
+static float m_wdl_w[NNUE_LAYER_STACKS][NNUE_WDL_OUT][NNUE_WDL_IN] = {};
+static float m_wdl_b[NNUE_LAYER_STACKS][NNUE_WDL_OUT]              = {};
+static uint32_t t_wdl = 0;
+#endif
 
 static float    *v_ft_w    = nullptr;  // [NNUE_FT_INPUTS × NNUE_HALF_DIMS] — FT per-weight second moment (~92 MB, OS lazy-paged)
 static bool     *ft_v_warmed = nullptr; // [NNUE_FT_INPUTS] — true if v_ft_w row was loaded from disk (v8+).
@@ -193,7 +222,40 @@ static inline float nnue_adam_step(float g, float &m, float &v, uint32_t cnt,
 struct NNUEApplyParams {
     float fc_lr, fc2_lr, fc_bias_lr, ft_lr, ft_bias_lr, psqt_lr;
     float ft_bc2_cold, ft_bc2_warm;
+#if WDL_HEAD
+    float wdl_lr;
+#endif
 };
+
+#if WDL_HEAD
+// Fresh WDL head init — reproduces current play at step zero (the WDL
+// analogue of --init-nnue-classical): the material weight alone maps
+// l_w − l_l = eval_cp / K, the draw bias matches the measured self-play draw
+// prior, and every other weight starts at 0 — a linear output layer needs no
+// symmetry-breaking noise (each output's softmax-CE gradient already differs),
+// and noise here is NOT small: fc2_in activations are O(100) across 32
+// inputs, so even std 0.02 weights add ±4–5 logits of garbage that swamps
+// the principled init.  Called by both init paths; a .nnue trailer or
+// .tdleaf.bin v13 load overwrites this afterwards.
+static void nnue_wdl_fresh_init()
+{
+    for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
+        for (int o = 0; o < NNUE_WDL_OUT; o++) {
+            for (int i = 0; i < NNUE_WDL_IN; i++)
+                wdl_weights_f32[s][o][i] = 0.0f;
+            wdl_bias_f32[s][o] = 0.0f;
+        }
+        wdl_weights_f32[s][0][NNUE_WDL_MAT] =  WDL_INIT_MAT_W;  // win logit
+        wdl_weights_f32[s][2][NNUE_WDL_MAT] = -WDL_INIT_MAT_W;  // loss logit
+        wdl_bias_f32[s][1] = WDL_INIT_DRAW_BIAS;                // draw prior
+    }
+    memset(grad_wdl_w, 0, sizeof(grad_wdl_w));
+    memset(grad_wdl_b, 0, sizeof(grad_wdl_b));
+    memset(v_wdl_w, 0, sizeof(v_wdl_w));  memset(v_wdl_b, 0, sizeof(v_wdl_b));
+    memset(m_wdl_w, 0, sizeof(m_wdl_w));  memset(m_wdl_b, 0, sizeof(m_wdl_b));
+    t_wdl = 0;
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // nnue_init_zero_weights — fresh-start FC/FT initialisation + classical PSQT
@@ -342,6 +404,9 @@ void nnue_init_zero_weights(int prior_mode)
     memset(m_ft_bias, 0, sizeof(m_ft_bias));
     t_adam = 0;
     if (ft_v_warmed) memset(ft_v_warmed, 0, NNUE_FT_INPUTS * sizeof(bool));
+#if WDL_HEAD
+    nnue_wdl_fresh_init();
+#endif
 
     // ---- FT biases: zero init ----
     // FT weights already break symmetry across dimensions, so zero FT biases
@@ -604,6 +669,12 @@ void nnue_init_fp32_weights()
     if (v_psqt_w)  memset(v_psqt_w,  0, psqt_sz * sizeof(float));
     if (m_psqt_w)  memset(m_psqt_w,  0, psqt_sz * sizeof(float));
     t_adam = 0;
+#if WDL_HEAD
+    // The head has no int8 source in the .nnue body — fresh-init it here.  If
+    // the .nnue carries a WDL trailer, nnue_load_stream imports it right after
+    // this returns; a .tdleaf.bin v13 load overwrites it again later.
+    nnue_wdl_fresh_init();
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -833,6 +904,115 @@ void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
         gb->grad_ft_bias[d] += (g_acc[0][d] + g_acc[1][d]);
 }
 
+#if WDL_HEAD
+// ---------------------------------------------------------------------------
+// nnue_wdl_head_forward — auxiliary WDL head forward pass (docs/WDL_PLAN.md).
+// Call AFTER nnue_forward_fp32 has filled act; kept separate so scalar-only
+// call sites never touch the head and the scalar forward stays textually
+// identical to a non-WDL build.  The material input is the full STM-POV cp
+// eval (psqt/2 + positional — same formula as the scalar score), making the
+// head a learned position-dependent temperature; the fifty counter is the
+// second scalar input.  Everything STM POV.
+// ---------------------------------------------------------------------------
+void nnue_wdl_head_forward(NNUEActivations &act,
+                           const int32_t psqt[2][NNUE_PSQT_BKTS], int fifty)
+{
+    int s   = act.stack;
+    int stm = (int)act.stm_persp;
+    int32_t psqt_diff = psqt[stm][s] - psqt[stm ^ 1][s];
+    // Integer-halve psqt_diff to match the scalar score path exactly.
+    float score_cp = ((float)(psqt_diff / 2) + act.positional) * (100.0f / 5776.0f);
+    act.wdl_mat   = score_cp * WDL_MAT_SCALE;
+    act.wdl_fifty = (float)fifty * WDL_FIFTY_SCALE;
+    if (getenv("NNUE_DEBUG"))
+        fprintf(stderr, "WDL_DEBUG: stack=%d stm=%d psqt_diff=%d positional=%.1f "
+                "score_cp=%.1f mat=%.3f fifty_in=%.2f\n",
+                s, stm, psqt_diff, (double)act.positional, (double)score_cp,
+                (double)act.wdl_mat, (double)act.wdl_fifty);
+    for (int o = 0; o < NNUE_WDL_OUT; o++) {
+        float sum = wdl_bias_f32[s][o];
+        const float *w = wdl_weights_f32[s][o];
+        for (int i = 0; i < NNUE_L2_PADDED; i++) sum += w[i] * act.fc2_in[i];
+        sum += w[NNUE_WDL_MAT]   * act.wdl_mat;
+        sum += w[NNUE_WDL_FIFTY] * act.wdl_fifty;
+        act.wdl_logits[o] = sum;
+    }
+    float mx = act.wdl_logits[0];
+    for (int o = 1; o < NNUE_WDL_OUT; o++)
+        if (act.wdl_logits[o] > mx) mx = act.wdl_logits[o];
+    float den = 0.0f;
+    for (int o = 0; o < NNUE_WDL_OUT; o++) {
+        act.wdl_soft[o] = expf(act.wdl_logits[o] - mx);
+        den += act.wdl_soft[o];
+    }
+    float inv = 1.0f / den;
+    for (int o = 0; o < NNUE_WDL_OUT; o++) act.wdl_soft[o] *= inv;
+}
+
+// ---------------------------------------------------------------------------
+// nnue_accumulate_wdl_gradients — head-only backprop for one ply (Stage A).
+// d_logits = softmax(logits) − target (STM POV), the softmax-CE gradient.
+// All three inputs (fc2_in, material, fifty) are stop-gradient: the trunk,
+// PSQT, and the eval scale are untouched — a WDL build's scalar net stays
+// byte-identical to a non-WDL build.  (Stage B relaxes this via a separate
+// trunk-gradient path; see docs/WDL_PLAN.md Phase 3.)
+// ---------------------------------------------------------------------------
+void nnue_accumulate_wdl_gradients(const NNUEActivations &act,
+                                   const float d_logits[NNUE_WDL_OUT],
+                                   float scale, NNUEGradBuf *gb)
+{
+    if (!gb) gb = &g_grad;
+    int s = act.stack;
+    for (int o = 0; o < NNUE_WDL_OUT; o++) {
+        float g = scale * d_logits[o];
+        if (g == 0.0f) continue;
+        float *gw = gb->grad_wdl_w[s][o];
+        for (int i = 0; i < NNUE_L2_PADDED; i++)
+            gw[i] += g * act.fc2_in[i];
+        gw[NNUE_WDL_MAT]   += g * act.wdl_mat;
+        gw[NNUE_WDL_FIFTY] += g * act.wdl_fifty;
+        gb->grad_wdl_b[s][o] += g;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// nnue_evaluate_wdl — inference-side read-out (the `wdl` CLI command and
+// diagnostics).  Not on any search hot path.
+// ---------------------------------------------------------------------------
+void nnue_evaluate_wdl(const int16_t acc[2][NNUE_HALF_DIMS],
+                       const int32_t psqt[2][NNUE_PSQT_BKTS],
+                       bool wtm, int piece_count, int fifty,
+                       float out[NNUE_WDL_OUT])
+{
+    if (piece_count < 1)  piece_count = 1;
+    if (piece_count > 32) piece_count = 32;
+    NNUEActivations act;
+    act.stack = (piece_count - 1) / 4;   // same bucketing as nnue_evaluate
+    nnue_forward_fp32(acc, psqt, wtm, act);
+    nnue_wdl_head_forward(act, psqt, fifty);
+    for (int o = 0; o < NNUE_WDL_OUT; o++) out[o] = act.wdl_soft[o];
+}
+
+// Flat serialize/restore for the .nnue trailer (nnue_io.cpp).  Order: per
+// stack, weights [o][i] then biases [o].
+void nnue_wdl_export(float *buf)
+{
+    for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
+        for (int o = 0; o < NNUE_WDL_OUT; o++)
+            for (int i = 0; i < NNUE_WDL_IN; i++) *buf++ = wdl_weights_f32[s][o][i];
+        for (int o = 0; o < NNUE_WDL_OUT; o++) *buf++ = wdl_bias_f32[s][o];
+    }
+}
+void nnue_wdl_import(const float *buf)
+{
+    for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
+        for (int o = 0; o < NNUE_WDL_OUT; o++)
+            for (int i = 0; i < NNUE_WDL_IN; i++) wdl_weights_f32[s][o][i] = *buf++;
+        for (int o = 0; o < NNUE_WDL_OUT; o++) wdl_bias_f32[s][o] = *buf++;
+    }
+}
+#endif  // WDL_HEAD
+
 // ---------------------------------------------------------------------------
 // NNUEGradBuf helpers — used by the offline batch trainer for within-batch
 // thread parallelism (docs/BT_PARALLEL_PLAN.md).  Each worker accumulates its
@@ -882,6 +1062,10 @@ void nnue_gradbuf_clear(NNUEGradBuf *g)
     memset(g->grad_l1_b,    0, sizeof(g->grad_l1_b));
     memset(g->grad_l2_w,    0, sizeof(g->grad_l2_w));
     memset(g->grad_l2_b,    0, sizeof(g->grad_l2_b));
+#if WDL_HEAD
+    memset(g->grad_wdl_w,   0, sizeof(g->grad_wdl_w));
+    memset(g->grad_wdl_b,   0, sizeof(g->grad_wdl_b));
+#endif
     memset(g->grad_ft_bias, 0, sizeof(g->grad_ft_bias));
 }
 
@@ -896,6 +1080,12 @@ void nnue_gradbuf_merge_dense(const NNUEGradBuf *w)
         for (int i = 0; i < NNUE_L1_SIZE; i++)                  g_grad.grad_l1_b[s][i] += w->grad_l1_b[s][i];
         for (int i = 0; i < NNUE_L2_PADDED; i++)                g_grad.grad_l2_w[s][i] += w->grad_l2_w[s][i];
         g_grad.grad_l2_b[s] += w->grad_l2_b[s];
+#if WDL_HEAD
+        for (int o = 0; o < NNUE_WDL_OUT; o++) {
+            for (int i = 0; i < NNUE_WDL_IN; i++) g_grad.grad_wdl_w[s][o][i] += w->grad_wdl_w[s][o][i];
+            g_grad.grad_wdl_b[s][o] += w->grad_wdl_b[s][o];
+        }
+#endif
     }
     for (int d = 0; d < NNUE_HALF_DIMS; d++) g_grad.grad_ft_bias[d] += w->grad_ft_bias[d];
 }
@@ -1081,6 +1271,9 @@ void nnue_apply_gradients(float lr_scale)
 {
     t_adam++;
     t_ft_session++;
+#if WDL_HEAD
+    t_wdl++;
+#endif
 
     // FT RMSProp bias-correction — two bc2 values to handle mixed warmed/fresh rows.
     //
@@ -1125,6 +1318,9 @@ void nnue_apply_gradients(float lr_scale)
     const float ft_lr      = lr_scale * warmup_factor * ft_session_factor * TDLEAF_ADAM_FT_LR0;
     const float ft_bias_lr = lr_scale * warmup_factor * TDLEAF_ADAM_FT_BIAS_LR0;
     const float psqt_lr    = lr_scale * warmup_factor * TDLEAF_ADAM_PSQT_LR0;
+#if WDL_HEAD
+    const float wdl_lr     = lr_scale * warmup_factor * TDLEAF_ADAM_WDL_LR0;
+#endif
 
     // Full Adam step for FC layers and FT biases — per-weight bias correction.
     // bc1 (beta1=0.9): skipped at cnt>=20 (0.9^20≈0.12 → bc1≈0.88, close to 1).
@@ -1221,6 +1417,24 @@ void nnue_apply_gradients(float lr_scale)
             l2_bias_f32[s] -= dw;
             l2_bias_cnt[s]++;
         }
+#if WDL_HEAD
+        // Auxiliary WDL head — fp32, own step counter (t_wdl, persisted in
+        // v13), no weight decay, no int8 clamp.  Steps share the FC telemetry
+        // accumulators via do_step (diagnostic-only; scalar weights untouched).
+        for (int o = 0; o < NNUE_WDL_OUT; o++) {
+            for (int i = 0; i < NNUE_WDL_IN; i++)
+                if (grad_wdl_w[s][o][i] != 0.0f) {
+                    float dw = do_step(grad_wdl_w[s][o][i], m_wdl_w[s][o][i],
+                                       v_wdl_w[s][o][i], t_wdl - 1, wdl_lr);
+                    wdl_weights_f32[s][o][i] -= dw;
+                }
+            if (grad_wdl_b[s][o] != 0.0f) {
+                float dw = do_step(grad_wdl_b[s][o], m_wdl_b[s][o],
+                                   v_wdl_b[s][o], t_wdl - 1, wdl_lr);
+                wdl_bias_f32[s][o] -= dw;
+            }
+        }
+#endif
     }
     memset(grad_l0_w, 0, sizeof(grad_l0_w));
     memset(grad_l0_b, 0, sizeof(grad_l0_b));
@@ -1228,6 +1442,10 @@ void nnue_apply_gradients(float lr_scale)
     memset(grad_l1_b, 0, sizeof(grad_l1_b));
     memset(grad_l2_w, 0, sizeof(grad_l2_w));
     memset(grad_l2_b, 0, sizeof(grad_l2_b));
+#if WDL_HEAD
+    memset(grad_wdl_w, 0, sizeof(grad_wdl_w));
+    memset(grad_wdl_b, 0, sizeof(grad_wdl_b));
+#endif
 
     // FT/PSQT: only iterate over dirty feature rows (sparse update).  Under
     // pure-PSQT the bucketed PSQT is the sole material channel and moves freely
@@ -1368,6 +1586,9 @@ static NNUEApplyParams nnue_apply_compute_params(float lr_scale)
 {
     t_adam++;
     t_ft_session++;
+#if WDL_HEAD
+    t_wdl++;
+#endif
     const uint32_t ft_t       = std::min(t_adam, t_ft_session);
     const float warmup_factor = (TDLEAF_ADAM_WARMUP > 0 && t_adam <= (uint32_t)TDLEAF_ADAM_WARMUP)
         ? (float)t_adam / (float)TDLEAF_ADAM_WARMUP : 1.0f;
@@ -1383,6 +1604,9 @@ static NNUEApplyParams nnue_apply_compute_params(float lr_scale)
     p.psqt_lr     = lr_scale * warmup_factor * TDLEAF_ADAM_PSQT_LR0;
     p.ft_bc2_cold = 1.0f - powf(TDLEAF_ADAM_BETA2, (float)ft_t);
     p.ft_bc2_warm = 1.0f - powf(TDLEAF_ADAM_BETA2, (float)t_adam);
+#if WDL_HEAD
+    p.wdl_lr      = lr_scale * warmup_factor * TDLEAF_ADAM_WDL_LR0;
+#endif
     return p;
 }
 
@@ -1434,6 +1658,23 @@ static void nnue_apply_fc_stack(int s, const NNUEApplyParams &p,
         l2_bias_f32[s] -= dw;
         l2_bias_cnt[s]++;
     }
+#if WDL_HEAD
+    // Auxiliary WDL head (mirrors the serial body: fp32, t_wdl counter, no
+    // weight decay, no clamp).
+    for (int o = 0; o < NNUE_WDL_OUT; o++) {
+        for (int i = 0; i < NNUE_WDL_IN; i++)
+            if (grad_wdl_w[s][o][i] != 0.0f) {
+                float dw = nnue_adam_step(grad_wdl_w[s][o][i], m_wdl_w[s][o][i],
+                                          v_wdl_w[s][o][i], t_wdl - 1, p.wdl_lr, smax, sclip);
+                wdl_weights_f32[s][o][i] -= dw;
+            }
+        if (grad_wdl_b[s][o] != 0.0f) {
+            float dw = nnue_adam_step(grad_wdl_b[s][o], m_wdl_b[s][o],
+                                      v_wdl_b[s][o], t_wdl - 1, p.wdl_lr, smax, sclip);
+            wdl_bias_f32[s][o] -= dw;
+        }
+    }
+#endif
 }
 
 // FT weight + PSQT Adam for the dirty rows rows[lo..hi) (mirrors the serial
@@ -1536,6 +1777,10 @@ void nnue_apply_gradients_parallel(float lr_scale, int nthreads,
     memset(grad_l1_b, 0, sizeof(grad_l1_b));
     memset(grad_l2_w, 0, sizeof(grad_l2_w));
     memset(grad_l2_b, 0, sizeof(grad_l2_b));
+#if WDL_HEAD
+    memset(grad_wdl_w, 0, sizeof(grad_wdl_w));
+    memset(grad_wdl_b, 0, sizeof(grad_wdl_b));
+#endif
     nnue_apply_ft_bias(p, step_max_ft_bias, step_clips_ft_bias);
     for (int t = 0; t < nthreads; t++) {
         if (tmax[t*4+0] > step_max_fc)   step_max_fc   = tmax[t*4+0];
@@ -1779,9 +2024,20 @@ void nnue_requantize_fc_applied()
 //   The writer emits v12 only.  The loader still accepts v2–v11: it reads and
 //   discards the dropped bytes to stay aligned, then upgrades to v12 on save.
 // ---------------------------------------------------------------------------
+// Version 13 additions (WDL_HEAD builds): trailing WDL head section —
+//   uint32_t t_wdl                                               (4 B)
+//   8 stacks × (fp32 w[3][34] + fp32 b[3] + fp32 v_w/v_b + fp32 m_w/m_b)
+//   Raw fp32, no TDLEAF_SCALE (head weights are O(0.01–1) floats).
+//   A non-WDL reader stops before the section (trailing bytes ignored); a WDL
+//   reader of a v12 file keeps the fresh-init head.  Non-WDL builds keep
+//   writing v12.
 static const float    TDLEAF_SCALE   = 128.0f;
 static const uint32_t TDLEAF_MAGIC   = 0x544D4C46u; // "TMLF"
+#if WDL_HEAD
+static const uint32_t TDLEAF_VERSION = 13u;
+#else
 static const uint32_t TDLEAF_VERSION = 12u;
+#endif
 
 // ---------------------------------------------------------------------------
 // tdleaf_acquire_lock / tdleaf_release_lock
@@ -2029,6 +2285,22 @@ bool nnue_save_fc_weights(const char *path)
 
     // (v12: the v11 PSQT init slot-means block was removed.)
 
+#if WDL_HEAD
+    // WDL head section (v13): weights/biases + Adam v,m + t_wdl, raw fp32.
+    fwrite(&t_wdl, sizeof(uint32_t), 1, f);
+    for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
+        for (int o = 0; o < NNUE_WDL_OUT; o++)
+            fwrite(wdl_weights_f32[s][o], sizeof(float), NNUE_WDL_IN, f);
+        fwrite(wdl_bias_f32[s], sizeof(float), NNUE_WDL_OUT, f);
+        for (int o = 0; o < NNUE_WDL_OUT; o++)
+            fwrite(v_wdl_w[s][o], sizeof(float), NNUE_WDL_IN, f);
+        fwrite(v_wdl_b[s], sizeof(float), NNUE_WDL_OUT, f);
+        for (int o = 0; o < NNUE_WDL_OUT; o++)
+            fwrite(m_wdl_w[s][o], sizeof(float), NNUE_WDL_IN, f);
+        fwrite(m_wdl_b[s], sizeof(float), NNUE_WDL_OUT, f);
+    }
+#endif
+
     fclose(f);
 
     // Atomic rename: temp → final (replaces the old file in one syscall).
@@ -2087,7 +2359,7 @@ bool nnue_load_fc_weights(const char *path)
     }
 
     // ---- Version 2 / 3 / 4 / 5 / 6 / 7 / 8 / 9 / 10: float32 × TDLEAF_SCALE + uint32 counts ----
-    if (version != 2u && version != 3u && version != 4u && version != 5u && version != 6u && version != 7u && version != 8u && version != 9u && version != 10u && version != 11u && version != TDLEAF_VERSION) {
+    if (version != 2u && version != 3u && version != 4u && version != 5u && version != 6u && version != 7u && version != 8u && version != 9u && version != 10u && version != 11u && version != 12u && version != 13u) {
         fprintf(stderr, "TDLeaf: unsupported version %u in %s\n", version, path);
         fclose(f); tdleaf_release_lock(lock_fd); return false;
     }
@@ -2315,6 +2587,29 @@ bool nnue_load_fc_weights(const char *path)
         (void)fread(means, sizeof(float), 11 * NNUE_PSQT_BKTS, f);
     }
 
+#if WDL_HEAD
+    // WDL head section (v13+): restore head weights + Adam state.  Older files
+    // (or a truncated section) leave the fresh-init head in place — non-fatal.
+    bool wdl_loaded = false;
+    if (ok && version >= 13u) {
+        uint32_t file_t_wdl = 0;
+        bool wok = (fread(&file_t_wdl, sizeof(uint32_t), 1, f) == 1);
+        for (int s = 0; s < NNUE_LAYER_STACKS && wok; s++) {
+            for (int o = 0; o < NNUE_WDL_OUT && wok; o++)
+                wok = (fread(wdl_weights_f32[s][o], sizeof(float), NNUE_WDL_IN, f) == (size_t)NNUE_WDL_IN);
+            if (wok) wok = (fread(wdl_bias_f32[s], sizeof(float), NNUE_WDL_OUT, f) == (size_t)NNUE_WDL_OUT);
+            for (int o = 0; o < NNUE_WDL_OUT && wok; o++)
+                wok = (fread(v_wdl_w[s][o], sizeof(float), NNUE_WDL_IN, f) == (size_t)NNUE_WDL_IN);
+            if (wok) wok = (fread(v_wdl_b[s], sizeof(float), NNUE_WDL_OUT, f) == (size_t)NNUE_WDL_OUT);
+            for (int o = 0; o < NNUE_WDL_OUT && wok; o++)
+                wok = (fread(m_wdl_w[s][o], sizeof(float), NNUE_WDL_IN, f) == (size_t)NNUE_WDL_IN);
+            if (wok) wok = (fread(m_wdl_b[s], sizeof(float), NNUE_WDL_OUT, f) == (size_t)NNUE_WDL_OUT);
+        }
+        if (wok) { t_wdl = file_t_wdl; wdl_loaded = true; }
+        else       nnue_wdl_fresh_init();   // partial read → clean re-init
+    }
+#endif
+
     fclose(f);
     tdleaf_release_lock(lock_fd);
     if (!ok) {
@@ -2334,9 +2629,17 @@ bool nnue_load_fc_weights(const char *path)
 
     if (version == TDLEAF_VERSION)
         snprintf(nnue_diag.tdleaf_summary, sizeof(nnue_diag.tdleaf_summary),
-                 "TDLeaf: loaded v%u weights from %s (%d FT rows, %d FT-v rows, adam_v=%s, adam_m=%s, t_adam=%u, content_hash=0x%08X)",
+                 "TDLeaf: loaded v%u weights from %s (%d FT rows, %d FT-v rows, adam_v=%s, adam_m=%s, t_adam=%u, content_hash=0x%08X"
+#if WDL_HEAD
+                 ", wdl=%s, t_wdl=%u"
+#endif
+                 ")",
                  TDLEAF_VERSION, path, n_ft_loaded, n_ft_v_loaded,
-                 adam_v_loaded ? "yes" : "no", adam_m_loaded ? "yes" : "no", t_adam, nnue_content_hash);
+                 adam_v_loaded ? "yes" : "no", adam_m_loaded ? "yes" : "no", t_adam, nnue_content_hash
+#if WDL_HEAD
+                 , wdl_loaded ? "loaded" : "fresh-init", t_wdl
+#endif
+                 );
     else if (version >= 5u)
         snprintf(nnue_diag.tdleaf_summary, sizeof(nnue_diag.tdleaf_summary),
                  "TDLeaf: loaded v%u weights from %s (%d FT rows, adam_v=%s, adam_m=%s, t_adam=%u, will upgrade to v%u on next save — piece_val/slot-mean fields discarded)",
