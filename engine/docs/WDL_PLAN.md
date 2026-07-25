@@ -43,6 +43,38 @@ Fit the target constants from data before any engine change.
 - **Exit:** fitted (`λ_dec`, `λ_draw`) with evidence, or a measured null
   (λ_draw ≈ λ_dec ⇒ single λ, idea retired cheaply).
 
+### Phase 0 results (2026-07-25 — `scripts/fit_outcome_lambda.py`)
+
+Data: `learn/corpus_r_dedup.tsv` (root corpus, d6 generation, early-training
+net era, 78k games sampled / 25M rows).  Method: future-eval-anchored blend
+fit — held-out CE against the outcome itself is circular (the outcome is
+inside the target, λ→1 always wins), so the target is scored on predicting
+`σ(cp/K)` at horizon `h` plies ahead; closed-form optimal blend weight
+`w*(d)` per distance bin + geometric fit, confirmed by direct λ scan.
+Split-half agreement ≤ 0.0025 everywhere.
+
+| anchor | λ_dec | λ_draw |
+|---|---|---|
+| h = 8  | 0.975 | 0.958 |
+| h = 16 | 0.985 | 0.978 |
+| h = 32 | 0.993 | 0.988 |
+
+- **λ_draw < λ_dec at every horizon** (Δ ≈ 0.005–0.017): draw outcomes decay
+  *faster* — very informative near the end (`w*` 0.7–0.9 at d≈10), weakly
+  informative far back.  Absolute λ rises with anchor horizon (proxy
+  contamination — future eval approaches the outcome as h→d), so the robust
+  readout is the class *separation*; the h=16 anchor reproduces the tuned
+  `TDLEAF_LAMBDA = 0.985` for decisive games.
+- **Starting constants:** `λ_dec = 0.985` (unchanged), `λ_draw ≈ 0.9775`,
+  to be validated by a cheap batch-train A/B; **refit on mature-net d8 data**
+  before Stage C (era caveat: fitted on early-net d6 corpus, 14% draw rate).
+- **Draw-rate prior** for head init, this era: `p_d ≈ 0.14` (recompute at
+  init time from the then-current corpus).
+- **Reliability by distance** (WDL motivation confirmed in-house): near the
+  end (d<20) moderate evals over-claim — `σ(cp/K) = 0.75` realizes only
+  `z ≈ 0.64` ("ahead but drawish"); at long distance mid evals are slightly
+  under-confident.  Full curves in `learn/wdl_phase0/`.
+
 ## Phase 1 — Branch + head scaffolding (Stage A, offline)
 
 Fresh branch from `main` (suggested: `wdl-head-2`).  Port by hand from
