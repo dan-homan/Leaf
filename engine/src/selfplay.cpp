@@ -537,6 +537,17 @@ static bool learner_process_file(const char *path, TDGameRecord *grec,
             fclose(f);
             return false;
         }
+        // Sanity-guard the shipped positions' fifty counter (a WDL head input
+        // read straight from pos.fifty — docs/WDL_PLAN.md Phase 2): a value
+        // outside [0,100] means a corrupt/incompatible record.
+        if (tr.pos.fifty < 0 || tr.pos.fifty > 100 ||
+            tr.root_pos.fifty < 0 || tr.root_pos.fifty > 100) {
+            fprintf(stderr, "learner: bad fifty counter (%d/%d) in %s record %d "
+                            "— skipping file\n",
+                    (int)tr.pos.fifty, (int)tr.root_pos.fifty, path, t);
+            fclose(f);
+            return false;
+        }
         TDRecord &r = grec->plies[t];
         r.pos               = tr.pos;
         r.root_pos          = tr.root_pos;

@@ -145,6 +145,28 @@ the head and records the flag in the sidecar.
 - **Exit:** head trained online matches offline-corpus calibration on the
   held-out slice.
 
+### Phase 2 results (2026-07-25)
+
+Zero learner code changes needed beyond a fifty sanity guard: the `.tdg`
+record ships the full `position` (fifty included), `tdleaf_rebuild_record`
+fills the rest, and the WDL λ-return bootstrap is computed by forward passes
+at update time — so the head's targets are on current weights **by
+construction**, independent of `--refresh-scores` (which remains required
+for the scalar targets, as before).  The learner now rejects trajectory
+files whose positions carry a fifty counter outside [0,100].
+
+Verified (m260720 net, d5, natural termination, disjoint opening chunks):
+- Frozen actor (400 games) → `.tdg` → learner `--refresh-scores`: 397/397
+  consumed, 0 rejected, v13 saved; dumped corpus carries real fifty values
+  (observed up to 99; 27 fifty-move draws in generation).
+- **Actor generation is byte-identical** between WDL and non-WDL builds
+  (20-game `.tdg` byte comparison, pid-gid excluded) — the draw-rate canary
+  is unchanged by construction.
+- **Held-out calibration** (Brier on a 150-game disjoint chunk):
+  fresh-init 0.597 → online-trained 0.527 vs offline-trained (2 epochs on
+  the same games' corpus) 0.520.  Online matches offline within ~1.3%; the
+  small offline edge is the expected two-full-passes effect.
+
 ## Phase 3 — Trunk commitment (Stage B)
 
 - WDL CE becomes the primary loss into FT/FC0/FC1 (port the branch's Phase-4
