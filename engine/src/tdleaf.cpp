@@ -454,6 +454,16 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
                               rec.plies[t].wtm, act);
             nnue_wdl_head_forward(act, rec.plies[t].psqt,
                                   (int)rec.plies[t].pos.fifty);
+#if WDL_TRUNK_GRAD
+            // The trunk backprop needs the FT backprop fields (Stage A's
+            // head-only gradient does not touch them).
+            memcpy(act.acc_raw[0], rec.plies[t].acc[0], NNUE_HALF_DIMS * sizeof(int16_t));
+            memcpy(act.acc_raw[1], rec.plies[t].acc[1], NNUE_HALF_DIMS * sizeof(int16_t));
+            act.n_ft[0] = rec.plies[t].n_ft[0];
+            act.n_ft[1] = rec.plies[t].n_ft[1];
+            memcpy(act.ft_idx[0], rec.plies[t].ft_idx[0], rec.plies[t].n_ft[0] * sizeof(int));
+            memcpy(act.ft_idx[1], rec.plies[t].ft_idx[1], rec.plies[t].n_ft[1] * sizeof(int));
+#endif
             float d_logits[NNUE_WDL_OUT];
             for (int o = 0; o < NNUE_WDL_OUT; o++)
                 d_logits[o] = act.wdl_soft[o] - tgt[o];   // softmax-CE grad, STM POV

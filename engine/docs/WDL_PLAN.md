@@ -183,6 +183,38 @@ Verified (m260720 net, d5, natural termination, disjoint opening chunks):
 - **Exit:** scalar-play gauntlet non-regressing; head calibration improves
   (trunk features now serve the head).
 
+### Phase 3 status (2026-07-25 — code + offline A/B done, gauntlet pending)
+
+`WDL_TRUNK_GRAD=1` ports the trunk backprop (fc2_in → FC1 → FC0 → FT, with
+FC2 weights, the FC0 passthrough, and PSQT all excluded; wdl_mat/wdl_fifty
+stop-gradient).  `TDLEAF_WDL_TRUNK_WEIGHT` (default 0.1) is compile-time,
+sweepable via `comp.pl TDLEAF_WDL_TRUNK_WEIGHT=<x>` — no new env vars.
+- **Regression:** a weight-0 trunk-grad build reproduces the Stage-A
+  `.tdleaf.bin` bit-exactly (whole file, head section included).
+- **LR recalibration check:** serial-apply step-clip telemetry over 743
+  batches — zero clips, per-category max |step| unchanged vs no-trunk
+  (FC 2.4 vs 2.5, FT 22.9 vs 22.5); Adam's per-weight normalisation absorbs
+  the gradient mix.  No LR changes needed at weight 0.1.
+- **Offline A/B** (2M-row corpus slice, 2 epochs, 100k-row held-out val):
+
+  | trunk weight | scalar MSE(blend) | WDL Brier |
+  |---|---|---|
+  | 0 (Stage A) | 0.01766 | 0.4298 |
+  | 0.1         | 0.01781 | 0.4257 |
+  | 0.5         | 0.01782 | 0.4258 |
+  | 1.0         | 0.01785 | 0.4258 |
+
+  Brier gains ~1% at 0.1 and saturates; scalar MSE degrades slightly and
+  monotonically.  0.1 confirmed as default.  (Unlike the old branch's
+  report, weight 1.0 does not hurt Brier here — but it buys nothing over
+  0.1 and costs the most scalar MSE.)
+- Landmine fixed during the port: the online WDL pass must copy the FT
+  backprop fields (acc_raw/ft_idx/n_ft) into the activations when the trunk
+  gradient is on — Stage A's head-only path never read them.
+- **Pending:** scalar-play A/B gauntlet vs foreign anchor
+  (full-corpus-consolidated w0 vs w0.1 nets), then a full `train.py
+  --wdl-head` hybrid iteration.
+
 ## Phase 4 — Search on WDL (Stage C)
 
 - Score dispatch in `score.cpp` switches to the logit conversion.  Fast

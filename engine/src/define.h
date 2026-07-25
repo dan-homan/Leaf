@@ -116,6 +116,22 @@
  #error "WDL_HEAD=1 requires TDLEAF=1"
 #endif
 
+// WDL_TRUNK_GRAD (Stage B, docs/WDL_PLAN.md Phase 3): let the WDL head's
+// gradient flow back into the SHARED trunk (FC1/FC0/FT weights + biases) via
+// fc2_in, scaled by TDLEAF_WDL_TRUNK_WEIGHT, so the WDL objective co-trains
+// the trunk.  The material channel (wdl_mat) stays stop-gradient — PSQT and
+// the eval scale are NOT perturbed — and the FC2 scalar output layer and the
+// FC0 passthrough are untouched.  OFF by default: with it off the head is a
+// pure read-out and the scalar net stays byte-identical to a non-WDL build.
+// With it ON the scalar net changes and must be gauntlet-validated.
+// Compile with -D WDL_HEAD=1 -D WDL_TRUNK_GRAD=1.
+#ifndef WDL_TRUNK_GRAD
+ #define WDL_TRUNK_GRAD 0
+#endif
+#if WDL_TRUNK_GRAD && !WDL_HEAD
+ #error "WDL_TRUNK_GRAD=1 requires WDL_HEAD=1"
+#endif
+
 // TDLEAF_LOG_STEP_CLIPS: append one line per Adam batch to
 // <exec_path>tdleaf_telemetry.log recording per-category max |step| and clip
 // counts.  Disabled by default; set to 1 to enable (for diagnosing clip

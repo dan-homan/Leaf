@@ -150,6 +150,18 @@ static const float TDLEAF_WDL_LAMBDA_DRAW = 0.9775f;
 // O(100) fc2_in activations even tiny noise swamps the logits.
 static const float WDL_INIT_MAT_W     = 1.0f / (2.0f * TDLEAF_K * WDL_MAT_SCALE);
 static const float WDL_INIT_DRAW_BIAS = -1.1f;
+#if WDL_TRUNK_GRAD
+// Scale of the WDL gradient that flows into the shared trunk (FC1/FC0/FT) as
+// an auxiliary objective — the head's own weights always learn at full
+// TDLEAF_WDL_WEIGHT regardless.  1.0 = full strength; the old-branch offline
+// A/B degraded both scalar MSE and WDL Brier at 1.0, so default to a gentle
+// co-training weight.  Overridable at compile time (comp.pl passes
+// TDLEAF_WDL_TRUNK_WEIGHT=<x> through as -D) so the weight can be swept with
+// builds, not env vars (guardrail policy).
+#ifndef TDLEAF_WDL_TRUNK_WEIGHT
+ #define TDLEAF_WDL_TRUNK_WEIGHT 0.1f
+#endif
+#endif
 #endif
 // Material representation: pure-PSQT — the bucketed PSQT is the SOLE trainable
 // material channel.  There is no dense piece_val channel and no gauge machinery
