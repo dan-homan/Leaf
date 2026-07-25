@@ -211,9 +211,24 @@ sweepable via `comp.pl TDLEAF_WDL_TRUNK_WEIGHT=<x>` — no new env vars.
 - Landmine fixed during the port: the online WDL pass must copy the FT
   backprop fields (acc_raw/ft_idx/n_ft) into the activations when the trunk
   gradient is on — Stage A's head-only path never read them.
-- **Pending:** scalar-play A/B gauntlet vs foreign anchor
-  (full-corpus-consolidated w0 vs w0.1 nets), then a full `train.py
-  --wdl-head` hybrid iteration.
+- **Full-corpus A/B** (25M-row root corpus, 2 epochs, 1.26M-row held-out
+  val): trunk weight 0.1 → Brier 0.4290 → 0.4208 (−1.9%), scalar MSE(blend)
+  0.01301 → 0.01335 (+2.6%) — both effects larger at scale than on the 2M
+  slice.
+- **Scalar-play A/B gauntlet** (800 games/arm vs `Leaf_vclassic_eval`,
+  3+0.05, FRC openings, one BayesElo frame): w0 −80 ±25, w0.1 −95 ±26 —
+  a −15 ±36 point estimate.  **Inconclusive within error**: no confirmed
+  regression, but no evidence the trunk co-training helps scalar play
+  either, consistent with the small monotone offline MSE cost.  Resolving
+  ±10 Elo would need ~10k games/arm.
+- **Recommendation recorded:** `WDL_TRUNK_GRAD` stays opt-in (default off)
+  for scalar-play-bound training; use it (weight 0.1) on the Stage-C track,
+  where the calibration gain is what matters and the scalar-play cost is
+  moot (search will run on the head).  Weight 0.1 is the confirmed sweet
+  spot in either case.
+- **Pending:** one full `train.py --wdl-head` hybrid iteration
+  (generation → consolidation → gauntlet) — multi-hour compute; scheduled
+  at the operator's discretion.
 
 ## Phase 4 — Search on WDL (Stage C)
 
