@@ -406,19 +406,40 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
                                               : TDLEAF_WDL_LAMBDA_DEC;
         static float PW [MAX_GAME_PLY][NNUE_WDL_OUT];  // predicted dist, White POV
         static float piW[MAX_GAME_PLY][NNUE_WDL_OUT];  // λ-return target, White POV
+#if !WDL_TRUNK_GRAD
+        // Production path: head inputs come from the INT inference path
+        // (train == serve, docs/WDL_PLAN.md Phase 4).  Captures + softmaxes
+        // from pass 1 are reused in pass 2.
+        static NNUEIntActs wdl_caps[MAX_GAME_PLY];
+        static float       wdl_softs[MAX_GAME_PLY][NNUE_WDL_OUT];
+#endif
 
         // Pass 1: predicted White-POV distribution per ply (current weights).
         for (int t = 0; t < T; t++) {
+            float soft[NNUE_WDL_OUT];
+#if WDL_TRUNK_GRAD
             NNUEActivations act;
             act.stack = rec.plies[t].stack;
             nnue_forward_fp32(rec.plies[t].acc, rec.plies[t].psqt,
                               rec.plies[t].wtm, act);
             nnue_wdl_head_forward(act, rec.plies[t].psqt,
                                   (int)rec.plies[t].pos.fifty);
+            for (int o = 0; o < NNUE_WDL_OUT; o++) soft[o] = act.wdl_soft[o];
+#else
+            // pc argument only selects the stack: stack*4+1 reproduces the
+            // recorded bucket exactly.
+            (void)nnue_evaluate_acc_raw(rec.plies[t].acc, rec.plies[t].psqt,
+                                        rec.plies[t].wtm ? 1 : 0,
+                                        rec.plies[t].stack * 4 + 1, &wdl_caps[t]);
+            float logits[NNUE_WDL_OUT];
+            nnue_wdl_int_forward(wdl_caps[t], (int)rec.plies[t].pos.fifty,
+                                 logits, wdl_softs[t]);
+            for (int o = 0; o < NNUE_WDL_OUT; o++) soft[o] = wdl_softs[t][o];
+#endif
             if (rec.plies[t].wtm) {           // STM == White: no swap
-                PW[t][0] = act.wdl_soft[0]; PW[t][1] = act.wdl_soft[1]; PW[t][2] = act.wdl_soft[2];
+                PW[t][0] = soft[0]; PW[t][1] = soft[1]; PW[t][2] = soft[2];
             } else {                          // STM == Black: swap win/loss
-                PW[t][0] = act.wdl_soft[2]; PW[t][1] = act.wdl_soft[1]; PW[t][2] = act.wdl_soft[0];
+                PW[t][0] = soft[2]; PW[t][1] = soft[1]; PW[t][2] = soft[0];
             }
         }
 
@@ -440,7 +461,7 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
                 piW[t][o] = (1.0f - lam) * PW[t + 1][o] + lam * piW[t + 1][o];
         }
 
-        // Pass 2: forward again for activations, accumulate the head gradient.
+        // Pass 2: accumulate the head gradient against the λ-return targets.
         for (int t = 0; t < T; t++) {
             float tgt[NNUE_WDL_OUT];
             if (rec.plies[t].wtm) {           // White POV → STM POV: no swap
@@ -448,29 +469,36 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
             } else {                          // swap win/loss back for Black STM
                 tgt[0] = piW[t][2]; tgt[1] = piW[t][1]; tgt[2] = piW[t][0];
             }
+            float id_weight = 1.0f / (1.0f + rec.plies[t].id_score_variance
+                                             / TDLEAF_ID_VAR_SIGMA2);
+            float d_logits[NNUE_WDL_OUT];
+#if WDL_TRUNK_GRAD
             NNUEActivations act;
             act.stack = rec.plies[t].stack;
             nnue_forward_fp32(rec.plies[t].acc, rec.plies[t].psqt,
                               rec.plies[t].wtm, act);
             nnue_wdl_head_forward(act, rec.plies[t].psqt,
                                   (int)rec.plies[t].pos.fifty);
-#if WDL_TRUNK_GRAD
-            // The trunk backprop needs the FT backprop fields (Stage A's
-            // head-only gradient does not touch them).
+            // The trunk backprop needs the FT backprop fields (the head-only
+            // gradient does not touch them).
             memcpy(act.acc_raw[0], rec.plies[t].acc[0], NNUE_HALF_DIMS * sizeof(int16_t));
             memcpy(act.acc_raw[1], rec.plies[t].acc[1], NNUE_HALF_DIMS * sizeof(int16_t));
             act.n_ft[0] = rec.plies[t].n_ft[0];
             act.n_ft[1] = rec.plies[t].n_ft[1];
             memcpy(act.ft_idx[0], rec.plies[t].ft_idx[0], rec.plies[t].n_ft[0] * sizeof(int));
             memcpy(act.ft_idx[1], rec.plies[t].ft_idx[1], rec.plies[t].n_ft[1] * sizeof(int));
-#endif
-            float d_logits[NNUE_WDL_OUT];
             for (int o = 0; o < NNUE_WDL_OUT; o++)
                 d_logits[o] = act.wdl_soft[o] - tgt[o];   // softmax-CE grad, STM POV
-            float id_weight = 1.0f / (1.0f + rec.plies[t].id_score_variance
-                                             / TDLEAF_ID_VAR_SIGMA2);
             nnue_accumulate_wdl_gradients(act, d_logits,
                                           TDLEAF_WDL_WEIGHT * id_weight);
+#else
+            for (int o = 0; o < NNUE_WDL_OUT; o++)
+                d_logits[o] = wdl_softs[t][o] - tgt[o];   // softmax-CE grad, STM POV
+            nnue_accumulate_wdl_gradients_int(wdl_caps[t],
+                                              (int)rec.plies[t].pos.fifty,
+                                              d_logits,
+                                              TDLEAF_WDL_WEIGHT * id_weight);
+#endif
         }
     }
 #endif  // WDL_HEAD

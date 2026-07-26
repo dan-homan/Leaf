@@ -132,6 +132,21 @@
  #error "WDL_TRUNK_GRAD=1 requires WDL_HEAD=1"
 #endif
 
+// WDL_SEARCH (Stage C, docs/WDL_PLAN.md Phase 4): the search runs on the
+// WDL head's logit-space centipawn conversion instead of the scalar FC2
+// output.  The head reads the INT inference path's fc2_in (train == serve;
+// the FP32-shadow activations diverge from the int path at trained
+// checkpoints).  Requires NNUE=1; does NOT require TDLEAF — a play binary
+// loads the head from the .nnue trailer (and hard-errors if the net has
+// none).  Training binaries combine WDL_SEARCH with WDL_HEAD (+TDLEAF).
+// Compile with -D NNUE=1 -D WDL_SEARCH=1 [-D TDLEAF=1 -D WDL_HEAD=1].
+#ifndef WDL_SEARCH
+ #define WDL_SEARCH 0
+#endif
+#if WDL_SEARCH && !NNUE
+ #error "WDL_SEARCH=1 requires NNUE=1"
+#endif
+
 // TDLEAF_LOG_STEP_CLIPS: append one line per Adam batch to
 // <exec_path>tdleaf_telemetry.log recording per-category max |step| and clip
 // counts.  Disabled by default; set to 1 to enable (for diagnosing clip

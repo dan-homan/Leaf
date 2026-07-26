@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <cmath>
 #include <algorithm>
 #include <random>
 #include "define.h"
@@ -50,6 +51,17 @@ static int8_t  l1_weights[NNUE_LAYER_STACKS][NNUE_L1_SIZE * NNUE_L1_PADDED];
 // FC2 (output): 1 output × 32 padded-inputs
 static int32_t out_biases [NNUE_LAYER_STACKS];
 static int8_t  out_weights[NNUE_LAYER_STACKS][NNUE_L2_PADDED];
+
+#if WDL_HEAD || WDL_SEARCH
+// Auxiliary WDL head — fp32, never quantized; the SINGLE authoritative copy
+// for both training (nnue_training.cpp trains these in place) and inference
+// (docs/WDL_PLAN.md).  Filled by the .nnue trailer, a .tdleaf.bin v13 load,
+// or the training fresh-init; nnue_wdl_loaded tracks that one of those
+// happened (a WDL_SEARCH play binary refuses to run without it).
+float wdl_weights_f32[NNUE_LAYER_STACKS][NNUE_WDL_OUT][NNUE_WDL_IN];
+float wdl_bias_f32   [NNUE_LAYER_STACKS][NNUE_WDL_OUT];
+bool  nnue_wdl_loaded = false;
+#endif
 
 // Path of the currently loaded .nnue file and per-stack hashes (for nnue_write_nnue).
 static char    nnue_loaded_path[FILENAME_MAX] = "";
@@ -499,7 +511,11 @@ void nnue_apply_delta(NNUEAccumulator &acc,
 //
 // FC2 output + FC0 direct + PSQT → centipawns
 // ---------------------------------------------------------------------------
-int nnue_evaluate(const NNUEAccumulator &acc, int stm, int piece_count)
+int nnue_evaluate(const NNUEAccumulator &acc, int stm, int piece_count
+#if WDL_HEAD || WDL_SEARCH
+                  , NNUEIntActs *cap
+#endif
+                  )
 {
     if (piece_count < 1)  piece_count = 1;
     if (piece_count > 32) piece_count = 32;
@@ -762,6 +778,16 @@ int nnue_evaluate(const NNUEAccumulator &acc, int stm, int piece_count)
     int score = (int32_t)((int64_t)(psqt_diff / 2 + positional) * 100 / 5776);
 #endif
 
+#if WDL_HEAD || WDL_SEARCH
+    // Capture the int-path activations for the WDL head (train == serve).
+    if (cap) {
+        for (int i = 0; i < NNUE_L2_PADDED; i++)
+            cap->fc2_in[i] = (float)fc2_in[i];
+        cap->score_cp = (float)score;
+        cap->stack    = stack;
+    }
+#endif
+
     if (getenv("NNUE_DEBUG"))
         fprintf(stderr, "NNUE_DEBUG: stack=%d fc2=%d fwd=%d positional=%d psqt_diff=%d total=%d\n",
                 stack, fc2_out, fwdOut, positional, psqt_diff, score);
@@ -796,6 +822,120 @@ int nnue_evaluate(const NNUEAccumulator &acc, int stm, int piece_count)
     }
     return score;
 }
+
+#if WDL_HEAD || WDL_SEARCH
+// ===========================================================================
+// WDL head — int-path inference (docs/WDL_PLAN.md Phase 4).
+// The head's canonical inputs are the INT inference path's fc2_in plus the
+// int path's cp score (material channel) and the fifty counter — training
+// uses the same capture, so there is no train/serve activation skew.
+// ===========================================================================
+
+// Head logits + softmax from captured int-path activations.  STM POV.
+void nnue_wdl_int_forward(const NNUEIntActs &cap, int fifty,
+                          float logits[NNUE_WDL_OUT], float soft[NNUE_WDL_OUT])
+{
+    int s = cap.stack;
+    float mat   = cap.score_cp * WDL_MAT_SCALE;
+    float fin   = (float)fifty * WDL_FIFTY_SCALE;
+    for (int o = 0; o < NNUE_WDL_OUT; o++) {
+        float sum = wdl_bias_f32[s][o];
+        const float *w = wdl_weights_f32[s][o];
+        for (int i = 0; i < NNUE_L2_PADDED; i++) sum += w[i] * cap.fc2_in[i];
+        sum += w[NNUE_WDL_MAT]   * mat;
+        sum += w[NNUE_WDL_FIFTY] * fin;
+        logits[o] = sum;
+    }
+    if (soft) {
+        float mx = logits[0];
+        if (logits[1] > mx) mx = logits[1];
+        if (logits[2] > mx) mx = logits[2];
+        float e0 = expf(logits[0] - mx), e1 = expf(logits[1] - mx), e2 = expf(logits[2] - mx);
+        float inv = 1.0f / (e0 + e1 + e2);
+        soft[0] = e0 * inv; soft[1] = e1 * inv; soft[2] = e2 * inv;
+    }
+}
+
+// Flat serialize/restore for the .nnue trailer (order: per stack, weights
+// [o][i] then biases [o]).
+void nnue_wdl_export(float *buf)
+{
+    for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
+        for (int o = 0; o < NNUE_WDL_OUT; o++)
+            for (int i = 0; i < NNUE_WDL_IN; i++) *buf++ = wdl_weights_f32[s][o][i];
+        for (int o = 0; o < NNUE_WDL_OUT; o++) *buf++ = wdl_bias_f32[s][o];
+    }
+}
+void nnue_wdl_import(const float *buf)
+{
+    for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
+        for (int o = 0; o < NNUE_WDL_OUT; o++)
+            for (int i = 0; i < NNUE_WDL_IN; i++) wdl_weights_f32[s][o][i] = *buf++;
+        for (int o = 0; o < NNUE_WDL_OUT; o++) wdl_bias_f32[s][o] = *buf++;
+    }
+    nnue_wdl_loaded = true;
+}
+
+// Read-out for the `wdl` CLI / diagnostics — same int path the search uses.
+void nnue_evaluate_wdl(const NNUEAccumulator &acc, int stm, int piece_count,
+                       int fifty, float out[NNUE_WDL_OUT])
+{
+    NNUEIntActs cap;
+    (void)nnue_evaluate(acc, stm, piece_count, &cap);
+    float logits[NNUE_WDL_OUT];
+    nnue_wdl_int_forward(cap, fifty, logits, out);
+}
+#endif  // WDL_HEAD || WDL_SEARCH
+
+#if WDL_SEARCH
+// Side-relative contempt state: ln(c) and ln(1−c) for "STM is the root side"
+// (index 1) and "STM is the opponent" (index 0).  δ = 0 default gives
+// ln(0.5) for all four — side-symmetric, negamax-exact.
+static float wdl_ln_c  [2] = { -0.6931472f, -0.6931472f };
+static float wdl_ln_1mc[2] = { -0.6931472f, -0.6931472f };
+static int   wdl_root_side_white = 1;
+
+void nnue_wdl_set_contempt(float delta, int root_side_white)
+{
+    if (delta < -0.45f) delta = -0.45f;
+    if (delta >  0.45f) delta =  0.45f;
+    float c_own = 0.5f - delta;   // root side devalues its own draws by δ
+    float c_opp = 0.5f + delta;
+    wdl_ln_c  [1] = logf(c_own);  wdl_ln_1mc[1] = logf(1.0f - c_own);
+    wdl_ln_c  [0] = logf(c_opp);  wdl_ln_1mc[0] = logf(1.0f - c_opp);
+    wdl_root_side_white = root_side_white ? 1 : 0;
+}
+
+static inline float wdl_logaddexp(float a, float b)
+{
+    float m = (a > b) ? a : b;
+    float d = (a > b) ? b - a : a - b;
+    return m + log1pf(expf(d));
+}
+
+// Stage C search score (STM POV, centipawns).  See nnue.h for the formula.
+int nnue_evaluate_wdl_cp(const NNUEAccumulator &acc, int stm, int piece_count,
+                         int fifty, bool stm_is_root_side)
+{
+    NNUEIntActs cap;
+    (void)nnue_evaluate(acc, stm, piece_count, &cap);
+    float l[NNUE_WDL_OUT];
+    nnue_wdl_int_forward(cap, fifty, l, nullptr);
+    int side = stm_is_root_side ? 1 : 0;
+    float num = wdl_logaddexp(l[0], l[1] + wdl_ln_c  [side]);
+    float den = wdl_logaddexp(l[2], l[1] + wdl_ln_1mc[side]);
+    float cp  = NNUE_WDL_K * (num - den);
+    int s = (int)lrintf(cp);
+    if (s >  9999) s =  9999;
+    if (s < -9999) s = -9999;
+    return s;
+}
+
+// Root side accessor for score_pos (set per search via nnue_wdl_set_contempt;
+// with δ = 0 the value is irrelevant — both sides share c = 0.5).
+int nnue_wdl_root_side() { return wdl_root_side_white; }
+#endif  // WDL_SEARCH
+
 // ---------------------------------------------------------------------------
 // nnue_extract_piece_values — derive cp values from loaded PSQT and write
 // into value[1..5] (score.h global), replacing the hardcoded constants.

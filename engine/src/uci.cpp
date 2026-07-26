@@ -251,8 +251,19 @@ static void uci_send_options()
     printf("option name UCI_AnalyseMode type check default false\n");
     printf("option name UCI_Chess960 type check default false\n");
     printf("option name Skill type spin default %d min 1 max 100\n", game.knowledge_scale);
+#if WDL_SEARCH
+    // Contempt δ in percent of a draw's value: the engine values its own
+    // draws at 0.5 − δ and the opponent's at 0.5 + δ (docs/WDL_PLAN.md).
+    // Default 0 = honest expected-score maximization (the self-play optimum);
+    // training drivers never set this option.
+    printf("option name WDLContempt type spin default 0 min -45 max 45\n");
+#endif
     fflush(stdout);
 }
+
+#if WDL_SEARCH
+static int uci_wdl_contempt = 0;   // δ in percent of draw value
+#endif
 
 //----------------------------------------------------------------------
 // Handle setoption
@@ -292,6 +303,14 @@ static void uci_setoption(const std::string &line)
         if (v > 100) v = 100;
         game.knowledge_scale = v;
     }
+#if WDL_SEARCH
+    else if (name_str == "WDLContempt") {
+        int v = atoi(val_str.c_str());
+        if (v < -45) v = -45;
+        if (v >  45) v =  45;
+        uci_wdl_contempt = v;
+    }
+#endif
     // UCI_AnalyseMode handled per "go infinite"
 }
 
@@ -381,6 +400,12 @@ static void uci_set_position(const std::string &line)
 
 static void uci_dispatch_go(const std::string &line)
 {
+#if WDL_SEARCH
+    // Refresh the side-relative contempt state for this search: the root
+    // side is whoever is to move in the position just set.  δ = 0 (default)
+    // keeps the score side-symmetric.
+    nnue_wdl_set_contempt((float)uci_wdl_contempt / 100.0f, game.pos.wtm);
+#endif
     std::istringstream iss(line);
     std::string tok;
     iss >> tok; // "go"

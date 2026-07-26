@@ -1261,7 +1261,15 @@ int search_node::pvs(int alpha, int beta, int depth, int in_pv, int move_to_skip
      }
    }
    // see if we can return a score
+#if WDL_SEARCH
+   // Stage C: the eval depends on the fifty counter but the TT key does not,
+   // so near the fifty-move horizon a stored score may come from a different
+   // counter value.  Suppress score cutoffs there (move hints stay valid) —
+   // docs/WDL_PLAN.md Phase 4.
+   if(tt_ok && hdepth >= depth && pos.fifty < 90) {
+#else
    if(tt_ok && hdepth >= depth) {
+#endif
      if(hflag == FLAG_P) {
        tdata->hash_count++;
        if(hscore > alpha) {
@@ -2170,7 +2178,12 @@ int search_node::qsearch(int alpha, int beta, int qply)
         }
       }
       // see if we can return a score
+#if WDL_SEARCH
+      // Same fifty-counter gate as in pvs() — see comment there.
+      if(tt_ok && hdepth >= -1 && pos.fifty < 90) {
+#else
       if(tt_ok && hdepth >= -1) {
+#endif
 	if(hflag == FLAG_P) {
 	  tdata->hash_count++;
 	  if(hscore > alpha) {

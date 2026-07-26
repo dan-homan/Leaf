@@ -228,7 +228,7 @@ static bool nnue_load_stream(MemStream *s)
             { printf("NNUE: stack %d FC2 weight read failed\n", st); ms_close(s); return false; }
     }
 
-#if WDL_HEAD
+#if WDL_HEAD || WDL_SEARCH
     // Optional Leaf WDL trailer — versioned section appended after the last
     // FC stack by nnue_write_nnue.  Standard readers stop at the last stack,
     // so the trailer is invisible to them.  Read it into a buffer now (before
@@ -255,10 +255,21 @@ static bool nnue_load_stream(MemStream *s)
 #if TDLEAF
     nnue_init_fp32_weights();
 #endif
-#if WDL_HEAD
+#if WDL_HEAD || WDL_SEARCH
     if (wdl_trailer) {
-        nnue_wdl_import(wdl_buf);
+        nnue_wdl_import(wdl_buf);   // sets nnue_wdl_loaded
         fprintf(stderr, "NNUE: WDL head restored from .nnue trailer\n");
+    }
+#endif
+#if WDL_SEARCH && !TDLEAF
+    // A WDL_SEARCH play binary has no other head source (no fresh-init, no
+    // .tdleaf.bin): without the trailer the head is all zeros and every
+    // position scores 0 cp.  Refuse to run rather than play randomly.
+    if (!nnue_wdl_loaded) {
+        fprintf(stderr, "NNUE: FATAL — WDL_SEARCH build but the loaded .nnue "
+                        "has no WDL head trailer.  Export the net from a "
+                        "WDL_HEAD build (nnue_write_nnue appends the head).\n");
+        exit(1);
     }
 #endif
     return true;
@@ -531,7 +542,7 @@ bool nnue_write_nnue(const char *dst_path)
 
     delete[] tmp;
 
-#if WDL_HEAD
+#if WDL_HEAD || WDL_SEARCH
     // Leaf extension: trailing WDL-head section (magic + dims + fp32 weights).
     // Standard HalfKAv2_hm readers stop at the last FC stack, so the trailer
     // is invisible to them; Leaf's loader (nnue_load_stream) restores it, and

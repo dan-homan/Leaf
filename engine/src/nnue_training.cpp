@@ -23,14 +23,8 @@ static float l1_weights_f32[NNUE_LAYER_STACKS][NNUE_L1_SIZE * NNUE_L1_PADDED];
 static float l1_biases_f32 [NNUE_LAYER_STACKS][NNUE_L1_SIZE];
 static float l2_weights_f32[NNUE_LAYER_STACKS][NNUE_L2_PADDED];
 static float l2_bias_f32   [NNUE_LAYER_STACKS];
-#if WDL_HEAD
-// Auxiliary WDL head — fp32 weights, per material-bucket stack (34→3, see
-// docs/WDL_PLAN.md).  Not quantized: the head is off the search hot path in
-// Stage A (read-out + learning only).  Persisted in the .tdleaf.bin v13
-// section and as a trailing section of exported .nnue files.
-static float wdl_weights_f32[NNUE_LAYER_STACKS][NNUE_WDL_OUT][NNUE_WDL_IN];
-static float wdl_bias_f32   [NNUE_LAYER_STACKS][NNUE_WDL_OUT];
-#endif
+// (WDL head weights live in nnue.cpp — the single authoritative fp32 copy
+// shared by training and inference; declared extern in nnue.h.)
 
 // Update counts — per weight/bias, incremented each game a non-zero gradient was applied.
 // Saved to / loaded from .tdleaf.bin so training history accumulates across sessions.
@@ -254,6 +248,7 @@ static void nnue_wdl_fresh_init()
     memset(v_wdl_w, 0, sizeof(v_wdl_w));  memset(v_wdl_b, 0, sizeof(v_wdl_b));
     memset(m_wdl_w, 0, sizeof(m_wdl_w));  memset(m_wdl_b, 0, sizeof(m_wdl_b));
     t_wdl = 0;
+    nnue_wdl_loaded = true;
 }
 #endif
 
@@ -1100,41 +1095,35 @@ void nnue_accumulate_wdl_gradients(const NNUEActivations &act,
 }
 
 // ---------------------------------------------------------------------------
-// nnue_evaluate_wdl — inference-side read-out (the `wdl` CLI command and
-// diagnostics).  Not on any search hot path.
+// nnue_accumulate_wdl_gradients_int — head backprop from INT-path activations
+// (docs/WDL_PLAN.md Phase 4: train == serve).  The production head-learning
+// path; the fp32-activation version above is retained for the opt-in
+// WDL_TRUNK_GRAD mode, whose trunk backprop needs the fp32 activation record.
+// Head-only: all inputs stop-gradient.
 // ---------------------------------------------------------------------------
-void nnue_evaluate_wdl(const int16_t acc[2][NNUE_HALF_DIMS],
-                       const int32_t psqt[2][NNUE_PSQT_BKTS],
-                       bool wtm, int piece_count, int fifty,
-                       float out[NNUE_WDL_OUT])
+void nnue_accumulate_wdl_gradients_int(const NNUEIntActs &cap, int fifty,
+                                       const float d_logits[NNUE_WDL_OUT],
+                                       float scale, NNUEGradBuf *gb)
 {
-    if (piece_count < 1)  piece_count = 1;
-    if (piece_count > 32) piece_count = 32;
-    NNUEActivations act;
-    act.stack = (piece_count - 1) / 4;   // same bucketing as nnue_evaluate
-    nnue_forward_fp32(acc, psqt, wtm, act);
-    nnue_wdl_head_forward(act, psqt, fifty);
-    for (int o = 0; o < NNUE_WDL_OUT; o++) out[o] = act.wdl_soft[o];
+    if (!gb) gb = &g_grad;
+    int s = cap.stack;
+    float mat = cap.score_cp * WDL_MAT_SCALE;
+    float fin = (float)fifty * WDL_FIFTY_SCALE;
+    for (int o = 0; o < NNUE_WDL_OUT; o++) {
+        float g = scale * d_logits[o];
+        if (g == 0.0f) continue;
+        float *gw = gb->grad_wdl_w[s][o];
+        for (int i = 0; i < NNUE_L2_PADDED; i++)
+            gw[i] += g * cap.fc2_in[i];
+        gw[NNUE_WDL_MAT]   += g * mat;
+        gw[NNUE_WDL_FIFTY] += g * fin;
+        gb->grad_wdl_b[s][o] += g;
+    }
 }
 
-// Flat serialize/restore for the .nnue trailer (nnue_io.cpp).  Order: per
-// stack, weights [o][i] then biases [o].
-void nnue_wdl_export(float *buf)
-{
-    for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
-        for (int o = 0; o < NNUE_WDL_OUT; o++)
-            for (int i = 0; i < NNUE_WDL_IN; i++) *buf++ = wdl_weights_f32[s][o][i];
-        for (int o = 0; o < NNUE_WDL_OUT; o++) *buf++ = wdl_bias_f32[s][o];
-    }
-}
-void nnue_wdl_import(const float *buf)
-{
-    for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
-        for (int o = 0; o < NNUE_WDL_OUT; o++)
-            for (int i = 0; i < NNUE_WDL_IN; i++) wdl_weights_f32[s][o][i] = *buf++;
-        for (int o = 0; o < NNUE_WDL_OUT; o++) wdl_bias_f32[s][o] = *buf++;
-    }
-}
+// (nnue_evaluate_wdl and nnue_wdl_export/import moved to nnue.cpp — the
+// read-out now runs on the int inference path, and the trailer interface is
+// available to WDL_SEARCH-only play binaries.)
 #endif  // WDL_HEAD
 
 // ---------------------------------------------------------------------------
@@ -2729,7 +2718,7 @@ bool nnue_load_fc_weights(const char *path)
                 wok = (fread(m_wdl_w[s][o], sizeof(float), NNUE_WDL_IN, f) == (size_t)NNUE_WDL_IN);
             if (wok) wok = (fread(m_wdl_b[s], sizeof(float), NNUE_WDL_OUT, f) == (size_t)NNUE_WDL_OUT);
         }
-        if (wok) { t_wdl = file_t_wdl; wdl_loaded = true; }
+        if (wok) { t_wdl = file_t_wdl; wdl_loaded = true; nnue_wdl_loaded = true; }
         else       nnue_wdl_fresh_init();   // partial read → clean re-init
     }
 #endif
@@ -2790,7 +2779,11 @@ bool nnue_load_fc_weights(const char *path)
 // ---------------------------------------------------------------------------
 int nnue_evaluate_acc_raw(const int16_t acc[2][NNUE_HALF_DIMS],
                            const int32_t psqt[2][NNUE_PSQT_BKTS],
-                           int stm, int piece_count)
+                           int stm, int piece_count
+#if WDL_HEAD || WDL_SEARCH
+                           , NNUEIntActs *cap
+#endif
+                           )
 {
     NNUEAccumulator tmp;
     memcpy(tmp.acc[0],  acc[0],  NNUE_HALF_DIMS  * sizeof(int16_t));
@@ -2798,7 +2791,11 @@ int nnue_evaluate_acc_raw(const int16_t acc[2][NNUE_HALF_DIMS],
     memcpy(tmp.psqt[0], psqt[0], NNUE_PSQT_BKTS * sizeof(int32_t));
     memcpy(tmp.psqt[1], psqt[1], NNUE_PSQT_BKTS * sizeof(int32_t));
     tmp.computed = true;
+#if WDL_HEAD || WDL_SEARCH
+    return nnue_evaluate(tmp, stm, piece_count, cap);
+#else
     return nnue_evaluate(tmp, stm, piece_count);
+#endif
 }
 
 #endif // TDLEAF

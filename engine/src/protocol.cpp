@@ -249,7 +249,7 @@ void parse_command()
       cout << "score = " << game.pos.score_pos(&game,&game.ts.tdata[0]) << "\n";
       cout << "material = " << game.pos.material << "\n";
       game.p_side = game.pos.wtm; }
-#if WDL_HEAD
+#if WDL_HEAD || WDL_SEARCH
   else if(!strcmp(response, "wdl") && !proto.xboard)
     {
       if (nnue_available) {
@@ -260,7 +260,7 @@ void parse_command()
           for (int pt = PAWN; pt <= QUEEN; pt++)
             pc += game.pos.plist[s][pt][0];
         float wdl[NNUE_WDL_OUT];
-        nnue_evaluate_wdl(tmp_acc.acc, tmp_acc.psqt, game.pos.wtm, pc,
+        nnue_evaluate_wdl(tmp_acc, game.pos.wtm, pc,
                           (int)game.pos.fifty, wdl);
         cout << "wdl (stm POV): win=" << wdl[0] << " draw=" << wdl[1]
              << " loss=" << wdl[2] << "  (fifty=" << (int)game.pos.fifty << ")\n";

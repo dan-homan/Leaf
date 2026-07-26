@@ -43,13 +43,21 @@ int position::score_pos(game_rec *gr, ts_thread_data *tdata NNUE_ACC_DEF)
    // -------------------------------------------------------------------
    if (nnue_available && nnue_acc) {
      tdata->eval_count++;
+#if WDL_SEARCH
+     // Stage C: the eval depends on the fifty counter (a WDL head input), so
+     // the score-hash key must too — otherwise entries written at one
+     // counter value would be served at another (docs/WDL_PLAN.md Phase 4).
+     h_code hkey = hcode ^ ((h_code)fifty * 0x9E3779B97F4A7C15ULL);
+#else
+     h_code hkey = hcode;
+#endif
      // Probe score hash table (same mechanism as classical eval)
-     score_rec *scores_n = score_table + (((SCORE_SIZE-1)*((hcode)&MAX_UINT))/MAX_UINT);
-     if (scores_n->get_key() == hcode) {
+     score_rec *scores_n = score_table + (((SCORE_SIZE-1)*((hkey)&MAX_UINT))/MAX_UINT);
+     if (scores_n->get_key() == hkey) {
        int cached = scores_n->score;
        int8_t cached_qc0 = scores_n->qchecks[0];
        int8_t cached_qc1 = scores_n->qchecks[1];
-       if (scores_n->get_key() == hcode) {
+       if (scores_n->get_key() == hkey) {
          tdata->shash_count++;
          qchecks[0] = cached_qc0;
          qchecks[1] = cached_qc1;
@@ -65,7 +73,15 @@ int position::score_pos(game_rec *gr, ts_thread_data *tdata NNUE_ACC_DEF)
      for (int s = 0; s < 2; s++)
        for (int pt = PAWN; pt <= QUEEN; pt++)
          pc += plist[s][pt][0];
+#if WDL_SEARCH
+     // Stage C: search runs on the WDL head's logit-space cp conversion
+     // (docs/WDL_PLAN.md Phase 4).  Side-relative contempt (δ = 0 default)
+     // enters through the precomputed ln(c)/ln(1−c) pair.
+     int score = nnue_evaluate_wdl_cp(*nnue_acc, wtm, pc, (int)fifty,
+                                      (int)wtm == nnue_wdl_root_side());
+#else
      int score = nnue_evaluate(*nnue_acc, wtm, pc);
+#endif
      // qchecks: classical king-safety eval is skipped under NNUE, but the
      // search relies on this signal to drive check extensions (search.cpp:1671)
      // and qsearch-with-checks (search.cpp:2164).  Recompute the king-tropism
@@ -116,7 +132,7 @@ int position::score_pos(game_rec *gr, ts_thread_data *tdata NNUE_ACC_DEF)
      scores_n->qchecks[0] = (int8_t)qchecks[0];
      scores_n->qchecks[1] = (int8_t)qchecks[1];
      scores_n->score = score_w;
-     scores_n->set_key(hcode, score_w, qchecks[0], qchecks[1]);
+     scores_n->set_key(hkey, score_w, qchecks[0], qchecks[1]);
      // score is already from side-to-move's POV (nnue_evaluate returns stm POV)
      return score;
    }

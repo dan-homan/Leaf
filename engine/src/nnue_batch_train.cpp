@@ -289,7 +289,11 @@ static bool bt_load_file(const char *path, std::vector<BTRecord> &out,
 // Returns d = sigmoid(white-POV score / K).
 // ---------------------------------------------------------------------------
 static float bt_eval_record(const BTRecord &r, float K, position &pos,
-                            NNUEAccumulator &acc, NNUEActivations *act_out)
+                            NNUEAccumulator &acc, NNUEActivations *act_out
+#if WDL_HEAD
+                            , NNUEIntActs *cap = nullptr
+#endif
+                            )
 {
     bt_decode(r, pos);
     nnue_init_accumulator(acc, pos);
@@ -300,7 +304,11 @@ static float bt_eval_record(const BTRecord &r, float K, position &pos,
             pc += pos.plist[sd][pt][0];
     pc = (pc < 1) ? 1 : (pc > 32) ? 32 : pc;
 
+#if WDL_HEAD
+    int score_stm = nnue_evaluate_acc_raw(acc.acc, acc.psqt, (int)pos.wtm, pc, cap);
+#else
     int score_stm = nnue_evaluate_acc_raw(acc.acc, acc.psqt, (int)pos.wtm, pc);
+#endif
     float score_w = pos.wtm ? (float)score_stm : -(float)score_stm;
     float d = 1.0f / (1.0f + expf(-score_w / K));
 
@@ -620,19 +628,22 @@ int nnue_batch_train(int argc, char *argv[])
                 uint32_t i = val_idx[k];
 #if WDL_HEAD
                 // WDL Brier vs the game-outcome one-hot (STM POV) — the head
-                // calibration canary, diagnostic only.
-                float d  = bt_eval_record(recs[i], K, w.pos, w.acc, &w.act);
+                // calibration canary, diagnostic only.  Uses the INT-path
+                // head inputs (train == serve), like the training gradient.
+                NNUEIntActs cap;
+                float d  = bt_eval_record(recs[i], K, w.pos, w.acc, nullptr, &cap);
                 {
                     const BTRecord &rr = recs[i];
-                    nnue_wdl_head_forward(w.act, w.acc.psqt, (int)rr.fifty);
+                    float logits[NNUE_WDL_OUT], soft[NNUE_WDL_OUT];
+                    nnue_wdl_int_forward(cap, (int)rr.fifty, logits, soft);
                     float tW[NNUE_WDL_OUT] = {0.0f, 0.0f, 0.0f};
                     tW[rr.result2 == 2 ? 0 : (rr.result2 == 1 ? 1 : 2)] = 1.0f;
                     float tgt[NNUE_WDL_OUT];
                     if (rr.wtm) { tgt[0]=tW[0]; tgt[1]=tW[1]; tgt[2]=tW[2]; }
                     else        { tgt[0]=tW[2]; tgt[1]=tW[1]; tgt[2]=tW[0]; }
                     for (int o = 0; o < NNUE_WDL_OUT; o++)
-                        w.brier += (double)(w.act.wdl_soft[o] - tgt[o])
-                                 * (double)(w.act.wdl_soft[o] - tgt[o]);
+                        w.brier += (double)(soft[o] - tgt[o])
+                                 * (double)(soft[o] - tgt[o]);
                 }
 #else
                 float d  = bt_eval_record(recs[i], K, w.pos, w.acc, nullptr);
@@ -687,7 +698,12 @@ int nnue_batch_train(int argc, char *argv[])
             int hi = (int)((long)(tid + 1) * cur / threads);
             for (int j = lo; j < hi; j++) {
                 const BTRecord &r = recs[train_idx[base + j]];
+#if WDL_HEAD
+                NNUEIntActs wcap;
+                float d      = bt_eval_record(r, K, w.pos, w.acc, &w.act, &wcap);
+#else
                 float d      = bt_eval_record(r, K, w.pos, w.acc, &w.act);
+#endif
                 float target = bt_target(r, lambda, leaf_lambda, K, decay(r));
                 float e      = target - d;
                 w.se += (double)e * e;
@@ -715,17 +731,30 @@ int nnue_batch_train(int argc, char *argv[])
                 {
                     float wdec = wdl_decay(r);
                     if (wdec != 0.0f) {
-                        nnue_wdl_head_forward(w.act, w.acc.psqt, (int)r.fifty);
                         float tW[NNUE_WDL_OUT] = {0.0f, 0.0f, 0.0f};
                         tW[r.result2 == 2 ? 0 : (r.result2 == 1 ? 1 : 2)] = 1.0f;
                         float tgt[NNUE_WDL_OUT];
                         if (r.wtm) { tgt[0]=tW[0]; tgt[1]=tW[1]; tgt[2]=tW[2]; }
                         else       { tgt[0]=tW[2]; tgt[1]=tW[1]; tgt[2]=tW[0]; }
                         float d_logits[NNUE_WDL_OUT];
+#if WDL_TRUNK_GRAD
+                        // Trunk-grad mode: fp32 activations (the trunk
+                        // backprop requires them; opt-in only).
+                        nnue_wdl_head_forward(w.act, w.acc.psqt, (int)r.fifty);
                         for (int o = 0; o < NNUE_WDL_OUT; o++)
                             d_logits[o] = w.act.wdl_soft[o] - tgt[o];
                         nnue_accumulate_wdl_gradients(w.act, d_logits,
                                                       TDLEAF_WDL_WEIGHT * wdec, w.gb);
+#else
+                        // Production: INT-path head inputs (train == serve).
+                        float logits[NNUE_WDL_OUT], soft[NNUE_WDL_OUT];
+                        nnue_wdl_int_forward(wcap, (int)r.fifty, logits, soft);
+                        for (int o = 0; o < NNUE_WDL_OUT; o++)
+                            d_logits[o] = soft[o] - tgt[o];
+                        nnue_accumulate_wdl_gradients_int(wcap, (int)r.fifty,
+                                                          d_logits,
+                                                          TDLEAF_WDL_WEIGHT * wdec, w.gb);
+#endif
                     }
                 }
 #endif

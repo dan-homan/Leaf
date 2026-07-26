@@ -126,11 +126,10 @@ static const float TDLEAF_ADAM_PSQT_LR0    = 13.0f;   // PSQT (int32; sized to r
                                                        // post-centering subspace is ~665, see note above)
 #if WDL_HEAD
 // ---------------------------------------------------------------------------
-// Auxiliary WDL head (docs/WDL_PLAN.md).  Input scaling puts the two scalar
-// inputs in the same magnitude band as the [0,127] fc2_in activations.
+// Auxiliary WDL head (docs/WDL_PLAN.md).  The input scales (WDL_MAT_SCALE,
+// WDL_FIFTY_SCALE) and the K anchor (NNUE_WDL_K) live in nnue.h, shared with
+// the WDL_SEARCH inference path.
 // ---------------------------------------------------------------------------
-static const float WDL_MAT_SCALE       = 1.0f / 16.0f; // cp → head input (±400cp → ±25)
-static const float WDL_FIFTY_SCALE     = 0.25f;        // fifty 0..100 → 0..25
 static const float TDLEAF_ADAM_WDL_LR0 = 0.001f;       // head weights + biases (fp32, ~0.01–0.05)
 static const float TDLEAF_WDL_WEIGHT   = 1.0f;         // WDL loss coefficient (per-ply grad scale)
 // Outcome-conditioned decay for the DISTRIBUTIONAL λ-return target (fitted

@@ -40,7 +40,7 @@ static const int NNUE_L1_PADDED   = 32;   // padded input dim (ceil(30, 16) = 32
 // FC2 (output): input = NNUE_L1_SIZE = 32 neurons
 static const int NNUE_L2_PADDED   = 32;   // padded input dim for FC2
 
-#if WDL_HEAD
+#if WDL_HEAD || WDL_SEARCH
 // Auxiliary WDL head (docs/WDL_PLAN.md): reads the same fc2_in[32] activation
 // as FC2 plus two scalar game-state inputs — the STM-POV cp eval (material /
 // learned-temperature channel) and the fifty-move counter — producing 3
@@ -53,6 +53,36 @@ static const int NNUE_WDL_FIFTY = NNUE_L2_PADDED + 1;   // input index: fifty-mo
 // .nnue trailer / export-import buffer size.
 static const int NNUE_WDL_FLOATS =
     NNUE_LAYER_STACKS * (NNUE_WDL_OUT * NNUE_WDL_IN + NNUE_WDL_OUT);
+// Head input scaling + the cp anchor of the logit-space conversion.
+// NNUE_WDL_K must stay equal to TDLEAF_K (the sigmoid temperature the scalar
+// TD loss and the head init are both anchored to).
+static const float NNUE_WDL_K     = 220.0f;
+static const float WDL_MAT_SCALE   = 1.0f / 16.0f;  // cp → head input (±400cp → ±25)
+static const float WDL_FIFTY_SCALE = 0.25f;         // fifty 0..100 → 0..25
+
+// Head weights — fp32, authoritative for BOTH training and inference (the
+// head is never quantized).  Defined in nnue.cpp so WDL_SEARCH-only play
+// binaries carry them; TDLEAF training code trains them in place.
+extern float wdl_weights_f32[NNUE_LAYER_STACKS][NNUE_WDL_OUT][NNUE_WDL_IN];
+extern float wdl_bias_f32   [NNUE_LAYER_STACKS][NNUE_WDL_OUT];
+extern bool  nnue_wdl_loaded;   // true once a trailer / v13 state / init filled them
+
+// Int-path activation capture — the head's canonical inputs (train == serve).
+// Filled by nnue_evaluate when a non-null capture pointer is passed.
+struct NNUEIntActs {
+    float   fc2_in[NNUE_L2_PADDED];  // int path's fc2_in, as floats
+    float   score_cp;                // the int path's final STM-POV cp score
+    int     stack;
+};
+
+// Compute head logits + softmax from captured int-path activations (STM POV).
+void nnue_wdl_int_forward(const NNUEIntActs &cap, int fifty,
+                          float logits[NNUE_WDL_OUT], float soft[NNUE_WDL_OUT]);
+
+// Serialize / restore the full head through a caller buffer of
+// NNUE_WDL_FLOATS floats — the .nnue-trailer interface (nnue_io.cpp).
+void nnue_wdl_export(float *buf);
+void nnue_wdl_import(const float *buf);
 #endif
 
 // Quantization scales
@@ -174,7 +204,40 @@ void nnue_apply_delta(NNUEAccumulator &acc,
 
 // Forward pass. Returns centipawns from side-to-move's perspective.
 // piece_count: total pieces on board (for layer-stack selection).
-int nnue_evaluate(const NNUEAccumulator &acc, int stm, int piece_count);
+// Under WDL builds an optional capture pointer receives the int-path
+// activations the WDL head consumes (nullptr = no capture, zero cost).
+int nnue_evaluate(const NNUEAccumulator &acc, int stm, int piece_count
+#if WDL_HEAD || WDL_SEARCH
+                  , struct NNUEIntActs *cap = nullptr
+#endif
+                  );
+
+#if WDL_HEAD || WDL_SEARCH
+// Inference-side WDL read-out (the `wdl` CLI command and diagnostics), on the
+// int path — the same distribution the search sees under WDL_SEARCH.
+void nnue_evaluate_wdl(const NNUEAccumulator &acc, int stm, int piece_count,
+                       int fifty, float out[NNUE_WDL_OUT]);
+#endif
+
+#if WDL_SEARCH
+// Stage C search score: logit-space cp conversion of the head distribution,
+//   score = K·[ logaddexp(l_w, l_d + ln c) − logaddexp(l_l, l_d + ln(1−c)) ]
+// where c is the side-relative draw value (0.5 ∓ δ; δ = contempt, default 0).
+// Asymptotically linear in the logits (no probability-space saturation), so
+// the material spine survives in won positions.  Clamped to ±9999 cp.
+int nnue_evaluate_wdl_cp(const NNUEAccumulator &acc, int stm, int piece_count,
+                         int fifty, bool stm_is_root_side);
+
+// Set the contempt term for subsequent searches: delta in draw-value units
+// (root side values draws at 0.5 − delta, opponent at 0.5 + delta) and which
+// color the root side is.  delta = 0 (the default, and the pinned value for
+// all training) makes the score side-symmetric.  Precomputes ln(c)/ln(1−c).
+void nnue_wdl_set_contempt(float delta, int root_side_white);
+
+// Which color the root side is (1 = White), as last set by
+// nnue_wdl_set_contempt.  Irrelevant while δ = 0 (both sides share c = 0.5).
+int nnue_wdl_root_side();
+#endif
 
 // ---------------------------------------------------------------------------
 // Prior modes for fresh-net initialisation (used by --init-nnue* CLI flags
@@ -279,19 +342,13 @@ void nnue_accumulate_wdl_gradients(const NNUEActivations &act,
                                    const float d_logits[NNUE_WDL_OUT],
                                    float scale, NNUEGradBuf *gb = nullptr);
 
-// Inference-side WDL read-out for a position's raw accumulator.  Read-out
-// only — does not affect search or the scalar score.  out = {p_w, p_d, p_l},
-// STM POV, sums to 1.  wtm: White to move; fifty: halfmove clock (0..100).
-void nnue_evaluate_wdl(const int16_t acc[2][NNUE_HALF_DIMS],
-                       const int32_t psqt[2][NNUE_PSQT_BKTS],
-                       bool wtm, int piece_count, int fifty,
-                       float out[NNUE_WDL_OUT]);
-
-// Serialize / restore the full head (all stacks: weights then biases, in
-// stack order) through a caller buffer of NNUE_WDL_FLOATS floats — the
-// .nnue-trailer interface used by nnue_io.cpp.
-void nnue_wdl_export(float *buf);
-void nnue_wdl_import(const float *buf);
+// INT-activation head backprop — the production head-learning path (train ==
+// serve, docs/WDL_PLAN.md Phase 4).  The fp32-activation version above serves
+// only the opt-in WDL_TRUNK_GRAD mode, whose trunk backprop needs the fp32
+// activation record.
+void nnue_accumulate_wdl_gradients_int(const NNUEIntActs &cap, int fifty,
+                                       const float d_logits[NNUE_WDL_OUT],
+                                       float scale, NNUEGradBuf *gb = nullptr);
 #endif
 
 // Per-thread gradient-buffer helpers for the offline batch trainer's
@@ -349,7 +406,11 @@ bool nnue_load_fc_weights(const char *path);
 // current weights, without constructing a full NNUEAccumulator object).
 int nnue_evaluate_acc_raw(const int16_t acc[2][NNUE_HALF_DIMS],
                            const int32_t psqt[2][NNUE_PSQT_BKTS],
-                           int stm, int piece_count);
+                           int stm, int piece_count
+#if WDL_HEAD || WDL_SEARCH
+                           , NNUEIntActs *cap = nullptr
+#endif
+                           );
 
 // Offline batch trainer (nnue_batch_train.cpp) — supervised training on
 // quiet-position TSV sets from scripts/extract_quiet_positions.py.
