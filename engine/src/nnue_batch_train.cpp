@@ -560,24 +560,39 @@ int nnue_batch_train(int argc, char *argv[])
         return powtab[g < 0 ? 0 : g];
     };
 #if WDL_HEAD
-    // Outcome-conditioned result decay for the WDL head target (compile-time
-    // constants, docs/WDL_PLAN.md Phase 0: draws decay faster than decisive
-    // outcomes; the split is draw-vs-decisive only, never win-vs-loss).  The
-    // λs were fitted per GAME-PLY; on a legacy record-index corpus each record
-    // spans 2 game plies, so square them (same convention as td_lambda above).
+    // Outcome-conditioned, LENGTH-TARGETED result decay for the WDL head target
+    // (docs/WDL_PLAN.md).  Decisive: a fixed λ (constant powtab).  Draw: a
+    // per-game λ_draw(N) that rises with game length, so long drawish /
+    // repetition endgames keep the draw terminal reaching their material-up
+    // shuffle positions (tdleaf_wdl_lambda_draw, tdleaf.h).  The split is
+    // draw-vs-decisive only, never win-vs-loss.  λs are per GAME-PLY; on a
+    // legacy record-index corpus each record spans 2 game plies, so square
+    // (same convention as td_lambda above).
     const float wdl_lam_dec  = corpus_game_ply ? TDLEAF_WDL_LAMBDA_DEC
                              : TDLEAF_WDL_LAMBDA_DEC  * TDLEAF_WDL_LAMBDA_DEC;
-    const float wdl_lam_draw = corpus_game_ply ? TDLEAF_WDL_LAMBDA_DRAW
-                             : TDLEAF_WDL_LAMBDA_DRAW * TDLEAF_WDL_LAMBDA_DRAW;
-    std::vector<float> powtab_wdec(max_gap + 1), powtab_wdraw(max_gap + 1);
-    for (int g = 0; g <= max_gap; g++) {
-        powtab_wdec[g]  = powf(wdl_lam_dec,  (float)g);
-        powtab_wdraw[g] = powf(wdl_lam_draw, (float)g);
+    std::vector<float> powtab_wdec(max_gap + 1);
+    for (int g = 0; g <= max_gap; g++)
+        powtab_wdec[g] = powf(wdl_lam_dec, (float)g);
+    // Per-game draw λ (fraction-of-game normalised); indexed like gid_N.
+    std::vector<float> lam_draw_gid(gid_N.size(), 0.0f);
+    float ld_min = 1.0f, ld_max = 0.0f;
+    for (size_t gg = 0; gg < gid_N.size(); gg++) {
+        if (gid_N[gg] == 0) continue;
+        float lam = tdleaf_wdl_lambda_draw((int)gid_N[gg]);
+        if (!corpus_game_ply) lam *= lam;          // 2 game-plies / record
+        lam_draw_gid[gg] = lam;
+        if (lam < ld_min) ld_min = lam;
+        if (lam > ld_max) ld_max = lam;
     }
+    fprintf(stderr, "batch-train: WDL decay — decisive λ=%.4f, draw λ(N) in "
+                    "[%.4f, %.4f] (ρ=%.3f, length-targeted)\n",
+            (double)wdl_lam_dec, (double)ld_min, (double)ld_max,
+            (double)TDLEAF_WDL_DRAW_RHO);
     auto wdl_decay = [&](const BTRecord &r) {
         int g = (int)gid_N[r.gid] - (int)r.ply;
         if (g < 0) g = 0;
-        return (r.result2 == 1) ? powtab_wdraw[g] : powtab_wdec[g];
+        return (r.result2 == 1) ? powf(lam_draw_gid[r.gid], (float)g)
+                                : powtab_wdec[g];
     };
 #endif
     {

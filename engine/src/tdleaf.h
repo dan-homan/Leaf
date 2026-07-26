@@ -18,6 +18,7 @@
 #ifndef TDLEAF_H
 #define TDLEAF_H
 
+#include <math.h>
 #include "define.h"
 #include "nnue.h"
 
@@ -132,14 +133,39 @@ static const float TDLEAF_ADAM_PSQT_LR0    = 13.0f;   // PSQT (int32; sized to r
 // ---------------------------------------------------------------------------
 static const float TDLEAF_ADAM_WDL_LR0 = 0.001f;       // head weights + biases (fp32, ~0.01–0.05)
 static const float TDLEAF_WDL_WEIGHT   = 1.0f;         // WDL loss coefficient (per-ply grad scale)
-// Outcome-conditioned decay for the DISTRIBUTIONAL λ-return target (fitted
-// offline, docs/WDL_PLAN.md Phase 0): draw outcomes decay FASTER than
-// decisive ones (informative near the end, weak far back).  The class split
-// is draw-vs-decisive ONLY — λ_win == λ_loss always; a win/loss asymmetry
+// Outcome-conditioned decay for the DISTRIBUTIONAL λ-return target.  The class
+// split is draw-vs-decisive ONLY — λ_win == λ_loss always; a win/loss asymmetry
 // puts a side-to-move bias into the expected target, i.e. designed-in
 // outcome-imbalance drift (docs/TRAINING.md).
-static const float TDLEAF_WDL_LAMBDA_DEC  = 0.985f;    // == TDLEAF_LAMBDA (h=16 anchor)
-static const float TDLEAF_WDL_LAMBDA_DRAW = 0.9775f;
+//
+// LENGTH-TARGETED (docs/WDL_PLAN.md).  Re-fitting fit_outcome_lambda.py split
+// by class × game length (future-eval anchor, from-scratch WDL corpus) showed:
+//   * draws want λ >= decisive at every horizon — the OPPOSITE of the original
+//     Phase-0 constants (0.985 dec / 0.9775 draw).  Faster draw decay starved
+//     long drawish/repetition endgames of the draw terminal, so the head could
+//     not tell a material-up win from a material-up dead draw.
+//   * LONG draws want the HIGHEST λ (the draw terminal must propagate
+//     proportionally further in a long endgame); long decisive games want a bit
+//     LOWER λ (uncertain-until-late grinds), so decisive stays a fixed mid λ
+//     where the bootstrap is roughly unbiased anyway.
+// Draw λ is therefore fraction-of-game normalised: λ_draw(N)=clamp(ρ^(1/N)),
+// N = game length in plies.  Longer game ⇒ slower per-ply decay.
+static const float TDLEAF_WDL_LAMBDA_DEC      = 0.985f;  // decisive (validated; unchanged)
+static const float TDLEAF_WDL_DRAW_RHO        = 0.163f;  // terminal weight at game start
+static const float TDLEAF_WDL_LAMBDA_DRAW_MIN = 0.985f;  // >= dec: draws never decay faster
+static const float TDLEAF_WDL_LAMBDA_DRAW_MAX = 0.993f;  // long-draw cap
+// Back-compat alias (short-game floor) for any report/log site.
+static const float TDLEAF_WDL_LAMBDA_DRAW     = TDLEAF_WDL_LAMBDA_DRAW_MIN;
+
+// Length-targeted per-game draw decay.  game_len_plies = game length N (plies).
+static inline float tdleaf_wdl_lambda_draw(int game_len_plies)
+{
+    int   N   = game_len_plies > 1 ? game_len_plies : 2;
+    float lam = powf(TDLEAF_WDL_DRAW_RHO, 1.0f / (float)N);
+    if (lam < TDLEAF_WDL_LAMBDA_DRAW_MIN) lam = TDLEAF_WDL_LAMBDA_DRAW_MIN;
+    if (lam > TDLEAF_WDL_LAMBDA_DRAW_MAX) lam = TDLEAF_WDL_LAMBDA_DRAW_MAX;
+    return lam;
+}
 // Head init reproduces current play at step zero (the WDL analogue of
 // --init-nnue-classical): the material weight alone maps l_w − l_l =
 // eval_cp / K — the same K=220 sigmoid the scalar TD loss is anchored to —

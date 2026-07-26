@@ -20,7 +20,7 @@ the learner is the sole `.tdleaf.bin` writer on `main`.
 | POV | Head is STM-POV like everything else; side flip swaps `l_w ↔ l_l`, negating the score (negamax-safe at `c = 0.5`). |
 | Material/PSQT | PSQT feeds the head as an input (per-bucket learned weight `w_mat`); PSQT stays fully trainable — the don't-freeze-PSQT constraint is honored *through* the head. Soft gauge (PSQT scale × `w_mat`) accepted; canary watches the product, not the factors. |
 | Fifty-move counter | Head input (late injection), **not** an FT feature (accumulator/TT-key blast radius). Search-side exact draw handling stays. Ships with a **TT-cutoff gate at high counters** (no TT cutoff when `pos.fifty` ≳ 90) in the same change that makes search-visible eval fifty-dependent (Phase 4). |
-| Repetition counts | **Not** an eval input — path-dependent, search handles exactly. |
+| Repetition counts | **Not** an eval input — path-dependent, search handles exactly. *(Under reconsideration — see "Draw-tracking diagnosis" below: reps are the dominant draw and are invisible to the static head; a rep-count input is Fix 2, deferred until the λ change is settled.)* |
 | Contempt | Side-relative `c = 0.5 ∓ δ` (root side devalues its own draws — restores exact negation). δ = 0 **structurally pinned in all training paths**; UCI option for play; default δ set by even-play gauntlet (expected: 0). Targets never see δ. |
 | Training target | Distributional λ-return: `π_t = (1−λ^dply)·P_{t+1} + λ^dply·π_{t+1}`, terminal one-hot, softmax-CE gradient (per the original `WDL_HEAD.md` math, White-POV recursion, STM conversion per ply). |
 | Outcome-conditioned λ | `λ_draw` vs `λ_dec` allowed; **`λ_win = λ_loss` mandatory** (win/loss asymmetry = designed-in outcome-imbalance drift). Constants fitted offline first (Phase 0), not guessed. |
@@ -312,6 +312,87 @@ is proven; the head isn't strong enough to search on yet.
 Generation stays on scalar search until the A/B reaches non-regression
 (flipping actors early would degrade generated-game quality by the same
 ~50 Elo).
+
+## Draw-tracking diagnosis + length-targeted λ (2026-07-26)
+
+Triggered by a from-scratch WDL run (`m260726wdl`, material init, `--wdl-search
+--wdl-trunk-grad`, d6) where iteration 2 (100k→200k games) went flat-to-worse
+vs iteration 1 (head-to-head −10 ±11; pooled vs anchors ≈ −23 Elo; losses to
+the *weak* material anchor 43→108) while the self-play draw rate drifted 33%→25%
+and grad-clip fires rose 7%→11%.  The head itself carries forward and calibrates
+fine (Brier 0.529→0.501 across iters) — the regression is a **decisiveness
+drift**, not a carry bug.
+
+**Root cause — the head cannot tell a won material-up position from a drawn
+one.** Probing the head on corpus positions the engine scored **+150…+500 cp**
+(White to move):
+
+| actual outcome | head p_win | head p_draw | head p_loss |
+|---|---|---|---|
+| games that WON  | 0.520 | 0.306 | 0.174 |
+| games that DREW | 0.510 | 0.372 | 0.118 |
+
+Near-identical.  Why: **threefold repetition is the dominant draw** (≈60% of
+draws, 15.5% of games; 50-move ≈3%, insufficient-material ≈7%), and reps are a
+*path* property — invisible to a static head (not an input), and the fifty
+counter can't proxy (draws end at mean fifty ≈10; only 0.6% of drawn positions
+are both material-up and fifty≥40).  The head can only learn "drawn" from the TD
+terminal, but (a) the old `λ_draw = 0.9775 < λ_dec = 0.985` gave the draw
+terminal a *shorter* reach than a win/loss, and (b) the λ-return bootstraps on
+the head's *own* (material-up ⇒ win-leaning) prediction (tdleaf.cpp), a
+self-consistent wrong fixed point.  Net play effect: the head over-values
+material-up-but-drawn positions ⇒ search plays greedily for material ⇒ the
+decisiveness drift and the doubled losses to the weak anchor.
+
+**Fix 1 (done) — length-targeted, order-flipped λ.** `fit_outcome_lambda.py`
+re-run split by class × game-length on this corpus (future-eval anchor, h∈{8,16,
+32}) robustly shows the OPPOSITE of the original Phase-0 constants: **draws want
+λ ≥ decisive at every horizon**, and **long draws want the highest λ** (the draw
+terminal must propagate proportionally further in a long drawish/rep endgame),
+while long *decisive* games want slightly lower λ (uncertain-until-late grinds).
+Implemented (`tdleaf.h` `tdleaf_wdl_lambda_draw`, used by both the online
+`tdleaf.cpp` recursion and the offline `nnue_batch_train.cpp` decay):
+- decisive: fixed `TDLEAF_WDL_LAMBDA_DEC = 0.985` (validated value, UNCHANGED);
+- draw: fraction-of-game normalised `λ_draw(N) = clamp(ρ^(1/N), 0.985, 0.993)`,
+  `ρ = 0.163`, `N` = game length in plies — longer game ⇒ slower per-ply decay,
+  and every drawn game now decays ≥ decisive (the flip).
+
+A first attempt also LOWERED decisive to 0.975 (the fit's absolute value at
+h=16), but the offline A/B showed that worsened aggregate Brier (0.5055 vs
+0.5011) — the fit's absolute λ is horizon-ambiguous and unreliable; the
+robust readouts are the class ORDERING and the LENGTH trend, not the absolute.
+Keeping decisive at 0.985 and confining the change to draws is the clean win.
+
+Era caveat (reconciles with Phase 0): the original constants were fitted on a
+14%-draw early-net d6 corpus whose draw population differed (few, later-decided);
+the from-scratch WDL corpus is rep-heavy with long drawish tails, which want the
+reversed ordering.  Re-examine as the net matures.
+
+**Validation (offline A/B, `m260726wdl-2e5g` corpus, same start/hyperparams,
+only λ differs):**
+
+| metric | OLD λ | length-targeted λ |
+|---|---|---|
+| aggregate val WDL_Brier | 0.5011 | **0.4952** |
+| won-vs-drawn p_win gap (matched +150..+500 cp) | 0.010 | **0.039** (~4×) |
+| p_loss on material-up WON positions | 0.174 | **0.058** |
+| p_draw on material-up DREW positions | 0.372 | **0.399** |
+
+The head discriminates won from drawn material-up positions ~4× better, stops
+hedging spurious loss on winning positions, and aggregate calibration improves.
+The residual (still-modest) gap is the rep-path class → Fix 2.  Next: a
+from-scratch online run with the new λ to confirm the decisiveness drift eases
+(draw-rate canary stops falling) and the head-to-head regression closes.
+
+**Fix 2 (planned, AFTER the λ question is settled) — repetition count as a head
+input.** Length-λ addresses the *positional/fortress* draw class and breaks the
+bootstrap trap, but repetition-path draws are fundamentally unobservable to a
+static head, so a rep-count input (companion to the fifty input) is the
+structural completion.  Deliberately deferred: settle λ first (cheap, offline,
+already reversing the dominant error), then add the input only if the residual
+won-vs-drawn gap justifies the head-dim change (34→35) and a from-scratch head
+retrain.  This revisits the "Repetition counts — not an eval input" settled
+decision above.
 
 ## Phase 5 — Contempt calibration + consolidation
 

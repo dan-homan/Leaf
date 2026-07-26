@@ -408,17 +408,23 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
     // Auxiliary WDL head — TD(λ) over the win/draw/loss distribution
     // (docs/WDL_PLAN.md).  White-POV λ-return recursion bootstrapped on the
     // next ply's prediction, terminal one-hot from the game result, converted
-    // to STM POV per ply.  The trace decay is OUTCOME-CONDITIONED
-    // (λ_draw < λ_dec, fitted offline in Phase 0) — the class split is
-    // draw-vs-decisive ONLY, never win-vs-loss: λ_win == λ_loss keeps the
-    // learning rule outcome-symmetric (an asymmetry there is designed-in
-    // outcome-imbalance drift).  Stage A: gradient touches only head weights;
+    // to STM POV per ply.  The trace decay is OUTCOME-CONDITIONED and
+    // LENGTH-TARGETED (tdleaf_wdl_lambda_draw; see tdleaf.h): draws decay
+    // SLOWER than decisive, and long drawn games slower still, so the draw
+    // terminal reaches the material-up shuffle positions of long drawish /
+    // repetition endgames.  The class split is draw-vs-decisive ONLY, never
+    // win-vs-loss: λ_win == λ_loss keeps the learning rule outcome-symmetric
+    // (an asymmetry there is designed-in drift).  Stage A: head weights only;
     // runs its own forward passes, independent of the scalar loop above.
     // -----------------------------------------------------------------------
     if (T >= 1) {
         const bool  wdl_is_draw = (result >= 0.25f && result <= 0.75f);
-        const float wdl_lambda  = wdl_is_draw ? TDLEAF_WDL_LAMBDA_DRAW
-                                              : TDLEAF_WDL_LAMBDA_DEC;
+        // Length-targeted draw decay: N = game length (last recorded game ply,
+        // same approximation as the TSV dump's final_game_ply).
+        const int   wdl_game_len = rec.plies[T - 1].game_ply;
+        const float wdl_lambda  = wdl_is_draw
+                                    ? tdleaf_wdl_lambda_draw(wdl_game_len)
+                                    : TDLEAF_WDL_LAMBDA_DEC;
         static float PW [MAX_GAME_PLY][NNUE_WDL_OUT];  // predicted dist, White POV
         static float piW[MAX_GAME_PLY][NNUE_WDL_OUT];  // λ-return target, White POV
 #if !WDL_TRUNK_GRAD

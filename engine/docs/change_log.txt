@@ -1,5 +1,24 @@
 Changes since 2017_12_24
 
+2026_07_26 -- WDL head: length-targeted outcome-conditioned lambda (docs/
+               WDL_PLAN.md "Draw-tracking diagnosis").  Diagnosis on a from-
+               scratch WDL run: the head could not distinguish a material-up
+               WIN from a material-up dead DRAW (near-identical p_win) because
+               threefold repetition is the dominant draw (~60%), reps are a
+               path property invisible to the static head, and the old
+               lambda_draw=0.9775 < lambda_dec=0.985 gave the draw terminal a
+               SHORTER reach than a win/loss.  Re-fit split by class x game
+               length reverses that: draws want lambda >= decisive, long draws
+               highest.  New scheme (tdleaf.h tdleaf_wdl_lambda_draw, used by
+               online tdleaf.cpp and offline nnue_batch_train.cpp): decisive
+               fixed at 0.985 (unchanged); draw lambda fraction-of-game
+               normalised lambda_draw(N)=clamp(0.163^(1/N), 0.985, 0.993),
+               N=game-length plies.  Offline A/B (same corpus/start, only lambda
+               differs): val WDL_Brier 0.5011 -> 0.4952, won-vs-drawn p_win gap
+               0.010 -> 0.039 (~4x), p_loss on material-up wins 0.174 -> 0.058.
+               Deferred (Fix 2): repetition count as a head input for the
+               residual rep-path draws.
+
 2026_07_25 -- WDL head Phase 1 (branch wdl-head-2, docs/WDL_PLAN.md): auxiliary
                win/draw/loss head, opt-in via WDL_HEAD=1 (requires TDLEAF=1).
                Per-bucket 34->3 fp32 head reading fc2_in[32] + material (STM cp
