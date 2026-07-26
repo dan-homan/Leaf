@@ -168,6 +168,14 @@ def binary_baked_net_matches(binary, net_name):
 # (tdleaf=False) stay plain — in Stage A the head never affects play, and a
 # non-WDL loader simply ignores the .nnue trailer.
 WDL_HEAD = False
+# Set from --wdl-search (Stage C, docs/WDL_PLAN.md Phase 4): EVERY binary —
+# actors, learner, batch trainer, AND the rating/play binaries — searches on
+# the WDL head's logit-space cp conversion.  Implies --wdl-head for the
+# TDLEAF builds.  Rating binaries need the .nnue trailer (exports carry it).
+WDL_SEARCH = False
+# Set from --wdl-trunk-grad: TDLEAF builds add WDL_TRUNK_GRAD=1 (head
+# gradient co-trains the trunk at the compile-time default weight).
+WDL_TRUNK_GRAD = False
 
 
 def compile_binary(version, net_name, tdleaf, force=False):
@@ -184,8 +192,12 @@ def compile_binary(version, net_name, tdleaf, force=False):
     flags = ["NNUE=1", f"NNUE_NET={net_name}"]
     if tdleaf:
         flags.append("TDLEAF=1")
-        if WDL_HEAD:
+        if WDL_HEAD or WDL_SEARCH:
             flags.append("WDL_HEAD=1")
+        if WDL_TRUNK_GRAD:
+            flags.append("WDL_TRUNK_GRAD=1")
+    if WDL_SEARCH:
+        flags.append("WDL_SEARCH=1")
     sh(["perl", COMP_PL, version] + flags + ["OVERWRITE"], cwd=RUN_DIR)
     if not binary.exists():
         die(f"compile did not produce {binary}")
@@ -463,6 +475,21 @@ def main():
                          "(docs/WDL_PLAN.md Stage A; scalar path is byte-"
                          "identical).  Usually combine with --recompile the "
                          "first time so cached binaries are rebuilt.")
+    ap.add_argument("--wdl-search", action="store_true",
+                    help="Stage C (docs/WDL_PLAN.md Phase 4): EVERY binary — "
+                         "actors, learner, batch trainer, and the rating "
+                         "binaries — searches on the WDL head's logit-space "
+                         "cp conversion.  Implies --wdl-head.  All recorded "
+                         "scores share the WDL-cp scale; the scalar channel "
+                         "becomes a distillation/teaching aux.  Combine with "
+                         "--recompile the first time.")
+    ap.add_argument("--wdl-trunk-grad", action="store_true",
+                    help="Build TDLEAF binaries with WDL_TRUNK_GRAD=1: the "
+                         "head gradient co-trains the trunk at the compile-"
+                         "time default weight (0.1).  Recommended on the "
+                         "Stage-C track (--wdl-search); changes the scalar "
+                         "net, so never mix with Stage-A byte-identity "
+                         "expectations.")
     ap.add_argument("--force", action="store_true",
                     help="Reuse an existing <tag>_work directory")
     ap.add_argument("--recompile", action="store_true",
@@ -480,10 +507,18 @@ def main():
                          "either way, this only controls pruning aggressiveness")
     args = ap.parse_args()
 
-    if args.wdl_head:
-        global WDL_HEAD
+    global WDL_HEAD, WDL_SEARCH, WDL_TRUNK_GRAD
+    if args.wdl_head or args.wdl_search:
         WDL_HEAD = True
         log("WDL head enabled: TDLEAF binaries built with WDL_HEAD=1")
+    if args.wdl_search:
+        WDL_SEARCH = True
+        log("WDL search enabled (Stage C): ALL binaries built with "
+            "WDL_SEARCH=1 — play runs on the head's cp conversion")
+    if args.wdl_trunk_grad:
+        WDL_TRUNK_GRAD = True
+        log("WDL trunk co-training enabled: TDLEAF binaries built with "
+            "WDL_TRUNK_GRAD=1")
 
     if args.no_repeat:
         log("note: --no-repeat is now always on — the flag is a no-op")
@@ -995,7 +1030,9 @@ def main():
         "games_this_iter": games_this_iter,
         "cumulative_games": cumulative_games,
         "gen_mode": ("skip-online" if args.skip_online else "actor-learner"),
-        "wdl_head": bool(args.wdl_head),
+        "wdl_head": bool(args.wdl_head or args.wdl_search),
+        "wdl_search": bool(args.wdl_search),
+        "wdl_trunk_grad": bool(args.wdl_trunk_grad),
         "depth": args.depth,
         "epochs": args.epochs,
         "picked_epoch": pick_ep,

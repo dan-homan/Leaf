@@ -148,7 +148,17 @@ void tdleaf_record_ply(TDGameRecord &rec,
     // This ensures d[t] is computed from what nnue_forward_fp32 actually produces
     // at that position, making the gradient self-consistent.
     // (The propagated search score includes quiescence and may differ.)
+#if WDL_SEARCH
+    // Stage C: every recorded score shares the WDL-cp scale the search plays
+    // on — leaf statics, root statics, and root search scores are then
+    // mutually comparable (quiet gates, adjudication thresholds), and the
+    // scalar aux channel becomes a distillation of the WDL system.  δ is
+    // pinned 0 in training, so the side flag is inert.
+    int leaf_score_stm = nnue_evaluate_wdl_cp(acc_a, (int)leaf_wtm, pc,
+                                              (int)cur.fifty, true);
+#else
     int leaf_score_stm = nnue_evaluate(acc_a, (int)leaf_wtm, pc);
+#endif
 
 #if TDLEAF_CHECK_SCORE
     {
@@ -233,7 +243,12 @@ void tdleaf_record_ply(TDGameRecord &rec,
             for (int pt = PAWN; pt <= KING; pt++)
                 pc_root += root_pos.plist[sd][pt][0];
         pc_root = (pc_root < 1) ? 1 : (pc_root > 32) ? 32 : pc_root;
+#if WDL_SEARCH
+        r.root_static = nnue_evaluate_wdl_cp(root_acc, (int)root_pos.wtm,
+                                             pc_root, (int)root_pos.fifty, true);
+#else
         r.root_static = nnue_evaluate(root_acc, (int)root_pos.wtm, pc_root);
+#endif
     }
 
     // Enumerate active features at the leaf position for FT/PSQT backprop.
@@ -740,8 +755,16 @@ void tdleaf_rebuild_record(TDRecord &r, bool refresh_score)
     pc = (pc < 1) ? 1 : (pc > 32) ? 32 : pc;
     r.stack = (pc - 1) / 4;
 
-    if (refresh_score)
+    if (refresh_score) {
+#if WDL_SEARCH
+        // Stage C: refreshed leaf statics stay on the WDL-cp scale the
+        // actor recorded them in (see tdleaf_record_ply).
+        r.score_stm = nnue_evaluate_wdl_cp(fresh_acc, (int)r.wtm, pc,
+                                           (int)r.pos.fifty, true);
+#else
         r.score_stm = nnue_evaluate_acc_raw(r.acc, r.psqt, (int)r.wtm, pc);
+#endif
+    }
 }
 
 // ---------------------------------------------------------------------------
