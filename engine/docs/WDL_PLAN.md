@@ -267,6 +267,52 @@ recommendation above; the production `--wdl-head` path is Stage A.
 - **Exit:** non-regression vs scalar search; healthy first co-evolved
   iteration.
 
+### Phase 4 results (2026-07-26 — machinery complete + validated; flip deferred)
+
+Implementation (`WDL_SEARCH`, commit 0a1b5e7): head weights moved to
+nnue.cpp as the single fp32 authority (play binaries load the .nnue trailer,
+hard-error without it); **train == serve** — the head's canonical inputs are
+the INT inference path's activations, captured via an optional out-param on
+`nnue_evaluate` (the fp32-activation path survives only for WDL_TRUNK_GRAD);
+logit-space conversion at K=220 with side-relative contempt
+(`WDLContempt` UCI option, default 0, never set by training); fifty-keyed
+score-hash; TT score-cutoff gate at fifty ≥ 90.
+
+Validated:
+- Conversion hand-check exact; NPS cost 2.8% (12s search — within budget,
+  fast-approximation option unused).
+- fp32→int input skew measured small at converged states (Brier 0.4496 int
+  vs 0.4493 fp32); head refit on int inputs → 0.4485.
+- Won endgames: KQK +1462 / KRK +901 (tail linearity keeps the material
+  spine and piece distinctions); KQK at fifty=80 discounts to +480 (the
+  trained fifty input is live, smooth damping); WDL search finds a SHORTER
+  KQK mate than scalar search in equal time.
+- Trailer guard + all five build combinations verified.
+
+**Same-net A/B gauntlet (the exit test): NOT passed yet.**  refit_ep1 net,
+800 games/arm vs `Leaf_vclassic_eval`, 3+0.05 FRC: scalar search −20 ±22,
+WDL search −70 ±22 → **WDL search costs ~50 ±31 Elo** with the current
+head.  Draw rates equal (~19–20%) — not a contempt/draw-avoidance artifact.
+Reading: the head today is a 34→3 read-out trained for CALIBRATION
+(softmax-CE), one iteration deep, on an early-strength net; its
+`l_w − l_l` is approximately the scalar eval plus a linear fc2_in
+correction whose move-ranking sharpness CE never optimized.  The machinery
+is proven; the head isn't strong enough to search on yet.
+
+**Path to the flip** (in recommended order):
+1. Keep search scalar; continue `--wdl-head` iterations (head deepens every
+   cycle for free) and re-run this same-net A/B each iteration — it is two
+   compiles + one gauntlet, and directly measures the remaining gap.
+2. Add trunk co-training (WDL_TRUNK_GRAD, weight 0.1) on a Stage-C-track
+   state so trunk features start serving the head (the Phase-3
+   recommendation anticipated exactly this use).
+3. If the gap persists, the endgame is the plan's original Stage-C bet:
+   head as terminal layer with full-strength trunk gradients and FC2
+   demoted — a training-recipe change, not more machinery.
+Generation stays on scalar search until the A/B reaches non-regression
+(flipping actors early would degrade generated-game quality by the same
+~50 Elo).
+
 ## Phase 5 — Contempt calibration + consolidation
 
 - Even-play δ gauntlet (δ-variants vs fixed δ = 0, same binary/net; W/D/L
