@@ -226,9 +226,26 @@ sweepable via `comp.pl TDLEAF_WDL_TRUNK_WEIGHT=<x>` — no new env vars.
   where the calibration gain is what matters and the scalar-play cost is
   moot (search will run on the head).  Weight 0.1 is the confirmed sweet
   spot in either case.
-- **Pending:** one full `train.py --wdl-head` hybrid iteration
-  (generation → consolidation → gauntlet) — multi-hour compute; scheduled
-  at the operator's discretion.
+- **Full hybrid iteration** (2026-07-26, operator-run):
+  `m260720wdl-1e6g` (`--wdl-head`, Stage A — no trunk grad) vs the directly
+  comparable baseline `m260720-1e6g` (same parent `m260720-5e5g`, 500k games
+  d6, 2 epochs):
+  - Draw-rate canary identical (25.6% vs 25.9%, 28k games sampled each) —
+    generation unaffected, as the byte-identity guarantee requires.
+  - Scalar consolidation curves essentially identical (ep2 val MSE(blend)
+    0.008573 vs 0.008618; differences are the games themselves — learner
+    arrival-order nondeterminism, present in any two reruns).
+  - Gauntlets within noise, mixed signs: final vs classic −151.8 ±12.1 (wdl)
+    vs −134.1 ±11.8 (base), Δ −17.7 ±17 (~1σ); vs parent-final +88.4 ±11.3
+    vs +91.0 ±11.4, Δ −2.6 ±16; epoch ladder favored the WDL run (+91.7 vs
+    +80.3).  Consistent with Stage A's structural no-op on scalar play.
+  - Head deliverable: Brier 0.4826 (online-trained, entering consolidation)
+    → 0.4493 after 2 offline epochs (4.9M-row val) — offline consolidation
+    sharpens the head just as it does the scalar net; the trained head ships
+    in `m260720wdl-1e6g_final.nnue`'s trailer + the v13 state.
+
+**Phase 3 complete.**  Stage-B trunk co-training remains opt-in per the
+recommendation above; the production `--wdl-head` path is Stage A.
 
 ## Phase 4 — Search on WDL (Stage C)
 
