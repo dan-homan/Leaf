@@ -24,7 +24,7 @@ the learner is the sole `.tdleaf.bin` writer on `main`.
 | Contempt | Side-relative `c = 0.5 ∓ δ` (root side devalues its own draws — restores exact negation). δ = 0 **structurally pinned in all training paths**; UCI option for play; default δ set by even-play gauntlet (expected: 0). Targets never see δ. |
 | Training target | Distributional λ-return: `π_t = (1−λ^dply)·P_{t+1} + λ^dply·π_{t+1}`, terminal one-hot, softmax-CE gradient (per the original `WDL_HEAD.md` math, White-POV recursion, STM conversion per ply). |
 | Outcome-conditioned λ | `λ_draw` vs `λ_dec` allowed; **`λ_win = λ_loss` mandatory** (win/loss asymmetry = designed-in outcome-imbalance drift). Constants fitted offline first (Phase 0), not guessed. |
-| Trunk commitment | Staged: A (head-only, gradient stops at `fc2_in`, scalar byte-identical) → B (WDL CE primary into trunk, FC2 scalar auxiliary) → C (search on WDL). FC2 dropped only after Stage C proves it unnecessary. |
+| Trunk commitment | Staged: A (head-only, gradient stops at `fc2_in`, scalar byte-identical) → B (WDL CE primary into trunk, FC2 scalar auxiliary) → C (search on WDL). FC2 is RETIRED from driving search at Stage C but the layer is KEPT (bootstrap scaffold; see "FC2's fate" under Phase 5) — not deleted. |
 | Head init | Reproduce current play at step zero: `w_mat = (PSQT→cp scale)/K`, positional row seeded from FC2, `l_d` from global draw-rate prior. WDL analogue of `--init-nnue-classical`. |
 | Knob policy | No new `TDLEAF_*` env vars unless allowlisted in `tdleaf_check_env()`; prefer compile-time constants (loss weights, λs) and UCI options (δ). |
 
@@ -448,10 +448,51 @@ A/B (Phase 4) reaches non-regression.
   composition is the sensitive readout, not just Elo).  Non-flat curve ⇒
   suspect head calibration before adopting a nonzero δ.
 - One δ sweep vs weaker anchors to document the UCI knob's value.
-- Decide FC2's fate (drop auxiliary if Stage C is proven without it; net
-  format cleanup).
 - Docs: rewrite `WDL_HEAD.md` to as-built, update `TRAINING.md`,
   `SCRIPT_USE.md`, `change_log.txt`.
+
+### FC2's fate — RESOLVED: keep the layer (2026-07-27)
+
+**Decision: do not delete FC2.**  Retire it from *driving search* once the head
+matures (Stage C), but keep the `32→1` layer in the architecture — optionally
+behind a compile gate for a stripped deployment build.  FC2 and the WDL head are
+parallel readouts of the same trunk (both read `fc2_in[32]`); the head never
+consumes FC2's output, so keeping FC2 costs the head nothing.
+
+Rationale:
+- **From-scratch capability depends on it.**  FC2 provides (a) the scalar score
+  that scalar-search generation runs on and (b) the scalar-TD anchor that trains
+  the trunk.  Both are what let a fresh (random/material) net climb PAST the young
+  head's self-play ceiling — proven by the wdlL vs wdlB A/B: WDL-search-only from
+  scratch stalls (~+379–472 vs material), the scalar-anchored path reaches +610
+  and climbs toward classical.  Delete FC2 and every future net is forced onto
+  WDL-search-from-scratch → the head-ceiling attractor → permanent dependence on
+  already having a strong net.
+- **A trained head cannot be transplanted to rescue this.**  The head's
+  `fc2_in[32]` weights are trunk-specific (a linear readout of the mature trunk's
+  FC1 features); on a fresh trunk they are meaningless.  The only trunk-independent
+  part — material weight + draw bias — is already exactly what
+  `nnue_wdl_fresh_init()` writes.  So baking a "trained" head into an init file
+  buys nothing over the principled init; the missing ingredient is the scalar
+  anchor, not the head init.
+- **It is nearly free and aligned.**  `32→1` per bucket: negligible compute, a few
+  KB of net.  Phase 3 showed the scalar and WDL readouts are aligned (trunk-grad
+  0.1 neutral on scalar), so FC2 as a low-weight auxiliary does not fight the head.
+- **It keeps scalar search available** for analysis, generation flexibility, and
+  as a fallback.
+
+Implementation:
+- Keep FC2 always-compiled for training/bootstrap binaries.  If a stripped
+  mature-deployment net is wanted, gate FC2 out behind a compile flag (e.g.
+  `WDL_NO_FC2`) rather than deleting it — bootstrap/train builds keep FC2, the
+  deployment build omits it.  This yields both an FC2-free deployment net AND the
+  ability to grow a new net from scratch on demand.
+- Net-format: FC2 weights stay in the `.nnue`/`.tdleaf.bin`; no format cleanup
+  needed unless a stripped build is produced.
+- Fallback if FC2 is ever fully removed anyway: the only route to a new net is
+  **teacher distillation** — generate a corpus with the mature net (WDL-search,
+  non-regressing by then) and consolidate a fresh net on it offline.  Sidesteps
+  the self-play attractor, but is "clone the teacher", not from-scratch self-play.
 
 ---
 
