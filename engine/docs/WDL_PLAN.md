@@ -380,19 +380,67 @@ only λ differs):**
 
 The head discriminates won from drawn material-up positions ~4× better, stops
 hedging spurious loss on winning positions, and aggregate calibration improves.
-The residual (still-modest) gap is the rep-path class → Fix 2.  Next: a
-from-scratch online run with the new λ to confirm the decisiveness drift eases
-(draw-rate canary stops falling) and the head-to-head regression closes.
 
-**Fix 2 (planned, AFTER the λ question is settled) — repetition count as a head
-input.** Length-λ addresses the *positional/fortress* draw class and breaks the
-bootstrap trap, but repetition-path draws are fundamentally unobservable to a
-static head, so a rep-count input (companion to the fifty input) is the
-structural completion.  Deliberately deferred: settle λ first (cheap, offline,
-already reversing the dominant error), then add the input only if the residual
-won-vs-drawn gap justifies the head-dim change (34→35) and a from-scratch head
-retrain.  This revisits the "Repetition counts — not an eval input" settled
-decision above.
+Outcome of the online confirmation run (m260726wdlL, still `--wdl-search`): the
+new λ did NOT ease the decisiveness drift or close the head-to-head regression —
+because the "lost ground" root cause was NOT head calibration at all, but the
+WDL-search generation attractor (next section).  The λ change remains a real,
+keepable OFFLINE calibration win (and improved head Brier online too: 0.459→0.442
+across the scalar-gen chain), orthogonal to the generation fix.
+
+**Fix 2 — repetition count as a head input — REJECTED (2026-07-27).** The plan was
+a rep-count input for the residual rep-path draws.  On inspection it earns
+nothing: the search returns a draw on the FIRST repetition (a 2-fold) in both pvs
+(search.cpp:1199) and qsearch (search.cpp:2101), BEFORE the NNUE eval runs, so the
+head essentially never evaluates a repeated position — it always sees rep=0.  A
+rep-count input would be constant 0 where it is read, and the diagnosed
+material-up-but-drawn positions are themselves rep=0 (the repetition is a future
+property, not a current one).  The "Repetition counts — not an eval input" settled
+decision therefore stands.
+
+## Root cause of the from-scratch "lost ground": WDL-search generation (2026-07-27)
+
+The λ fix above improved head calibration but did NOT resolve the from-scratch
+"lost ground" (m260726wdlL: Stage-2 still −21 Elo vs Stage-1, draw rate still
+33→25%).  Localising the loss BY PIPELINE STAGE found the real mechanism.
+
+Under `--wdl-search` the engine eval **is** the head's cp (score.cpp:80), so both
+the search AND the online scalar TD targets are driven by the young head.  Stage-2
+broken down by stage (Elo vs the material anchor):
+
+| Stage-2 checkpoint | wdlL (`--wdl-search`) | wdlB (scalar gen) |
+|---|---|---|
+| Stage-1 consolidated (= Stage-2 start) | +472 | +584 |
+| Stage-2 online (post-generation) | **+285** (−187) | **+541** (held) |
+| Stage-2 consolidated (final) | +379 | +610 |
+| Stage-2 final vs Stage-1 final | **−21** | **+96** |
+
+Under WDL-search, Stage-2's online phase dragged the trunk from its +472
+consolidated start DOWN to +285 — the head's own operating point (Stage-1's online
+net was +279).  **The young head is a ceiling: WDL-search generation distills the
+strong consolidated trunk down to what the head can score, every online phase,
+regardless of where it started.**  Consolidation re-lifts (real outcomes let it
+exceed the head) but from a corpus generated at the head's level, so Stage-2 lands
+below Stage-1.  This is the ~50 Elo WDL-search cost from Phase 4, compounding —
+exactly what the "generation stays scalar until non-regression" rule (Path to the
+flip) exists to prevent.  It shows up at 200k games because it is the head-coupling
+attractor, NOT the d6 depth ceiling (which waits for ~2M games / classical
+strength — verified by the engine author's experience).
+
+**Fix (confirmed) — scalar generation (Stage B: `--wdl-head --wdl-trunk-grad`, NO
+`--wdl-search`).**  Scalar search generates strong games (trunk stays on its
+compounding trajectory); the head trains every iteration as a passenger.  Result
+(wdlB column): the online attractor is gone (Stage-2 online +541, holds/builds),
+Stage-2 EXCEEDS Stage-1 by +96 (was −21), absolute strength ~+230 Elo higher vs
+material and ~+160 vs classic, draw rate healthy (34→30% with a RISING within-run
+trend, vs the falling 30→25% drift), and the head develops BETTER as a passenger
+(consolidation Brier 0.442 vs 0.495 when it drove its own weak search) — the head
+gets strong by learning from strong play, which is the bootstrapping thesis of the
+Path to the flip.
+
+**Standing rule (now empirically proven):** generation runs on scalar search; the
+head trains as a passenger; flip actors to `--wdl-search` only once the same-net
+A/B (Phase 4) reaches non-regression.
 
 ## Phase 5 — Contempt calibration + consolidation
 
