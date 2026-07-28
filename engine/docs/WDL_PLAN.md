@@ -442,6 +442,69 @@ Path to the flip.
 head trains as a passenger; flip actors to `--wdl-search` only once the same-net
 A/B (Phase 4) reaches non-regression.
 
+## Head as the search eval — the real ceiling, branch paused (2026-07-28)
+
+After scalar-generation training reached 500k games (net playing well, ~+600 vs
+the material anchor), two 500k-game continuations from the same `wdlB-5e5g`
+checkpoint tested the flip:
+- **B** (`--wdl-head`, scalar generation continues): +85 Elo vs the 5e5g start,
+  −136 vs classic and climbing.  Healthy, compounding.
+- **Bs** (`--wdl-search`, head drives generation): online collapsed to +127 vs
+  material (**−442** vs the 5e5g start), consolidation recovered only to −142.
+  Disastrous.
+
+**Same-net A/B — the cheap test that should be run first.**  Compile a
+`WDL_SEARCH` build and a scalar build of the SAME net, gauntlet at fixed depth 6:
+pure flip cost, no training confound.
+
+| net | WDL-search vs scalar (depth 6, 400g) |
+|---|---|
+| wdlB-5e5g | **−8 ± 29** (even) |
+| wdlB-1e6g | **−41 ± 29** (LOS 0.3% — real) |
+
+Two distinct effects, now separated:
+
+1. **A modest but GROWING structural deficit.**  Head-search is even with scalar
+   at 5e5g, −41 by 1M.  As a passenger the head is trained to CALIBRATE (predict
+   outcomes on quiet leaves) — a coarser objective than FC2's TD SEARCH target.
+   FC2 improves as a search eval faster than the passenger head, so the gap
+   WIDENS as the net strengthens.  Consequence: **"flip once the head is
+   non-regressing" is unreachable via passenger training** — the target pulls away.
+2. **WDL-search GENERATION amplifies −41 into −442.**  Under `--wdl-search` the
+   online scalar TD target becomes the head cp (trunk distilled toward the head),
+   and the head drives its own self-play (draw rate 23% drifting down vs scalar's
+   stable 28–29% — the decisiveness spiral).  Together they turn the modest
+   structural gap into a full collapse; the bigger the trunk, the bigger the fall.
+   Confirmed again, at scale: **never use WDL-search for generation.**
+
+**The deeper question this surfaced:** can the head ever be a STRONG *standalone*
+search eval?  Passenger training says no (gap widens); WDL-search training says no
+(collapses).  A chicken-and-egg that argues for reconsidering the "head IS the
+score" premise.  Options:
+
+- **C — augment, don't replace (recommended).**  Search on the strong scalar cp;
+  use the head only for draw/contempt-aware score adjustment + WDL output.
+  Delivers the original motivation (draw-aware play, the contempt knob, WDL for
+  GUIs) at zero search-strength cost, no flip/attractor risk.  The head stops
+  competing with FC2 and starts complementing it.
+- **B — distill head cp → scalar cp.**  Add a "head cp ≈ scalar cp" term to the
+  head loss during scalar generation so the head inherits FC2's search-quality
+  positional readout while the outcome CE adds the WDL split.  Head-search → ~0
+  cost.  But once head cp ≈ scalar cp by construction, B collapses into C — the
+  head's only remaining value is the WDL split.
+- **A — deploy WDL-search at a cost.**  Ship a WDL-search play build, eat the −41
+  (and rising) for the WDL features.
+
+The evidence indicates the head's value was never "a better scalar" — it is the
+DISTRIBUTION (draws, contempt, WDL output).  Option C banks that permanently while
+keeping the scalar search built over 1M games.
+
+**Branch status: PAUSED (2026-07-28).**  The length-targeted λ (committed) and the
+diagnostic findings stand.  Resuming means choosing C / B / A above; nothing
+further trains until then.  The scalar-generation net (`wdlB-1e6g`, +721 vs
+material, −136 vs classic and climbing) is the strongest artifact and is a normal
+scalar net that also carries a passenger-trained WDL trailer.
+
 ## Phase 5 — Contempt calibration + consolidation
 
 - Even-play δ gauntlet (δ-variants vs fixed δ = 0, same binary/net; W/D/L
