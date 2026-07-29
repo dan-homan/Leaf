@@ -505,6 +505,90 @@ further trains until then.  The scalar-generation net (`wdlB-1e6g`, +721 vs
 material, −136 vs classic and climbing) is the strongest artifact and is a normal
 scalar net that also carries a passenger-trained WDL trailer.
 
+### Option C — concrete sketch (recommended resume path)
+
+Search never runs on the head; it runs on the scalar cp, and the head contributes
+only a contempt-driven correction that is exactly zero at δ = 0 (so the −41
+head-search deficit vanishes and δ = 0 is byte-for-byte the scalar search).
+
+**The eval:**
+
+```
+score_C = scalar_cp  +  [ cp_wdl(δ) − cp_wdl(0) ]
+          └ backbone ┘   └─── head contempt correction ───┘
+```
+
+- `scalar_cp` = `nnue_evaluate(...)` — the strong FC2 signal, what alpha-beta maximizes.
+- `cp_wdl(δ)` = the head's logit-space cp WITH side-relative contempt (`nnue_evaluate_wdl_cp`, already exists); `cp_wdl(0)` = the same at neutral c = 0.5.
+- The bracket isolates ONLY the contempt effect and adds it to the backbone.  Two
+  positions with equal `scalar_cp` but different head `p_d` get nudged apart when
+  δ ≠ 0; the drawish one moves in the contempt-preferred direction.
+- **δ = 0 ⇒ bracket ≡ 0 ⇒ `score_C ≡ scalar_cp`.**  Zero regression.  The head is
+  dormant in training (δ = 0 always) and wakes only at play time.
+
+**Where it lives (`score.cpp`)** — a sibling of the `WDL_SEARCH` path; reuses all
+head machinery, changes only the combination:
+
+```c
+NNUEIntActs cap;
+int score = nnue_evaluate(*nnue_acc, wtm, pc, &cap);   // scalar backbone + capture
+
+#if WDL_ADJUST
+if (nnue_wdl_contempt_active()) {          // δ != 0, set once per game
+    float logits[3];
+    nnue_wdl_int_forward(cap, (int)fifty, logits, nullptr);
+    int delta = nnue_wdl_contempt_delta(logits,        // cp_wdl(δ) − cp_wdl(0)
+                                        (int)wtm == nnue_wdl_root_side());
+    score += delta;
+}
+#endif
+```
+
+One `nnue_evaluate` call yields both the scalar cp and `fc2_in` — no second forward
+pass.  Head cost is one `34→3` forward + two `logaddexp` conversions, and only when
+δ ≠ 0.  `nnue_wdl_contempt_delta` is a tiny new helper (run the existing cp
+conversion twice on the same logits, at δ and at c = 0.5, return the int diff).
+
+**Hash key** — score depends on `fifty` only when δ ≠ 0:
+
+```c
+h_code hkey = (WDL_ADJUST && nnue_wdl_contempt_active())
+              ? hcode ^ ((h_code)fifty * 0x9E3779B97F4A7C15ULL) : hcode;
+```
+
+At δ = 0 the plain `hcode` is correct — no fifty dependence, and no WDL_SEARCH
+TT-cutoff gate needed.  Contempt is fixed per game, so it need not enter the key.
+
+**WDL output (independent of search)** — plumb the head's softmax straight out:
+`info … wdl <W> <D> <L>` on the PV, keep the `wdl` CLI command, and optionally feed
+`p_d` to time management (spend less in dead-drawn positions) and search control
+(extra reduction at high `p_d`).  Uses the DISTRIBUTION to steer effort without
+touching eval quality.
+
+**Training — unchanged.**  Generation stays scalar (the +721 compounding path); the
+head trains as a passenger, δ = 0 throughout, so the contempt term is never
+exercised in self-play — correct, since a calibrated head + a chosen δ gives a
+sensible correction at play time.  The Phase-5 δ-sweep tunes the DEFAULT δ via
+play-time gauntlets (fixed net, δ-variants), never via training.
+
+**What you build:** a `WDL_ADJUST` play build (a variant of the `WDL_SEARCH` build —
+NNUE-only, head from the `.nnue` trailer — with augment-eval instead of
+replace-eval), one helper (`nnue_wdl_contempt_delta`) and the `active()` predicate.
+Everything else (head weights, forward, `nnue_wdl_set_contempt`, the logaddexp
+conversion, `WDLContempt` UCI option) already exists and is reused.  TDLEAF training
+builds keep the passenger head exactly as now.
+
+**Scope:** delivers the practical WDL goals — a contempt knob that shifts
+draw-seeking/avoiding, and WDL output — at zero strength cost and no attractor risk.
+It gives up the literal original framing ("the score IS p_w − p_l"): the head
+augments the scalar rather than being the eval — which is precisely what the
+−41 / −442 evidence retired.  The head's durable value was always the distribution.
+
+**First step on resume:** implement `nnue_wdl_contempt_delta` + the `WDL_ADJUST`
+path on `wdlB-1e6g`, then run a δ-sweep gauntlet (δ = 0, ±small, ±large) vs the
+anchors — δ = 0 must reproduce scalar exactly (the sanity check), and the δ ≠ 0
+curve shows whether the contempt lever moves W/D/L composition as intended.
+
 ## Phase 5 — Contempt calibration + consolidation
 
 - Even-play δ gauntlet (δ-variants vs fixed δ = 0, same binary/net; W/D/L
