@@ -1411,3 +1411,76 @@ and the historical comparison is unsafe.  ~1h.
 - 20k d8 calibration: `learn/alphapre_calib_20k_d8_work/`.
 - Draw rates aggregated over all 11 actor logs per arm, not the first four
   the script prints.
+
+## 6.9 RETRACTION of 6.8's seed hypothesis — the harness, not the seed (2026-08-13)
+
+6.8 concluded that the endgame over-coherence had "resolved as the net
+matured", inferring it from two runs seeded at the chain head both reading
+b0/b7 ~ 0.94-0.98 against 1.32-2.12 in six production iterations.  The
+confirmation test named in 6.8's "what remains untested" was run and
+**falsifies that conclusion.**
+
+Same harness, same depth, same game count, same cadence, alpha=0, seeded from
+`m260720-1e6g_final` (-134 vs classic) — the exact state the historical 2e6g
+iteration used, which produced b0 = 10.37 and b0/b7 = 1.34:
+
+| run | seed (Elo vs classic) | b0..b7 | b0/b7 |
+|---|---|---|---|
+| production 2e6g (1M games) | 1e6_final (-134) | 10.37 9.51 8.46 8.81 8.56 8.38 8.02 7.75 | **1.34** |
+| this harness (200k games) | 1e6_final (-134) | 7.70 8.94 9.01 8.63 7.91 7.90 7.58 7.74 | **0.99** |
+
+Predicted 1.34, measured 0.99.  Draw rate 27.1%, in band.  All three harness
+runs — two seeds differing by 158 Elo — cluster at 0.94/0.98/0.99, while all
+six production iterations sit at 1.32-2.12.  **The variable is the harness,
+not the seed, not depth, not game count, not cadence.**
+
+Excluded so far, each checked rather than assumed:
+
+- **Binary / source**: production `Leaf_vtrain_hl_a` (Aug 12) and
+  `Leaf_valphapre` are built from the same `engine/src/` — no source commit
+  between 2026-07-20 and this work — with identical flags
+  (`NNUE=1 NNUE_NET=m260720.nnue TDLEAF=1`).  The only delta is the alpha knob,
+  proven a byte-exact no-op at 0.
+- **Invocation**: matches train.py's `selfplay_run.py` call in every argument
+  (`--actors --depth --games-per-actor --total-games --traj-dir
+  --delete-consumed --refresh-scores`), `--tdleaf-out` equivalent by naming.
+- **The TSV dump env** (`TDLEAF_DUMP_TSV`/`_QUIET_CP`, which production sets
+  and this harness does not): excluded by code — `tdleaf_record_ply` gates root
+  capture on `tdleaf_dump_wanted() || tdleaf_capture_root`, and
+  `selfplay.cpp:360` sets `tdleaf_capture_root` whenever `--traj-out` is
+  active, which is always in the actor/learner path.  The dump only makes the
+  learner write corpus TSVs; it does not touch the gradient path.
+- **Refresh cadence**: tested directly, 500 vs 1000 gives 0.94 vs 0.98.
+- **Game count**: the production d6 series is flat from 100k to 1M
+  (1.32/1.42/1.45/1.34), so 200k cannot explain 0.99.
+- **Opening book**: `training_openings.epd` is dated 2026-07-18, unchanged
+  across every m260720 iteration and every harness run.
+
+Top remaining candidate: **the opening-shuffle `--seed`**.  train.py derives it
+per iteration (`zlib.crc32(tag)`); this harness hardcoded `20260813` for all
+three runs — which would also explain why three runs from very different weight
+states cluster so tightly.  Testable in ~1h by re-running one arm with a
+different `--seed`.
+
+### What this invalidates, and what survives
+
+- **6.8 conclusion 2 is RETRACTED.**  There is no evidence that the endgame
+  over-coherence resolves with net maturity.  6.4's measurement stands as a
+  property of production iterations; its absence here is a harness artefact of
+  unknown origin.
+- **6.8 conclusion 1 is weakened but not void.**  The control genuinely lacked
+  dynamic range, so the alpha arms could not be read against the intended
+  criterion — that much holds.  But the *reason* is now unknown rather than
+  "the pathology is gone", so this is not evidence that alpha is unnecessary.
+  What survives independently is the internal comparison: alpha inverts the
+  bucket profile (spread 1.31 -> 1.90 -> 2.70) and acts as a differential LR
+  cut (PSQT -3.6x, FT -8x, FC biases -1.3x).  That is measured within one
+  harness against its own control and does not depend on the production
+  comparison.  Alpha stays shelved on that ground alone.
+- **6.8 conclusion 3 is withdrawn.**  Endgame coherence is NOT ruled out as
+  the mechanism behind the -27/-32 online displacement; it is simply untested,
+  because the instrument does not currently reproduce the phenomenon.
+
+**The actionable finding is a tooling one:** `alpha_pretest.sh` cannot validate
+or reject any online-update change until the ~1.4-vs-~0.97 gap against
+production is explained.  Fix the instrument before running more arms.

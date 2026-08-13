@@ -43,7 +43,10 @@ BINARY=Leaf_valphapre
 # catches any recurrence.
 NET=m260720.nnue
 STATE=m260720.tdleaf.bin
-SEED_STATE=m260720-3e6g_final.tdleaf.bin
+# Seed state.  Overridable: the endgame-violence profile is SEED-DEPENDENT
+# (6.8), so which state an arm starts from is a first-class variable, not a
+# constant.  Must be anchored to $NET or it will refuse to load (see above).
+SEED_STATE=${SEED_STATE:-m260720-3e6g_final.tdleaf.bin}
 EPD=training_openings.epd
 OUT=${OUT:-alphapre_work}
 
