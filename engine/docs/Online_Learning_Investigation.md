@@ -1015,3 +1015,308 @@ castle fix, so its delta vs d8t-2sp mixes fix + architecture + iteration.
   `material_260708-d8t-2sp_work/selfplay_*.log` (37% flat).
 - Sidecars: `material_260708-d8t-2sp_final.json`,
   `material_260708-d8t-3al3_final.json`.
+
+---
+
+# Part 6 — The m260720 chain: freeze-generation is closed at d8 too, and the online phase is what carries the iteration (2026-08-13)
+
+The `m260720` chain ran 3.0M games from a fresh seed through eight
+hybrid-loop iterations — six at d6, then d8 from the 2.2e6 mark — with the
+actor/learner split throughout (`gen_mode: actor-learner` in every sidecar).
+The final 500k games were generated with `TDLEAF_FREEZE=1`, following Part
+4.5's recipe of record.  That frozen iteration is the control Part 4 never
+ran at d8 with a mature chain behind it, and it inverts the recipe.
+
+## 6.1 Foreign-anchor decomposition of the chain
+
+Every iteration's sidecar carries a 1000-game gauntlet of both the
+post-online (`tdleaf`) and post-offline (`final`) net against
+`Leaf_vclassic_eval` (±11).  Because it is the same foreign opponent every
+time, differencing that column separates the two phases without the
+family-compression distortion of Part 4.6:
+
+| iter | games | depth | tdleaf vs classic | final vs classic | online Δ | offline Δ | iter total | final vs prev final (family) | foreign/family |
+|---|---|---|---|---|---|---|---|---|
+| 1e5 | 100k | 6 | −404 | −349 | — | +55 | — | — | — |
+| 2e5 | 100k | 6 | −330 | −294 | +18 | +36 | +55 | +87 | 0.63 |
+| 5e5 | 300k | 6 | −287 | −199 | +7 | +89 | +95 | +113 | 0.85 |
+| 1e6 | 500k | 6 | −201 | −134 | −2 | +67 | +65 | +91 | 0.71 |
+| 2e6 | 1M | 6 | −135 | −61 | −1 | +74 | +73 | +116 | 0.63 |
+| 2.2e6 | 200k | 8 | −88 | −36 | −27 | +52 | +24 | +37 | 0.65 |
+| 2.5e6 | 300k | 8 | −68 | +17 | −32 | +85 | **+53** | +38 | 1.39 |
+| 3e6 | 500k | 8 **frozen** | — | +24 | — | +7 | **+7** | +29 | **0.25** |
+
+(The early rows sit at −300…−400 where the Elo scale is stretched and
+differences are less reliable; the comparison that matters — 2.5e6 vs 3e6 —
+is in the near-even zone where the anchor is trustworthy.)
+
+Two readings jump out:
+
+1. **The frozen iteration used 1.7× the games of the one before it and
+   returned +7 against +53.**
+2. **Its family/foreign ratio inverts.**  Every learning iteration converts
+   63–139% of its within-family gain into gain against a foreign opponent;
+   the frozen iteration converts 25%.  Part 4.6 established that family
+   matches *understate* real improvement (~+65 style-robust showing as +13);
+   the frozen iteration is the first in either chain where family
+   *overstates* it.  Its +29 over the seed is largely family-local.
+
+## 6.2 The objective-space evidence, which needs no Elo at all
+
+The trainer's own validation curve settles it independently of any match
+result:
+
+| iteration | baseline val MSE | epoch 1 | epoch 2 |
+|---|---|---|---|
+| 2e6 (learning, d6) | 0.009186 | 0.008359 | 0.008356 |
+| 2.2e6 (learning, d8) | 0.006946 | 0.006423 | 0.006491 |
+| 2.5e6 (learning, d8) | 0.006829 | 0.006347 | 0.006363 |
+| **3e6 (frozen, d8)** | **0.005928** | **0.005954** | **0.005998** |
+
+The frozen consolidation made validation MSE **rise at every epoch**.  Epoch
+1's running train MSE opens at 0.005989 — *above* the baseline — and closes
+at 0.005903.  The seed already sat at the optimum of a corpus it had labeled
+itself; there was no descent direction to find, and both epochs are noise
+around a fixed point.  This is Part 4.3's `seedctl-dedup` result (flat, −3
+and −10 Elo, val 0.007845 → 0.007638 → 0.007571) reproducing at d8 with a
+mature chain: **freeze-generate → consolidate is closed at depth 8, exactly
+as it closed at depth 6.**  Part 4.6's d8-1 iteration was positive because
+it was the *first* d8 corpus for a d6-saturated net; once the chain has run
+d8 iterations, a frozen d8 corpus carries nothing new.
+
+Corpus size was not the limiter: 69.7M rows (139.5 rows/game after the
+auto-dedup that `TDLEAF_FREEZE` enables — a ~25% reduction from the 186–189
+rows/game the d8 learning runs produced) against 55.8M for the 2.5e6
+iteration that gained +53.  More data, less information.  Generation health
+was normal in both (draw rate 34.7% frozen, 36.0% learning, both inside the
+35–40% canary band; learner batch applies 0 frozen vs 300k learning,
+confirming the freeze took).
+
+## 6.3 What this does to the Part-3 picture
+
+Part 3.5 concluded from the `seedctl` control that the reliable offline gain
+was **repair of online self-damage measured against a damaged baseline**, and
+Part 3.7/4.5 drew the consequence: retire online learning, freeze the
+generator.  The m260720 chain says that consequence does not survive contact
+with a healthy online phase.
+
+The correction is not that Part 3 measured wrong — `seedctl` is sound, and
+the online phase here still reads −27/−32 in its own right.  It is that
+**the online phase's product is not its Elo, it is the corpus.**  A frozen
+generator labels positions with the seed's own evaluations, so consolidating
+that corpus is a no-op by construction (6.2 measures exactly this).  A
+learning generator moves off the seed's fixed point during generation, so
+its corpus contains labels the seed does not already reproduce — and offline
+consolidation converts those into a properly-fit, style-robust net worth +52
+to +85 against a foreign anchor.  The online phase pays ~30 Elo of
+displacement to buy that; the loop nets +24 to +53.  Frozen, the loop nets
++7.
+
+Part 3's seedctl was run in the 13-writer merge regime, where online
+displacement was large enough to dominate whatever signal the drift carried.
+Under the actor/learner split with `--refresh-scores` and natural
+termination, the displacement is smaller and the balance flips.  The two
+results are consistent; the regime changed underneath the conclusion.
+
+**Recipe of record, revised: keep online learning on during generation.**
+`TDLEAF_FREEZE=1` remains the right tool for isolating label quality in a
+control, and remains mandatory-with-dedup if ever used for production
+generation, but it should not be the default generation mode.
+
+Caveat worth stating plainly: this rests on one frozen iteration (n=1) for
+the Elo half.  The val-MSE half (6.2) is not a noisy measurement and is what
+the conclusion mainly leans on.
+
+## 6.4 The online displacement is still endgame-concentrated — measured in the current regime
+
+With online learning reinstated, its −27/−32 cost becomes the thing worth
+fixing.  `bucket_phase_analysis.py` on the 2.5e6 phase
+(`m260720-2.2e6g_final` → `m260720-2.5e6g_work/train/m260720.tdleaf.bin` →
+`m260720-2.5e6g_final`), PSQT per-update violence `med|dw|/√updates`:
+
+| bucket | online | offline | online exposure share | offline share | PSQT proj | cos |
+|---|---|---|---|---|---|---|
+| 0 (1–4 pieces) | **14.85** | 3.35 | 4.2% | 1.8% | −0.03 | −0.07 |
+| 1 | 11.04 | 3.30 | 18.3% | 15.4% | −0.07 | −0.10 |
+| 2 | 11.38 | 3.35 | 18.7% | 17.9% | +0.01 | +0.02 |
+| 3 | 10.10 | 2.95 | 15.9% | 15.6% | −0.04 | −0.06 |
+| 5 | 8.30 | 2.31 | 11.6% | 13.2% | −0.19 | −0.31 |
+| 7 (opening) | **7.94** | 2.15 | 7.6% | 9.9% | −0.18 | −0.32 |
+
+- Bucket 0 is **1.87× bucket 7** — the *identical* ratio Part 3.2 measured on
+  the old 13-writer harness (12.7 → 6.8).  The actor/learner split fixed the
+  multi-writer problem and did nothing to this one.
+- Offline is 3–4× gentler per update in every bucket.
+- PSQT projections in buckets 0–2 are ≈ 0 with cos ≈ −0.1: offline neither
+  confirms nor repairs online's endgame PSQT movement.  It persists into the
+  final net as unvetted noise, replicating Part 3.2 exactly.
+- The concentrated-parameter version shows in the FC stacks: the bucket-0
+  fc2 output bias moved **−183** online and offline pushed back only **+87**
+  (bucket 1: −73 → +32).  In Part 3 the same parameter moved −182/−112
+  online with a +365/+225 offline repair — the drift is unchanged and the
+  repair is now weaker.
+
+## 6.5 Mechanism: coherence, not magnitude
+
+`|dw|/√n` is the displacement a *random walk* of n independent updates would
+produce.  That this ratio grows 1.87× toward the deep endgame means the
+updates there are **correlated**, not merely more numerous — the implied
+effective coherence in bucket 0 is ~3.5× that of bucket 7.  Gradient
+magnitude is not the mechanism: Adam's `v` renormalizes scale by design (the
+same point Part 2 made about per-record error magnitude).
+
+Two within-game sources, both amplified by internal self-play's dply=1
+recording of every ply:
+
+1. **Outcome-term saturation in the game tail.**  `e[t]` carries
+   `λ^(T−1−t)·(result − d[T−1])`, which → 1 as t → T.  Every late record in a
+   game therefore holds the same sign and nearly the same magnitude.
+2. **Near-identical positions.**  Those records share an FC stack, a PSQT
+   bucket, and most FT feature indices.  Corpus measurement over 4000 games
+   of the 2.5e6 leaf rows: 44.5% of rows sit in buckets ≤2 at a median 31
+   rows/game, and *literal* within-game position repeats are 13.8% of
+   bucket-0 rows (max 13 copies of one position), 8.0% in bucket 1, 0.9% in
+   bucket 7.
+
+`TDLEAF_BATCH_SIZE` is 8 **games**, so a bucket's effective sample size per
+Adam step is the game count regardless of how many correlated records each
+game contributes — while the step size is normalized per weight like
+everything else.  Endgame weights random-walk further per step by
+construction.  This is Part 3.4's reinterpretation, now measured rather than
+inferred, and it survives every architectural change since.
+
+Suspected amplifier, not yet measured: `id_weight = 1/(1 + var/σ²)`
+upweights records with stable iterative-deepening scores, and fixed-depth
+endgame searches are the most stable in the game — so the ID-stability
+weighting should be systematically boosting exactly the over-coherent
+records.  Checkable from a `TDLEAF_TRACE_UPDATE` dump (the `var=` field
+against `stack=`).
+
+## 6.6 The fix: TDLEAF_STACK_NORM_ALPHA (implemented 2026-08-13)
+
+Each record's gradient is divided by `pow(n_stack, alpha)`, where `n_stack` is
+how many records its game contributes to that record's FC/PSQT material
+bucket — a pre-pass in `tdleaf_accumulate_game`, applied to `grad_scale`
+alongside the existing `id_weight`.  At `alpha = 1` a game teaches each
+material bucket exactly one lesson no matter how many plies it spent there;
+`alpha = 0.5` is the sqrt-n compromise; `alpha = 0` is the previous
+behaviour.  Compile-time default `TDLEAF_STACK_NORM_ALPHA = 0.0`, env-
+overridable for the sweep (and added to `tdleaf_check_env()`'s allowlist —
+the binary refuses to start otherwise).
+
+It subsumes the literal-repetition problem for free, and it does not touch
+the target math, which Part 3.1 exonerated across three completely different
+error formulas.
+
+Validation before any training run:
+
+- **alpha = 0 is byte-for-byte the old code.**  A 24-game strict `--selfplay`
+  run produces an md5-identical `.tdleaf.bin` to a binary built from the
+  pre-change sources.  The divisor is *skipped* at alpha = 0 rather than
+  computed as `pow(n, 0)`, which is what makes this exact; the
+  actor/learner bit-exactness gate (5.3) depends on it.
+- **The arithmetic is exactly 1/n_stack.**  A `TDLEAF_TRACE_UPDATE` diff of
+  alpha 0 vs 1 over one game: observed `gs` ratio per stack matches `1/n`
+  to a max relative error of 8e-8 (stacks of n = 6, 10, 14, 19), while
+  `max|e_alpha1 - e_alpha0| = 0.0` — the targets are bit-identical, only the
+  per-record weighting moved.
+
+## 6.7 The pre-test, and two traps in setting it up
+
+`scripts/alpha_pretest.sh` runs one short actor/learner generation per alpha
+from an identical seed and diffs seed → post-online per material bucket.  No
+gauntlet: a flattened `on/upd` profile is what earns a full iteration.
+
+Two failure modes were hit while building it, both worth recording because
+each produces a run that *looks* completely healthy:
+
+1. **The `.tdleaf.bin` content-hash trap.**  A state file carries a hash of
+   the `.nnue` it was trained against and refuses to load against any other —
+   then the engine plays on from freshly-derived shadow weights, so the run
+   completes normally, the logs look right, and the experiment measures
+   nothing.  The tell is in the state file, not the log: update counts
+   *reset* (a toy run showed `psqt_cnt` total 16,608 against the seed's
+   12.85e9) and `bucket_phase_analysis.py` reports **negative** `upd_on`.
+   The cause: the chain's states are all anchored to the BASE net
+   `m260720.nnue`, not to the baked `m260720-*_final.nnue` exports.  The
+   script now pairs base net + base-name state (seeded by copying the chain
+   head onto it) and hard-fails on any "Refusing to load" line.
+2. **The measurement has a resolution floor in game count.**  A 400-game d6
+   smoke showed the profile *inverted* (bucket 0 = 1.90, bucket 7 = 7.27), and
+   a full 20k-game d8 control arm still read b0/b7 = 0.80 — bucket 0 the
+   *quietest* bucket, against 1.87 in the 300k reference.  The initial reading
+   was that `|dw|/sqrt(n)` grows as sqrt(n) for coherent updates, implying the
+   test needed ~110k games.  **That reasoning is wrong**, as the chain's own
+   completed iterations show when profiled the same way:
+
+   | depth | games | b0/b7 |
+   |---|---|---|
+   | d6 | 100k | 1.32 |
+   | d6 | 300k | 1.42 |
+   | d6 | 500k | 1.45 |
+   | d6 | 1M | 1.34 |
+   | d8 | 200k | 2.12 |
+   | d8 | 300k | 1.87 |
+   | d8 | 20k (control arm) | 0.80 |
+
+   The ratio does **not** scale with n: four independent d6 iterations spanning
+   10x in game count all land in 1.32-1.45.  What actually happens is a
+   resolution floor — below a threshold between 20k and 100k games the deep
+   endgame accumulates too few updates (0.7M at 20k vs 9.5M at 300k) to
+   resolve, and above it the value is flat.  **>= 100k games/arm; the number
+   read off an arm is comparable to any other arm at any n above the floor.**
+
+3. **The signature is depth-dependent, and d6 is the better test bed.**
+   d8 shows it more strongly (1.87-2.12) but d6 shows it with a far tighter
+   baseline (1.32-1.45 across four runs, sigma ~0.06) at ~5x the throughput.
+   That the effect is *stronger at greater depth* is independent support for
+   the `id_weight` amplifier hypothesis in 6.5: deeper search makes endgame ID
+   scores relatively more stable, so the stability weight upweights exactly
+   the over-coherent records more at d8.  Pre-test at d6 for power per hour;
+   validate the winning alpha at d8, the production depth, with a foreign
+   anchor.
+
+Reading the result:
+
+- **PASS** — `on/upd` flattens (bucket0:bucket7 ratio drops toward 1)
+  *and* aggregate displacement stays the same order of magnitude as
+  alpha = 0.
+- **FAIL-1** — profile flattens but aggregate displacement collapses: alpha
+  is acting as a blanket LR cut, not a decorrelator.  Re-run the winning
+  alpha with the section LRs scaled up to match alpha = 0's displacement
+  before believing anything.
+- **FAIL-2** — profile unchanged: within-game per-stack coherence is not the
+  mechanism; test the `id_weight` amplifier from 6.5 instead.
+
+In every arm the draw rate must hold 35–40% (the 5.4 canary) — a quiet run
+flatters every other number on the page.
+
+## Methodology notes (Part 6)
+
+- Foreign-anchor decomposition: `learn/m260720-*_final.json`,
+  `tdleaf_gauntlet` / `final_gauntlet` entries for `Leaf_vclassic_eval`
+  (1000 games each).  Family column is the same sidecars' `final_gauntlet`
+  entry against the previous iteration's final.
+- Val MSE and corpus sizes: `learn/m260720-*_work/train/train.log`
+  (`batch-train: ... positions loaded`, `val MSE(blend)` lines).
+- Freeze confirmation: `TDLEAF_FREEZE=1` startup notice in
+  `m260720-3e6g_work/traj/actor_*.log`; 0 learner batch-apply lines vs 300k
+  for 2.5e6.  Draw-rate canary from the actors' running `+W =D -L` lines.
+- Bucket forensics: `python3 scripts/bucket_phase_analysis.py
+  m260720-2.2e6g_final.tdleaf.bin
+  m260720-2.5e6g_work/train/m260720.tdleaf.bin
+  m260720-2.5e6g_final.tdleaf.bin`.
+- Endgame concentration / repetition: leaf rows (`$5==0`) of
+  `m260720-2.5e6g_work/corpus.tsv.gz`, first 4000 gids, bucket =
+  `(piece_count−1)/4` from the FEN board field.
+- Alpha knob: `src/tdleaf.h` (`TDLEAF_STACK_NORM_ALPHA`,
+  `tdleaf_stack_norm_alpha()`), `src/tdleaf.cpp` (pre-pass in
+  `tdleaf_accumulate_game`, allowlist entry, config banner).
+- Byte-exactness gate: baseline binary built from `git show HEAD:` copies of
+  `tdleaf.{cpp,h}` (do NOT use `git stash` for this — the repo carries
+  unrelated stash entries), both run over 24 `--selfplay` games at d6 from the
+  same seed, `.tdleaf.bin` md5 compared.
+- Pre-test driver: `scripts/alpha_pretest.sh` (arms under
+  `learn/alphapre_work/a<alpha>/`; each arm bookless by design — `run/` carries
+  `main_bk.dat` and a book would collapse the opening diversity the
+  measurement depends on).

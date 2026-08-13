@@ -1,5 +1,56 @@
 Changes since 2017_12_24
 
+2026_08_13 -- TDLeaf online update: added TDLEAF_STACK_NORM_ALPHA, a per-game
+               per-stack record normalisation knob.  Each record's gradient is
+               divided by pow(n_stack, alpha), where n_stack is how many records
+               the game contributes to that record's FC/PSQT material bucket.
+               Targets within-game gradient COHERENCE (not magnitude — Adam's v
+               renormalises magnitude): late in a game the outcome term
+               lambda^(T-1-t)*(result-d[T-1]) saturates toward 1, so every
+               record in the endgame tail carries the same sign onto the same
+               bucket's weights, and those records are near-identical positions
+               sharing an FC stack, a PSQT bucket, and most FT features.  With
+               TDLEAF_BATCH_SIZE counted in GAMES, such a bucket's effective
+               sample size per Adam step is the game count however many
+               correlated records each game contributes, while the step size is
+               normalised per weight — so endgame weights random-walk further
+               per step by construction.  Measured signature (Online_Learning_
+               Investigation.md 6.4): online PSQT med|dw|/sqrt(updates) 14.85 in
+               bucket 0 vs 7.94 in bucket 7, a 1.87x ratio replicated across two
+               chains and unchanged by the actor/learner split.
+               Default alpha = 0.0 = previous behaviour; env-overridable for the
+               A/B sweep and added to tdleaf_check_env()'s allowlist.
+               VALIDATED: at alpha=0 the divisor is skipped entirely (not
+               computed as pow(n,0)), and a 24-game strict --selfplay run is
+               byte-identical (.tdleaf.bin md5) to a binary built from the
+               pre-change sources; alpha=0.5/1 produce distinct states.  Per-
+               record gradient trace (TDLEAF_TRACE_UPDATE) confirms gs scales by
+               exactly 1/n_stack at alpha=1 (max rel err 8e-8) while the TD
+               targets e[] are bit-identical — the knob touches only the
+               per-record weighting, not the target math.
+               New: scripts/alpha_pretest.sh (weight-level pre-test, no
+               gauntlet: runs one short actor/learner generation per alpha from
+               an identical seed and diffs seed->post-online per material
+               bucket).  Docs: Online_Learning_Investigation.md Part 6.
+
+2026_08_13 -- Online_Learning_Investigation.md Part 6 (m260720 chain, 3.0M
+               games): the frozen-generation recipe of record (Part 4.5) is
+               REVISED.  Foreign-anchor decomposition of all eight iterations
+               shows the online phase costs 0 to -32 Elo of its own but is what
+               makes the corpus worth consolidating: learning iterations netted
+               +24..+95 vs Leaf_vclassic_eval, the one TDLEAF_FREEZE=1
+               iteration netted +7 on 1.7x the games.  Objective-space
+               confirmation, independent of match noise: the frozen
+               consolidation RAISED validation MSE at every epoch (0.005928 ->
+               0.005954 -> 0.005998) with epoch-1 train MSE opening above
+               baseline, i.e. the seed already sat at the optimum of a corpus it
+               had labeled itself.  freeze-generate -> consolidate is closed at
+               d8 exactly as it closed at d6.  Part 3.5's "offline gain is
+               repair of online damage" holds for the 13-writer merge regime it
+               was measured in, not for the actor/learner regime.  Recipe of
+               record: keep online learning on during generation; TDLEAF_FREEZE
+               stays a control tool.
+
 2026_07_20 -- Simplification Phase 3 (code cleanup): removed the epoch-based
                experience-replay ring buffer (was disabled at TDLEAF_REPLAY_K=0)
                and retired the in-engine multi-writer .tdleaf.bin merge.
