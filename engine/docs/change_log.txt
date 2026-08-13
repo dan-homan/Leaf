@@ -1,5 +1,39 @@
 Changes since 2017_12_24
 
+2026_08_13 -- TDLEAF_STACK_NORM_ALPHA pre-test: REJECTED; knob shelved at its
+               default 0.0 (verified byte-exact no-op).  Three arms (alpha
+               0/0.5/1, 200k games each at d6, identical seed, draw rate
+               27.4-28.2%): the alpha=0 control never reproduced the endgame
+               over-coherence it was built to measure (b0/b7 = 0.94 against
+               1.32-1.45 in every historical d6 iteration; per-bucket exposure
+               matches within ~5%, so not a sampling artefact), and alpha itself
+               inverted the profile rather than flattening it (spread 1.31 ->
+               1.90 -> 2.70) while cutting PSQT displacement 3.6x and FT weights
+               8x but FC biases only 1.3x — a differential LR cut.
+               The control anomaly tracks the SEED, not depth or game count:
+               runs seeded from weak nets (-349..-36 vs classic) give b0
+               10.4-16.2, both runs seeded from the current chain head (+24)
+               give 6.5-7.2 regardless of depth.  The one methodological
+               confound (--games-per-actor 500 vs train.py's production 1000)
+               was tested and excluded: 0.94 vs 0.98, PSQT med|dw| 42.95 vs
+               44.09.
+               Reading: the endgame over-coherence measured in Part 6.4 was real
+               when taken but has resolved as the net matured — a well-calibrated
+               endgame eval makes result-d[T-1] small, so the saturated same-sign
+               tail gradient shrinks on its own.  It was a symptom of an
+               under-trained endgame, not a defect of the update rule.  The
+               -27/-32 Elo online displacement at the chain head therefore needs
+               a different explanation; with targets (Part 3.1) and the
+               multi-writer merge (Part 5) already excluded, fixed-LR noise-ball
+               diffusion around an offline-selected optimum is the leading
+               hypothesis, which points at online LR decay rather than any
+               reweighting.  Knob + harness kept in tree as reusable
+               measurement.  Docs: Online_Learning_Investigation.md 6.8.
+               alpha_pretest.sh: refresh cadence is now an explicit parameter
+               defaulting to production's 1000 (the hardcoded 500 is what made
+               this ambiguous); draw-rate canary guidance made depth-aware
+               (~35-40% at d8, ~26-28% at d6).
+
 2026_08_13 -- TDLeaf online update: added TDLEAF_STACK_NORM_ALPHA, a per-game
                per-stack record normalisation knob.  Each record's gradient is
                divided by pow(n_stack, alpha), where n_stack is how many records

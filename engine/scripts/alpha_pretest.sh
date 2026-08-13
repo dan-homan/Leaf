@@ -26,6 +26,12 @@ GAMES=${1:-200000}
 DEPTH=${2:-6}
 ACTORS=${3:-11}
 ALPHAS=${ALPHAS:-"0 0.5 1"}
+# Actor weight-refresh cadence.  train.py production default is 1000; a
+# shorter interval means actors track the learner more closely, which reduces
+# score staleness and therefore TD-error size — a confound for any violence
+# measurement compared against production iterations.  Match production unless
+# deliberately probing this.
+GAMES_PER_ACTOR=${GAMES_PER_ACTOR:-1000}
 
 BINARY=Leaf_valphapre
 # The .tdleaf.bin carries a content hash of the .nnue it was trained against and
@@ -39,7 +45,7 @@ NET=m260720.nnue
 STATE=m260720.tdleaf.bin
 SEED_STATE=m260720-3e6g_final.tdleaf.bin
 EPD=training_openings.epd
-OUT=alphapre_work
+OUT=${OUT:-alphapre_work}
 
 LEARN_DIR=$(pwd)
 SCRIPTS=$(cd "$(dirname "$0")" && pwd)
@@ -55,6 +61,7 @@ done
 
 mkdir -p "$OUT"
 echo "alpha pre-test: $GAMES games, depth $DEPTH, $ACTORS actors, alphas: $ALPHAS"
+echo "refresh: $GAMES_PER_ACTOR games/actor   out: $OUT"
 echo "seed state: $SEED_STATE   base net: $NET"
 echo
 
@@ -73,7 +80,7 @@ for A in $ALPHAS; do
     ( cd "$ARM" && TDLEAF_STACK_NORM_ALPHA=$A python3 "$SCRIPTS/selfplay_run.py" \
         --binary "$BINARY" --epd "$EPD" \
         --actors "$ACTORS" --depth "$DEPTH" \
-        --games-per-actor 500 --total-games "$GAMES" \
+        --games-per-actor "$GAMES_PER_ACTOR" --total-games "$GAMES" \
         --traj-dir traj --refresh-scores --delete-consumed \
         --seed 20260813 > run.log 2>&1 )
 
@@ -98,8 +105,9 @@ for A in $ALPHAS; do
     ARM="$OUT/a$A"
     echo
     echo "================= alpha=$A ================="
-    # Draw-rate canary (healthy ~35-40% at d8).  A collapse here invalidates the
-    # arm no matter what the bucket profile says.
+    # Draw-rate canary — DEPTH-DEPENDENT: ~35-40% at d8, ~26-28% at d6 (the
+    # chain's d6 iterations ran 26-27%).  A collapse invalidates the arm no
+    # matter what the bucket profile says.
     # No `| head -N` here: under `set -euo pipefail` an early-closing head sends
     # SIGPIPE to the loop and kills the whole script mid-report (it did).
     echo "--- generation health: final +W =D -L per actor (first 4) ---"
@@ -152,7 +160,7 @@ FAIL-1: profile flattens but aggregate displacement collapses -> alpha is acting
         believing anything.
 FAIL-2: profile unchanged -> within-game per-stack coherence is not the
         mechanism; go back to 6.5 and test the id_weight amplifier instead.
-Also confirm the draw rate held 35-40% in every arm: a quiet run flatters
-every other number on the page.
+Also confirm the draw rate held its depth's band in every arm (~35-40% at d8,
+~26-28% at d6): a quiet run flatters every other number on the page.
 Only a PASS earns a full iteration with a foreign-anchor gauntlet.
 NOTE

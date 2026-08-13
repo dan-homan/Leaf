@@ -1320,3 +1320,94 @@ flatters every other number on the page.
   `learn/alphapre_work/a<alpha>/`; each arm bookless by design — `run/` carries
   `main_bk.dat` and a book would collapse the opening diversity the
   measurement depends on).
+
+## 6.8 The pre-test result: alpha rejected, and the pathology is gone from the chain head (2026-08-13)
+
+Three arms, 200k games each at d6, all from an identical copy of
+`m260720-3e6g_final`, draw rate 27.4-28.2% throughout (the d6 band):
+
+| arm | per-bucket violence b0..b7 | b0/b7 | spread | PSQT med\|dw\| | ft_w med\|dw\| |
+|---|---|---|---|---|---|
+| alpha=0 | 6.85 8.78 8.97 7.87 7.20 7.42 7.50 7.28 | **0.94** | 1.31 | 42.95 | 0.16 |
+| alpha=0.5 | 2.51 2.59 3.64 4.06 4.46 4.76 4.74 4.66 | 0.54 | 1.90 | 18.06 | 0.04 |
+| alpha=1 | 1.65 1.13 1.72 2.30 2.78 2.99 2.97 3.07 | 0.54 | **2.70** | 11.84 | 0.02 |
+
+**The control never reproduced the pathology.**  b0/b7 = 0.94 against
+1.32-1.45 in every historical d6 iteration — bucket 0 is the *quietest*
+bucket here, not the loudest.  Exposure rules out a sampling artefact: 31.7
+updates/game in bucket 0 versus 33.1 for the closest historical run, and the
+whole per-bucket exposure vector matches within ~5%.  With no dynamic range
+to flatten, the treatment arms cannot be read against the intended criterion.
+
+**Alpha also fails on its own terms** (FAIL-1 of the pre-committed reading).
+It does not flatten the profile, it *inverts* it — spread 1.31 -> 1.90 ->
+2.70 — while cutting PSQT displacement 3.6x and FT weights 8x but FC biases
+only 1.3x.  That is a differential LR cut, not a decorrelator.  Obvious in
+hindsight: dividing by `n_stack` bites hardest exactly where records-per-game
+is highest, and it overshoots straight past uniform.
+
+### The control anomaly tracks the SEED, not depth or game count
+
+| seed (Elo vs classic) | run | b0 violence | b0/b7 |
+|---|---|---|---|
+| 1e5_final (-349) … 1e6_final (-134) | four d6 iterations | 10.4 - 11.4 | 1.32 - 1.45 |
+| 2e6_final (-61), 2.2e6_final (-36) | two d8 iterations | 14.9 - 16.2 | 1.87 - 2.12 |
+| **3e6_final (+24)** | pre-test d6 **and** the 20k d8 calibration | **6.85 / 6.54** | 0.94 / 0.80 |
+
+Both arms seeded from the current chain head land at ~6.5-7.2 regardless of
+depth.  This also reframes 6.7's calibration: the 20k arm's low b0 was read
+as "under-resolved", but it was probably measuring this same real effect.
+
+One confound separated the pre-test from the historical iterations —
+`--games-per-actor 500` where train.py's production default is 1000, i.e.
+actors refreshed twice as often, which reduces score staleness and therefore
+TD-error size.  Re-run at production cadence, everything else identical:
+
+| control | b0..b7 | b0/b7 | PSQT med\|dw\| |
+|---|---|---|---|
+| cadence 500 | 6.85 8.78 8.97 7.87 7.20 7.42 7.50 7.28 | 0.94 | 42.95 |
+| cadence 1000 | 7.16 8.67 8.93 7.84 7.33 7.47 7.31 7.33 | **0.98** | 44.09 |
+
+Indistinguishable.  Cadence is not the confound, and with it matched the
+harness is methodologically identical to a historical d6 iteration except for
+the seed.
+
+### Conclusions
+
+1. **`TDLEAF_STACK_NORM_ALPHA` is shelved at its default 0.0** (a verified
+   byte-exact no-op).  The knob and its pre-test harness stay in the tree —
+   the measurement is reusable and the mechanism may return at other seeds or
+   architectures — but nothing should ship it as a non-zero default on this
+   evidence.
+2. **The endgame over-coherence has resolved as the net matured.**  6.4's
+   measurement was real when taken (2.5e6 iteration, seed at -36 vs classic);
+   it is absent at +24.  The plausible mechanism is self-limiting: a
+   well-calibrated endgame eval makes `result - d[T-1]` small, so the
+   saturated same-sign tail gradient shrinks on its own.  The pathology was a
+   symptom of an under-trained endgame, not a structural defect of the update
+   rule.
+3. **The -27/-32 Elo online displacement at the chain head (6.1) therefore
+   needs a different explanation.**  Endgame coherence is ruled out at this
+   maturity; targets were ruled out in Part 3.1; the multi-writer merge was
+   removed in Part 5.  The remaining candidates from 3.1 are the
+   phase-boundary Adam-v mismatch (checkable with `TDLEAF_LOG_STEP_CLIPS=1`)
+   and plain fixed-LR noise-ball diffusion around an offline-selected optimum
+   — the latter now the leading hypothesis, and it predicts that online LR
+   decay across the chain is the indicated fix rather than any reweighting.
+
+### What remains untested
+
+The seed explanation rests on one seed.  The clean confirmation is to run this
+same harness from an older state (e.g. `m260720-1e6g_final`) at d6/200k: if
+b0/b7 returns to ~1.4, seed maturity is confirmed as the variable; if it does
+not, something else about this harness differs from the production iterations
+and the historical comparison is unsafe.  ~1h.
+
+## Methodology notes (6.8)
+
+- Arms: `learn/alphapre_work/a{0,0.5,1}/`, driver log `learn/alphapre.log`.
+- Production-cadence control: `learn/alphactl_gpa1000_work/a0/`, log
+  `learn/alphactl_gpa1000.log` (`GAMES_PER_ACTOR=1000 OUT=... ALPHAS=0`).
+- 20k d8 calibration: `learn/alphapre_calib_20k_d8_work/`.
+- Draw rates aggregated over all 11 actor logs per arm, not the first four
+  the script prints.
