@@ -94,6 +94,58 @@ static const float TDLEAF_ID_VAR_SIGMA2  = 10000.0f;
 static const float TDLEAF_STACK_NORM_ALPHA = 0.0f;
 // Effective alpha for this process (default above, or TDLEAF_STACK_NORM_ALPHA).
 float tdleaf_stack_norm_alpha();
+// ---------------------------------------------------------------------------
+// Approach 4 — per-feature within-game vote normalisation ("feature dedup").
+//
+// Each FEATURE's repeated contributions within one game are AVERAGED before
+// entering the batch sum, so a game casts one vote per feature rather than one
+// per ply.  Contributions still SUM across the batch's 8 games, which is the
+// evidence we want to keep.
+//
+// Why this and not TDLEAF_STACK_NORM_ALPHA (which is rejected — see above):
+// alpha divided every record by n_stack, the count of ALL records the game
+// contributed to that material bucket (~21 for bucket 1), whether or not any
+// feature actually recurred.  It therefore scaled ~100% of the gradient to
+// address redundancy affecting a few percent of it, and read as a blanket LR
+// cut.  The per-feature occurrence count is 1 for most features and only grows
+// during genuine repetition (shuffling, 3-fold run-ups, a piece and both kings
+// standing still), so this touches a small fraction of the gradient mass.
+//
+// The mechanism it targets (docs/Online_Learning_Investigation.md 6.11):
+// writing a cell's batch gradient as k*g0, Adam's step is k/sqrt(E[k^2]) —
+// because v is updated only on batches where the feature appears and beta2 =
+// 0.999 makes v the feature's full-history mean square.  So the MEAN of k is
+// normalised away but its VARIANCE is not, and a feature whose k is 1 at 99%
+// and 40 at 1% takes a 40x step on the rare repeat-heavy game while every
+// normal step is suppressed 4x by the inflated denominator.  Averaging within
+// the game removes k from both numerator and denominator at once; changing
+// only one of them makes matters worse (numerator-only = undamped k;
+// denominator-only = k passes through with no normalisation at all).
+//
+// Applies ONLY to the per-feature sections (FT weights, PSQT).  FC weights /
+// biases and FT biases are dense — every record touches them, so there is no
+// per-feature repetition to remove and they are left untouched.
+//
+// Exponent semantics: a feature occurring r times in a game is scaled by
+// r^-beta.  beta = 0 disables it and is BYTE-EXACT (the divisor is skipped, not
+// computed as r^0); beta = 1 is full averaging; intermediate values partially
+// pool.  Runtime-overridable via TDLEAF_FEATURE_DEDUP for the A/B.
+//
+// NOTE for interpreting any A/B: 6.10 established that online displacement is
+// net-productive at the margin, so ANY intervention that reduces it starts
+// from behind.  Calibrate with TDLEAF_REP_HIST (below) BEFORE running a
+// production arm — if nearly all gradient mass already sits at r = 1 the
+// intervention is near-free but also near-pointless.
+static const float TDLEAF_FEATURE_DEDUP = 0.0f;
+// Effective exponent for this process (default above, or TDLEAF_FEATURE_DEDUP).
+float tdleaf_feature_dedup();
+// Diagnostic: TDLEAF_REP_HIST=1 accumulates the distribution of per-game
+// feature occurrence counts r (by occurrence and by |gradient| mass, for both
+// the FT-row and the PSQT (row,bucket) granularity) and prints a cumulative
+// summary at each batch apply.  Independent of TDLEAF_FEATURE_DEDUP, so the
+// baseline r distribution can be measured with the normalisation switched off.
+bool tdleaf_rep_hist_enabled();
+void tdleaf_rep_hist_report(FILE *out);
 // The learning target is the classic λ-decayed eligibility trace (per game-ply
 // decay pow(λ, dply), with the score-change clip and ID-variance stability
 // weight above).  Earlier opt-in "blend"/"hybrid" targets and online root

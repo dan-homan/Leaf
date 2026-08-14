@@ -46,6 +46,173 @@ float tdleaf_stack_norm_alpha()
     return alpha;
 }
 
+// tdleaf_feature_dedup — per-feature within-game vote normalisation exponent.
+// Defaults to TDLEAF_FEATURE_DEDUP; overridable by the env var of the same
+// name.  Cached on first call.  Negative values are rejected (they would
+// AMPLIFY repeated features rather than pool them).
+// ---------------------------------------------------------------------------
+float tdleaf_feature_dedup()
+{
+    static float beta = -1.0f;
+    if (beta < 0.0f) {
+        beta = TDLEAF_FEATURE_DEDUP;
+        const char *p = getenv("TDLEAF_FEATURE_DEDUP");
+        if (p && *p) {
+            char *end = nullptr;
+            float v = strtof(p, &end);
+            if (end == p || *end || !(v >= 0.0f)) {
+                fprintf(stderr, "TDLeaf: TDLEAF_FEATURE_DEDUP=%s is not a "
+                                "non-negative number.\n", p);
+                exit(1);
+            }
+            beta = v;
+        }
+    }
+    return beta;
+}
+
+// ---------------------------------------------------------------------------
+// Feature-repetition histogram (env TDLEAF_REP_HIST=1) — calibration for the
+// above.  Buckets the per-game occurrence count r of every feature CONTRIBUTION
+// (so a feature used 13 times adds 13 counts to r's bucket), separately for the
+// FT-row and PSQT (row,bucket) granularities, and weights each by |grad_scale|
+// so the report reads as a share of gradient MASS, not just of contributions.
+// Independent of tdleaf_feature_dedup() so the baseline distribution can be
+// measured with the normalisation off.
+// ---------------------------------------------------------------------------
+bool tdleaf_rep_hist_enabled()
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *p = getenv("TDLEAF_REP_HIST");
+        on = (p && *p && strcmp(p, "0") != 0) ? 1 : 0;
+    }
+    return on == 1;
+}
+
+// Bucket edges: r == 1, 2, 3, 4-7, 8-15, 16-31, 32+
+static const int TD_REP_NB = 7;
+static const char *td_rep_label[TD_REP_NB] =
+    { "1", "2", "3", "4-7", "8-15", "16-31", "32+" };
+static double td_rep_n_ft  [TD_REP_NB];   // contributions, FT-row granularity
+static double td_rep_m_ft  [TD_REP_NB];   // |grad| mass,   FT-row granularity
+static double td_rep_n_pq  [TD_REP_NB];   // contributions, PSQT (row,bucket)
+static double td_rep_m_pq  [TD_REP_NB];   // |grad| mass,   PSQT (row,bucket)
+
+// ---------------------------------------------------------------------------
+// Per-feature ACROSS-GAME statistics of r — the quantity the variance argument
+// actually turns on.  The marginal histogram above sizes the intervention (how
+// much gradient mass sits at high r); it cannot say whether Adam absorbs it.
+//
+// Writing a cell's batch gradient as r*g0, the Adam step is r/sqrt(E[r^2]).
+// With mean m and standard deviation s of r for THAT cell:
+//     mean step = 1 / sqrt(1 + CV^2)      CV = s/m
+//     step CV   = CV
+// So CV(r) is *exactly* the step-size coefficient of variation.  A feature
+// whose r is a stable 20 has its multiplier fully absorbed by v and costs
+// nothing; one swinging 1..40 is the one that injects noise.  Small CV
+// everywhere ⇒ the mechanism does not bite and TDLEAF_FEATURE_DEDUP is
+// treating a non-problem.
+//
+// Accumulated once per (cell, game) via the first-visit trick in the reset
+// walk.  Lazily allocated so a build with the diagnostic off carries no dead
+// BSS (the ~40 MB replay-buffer incident in Part 2 is the cautionary tale).
+// Weighted by total contributions (sum of r), not |grad| mass, which would
+// need a further per-game side array; the mass-weighted view is already in the
+// marginal histogram.
+// ---------------------------------------------------------------------------
+static uint32_t *rv_n   = nullptr;   // games in which this cell appeared
+static double   *rv_sr  = nullptr;   // sum of r
+static double   *rv_sr2 = nullptr;   // sum of r^2
+
+static bool tdleaf_rv_alloc()
+{
+    if (rv_n) return true;
+    size_t n = (size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS;
+    rv_n   = (uint32_t *)calloc(n, sizeof(uint32_t));
+    rv_sr  = (double   *)calloc(n, sizeof(double));
+    rv_sr2 = (double   *)calloc(n, sizeof(double));
+    if (!rv_n || !rv_sr || !rv_sr2) {
+        fprintf(stderr, "TDLeaf: rep-hist variance tables allocation failed\n");
+        free(rv_n); free(rv_sr); free(rv_sr2);
+        rv_n = nullptr; rv_sr = nullptr; rv_sr2 = nullptr;
+        return false;
+    }
+    return true;
+}
+
+static inline int td_rep_bucket(int r)
+{
+    if (r <= 1)  return 0;
+    if (r == 2)  return 1;
+    if (r == 3)  return 2;
+    if (r < 8)   return 3;
+    if (r < 16)  return 4;
+    if (r < 32)  return 5;
+    return 6;
+}
+
+void tdleaf_rep_hist_report(FILE *out)
+{
+    double tn_ft = 0, tm_ft = 0, tn_pq = 0, tm_pq = 0;
+    for (int i = 0; i < TD_REP_NB; i++) {
+        tn_ft += td_rep_n_ft[i]; tm_ft += td_rep_m_ft[i];
+        tn_pq += td_rep_n_pq[i]; tm_pq += td_rep_m_pq[i];
+    }
+    if (tn_pq <= 0.0) return;
+    fprintf(out, "TDLeaf rep-hist (cumulative; %% of contributions / %% of |grad| mass)\n");
+    fprintf(out, "  r        FT-row              PSQT(row,bkt)\n");
+    for (int i = 0; i < TD_REP_NB; i++)
+        fprintf(out, "  %-6s %6.2f%% / %6.2f%%     %6.2f%% / %6.2f%%\n",
+                td_rep_label[i],
+                100.0 * td_rep_n_ft[i] / tn_ft, 100.0 * td_rep_m_ft[i] / std::max(tm_ft, 1e-30),
+                100.0 * td_rep_n_pq[i] / tn_pq, 100.0 * td_rep_m_pq[i] / std::max(tm_pq, 1e-30));
+    double share_ft = 0, share_pq = 0;
+    for (int i = 1; i < TD_REP_NB; i++) { share_ft += td_rep_m_ft[i]; share_pq += td_rep_m_pq[i]; }
+    fprintf(out, "  mass at r>=2:  FT %.2f%%   PSQT %.2f%%   (n=%.0f contributions)\n",
+            100.0 * share_ft / std::max(tm_ft, 1e-30),
+            100.0 * share_pq / std::max(tm_pq, 1e-30), tn_pq);
+
+    // ---- Across-game CV(r) per PSQT cell -----------------------------------
+    // CV is the step-size coefficient of variation (see the note above), so
+    // these bands read directly as "how much of the learning signal sits on
+    // cells whose Adam step swings by this much".
+    if (rv_n) {
+        static const int NCV = 6;
+        static const char *cvlab[NCV] =
+            { "<0.1", "0.1-0.25", "0.25-0.5", "0.5-1.0", "1.0-2.0", ">2.0" };
+        double w[NCV] = {0}, wtot = 0;      // weighted by total contributions
+        double cv_mean_num = 0;
+        size_t cells = 0, cells_ge2 = 0;
+        size_t ncell = (size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS;
+        for (size_t i = 0; i < ncell; i++) {
+            if (rv_n[i] == 0) continue;
+            cells++;
+            if (rv_n[i] < 2) continue;      // need >=2 games to have a variance
+            cells_ge2++;
+            double n  = (double)rv_n[i];
+            double m  = rv_sr[i] / n;
+            double va = rv_sr2[i] / n - m * m;
+            if (va < 0) va = 0;             // rounding
+            double cv = (m > 0) ? sqrt(va) / m : 0.0;
+            double wt = rv_sr[i];           // total contributions from this cell
+            int b = (cv < 0.1) ? 0 : (cv < 0.25) ? 1 : (cv < 0.5) ? 2
+                  : (cv < 1.0) ? 3 : (cv < 2.0) ? 4 : 5;
+            w[b] += wt; wtot += wt; cv_mean_num += cv * wt;
+        }
+        if (wtot > 0) {
+            fprintf(out, "  CV(r) across games, PSQT cells (%% of contributions):\n   ");
+            for (int i = 0; i < NCV; i++)
+                fprintf(out, " %s=%.1f%%", cvlab[i], 100.0 * w[i] / wtot);
+            double cvbar = cv_mean_num / wtot;
+            fprintf(out, "\n  weighted mean CV = %.2f  ->  mean step attenuation "
+                         "1/sqrt(1+CV^2) = %.2f  (cells seen %zu, with >=2 games %zu)\n",
+                    cvbar, 1.0 / sqrt(1.0 + cvbar * cvbar), cells, cells_ge2);
+        }
+    }
+    fflush(out);
+}
+
 // ---------------------------------------------------------------------------
 // tdleaf_check_env — startup guardrail + config banner for TDLEAF builds.
 //
@@ -67,7 +234,9 @@ void tdleaf_check_env()
         "TDLEAF_DUMP_MAX_CP",     // corpus dump |cp| cap
         "TDLEAF_CHECK_ACC",       // diagnostic: walked-vs-rebuilt accumulator check
         "TDLEAF_TRACE_UPDATE",    // diagnostic: per-record gradient trace file
-        "TDLEAF_STACK_NORM_ALPHA",// per-game per-stack record normalisation exponent
+        "TDLEAF_STACK_NORM_ALPHA",// per-game per-stack record normalisation exponent (REJECTED, see 6.10)
+        "TDLEAF_FEATURE_DEDUP",   // per-feature within-game vote normalisation exponent
+        "TDLEAF_REP_HIST",        // diagnostic: feature-repetition histogram
     };
     int bad = 0;
     for (char **e = environ; e && *e; e++) {
@@ -94,12 +263,14 @@ void tdleaf_check_env()
 
     fprintf(stderr,
             "TDLeaf config: K=%.0f lambda=%.4f batch=%d grad_clip=%.2f wd=%.1e "
-            "score_clip=%.1fxP id_var_sigma2=%.0f stack_norm_alpha=%.3g\n"
+            "score_clip=%.1fxP id_var_sigma2=%.0f stack_norm_alpha=%.3g "
+            "feature_dedup=%.3g rep_hist=%d\n"
             "TDLeaf LR0: FC=%.4g FC2=%.4g FC_bias=%.4g FT=%.4g FT_bias=%.4g PSQT=%.4g\n",
             (double)TDLEAF_K, (double)TDLEAF_LAMBDA, TDLEAF_BATCH_SIZE,
             (double)TDLEAF_GRAD_CLIP_NORM, (double)TDLEAF_WEIGHT_DECAY,
             (double)TDLEAF_SCORE_CLIP_PAWNS, (double)TDLEAF_ID_VAR_SIGMA2,
             (double)tdleaf_stack_norm_alpha(),
+            (double)tdleaf_feature_dedup(), (int)tdleaf_rep_hist_enabled(),
             (double)TDLEAF_ADAM_LR0, (double)TDLEAF_ADAM_FC2_LR0,
             (double)TDLEAF_ADAM_FC_BIAS_LR0, (double)TDLEAF_ADAM_FT_LR0,
             (double)TDLEAF_ADAM_FT_BIAS_LR0, (double)TDLEAF_ADAM_PSQT_LR0);
@@ -387,22 +558,93 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
         }
     }
 
+    // Per-record gradient scales, hoisted out of the accumulation loop so the
+    // feature-occupancy pass below can count exactly the records that will
+    // contribute (grad_scale != 0) and weight the histogram by |grad_scale|.
+    // The arithmetic is unchanged from the in-loop version it replaces.
+    //
+    // wtm_sign converts ∂d_t/∂w (white-POV utility we want to ascend) into the
+    // descent-form gradient expected by nnue_apply_gradients (which does
+    // w -= LR × step on the supplied "loss" gradient).  score_white = wtm ?
+    // +score_stm : -score_stm; nnue_forward_fp32 backprops ∂(stm-POV score)/∂w,
+    // so the white-POV sign is (wtm ? +1 : -1) and the loss-form sign we pass
+    // downstream is its negative — hence (wtm ? -1 : +1).
+    static float gs[MAX_GAME_PLY];
     for (int t = 0; t < T; t++) {
-        float sig_grad = d[t] * (1.0f - d[t]) / TDLEAF_K;
-        // wtm_sign converts ∂d_t/∂w (white-POV utility we want to ascend)
-        // into the descent-form gradient expected by nnue_apply_gradients
-        // (which does w -= LR × step on the supplied "loss" gradient).
-        // score_white = wtm ? +score_stm : -score_stm; nnue_forward_fp32
-        // backprops ∂(stm-POV score)/∂w, so the white-POV sign is
-        // (wtm ? +1 : -1) and the loss-form sign we pass downstream is its
-        // negative — hence (wtm ? -1 : +1).
-        float wtm_sign = rec.plies[t].wtm ? -1.0f : 1.0f;
+        float sig_grad  = d[t] * (1.0f - d[t]) / TDLEAF_K;
+        float wtm_sign  = rec.plies[t].wtm ? -1.0f : 1.0f;
         float id_weight = 1.0f / (1.0f + rec.plies[t].id_score_variance / TDLEAF_ID_VAR_SIGMA2);
-        float grad_scale = e[t] * sig_grad * cp_factor * wtm_sign * id_weight;
-        {
-            int s = rec.plies[t].stack;
-            if (s >= 0 && s < NNUE_LAYER_STACKS) grad_scale *= stack_norm[s];
+        float g = e[t] * sig_grad * cp_factor * wtm_sign * id_weight;
+        int s = rec.plies[t].stack;
+        if (s >= 0 && s < NNUE_LAYER_STACKS) g *= stack_norm[s];
+        gs[t] = g;
+    }
+
+    // ---- Per-feature within-game occupancy (TDLEAF_FEATURE_DEDUP / _REP_HIST)
+    // r = the number of contributions THIS GAME makes to a given FT row, and to
+    // a given PSQT (row, bucket).  Counted over exactly the records the
+    // accumulation loop will use, both perspectives, matching its indexing:
+    // nnue_accumulate_gradients writes grad_psqt_w[fi*PSQT_BKTS + s] with the
+    // record's own stack s for BOTH perspectives.
+    // Each feature can occur at most once per perspective per record, so
+    // r <= 2*T <= 2*MAX_GAME_PLY, which bounds the reciprocal table below.
+    const float dedup_beta = tdleaf_feature_dedup();
+    const bool  want_hist  = tdleaf_rep_hist_enabled();
+    const bool  want_rep   = (dedup_beta > 0.0f) || want_hist;
+    static uint16_t feat_rep_ft[NNUE_FT_INPUTS];                          //  44 KB
+    static uint16_t feat_rep_pq[(size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS]; // 352 KB
+    static const int REP_MAX = 2 * MAX_GAME_PLY + 1;
+    static float feat_rep_recip[REP_MAX + 1];
+
+    // Walk helper: visit every (record, perspective, feature) the accumulation
+    // loop will touch.  Used three times — count, histogram, reset — so the
+    // three passes cannot drift out of sync with each other.
+    auto walk_features = [&](auto &&fn) {
+        for (int t = 0; t < T; t++) {
+            if (gs[t] == 0.0f) continue;
+            const TDRecord &r = rec.plies[t];
+            int s = r.stack;
+            if (s < 0 || s >= NNUE_PSQT_BKTS) continue;
+            for (int p = 0; p < 2; p++)
+                for (int k = 0; k < r.n_ft[p]; k++) {
+                    int fi = r.ft_idx[p][k];
+                    if (fi < 0 || fi >= NNUE_FT_INPUTS) continue;
+                    fn(t, fi, (size_t)fi * NNUE_PSQT_BKTS + (size_t)s);
+                }
         }
+    };
+
+    if (want_rep) {
+        walk_features([&](int, int fi, size_t pi) {
+            if (feat_rep_ft[fi] < REP_MAX) feat_rep_ft[fi]++;
+            if (feat_rep_pq[pi] < REP_MAX) feat_rep_pq[pi]++;
+        });
+    }
+    if (want_hist) {
+        walk_features([&](int t, int fi, size_t pi) {
+            double mass = fabs((double)gs[t]);
+            int bf = td_rep_bucket(feat_rep_ft[fi]);
+            td_rep_n_ft[bf] += 1.0; td_rep_m_ft[bf] += mass;
+            int bp = td_rep_bucket(feat_rep_pq[pi]);
+            td_rep_n_pq[bp] += 1.0; td_rep_m_pq[bp] += mass;
+        });
+    }
+    if (dedup_beta > 0.0f) {
+        static float recip_built_for = -1.0f;
+        if (recip_built_for != dedup_beta) {
+            recip_built_for = dedup_beta;
+            feat_rep_recip[0] = 1.0f;
+            for (int r = 1; r <= REP_MAX; r++)
+                feat_rep_recip[r] = (r == 1) ? 1.0f
+                                             : 1.0f / powf((float)r, dedup_beta);
+        }
+        g_feat_rep_ft    = feat_rep_ft;
+        g_feat_rep_psqt  = feat_rep_pq;
+        g_feat_rep_recip = feat_rep_recip;   // gates the whole mechanism downstream
+    }
+
+    for (int t = 0; t < T; t++) {
+        float grad_scale = gs[t];
 
         if (trace_f) {
             const TDRecord &r = rec.plies[t];
@@ -442,6 +684,30 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
             nnue_accumulate_gradients(act, grad_scale);
         }
     }
+
+    // ---- Tear down the per-game occupancy tables --------------------------
+    // Zero exactly the entries the counting pass incremented (same walk, so no
+    // drift) rather than memset-ing 396 KB per game, and drop the pointers so
+    // every other caller of nnue_accumulate_gradients — the offline batch
+    // trainer above all — sees the mechanism disabled.
+    // First-visit trick: the counting pass left every touched cell non-zero, and
+    // this walk zeroes it, so the first visit to a cell is the only one that
+    // sees a non-zero r.  That gives exactly one (cell, game) sample for the
+    // across-game statistics without a second dirty list.
+    if (want_rep) {
+        const bool rv = want_hist && tdleaf_rv_alloc();
+        walk_features([&](int, int fi, size_t pi) {
+            if (rv && feat_rep_pq[pi] != 0) {
+                double r = (double)feat_rep_pq[pi];
+                rv_n[pi]++; rv_sr[pi] += r; rv_sr2[pi] += r * r;
+            }
+            feat_rep_ft[fi] = 0;
+            feat_rep_pq[pi] = 0;
+        });
+    }
+    g_feat_rep_ft    = nullptr;
+    g_feat_rep_psqt  = nullptr;
+    g_feat_rep_recip = nullptr;
 }
 
 // ---------------------------------------------------------------------------
@@ -625,6 +891,10 @@ void tdleaf_update_after_game(TDGameRecord &rec, float result, const char *save_
 
         fprintf(stderr, "TDLeaf: applied batch of %d game(s), latest %d plies (result=%.1f)\n",
                 td_batch_pending, T, (double)result);
+        // Feature-repetition calibration (TDLEAF_REP_HIST=1).  Cumulative, so
+        // one report per batch is enough to watch it converge; grep the last
+        // one out of the learner log.
+        if (tdleaf_rep_hist_enabled()) tdleaf_rep_hist_report(stderr);
         td_batch_pending = 0;
     } else {
         fprintf(stderr, "TDLeaf: accumulated %d-ply game (result=%.1f), batch %d/%d\n",
