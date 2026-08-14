@@ -107,9 +107,17 @@ float tdleaf_stack_norm_alpha();
 // contributed to that material bucket (~21 for bucket 1), whether or not any
 // feature actually recurred.  It therefore scaled ~100% of the gradient to
 // address redundancy affecting a few percent of it, and read as a blanket LR
-// cut.  The per-feature occurrence count is 1 for most features and only grows
-// during genuine repetition (shuffling, 3-fold run-ups, a piece and both kings
-// standing still), so this touches a small fraction of the gradient mass.
+// cut.  This form instead scales by each feature's OWN occurrence count.
+//
+// NOTE — the pitch for this design assumed r would be "1 for most features,
+// large only during genuine repetition", i.e. a small fraction of gradient
+// mass.  MEASUREMENT REFUTED THAT (docs 6.11): 92.4% of PSQT mass sits at
+// r >= 2 and the mass-weighted mean r is 15.9, because r counts feature
+// PERSISTENCE, not position repetition — a pawn on e4 with a static king gives
+// r = 40 with no position ever recurring.  So the exponent form is NOT
+// surgical: at beta = 1 it cuts gradient mass ~5.9x, more than the rejected
+// alpha knob's 3.6x.  Prefer TDLEAF_FEATURE_RBAR below, which removes the same
+// variance without the scale cut.
 //
 // The mechanism it targets (docs/Online_Learning_Investigation.md 6.11):
 // writing a cell's batch gradient as k*g0, Adam's step is k/sqrt(E[k^2]) —
@@ -168,14 +176,34 @@ float tdleaf_feature_dedup();
 // ~37% INCREASE in displacement.  It therefore moves WITH 6.10's dose-response
 // (more displacement, less noise) instead of against it.
 //
-// Value = the minimum number of prior games a cell needs before rbar is
-// trusted; below it the weight is 1.0 (no bootstrap guessing).  0 disables the
-// mode entirely.  Mutually exclusive with TDLEAF_FEATURE_DEDUP.
+// rbar is a SHRINKAGE estimate, not a raw sample mean:
+//
+//     rbar_shrunk = (n * rbar_cell + k * rbar_prior) / (n + k)
+//
+// where n is the cell's prior-game count and rbar_prior is the mean r of its
+// MATERIAL BUCKET (a strong predictor — endgame features persist far longer
+// than opening ones); FT rows, which have no bucket, shrink toward a global
+// mean instead.  Value = the pseudo-count k.  0 disables the mode.
+//
+// This replaced an earlier hard min-games threshold, which was arbitrary and
+// left a coverage gap exactly where the argument matters: cells below it got
+// NO normalisation at all, i.e. full CV = 0.95 noise, and those are the rare
+// features the whole variance case is about.  Shrinkage has no cliff — a cold
+// cell starts at its bucket's typical r and converges to its own mean as
+// history accumulates.
+//
+// On residual noise: because w = rbar/r, the current game's r cancels exactly,
+// so r's variance is removed immediately and completely however poor rbar is.
+// What remains is rbar's own drift between batches, of size CV/sqrt(n_eff) —
+// which DECAYS as the run proceeds, so k governs only how much the early
+// estimate is damped, not a permanent quality ceiling.
+//
+// Mutually exclusive with TDLEAF_FEATURE_DEDUP.
 //
 // Caveat: unlike the exponent, this makes the update depend on training
 // history, so the byte-exact regression gate only covers the disabled path.
 static const int TDLEAF_FEATURE_RBAR = 0;
-// Effective min-games threshold (default above, or TDLEAF_FEATURE_RBAR).
+// Effective pseudo-count k (default above, or TDLEAF_FEATURE_RBAR).
 int tdleaf_feature_rbar();
 // Diagnostic: TDLEAF_REP_HIST=1 accumulates the distribution of per-game
 // feature occurrence counts r (by occurrence and by |gradient| mass, for both

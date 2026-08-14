@@ -128,6 +128,13 @@ static double td_rep_n_ft  [TD_REP_NB];   // contributions, FT-row granularity
 static double td_rep_m_ft  [TD_REP_NB];   // |grad| mass,   FT-row granularity
 static double td_rep_n_pq  [TD_REP_NB];   // contributions, PSQT (row,bucket)
 static double td_rep_m_pq  [TD_REP_NB];   // |grad| mass,   PSQT (row,bucket)
+// Coverage: how many PRIOR games the cell had when it contributed.  This is
+// what governs the quality of the rbar estimate (its residual drift is
+// ~CV/sqrt(n)), so it says how much of the learning signal is actually being
+// normalised well at a given pseudo-count k.  Bands: 0, 1-3, 4-15, 16-63, 64+.
+static const int TD_COV_NB = 5;
+static const char *td_cov_label[TD_COV_NB] = { "0", "1-3", "4-15", "16-63", "64+" };
+static double td_cov_n[TD_COV_NB];
 
 // ---------------------------------------------------------------------------
 // Per-feature ACROSS-GAME statistics of r — the quantity the variance argument
@@ -158,6 +165,16 @@ static double   *rv_sr2 = nullptr;   // sum of r^2
 // per-row running mean.  sr2 is not tracked here — the CV report is PSQT-only.
 static uint32_t *rvf_n  = nullptr;
 static double   *rvf_sr = nullptr;
+// Shrinkage priors for the rbar mode: the mean r of a cell's MATERIAL BUCKET
+// (endgame features persist far longer than opening ones, so the bucket is a
+// strong predictor), and a single global mean for FT rows, which have no
+// bucket.  Both are (cell, game) sample means, accumulated in the teardown
+// walk alongside rv_*.  One game supplies thousands of samples, so the warmup
+// guard below clears after the first game or two.
+static double rb_bkt_sr[NNUE_PSQT_BKTS];
+static double rb_bkt_n [NNUE_PSQT_BKTS];
+static double rb_ft_sr = 0.0, rb_ft_n = 0.0;
+static const double RB_PRIOR_MIN_SAMPLES = 1000.0;
 
 static bool tdleaf_rv_alloc()
 {
@@ -245,6 +262,16 @@ void tdleaf_rep_hist_report(FILE *out)
             fprintf(out, "\n  weighted mean CV = %.2f  ->  mean step attenuation "
                          "1/sqrt(1+CV^2) = %.2f  (cells seen %zu, with >=2 games %zu)\n",
                     cvbar, 1.0 / sqrt(1.0 + cvbar * cvbar), cells, cells_ge2);
+        }
+        double covtot = 0;
+        for (int i = 0; i < TD_COV_NB; i++) covtot += td_cov_n[i];
+        if (covtot > 0) {
+            fprintf(out, "  prior games per contributing cell (rbar estimate "
+                         "quality, %% of contributions):\n   ");
+            for (int i = 0; i < TD_COV_NB; i++)
+                fprintf(out, " n=%s:%.1f%%", td_cov_label[i],
+                        100.0 * td_cov_n[i] / covtot);
+            fputc('\n', out);
         }
     }
     fflush(out);
@@ -628,12 +655,12 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
     // Each feature can occur at most once per perspective per record, so
     // r <= 2*T <= 2*MAX_GAME_PLY, which bounds the reciprocal table below.
     const float dedup_beta = tdleaf_feature_dedup();
-    const int   rbar_min   = tdleaf_feature_rbar();
+    const int   rbar_k     = tdleaf_feature_rbar();
     const bool  want_hist  = tdleaf_rep_hist_enabled();
-    const bool  want_rep   = (dedup_beta > 0.0f) || (rbar_min > 0) || want_hist;
+    const bool  want_rep   = (dedup_beta > 0.0f) || (rbar_k > 0) || want_hist;
     // The rbar mode needs the across-game running means maintained every game,
     // not only when the histogram is on.
-    const bool  want_stats = want_hist || (rbar_min > 0);
+    const bool  want_stats = want_hist || (rbar_k > 0);
     static uint16_t feat_rep_ft[NNUE_FT_INPUTS];                          //  44 KB
     static uint16_t feat_rep_pq[(size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS]; // 352 KB
     static const int REP_MAX = 2 * MAX_GAME_PLY + 1;
@@ -675,6 +702,12 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
             td_rep_n_ft[bf] += 1.0; td_rep_m_ft[bf] += mass;
             int bp = td_rep_bucket(feat_rep_pq[pi]);
             td_rep_n_pq[bp] += 1.0; td_rep_m_pq[bp] += mass;
+            if (rv_n) {
+                uint32_t np = rv_n[pi];   // prior games (teardown runs after this)
+                int cb = (np == 0) ? 0 : (np < 4) ? 1 : (np < 16) ? 2
+                       : (np < 64) ? 3 : 4;
+                td_cov_n[cb] += 1.0;
+            }
         });
     }
     if (dedup_beta > 0.0f) {
@@ -693,20 +726,31 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
         });
         g_feat_w_ft   = feat_w_ft;
         g_feat_w_psqt = feat_w_pq;
-    } else if (rbar_min > 0 && tdleaf_rv_alloc()) {
-        // Scale-neutral mode: w = rbar_cell / r, using the running mean over
-        // PRIOR games only (the stats are updated in the teardown walk below,
-        // after this game's accumulation, so there is no self-reference).
-        // Cells with too little history keep w = 1.0 rather than guessing.
+    } else if (rbar_k > 0 && tdleaf_rv_alloc()) {
+        // Scale-neutral mode: w = rbar_shrunk / r, so the current game's r
+        // cancels exactly and only the (slowly drifting) rbar survives.
+        // rbar_shrunk = (n*rbar_cell + k*rbar_prior) / (n + k), with the stats
+        // taken over PRIOR games only — they are updated in the teardown walk
+        // below, after this game's accumulation, so there is no self-reference.
+        const double k = (double)rbar_k;
+        double prior_bkt[NNUE_PSQT_BKTS];
+        for (int b = 0; b < NNUE_PSQT_BKTS; b++)
+            prior_bkt[b] = (rb_bkt_n[b] >= RB_PRIOR_MIN_SAMPLES)
+                         ? rb_bkt_sr[b] / rb_bkt_n[b] : 0.0;   // 0 = not ready
+        const double prior_ft = (rb_ft_n >= RB_PRIOR_MIN_SAMPLES)
+                              ? rb_ft_sr / rb_ft_n : 0.0;
         walk_features([&](int, int fi, size_t pi) {
-            uint16_t r_ft = feat_rep_ft[fi];
-            uint16_t r_pq = feat_rep_pq[pi];
-            feat_w_ft[fi] = (rvf_n[fi] >= (uint32_t)rbar_min && r_ft > 0)
-                          ? (float)(rvf_sr[fi] / (double)rvf_n[fi] / (double)r_ft)
-                          : 1.0f;
-            feat_w_pq[pi] = (rv_n[pi]  >= (uint32_t)rbar_min && r_pq > 0)
-                          ? (float)(rv_sr[pi]  / (double)rv_n[pi]  / (double)r_pq)
-                          : 1.0f;
+            double r_ft = (double)feat_rep_ft[fi];
+            double r_pq = (double)feat_rep_pq[pi];
+            if (prior_ft > 0.0 && r_ft > 0.0) {
+                double rbar = (rvf_sr[fi] + k * prior_ft) / ((double)rvf_n[fi] + k);
+                feat_w_ft[fi] = (float)(rbar / r_ft);
+            } else feat_w_ft[fi] = 1.0f;
+            double pb = prior_bkt[pi % NNUE_PSQT_BKTS];
+            if (pb > 0.0 && r_pq > 0.0) {
+                double rbar = (rv_sr[pi] + k * pb) / ((double)rv_n[pi] + k);
+                feat_w_pq[pi] = (float)(rbar / r_pq);
+            } else feat_w_pq[pi] = 1.0f;
         });
         g_feat_w_ft   = feat_w_ft;
         g_feat_w_psqt = feat_w_pq;
@@ -769,9 +813,13 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
             if (rv && feat_rep_pq[pi] != 0) {
                 double r = (double)feat_rep_pq[pi];
                 rv_n[pi]++; rv_sr[pi] += r; rv_sr2[pi] += r * r;
+                int b = (int)(pi % NNUE_PSQT_BKTS);
+                rb_bkt_n[b] += 1.0; rb_bkt_sr[b] += r;      // per-bucket prior
             }
             if (rv && feat_rep_ft[fi] != 0) {
-                rvf_n[fi]++; rvf_sr[fi] += (double)feat_rep_ft[fi];
+                double r = (double)feat_rep_ft[fi];
+                rvf_n[fi]++; rvf_sr[fi] += r;
+                rb_ft_n += 1.0; rb_ft_sr += r;              // global FT prior
             }
             feat_rep_ft[fi] = 0;
             feat_rep_pq[pi] = 0;
