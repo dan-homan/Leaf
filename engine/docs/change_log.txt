@@ -1,5 +1,43 @@
 Changes since 2017_12_24
 
+2026_08_14 -- TDLEAF_STACK_NORM_ALPHA: production A/B run, knob CLOSED at
+               default 0.0, and the online phase reframed.  A full iteration
+               with alpha=1 (300k games at d8 from m260720-2.2e6g_final, same
+               command as the alpha=0 iteration modulo tag) vs the completed
+               alpha=0 iteration -- same seed, same corpus size, draw rate 35.3%,
+               identical baseline val MSE.
+               Weight level: the knob works decisively.  Deep-endgame PSQT
+               displacement fell 8x (on/upd 14.85 -> 1.82 in bucket 0) and the
+               profile inverted (b0/b7 1.87 -> 0.60) at bucket-for-bucket
+               identical exposure -- matching the pre-test harness's RELATIVE
+               prediction (0.54) even though its absolute control level remains
+               unexplained (6.9).
+               Elo: nothing gained.  Against the foreign anchor the online phase
+               cost -31.6 (alpha=0) vs -16.7 (alpha=1) while the offline gain
+               fell +84.6 -> +56.0, for iteration totals +53.0 vs +39.3.  No
+               single comparison is significant (1000-game matches, +-11, so
+               differences carry +-16; the four run 0.6-1.8 sigma) and the two
+               anchors contradict on the post-online net.
+               The finding is the dose-response across three interventions:
+               frozen generation (zero online displacement) +7, alpha=1 (~8x
+               suppressed) +39, alpha=0 (full) +53.  Monotone -- suppressing
+               online movement degrades the iteration in proportion.  ONLINE
+               DISPLACEMENT IS NET-PRODUCTIVE AT THE MARGIN: it is the mechanism
+               that moves the generator off its fixed point so the corpus
+               carries labels the seed cannot already reproduce, and the -27/-32
+               Elo is its price, not a defect.  The premise this line started
+               from -- endgame over-learning damages the online phase, fixing it
+               would compound -- is wrong.  The over-coherence is real at the
+               weight level (6.4) and controllable (here), but costs no Elo.
+               Consequences: default stays 0.0 (byte-exact no-op); do NOT ship a
+               non-zero default and do NOT run alpha=0.5.  Reducing online
+               displacement is excluded as a lever, joining targets (3.1), the
+               multi-writer merge (Part 5), book diversity (4.4) and
+               freeze-generation (6.1/6.2).  The long-standing online-LR-decay
+               hypothesis (from 3.1) should now be regarded as doubtful for the
+               same reason alpha failed.  Docs: Online_Learning_Investigation.md
+               6.10.
+
 2026_08_13 -- TDLEAF_STACK_NORM_ALPHA pre-test: REJECTED; knob shelved at its
                default 0.0 (verified byte-exact no-op).  Three arms (alpha
                0/0.5/1, 200k games each at d6, identical seed, draw rate

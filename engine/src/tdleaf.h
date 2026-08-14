@@ -78,8 +78,19 @@ static const float TDLEAF_ID_VAR_SIGMA2  = 10000.0f;
 //   alpha = 1  gives each game one unit of gradient per material bucket
 //              regardless of how many plies it spent there.
 //   alpha = 0.5 is the halfway/"sqrt-n" compromise.
-// Runtime-overridable by TDLEAF_STACK_NORM_ALPHA for the A/B sweep; once a
-// value is chosen this default should be set to it and the env var retired.
+// TESTED AND REJECTED (2026-08-14, docs/Online_Learning_Investigation.md 6.10).
+// A full production A/B -- alpha=1 vs alpha=0, 300k games at d8 from the same
+// seed -- showed the knob works decisively at the weight level (deep-endgame
+// PSQT displacement 8x lower, b0/b7 1.87 -> 0.60 at identical exposure) and
+// gains NOTHING in Elo: the online phase cost -16.7 instead of -31.6 against a
+// foreign anchor, but the offline gain fell +84.6 -> +56.0, so the iteration
+// total went +53.0 -> +39.3.  Together with the frozen-generation iteration
+// (zero displacement, +7) this is a monotone dose-response: suppressing online
+// movement degrades the iteration in proportion.  Online displacement is
+// NET-PRODUCTIVE -- it is what moves the generator off its fixed point so the
+// corpus carries labels the seed cannot already reproduce.
+// KEEP THIS AT 0.0.  Do not ship a non-zero default; do not run alpha=0.5.
+// Retained only as the reproduction handle for that experiment.
 static const float TDLEAF_STACK_NORM_ALPHA = 0.0f;
 // Effective alpha for this process (default above, or TDLEAF_STACK_NORM_ALPHA).
 float tdleaf_stack_norm_alpha();

@@ -1484,3 +1484,145 @@ different `--seed`.
 **The actionable finding is a tooling one:** `alpha_pretest.sh` cannot validate
 or reject any online-update change until the ~1.4-vs-~0.97 gap against
 production is explained.  Fix the instrument before running more arms.
+
+## 6.10 The production alpha A/B: the knob works, the theory does not — and online displacement is net-productive (2026-08-14)
+
+D. Homan's call: skip further harness repair and run alpha where the signature
+demonstrably exists — a full production iteration, same seed, same everything,
+against the already-completed alpha=0 iteration.
+
+```sh
+env TDLEAF_STACK_NORM_ALPHA=1.0 python3 train.py \
+    --tag m260720-2.5e6g-a1 --continue m260720-2.2e6g \
+    --games 300000 --depth 8 --concurrency 12 --recompile \
+    --gauntlet-anchors Leaf_vclassic_eval --gauntlet-epochs --gauntlet-tdleaf --gauntlet
+```
+
+This is the exact command that produced `m260720-2.5e6g` with `alpha` unset,
+modulo the tag and the env prefix.  Both iterations: 300k games at d8 from
+`m260720-2.2e6g_final`, ~55.4M/55.8M corpus rows, draw rate 35.3% (in the d8
+band), identical baseline val MSE 0.006829.  A cleaner A/B than anything the
+pre-test harness could have produced.
+
+### The knob works, decisively, at the weight level
+
+| bucket | alpha=0 `on/upd` | alpha=1 `on/upd` | upd_on (M), a0 / a1 |
+|---|---|---|---|
+| 0 | 14.85 | **1.82** | 9.5 / 9.5 |
+| 1 | 11.04 | 1.36 | 41.7 / 42.1 |
+| 2 | 11.38 | 2.04 | 42.6 / 42.2 |
+| 3 | 10.10 | 2.69 | 36.2 / 35.8 |
+| 4 | 9.06 | 3.21 | 29.8 / 29.3 |
+| 7 | 7.94 | 3.04 | 17.3 / 17.3 |
+| **b0/b7** | **1.87** | **0.60** | |
+
+Exposure matches bucket-for-bucket, so this isolates the update rule.  Alpha=1
+suppressed deep-endgame displacement 8x and inverted the profile — exactly what
+the harness predicted (0.60 in production against 0.54 there).  **The harness's
+*relative* prediction about alpha was correct** even though its absolute control
+level was not (6.9); that discrepancy is now moot for decision-making, since
+production is the instrument of record.
+
+### It bought nothing in Elo
+
+| measurement | alpha=0 | alpha=1 |
+|---|---|---|
+| tdleaf vs classic | −67.9 | **−53** |
+| tdleaf vs 2.2e6-final | −20.9 | **−49** |
+| final vs classic | +16.7 | **+3** |
+| final vs 2.2e6-final | +38.0 | **+48** |
+| epoch ladder | ep1 +39.1, ep2 +63.2 | ep1 +52.5, ep2 +64.7 |
+| val MSE | 0.006829 → 0.006347 → 0.006363 | 0.006829 → 0.006310 → 0.006340 |
+
+Decomposed against the foreign anchor (seed = −36.3 vs classic):
+
+| | online Δ | offline Δ | iteration total |
+|---|---|---|---|
+| alpha=0 | −31.6 | +84.6 | **+53.0** |
+| alpha=1 | **−16.7** | **+56.0** | **+39.3** |
+
+Alpha halved the online damage and the offline gain fell by twice as much.
+
+**Statistical honesty:** at 1000 games each (±11), a difference of two
+measurements carries ±16.  The four comparisons run 0.6σ–1.8σ, so *none* is
+significant, and the two anchors contradict each other on the post-online net —
+alpha=1 is 15 Elo better vs classic but 28 Elo worse vs the seed.  No
+conclusion should be drawn from any single cell of that table.  What follows
+leans on the pattern across interventions, not on these deltas.
+
+### The finding: online displacement is net-productive at the margin
+
+Three interventions on the same loop, ordered by how much online weight
+movement they permit:
+
+| online displacement | iteration total (foreign anchor) |
+|---|---|
+| frozen — zero (6.1, 3e6 iteration) | +7 |
+| alpha=1 — ~8x suppressed | +39 |
+| alpha=0 — full | +53 |
+
+Monotone.  Suppressing online movement degraded the iteration in proportion to
+how much was suppressed.  This promotes 6.3's thesis from observation to
+intervention: **the online phase's displacement is not damage to be minimised,
+it is the mechanism that moves the generator off its fixed point so the corpus
+carries labels the seed does not already reproduce.**  The −27/−32 Elo the
+online phase costs is the price of that signal, not a defect.
+
+(Caveats: three points, each ±16, and the frozen run was 500k games at a later
+chain position.  The monotonicity across three mechanically very different
+interventions is what carries the argument, not any pair.)
+
+This retroactively unifies the whole investigation.  The frozen iteration
+failed because zero displacement means zero corpus signal.  Alpha failed the
+same way in milder form.  And the premise this line started from — that
+endgame over-learning was damaging the online phase, so fixing it would
+compound — is **wrong**: the endgame over-coherence is real at the weight level
+(6.4, replicated across two chains and confirmed controllable here), but it is
+not costing Elo.
+
+### Status of the alpha line: CLOSED
+
+- `TDLEAF_STACK_NORM_ALPHA` stays at its default **0.0**, a verified byte-exact
+  no-op.  Do not ship a non-zero default.  The knob and
+  `scripts/alpha_pretest.sh` remain in the tree as the reproduction handle for
+  this experiment; whether to delete them under the repo's
+  retire-and-remove convention is a separate call.
+- **Do not run alpha=0.5.**  It interpolates between two arms that already
+  differ by less than the measurement error.
+- If alpha=1 vs alpha=0 is ever worth settling properly, the cheap route is a
+  direct head-to-head of the existing finals (`m260720-2.5e6g_final` vs
+  `m260720-2.5e6g-a1_final`) at 4000–6000 games, which needs no generation and
+  sidesteps the anchor contradiction.  The point estimate and the mechanism
+  both favour alpha=0, so this is for the record, not for a decision.
+
+### What is now settled, and what remains open
+
+Settled: targets (3.1), the multi-writer merge (Part 5), book diversity (4.4),
+freeze-generation (6.1/6.2), and now endgame-coherence reweighting (here) are
+all excluded as levers on the online phase.  Reducing online displacement is
+not the direction.
+
+Open:
+
+1. **The harness gap (6.9)** — `alpha_pretest.sh` measures b0/b7 ≈ 0.94–1.04
+   where production measures 1.32–2.12, unexplained after excluding binary,
+   flags, dump env, cadence, weight seed, game count, book, and shuffle seed.
+   No longer blocking (production is the instrument), but the harness must not
+   be trusted for absolute levels until it is explained.
+2. **Whether the online phase can be made *more* productive rather than less.**
+   The dose-response curve points the opposite way from every intervention
+   tried so far: if displacement is the product, the question is whether more
+   or better-directed displacement helps — the reverse of the LR-decay
+   hypothesis carried since 3.1, which should now be regarded as doubtful for
+   the same reason alpha failed.
+
+## Methodology notes (6.10)
+
+- Runs: `learn/m260720-2.5e6g_final.json` (alpha=0) and
+  `learn/m260720-2.5e6g-a1_final.json` (alpha=1); trainer logs and post-online
+  states under each `<tag>_work/train/`.
+- Alpha confirmed in-run via the learner banner
+  (`grep stack_norm_alpha <tag>_work/traj/learner.log` → `stack_norm_alpha=1`).
+- Bucket profiles: `bucket_phase_analysis.py <2.2e6_final> <work/train state>
+  <final>` for each arm.
+- Draw rate aggregated over all 11 actor logs (35.3%, n=6400).
