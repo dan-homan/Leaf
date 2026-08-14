@@ -21,6 +21,32 @@
 extern int value[7];
 
 // ---------------------------------------------------------------------------
+// tdleaf_stack_norm_alpha — per-game per-stack record normalisation exponent.
+// Defaults to TDLEAF_STACK_NORM_ALPHA; overridable by the env var of the same
+// name for the A/B sweep.  Cached on first call.  Negative values are rejected
+// (they would AMPLIFY the coherence this knob exists to suppress).
+// ---------------------------------------------------------------------------
+float tdleaf_stack_norm_alpha()
+{
+    static float alpha = -1.0f;
+    if (alpha < 0.0f) {
+        alpha = TDLEAF_STACK_NORM_ALPHA;
+        const char *p = getenv("TDLEAF_STACK_NORM_ALPHA");
+        if (p && *p) {
+            char *end = nullptr;
+            float v = strtof(p, &end);
+            if (end == p || *end || !(v >= 0.0f)) {
+                fprintf(stderr, "TDLeaf: TDLEAF_STACK_NORM_ALPHA=%s is not a "
+                                "non-negative number.\n", p);
+                exit(1);
+            }
+            alpha = v;
+        }
+    }
+    return alpha;
+}
+
+// ---------------------------------------------------------------------------
 // tdleaf_check_env — startup guardrail + config banner for TDLEAF builds.
 //
 // Hard-errors if any TDLEAF_* environment variable outside the known allowlist
@@ -41,6 +67,7 @@ void tdleaf_check_env()
         "TDLEAF_DUMP_MAX_CP",     // corpus dump |cp| cap
         "TDLEAF_CHECK_ACC",       // diagnostic: walked-vs-rebuilt accumulator check
         "TDLEAF_TRACE_UPDATE",    // diagnostic: per-record gradient trace file
+        "TDLEAF_STACK_NORM_ALPHA",// per-game per-stack record normalisation exponent
     };
     int bad = 0;
     for (char **e = environ; e && *e; e++) {
@@ -67,11 +94,12 @@ void tdleaf_check_env()
 
     fprintf(stderr,
             "TDLeaf config: K=%.0f lambda=%.4f batch=%d grad_clip=%.2f wd=%.1e "
-            "score_clip=%.1fxP id_var_sigma2=%.0f\n"
+            "score_clip=%.1fxP id_var_sigma2=%.0f stack_norm_alpha=%.3g\n"
             "TDLeaf LR0: FC=%.4g FC2=%.4g FC_bias=%.4g FT=%.4g FT_bias=%.4g PSQT=%.4g\n",
             (double)TDLEAF_K, (double)TDLEAF_LAMBDA, TDLEAF_BATCH_SIZE,
             (double)TDLEAF_GRAD_CLIP_NORM, (double)TDLEAF_WEIGHT_DECAY,
             (double)TDLEAF_SCORE_CLIP_PAWNS, (double)TDLEAF_ID_VAR_SIGMA2,
+            (double)tdleaf_stack_norm_alpha(),
             (double)TDLEAF_ADAM_LR0, (double)TDLEAF_ADAM_FC2_LR0,
             (double)TDLEAF_ADAM_FC_BIAS_LR0, (double)TDLEAF_ADAM_FT_LR0,
             (double)TDLEAF_ADAM_FT_BIAS_LR0, (double)TDLEAF_ADAM_PSQT_LR0);
@@ -323,6 +351,29 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
     // 3. For each ply, run FP32 forward pass + accumulate gradients
     const float cp_factor = 100.0f / 5776.0f;
 
+    // Per-game, per-stack record normalisation (see TDLEAF_STACK_NORM_ALPHA in
+    // tdleaf.h).  Count this game's records per FC/PSQT material bucket, then
+    // divide each record's gradient by pow(count, alpha) so a game's endgame
+    // tail — dozens of near-identical positions carrying the same-sign
+    // saturated outcome term into the same bucket — cannot outvote its sparse,
+    // decorrelated opening records within one Adam step.
+    // At alpha == 0 the divisor is skipped entirely rather than computed as
+    // pow(n, 0): that keeps the default arithmetic byte-for-byte identical to
+    // the pre-knob code, which the actor/learner bit-exactness gate relies on.
+    const float stack_alpha = tdleaf_stack_norm_alpha();
+    float stack_norm[NNUE_LAYER_STACKS];
+    for (int s = 0; s < NNUE_LAYER_STACKS; s++) stack_norm[s] = 1.0f;
+    if (stack_alpha > 0.0f) {
+        int n_stack[NNUE_LAYER_STACKS] = {0};
+        for (int t = 0; t < T; t++) {
+            int s = rec.plies[t].stack;
+            if (s >= 0 && s < NNUE_LAYER_STACKS) n_stack[s]++;
+        }
+        for (int s = 0; s < NNUE_LAYER_STACKS; s++)
+            if (n_stack[s] > 1)
+                stack_norm[s] = 1.0f / powf((float)n_stack[s], stack_alpha);
+    }
+
     // Diagnostic (env TDLEAF_TRACE_UPDATE=<file>): append one line per record
     // with every quantity that feeds the gradient, floats in exact hex — for
     // diffing the online arm against the trajectory learner.
@@ -348,6 +399,10 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
         float wtm_sign = rec.plies[t].wtm ? -1.0f : 1.0f;
         float id_weight = 1.0f / (1.0f + rec.plies[t].id_score_variance / TDLEAF_ID_VAR_SIGMA2);
         float grad_scale = e[t] * sig_grad * cp_factor * wtm_sign * id_weight;
+        {
+            int s = rec.plies[t].stack;
+            if (s >= 0 && s < NNUE_LAYER_STACKS) grad_scale *= stack_norm[s];
+        }
 
         if (trace_f) {
             const TDRecord &r = rec.plies[t];

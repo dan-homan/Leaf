@@ -1,5 +1,128 @@
 Changes since 2017_12_24
 
+2026_08_14 -- TDLEAF_STACK_NORM_ALPHA: production A/B run, knob CLOSED at
+               default 0.0, and the online phase reframed.  A full iteration
+               with alpha=1 (300k games at d8 from m260720-2.2e6g_final, same
+               command as the alpha=0 iteration modulo tag) vs the completed
+               alpha=0 iteration -- same seed, same corpus size, draw rate 35.3%,
+               identical baseline val MSE.
+               Weight level: the knob works decisively.  Deep-endgame PSQT
+               displacement fell 8x (on/upd 14.85 -> 1.82 in bucket 0) and the
+               profile inverted (b0/b7 1.87 -> 0.60) at bucket-for-bucket
+               identical exposure -- matching the pre-test harness's RELATIVE
+               prediction (0.54) even though its absolute control level remains
+               unexplained (6.9).
+               Elo: nothing gained.  Against the foreign anchor the online phase
+               cost -31.6 (alpha=0) vs -16.7 (alpha=1) while the offline gain
+               fell +84.6 -> +56.0, for iteration totals +53.0 vs +39.3.  No
+               single comparison is significant (1000-game matches, +-11, so
+               differences carry +-16; the four run 0.6-1.8 sigma) and the two
+               anchors contradict on the post-online net.
+               The finding is the dose-response across three interventions:
+               frozen generation (zero online displacement) +7, alpha=1 (~8x
+               suppressed) +39, alpha=0 (full) +53.  Monotone -- suppressing
+               online movement degrades the iteration in proportion.  ONLINE
+               DISPLACEMENT IS NET-PRODUCTIVE AT THE MARGIN: it is the mechanism
+               that moves the generator off its fixed point so the corpus
+               carries labels the seed cannot already reproduce, and the -27/-32
+               Elo is its price, not a defect.  The premise this line started
+               from -- endgame over-learning damages the online phase, fixing it
+               would compound -- is wrong.  The over-coherence is real at the
+               weight level (6.4) and controllable (here), but costs no Elo.
+               Consequences: default stays 0.0 (byte-exact no-op); do NOT ship a
+               non-zero default and do NOT run alpha=0.5.  Reducing online
+               displacement is excluded as a lever, joining targets (3.1), the
+               multi-writer merge (Part 5), book diversity (4.4) and
+               freeze-generation (6.1/6.2).  The long-standing online-LR-decay
+               hypothesis (from 3.1) should now be regarded as doubtful for the
+               same reason alpha failed.  Docs: Online_Learning_Investigation.md
+               6.10.
+
+2026_08_13 -- TDLEAF_STACK_NORM_ALPHA pre-test: REJECTED; knob shelved at its
+               default 0.0 (verified byte-exact no-op).  Three arms (alpha
+               0/0.5/1, 200k games each at d6, identical seed, draw rate
+               27.4-28.2%): the alpha=0 control never reproduced the endgame
+               over-coherence it was built to measure (b0/b7 = 0.94 against
+               1.32-1.45 in every historical d6 iteration; per-bucket exposure
+               matches within ~5%, so not a sampling artefact), and alpha itself
+               inverted the profile rather than flattening it (spread 1.31 ->
+               1.90 -> 2.70) while cutting PSQT displacement 3.6x and FT weights
+               8x but FC biases only 1.3x — a differential LR cut.
+               The control anomaly tracks the SEED, not depth or game count:
+               runs seeded from weak nets (-349..-36 vs classic) give b0
+               10.4-16.2, both runs seeded from the current chain head (+24)
+               give 6.5-7.2 regardless of depth.  The one methodological
+               confound (--games-per-actor 500 vs train.py's production 1000)
+               was tested and excluded: 0.94 vs 0.98, PSQT med|dw| 42.95 vs
+               44.09.
+               Reading: the endgame over-coherence measured in Part 6.4 was real
+               when taken but has resolved as the net matured — a well-calibrated
+               endgame eval makes result-d[T-1] small, so the saturated same-sign
+               tail gradient shrinks on its own.  It was a symptom of an
+               under-trained endgame, not a defect of the update rule.  The
+               -27/-32 Elo online displacement at the chain head therefore needs
+               a different explanation; with targets (Part 3.1) and the
+               multi-writer merge (Part 5) already excluded, fixed-LR noise-ball
+               diffusion around an offline-selected optimum is the leading
+               hypothesis, which points at online LR decay rather than any
+               reweighting.  Knob + harness kept in tree as reusable
+               measurement.  Docs: Online_Learning_Investigation.md 6.8.
+               alpha_pretest.sh: refresh cadence is now an explicit parameter
+               defaulting to production's 1000 (the hardcoded 500 is what made
+               this ambiguous); draw-rate canary guidance made depth-aware
+               (~35-40% at d8, ~26-28% at d6).
+
+2026_08_13 -- TDLeaf online update: added TDLEAF_STACK_NORM_ALPHA, a per-game
+               per-stack record normalisation knob.  Each record's gradient is
+               divided by pow(n_stack, alpha), where n_stack is how many records
+               the game contributes to that record's FC/PSQT material bucket.
+               Targets within-game gradient COHERENCE (not magnitude — Adam's v
+               renormalises magnitude): late in a game the outcome term
+               lambda^(T-1-t)*(result-d[T-1]) saturates toward 1, so every
+               record in the endgame tail carries the same sign onto the same
+               bucket's weights, and those records are near-identical positions
+               sharing an FC stack, a PSQT bucket, and most FT features.  With
+               TDLEAF_BATCH_SIZE counted in GAMES, such a bucket's effective
+               sample size per Adam step is the game count however many
+               correlated records each game contributes, while the step size is
+               normalised per weight — so endgame weights random-walk further
+               per step by construction.  Measured signature (Online_Learning_
+               Investigation.md 6.4): online PSQT med|dw|/sqrt(updates) 14.85 in
+               bucket 0 vs 7.94 in bucket 7, a 1.87x ratio replicated across two
+               chains and unchanged by the actor/learner split.
+               Default alpha = 0.0 = previous behaviour; env-overridable for the
+               A/B sweep and added to tdleaf_check_env()'s allowlist.
+               VALIDATED: at alpha=0 the divisor is skipped entirely (not
+               computed as pow(n,0)), and a 24-game strict --selfplay run is
+               byte-identical (.tdleaf.bin md5) to a binary built from the
+               pre-change sources; alpha=0.5/1 produce distinct states.  Per-
+               record gradient trace (TDLEAF_TRACE_UPDATE) confirms gs scales by
+               exactly 1/n_stack at alpha=1 (max rel err 8e-8) while the TD
+               targets e[] are bit-identical — the knob touches only the
+               per-record weighting, not the target math.
+               New: scripts/alpha_pretest.sh (weight-level pre-test, no
+               gauntlet: runs one short actor/learner generation per alpha from
+               an identical seed and diffs seed->post-online per material
+               bucket).  Docs: Online_Learning_Investigation.md Part 6.
+
+2026_08_13 -- Online_Learning_Investigation.md Part 6 (m260720 chain, 3.0M
+               games): the frozen-generation recipe of record (Part 4.5) is
+               REVISED.  Foreign-anchor decomposition of all eight iterations
+               shows the online phase costs 0 to -32 Elo of its own but is what
+               makes the corpus worth consolidating: learning iterations netted
+               +24..+95 vs Leaf_vclassic_eval, the one TDLEAF_FREEZE=1
+               iteration netted +7 on 1.7x the games.  Objective-space
+               confirmation, independent of match noise: the frozen
+               consolidation RAISED validation MSE at every epoch (0.005928 ->
+               0.005954 -> 0.005998) with epoch-1 train MSE opening above
+               baseline, i.e. the seed already sat at the optimum of a corpus it
+               had labeled itself.  freeze-generate -> consolidate is closed at
+               d8 exactly as it closed at d6.  Part 3.5's "offline gain is
+               repair of online damage" holds for the 13-writer merge regime it
+               was measured in, not for the actor/learner regime.  Recipe of
+               record: keep online learning on during generation; TDLEAF_FREEZE
+               stays a control tool.
+
 2026_07_20 -- Simplification Phase 3 (code cleanup): removed the epoch-based
                experience-replay ring buffer (was disabled at TDLEAF_REPLAY_K=0)
                and retired the in-engine multi-writer .tdleaf.bin merge.

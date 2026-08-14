@@ -56,6 +56,44 @@ static const float TDLEAF_SCORE_CLIP_PAWNS = 1.0f;
 // Expressed in cp²: 10000 corresponds to a 100 cp std-dev reference.
 // Larger values are more tolerant of ID score instability.
 static const float TDLEAF_ID_VAR_SIGMA2  = 10000.0f;
+// Approach 3 — per-game, per-stack record normalisation (the "alpha knob").
+// Each record's gradient is divided by pow(n_stack, alpha), where n_stack is
+// how many records THIS GAME contributes to that record's FC/PSQT material
+// bucket.  Targets within-game gradient COHERENCE, not magnitude (Adam's v
+// renormalises magnitude by design):
+//   - late in a game lambda^(T-1-t)*(result - d[T-1]) -> 1, so every record in
+//     the tail carries the same sign and nearly the same size, and
+//   - those records are near-identical positions sharing an FC stack, a PSQT
+//     bucket, and most FT feature indices.
+// With TDLEAF_BATCH_SIZE counted in GAMES, a bucket's effective sample size
+// per Adam step is the game count however many correlated records each game
+// contributes — while the step size is normalised per weight like everything
+// else, so endgame weights random-walk further per step by construction.
+// Measured signature (docs/Online_Learning_Investigation.md 6.4): online PSQT
+// med|dw|/sqrt(updates) is 14.85 in bucket 0 vs 7.94 in bucket 7 — a 1.87x
+// ratio implying ~3.5x the effective coherence — replicated across two chains
+// and unchanged by the actor/learner split.
+//   alpha = 0  reproduces the pre-2026-08-13 behaviour BYTE-FOR-BYTE (the
+//              divisor is skipped entirely, not computed as pow(n, 0)).
+//   alpha = 1  gives each game one unit of gradient per material bucket
+//              regardless of how many plies it spent there.
+//   alpha = 0.5 is the halfway/"sqrt-n" compromise.
+// TESTED AND REJECTED (2026-08-14, docs/Online_Learning_Investigation.md 6.10).
+// A full production A/B -- alpha=1 vs alpha=0, 300k games at d8 from the same
+// seed -- showed the knob works decisively at the weight level (deep-endgame
+// PSQT displacement 8x lower, b0/b7 1.87 -> 0.60 at identical exposure) and
+// gains NOTHING in Elo: the online phase cost -16.7 instead of -31.6 against a
+// foreign anchor, but the offline gain fell +84.6 -> +56.0, so the iteration
+// total went +53.0 -> +39.3.  Together with the frozen-generation iteration
+// (zero displacement, +7) this is a monotone dose-response: suppressing online
+// movement degrades the iteration in proportion.  Online displacement is
+// NET-PRODUCTIVE -- it is what moves the generator off its fixed point so the
+// corpus carries labels the seed cannot already reproduce.
+// KEEP THIS AT 0.0.  Do not ship a non-zero default; do not run alpha=0.5.
+// Retained only as the reproduction handle for that experiment.
+static const float TDLEAF_STACK_NORM_ALPHA = 0.0f;
+// Effective alpha for this process (default above, or TDLEAF_STACK_NORM_ALPHA).
+float tdleaf_stack_norm_alpha();
 // The learning target is the classic λ-decayed eligibility trace (per game-ply
 // decay pow(λ, dply), with the score-change clip and ID-variance stability
 // weight above).  Earlier opt-in "blend"/"hybrid" targets and online root
