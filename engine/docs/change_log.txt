@@ -1,5 +1,51 @@
 Changes since 2017_12_24
 
+2026_08_14 -- TDLeaf per-feature vote normalisation (TDLEAF_FEATURE_DEDUP /
+               TDLEAF_FEATURE_RBAR) + repetition calibration (TDLEAF_REP_HIST).
+               Targets the repeated-measures problem directly rather than via
+               the rejected alpha knob: a feature's repeated contributions
+               within one game are pooled before entering the batch sum, while
+               contributions still sum ACROSS the batch's 8 games.  Applies only
+               to the per-feature sections (FT weights, PSQT); FC and FT biases
+               are dense and untouched.
+               Mechanism: writing a cell's batch gradient as r*g0, Adam's step is
+               r/sqrt(E[r^2]) — v is updated only on batches where the feature
+               appears, so it is that feature's full-history mean square.  The
+               MEAN of r is normalised away; its VARIANCE is not.  Measured
+               across-game CV(r) = 0.95 (d8, 500 games, 2.15M contributions) and
+               0.94 (d6, 1200 games, 5.03M) — and CV(r) IS the step-size CV, so
+               a typical PSQT cell's step swings ~+-95% on feature persistence
+               alone, with Adam attenuating mean steps to 0.73 to pay for it.
+               Two modes.  DEDUP=beta is the exponent form (r^-beta); RBAR=k is
+               scale-neutral, weighting by rbar_shrunk/r with
+               rbar_shrunk = (n*rbar_cell + k*rbar_prior)/(n+k) shrunk toward the
+               cell's MATERIAL-BUCKET mean r (global mean for FT rows).
+               Mutually exclusive; setting both is a hard error.
+               Prefer RBAR.  The exponent also cuts the MEAN ~5.9x at beta=1,
+               and although Adam is scale-invariant in steady state, v adapts
+               over ~1000 touches while a median PSQT cell gets ~450 per
+               300k-game iteration — so a mass cut acts as a straight LR cut for
+               a whole run.  That is the likeliest explanation of the rejected
+               alpha knob's 3.6x displacement drop, which 6.10 showed loses Elo.
+               Measured at 1200 games d6: displacement 0.41x (DEDUP=1) vs 1.04x
+               (RBAR=8) against an identical-seed baseline.
+               CALIBRATION CORRECTED A PREMISE: this was pitched as touching "a
+               small fraction of the gradient mass" on the assumption that r is
+               mostly 1.  In fact 92-94% of PSQT gradient mass sits at r >= 2
+               with mass-weighted mean r = 15.9, because r counts feature
+               PERSISTENCE, not position repetition — HalfKAv2_hm features are
+               king-relative, so any king move re-indexes every piece, and a
+               static pawn with a static king gives r = 40 with no position ever
+               recurring.  The exact-repeat rate (5% of rows) measured a
+               different thing.
+               Gates: default byte-exact vs pre-change sources; TDLEAF_REP_HIST
+               alone byte-exact (pure observer); exponent mode byte-stable across
+               the weight-array refactor; RBAR distinct.  RBAR makes the update
+               history-dependent, so the actor/learner bit-exactness gate (5.3)
+               does NOT hold for it — closing that would need the rv_* tables
+               persisted into .tdleaf.bin.  No Elo measurement yet.
+               Docs: Online_Learning_Investigation.md 6.11.
+
 2026_08_14 -- TDLEAF_STACK_NORM_ALPHA: production A/B run, knob CLOSED at
                default 0.0, and the online phase reframed.  A full iteration
                with alpha=1 (300k games at d8 from m260720-2.2e6g_final, same

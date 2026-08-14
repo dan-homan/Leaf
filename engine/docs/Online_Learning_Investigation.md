@@ -1628,3 +1628,252 @@ Open:
 - Bucket profiles: `bucket_phase_analysis.py <2.2e6_final> <work/train state>
   <final>` for each arm.
 - Draw rate aggregated over all 11 actor logs (35.3%, n=6400).
+
+## 6.11 The repeated-measures line: per-feature vote normalisation (2026-08-14)
+
+After 6.10 closed the alpha line, D. Homan reframed the target: alpha had never
+addressed the original concern.  It divided by `n_stack` — every record the game
+contributed to a material bucket — whether or not anything actually recurred.
+The concern was *repeated measures*: within one game it is hard to tell whether
+a strong repeated signal is real evidence or the same observation counted many
+times.  This section records the mechanical answer to how gradients are applied,
+the statistical analysis that follows from it, the implementation, and a
+calibration that refuted the premise the design was first pitched on.
+
+### 6.11.1 How gradients are actually applied
+
+Two things happen at two different rates, and conflating them was the source of
+several wrong intuitions in this investigation.
+
+- **Accumulation is per ply.**  `tdleaf_accumulate_game` loops over every record
+  and calls `nnue_accumulate_gradients`, which for PSQT does
+  `grad_psqt_w[fi*PSQT_BKTS + s] += g_psqt_diff * psqt_sign` for every active
+  feature of both perspectives.  Nothing is applied.
+- **The Adam step is per 8 GAMES.**  `tdleaf_update_after_game` counts games and
+  only at `TDLEAF_BATCH_SIZE` calls `nnue_apply_gradients`, which takes one step
+  per `(fi, bucket)` with non-zero accumulated gradient, then zeroes.
+
+So a feature present for 40 plies contributes 40 additive terms into one
+gradient cell and a single step is taken on their sum, pooled with the other 7
+games.  **`psqt_weights_cnt` increments once per batch-apply, not per ply** — so
+every "updates" figure in this document (6.4 included) counts batches.  The
+median bucket-0 PSQT cell had m = 597 against ~125,000 batches in the
+production 1M-game run: touched in ~0.5% of them.
+
+### 6.11.2 Why offline batch=512 differs from online batch=8
+
+D. Homan's framing, confirmed in code and arithmetic:
+
+- The offline trainer does a **full global shuffle** of the training index each
+  epoch (`std::shuffle(train_idx...)`), then takes contiguous 512-slices.  With
+  55.8M rows over ~300k games (186 rows/game), the expected number of same-game
+  *pairs* in a batch is **0.43**, and any given row has a **0.17%** chance of
+  sharing its game with another row in its batch.  An offline batch is
+  effectively 512 independent games.
+- The online batch is **not smaller — it is larger**.  Mean game length is 149
+  plies (median 139, n = 200k games), and internal self-play records every ply,
+  so 8 games ≈ **1192 records** against 512.  Sample size was never the issue;
+  effective independent sample size is.
+
+### 6.11.3 The Adam analysis: the mean is absorbed, the variance is not
+
+Write a cell's batch gradient as `r * g0`.  For sparse PSQT/FT rows `v` is
+updated **only when the gradient is non-zero**, so it is an EMA over the batches
+in which the feature actually appears, and bias correction uses the per-weight
+count — making `v_hat` an approximately unbiased estimate of `E[g^2]` even at
+small counts.  Rare features therefore *are* normalised.  What Adam removes is
+the **mean** of `r`; what survives is its **variance**:
+
+    step      = r / sqrt(E[r^2]) = r / (rbar * sqrt(1 + CV^2))
+    mean step = 1 / sqrt(1 + CV^2)
+    step CV   = CV                     (CV = sd(r)/mean(r) for that cell)
+
+**CV(r) is exactly the Adam step-size CV.**  A worked case: a cell whose r is 1
+at 99% and 40 at 1% has `sqrt(E[r^2]) = 4.12`, so the rare repeat-heavy game
+takes a step of 9.7 while every normal step is suppressed to 0.24.  The scheme
+is bad in both directions at once — outliers dominate *and* desensitise the
+well-behaved majority.
+
+This also rules out a tempting half-measure: excluding the within-game
+repetition from `v` alone.  That restores normal steps to 1.0 but sends the
+outlier to 40 (clipped at 30) with no normalisation at all.  Only removing `r`
+from numerator and denominator *together* — averaging within the game — fixes
+both.
+
+### 6.11.4 A correction to the premise: features are king-relative
+
+The design was pitched on the assumption that a "stationary pawn" repeatedly
+hammers one weight.  The architecture largely prevents that:
+
+    halfkav2_feature(persp, ksq, psq, ptype, pside)
+        = KingBuckets[ksq_f] + ps + psq_o
+
+`KingBuckets` maps 64 king squares onto 32 buckets — exactly two squares per
+bucket, horizontal mirrors of each other, and those two carry *opposite*
+orientation (`orient = ((ksq_f & 7) < 4) ? 7 : 0`).  **Any king move re-indexes
+every piece in that perspective**: either the bucket changes, or for the
+mirror-partner square the bucket is preserved while every `psq_o` flips.  And it
+is per perspective, so a white pawn re-indexes when *either* king steps.
+
+So in an endgame with active kings a static pawn's signal is spread across a
+fresh row on every king move — the same mechanism that spreads a *moving*
+pawn's.  What does land repeatedly on identical cells is a literally repeated
+position (shuffling, 3-fold run-ups), because the whole position recurs, kings
+included; and since the bucket is material count, which a shuffle does not
+change, repeats hit exactly the same `(fi, bucket)` pairs.
+
+### 6.11.5 Implementation
+
+Two modes, both applying **only** to the per-feature sections (FT weights,
+PSQT).  FC weights/biases and FT biases are dense — every record touches them,
+so there is no per-feature repetition to remove.
+
+- `TDLEAF_FEATURE_DEDUP` = beta — exponent form, weight `r^-beta`.
+  beta = 0 disables and is BYTE-EXACT (the divisor is skipped, not computed as
+  `r^0`); beta = 1 is full averaging.
+- `TDLEAF_FEATURE_RBAR` = k — scale-neutral form, weight `rbar_shrunk / r` with
+      rbar_shrunk = (n * rbar_cell + k * rbar_prior) / (n + k)
+  and `rbar_prior` the mean r of the cell's material bucket (a global mean for
+  FT rows, which have no bucket).  Mutually exclusive with the exponent —
+  setting both is a hard error.
+- `TDLEAF_REP_HIST=1` — a pure observer (byte-exact against baseline, verified)
+  reporting the marginal r distribution, the across-game CV(r), and coverage.
+
+`nnue_accumulate_gradients` consumes precomputed per-cell weight arrays, so all
+mode logic stays out of the hot loop behind one null check.  Three passes share
+a single `walk_features` lambda (count, histogram, teardown) so they cannot
+drift apart; the across-game statistics are collected once per (cell, game) by a
+first-visit trick in the teardown walk.
+
+### 6.11.6 Calibration — and the refutation of "surgical"
+
+The design was pitched, by Claude, as touching "roughly a twentieth of the
+gradient mass", reasoning from the exact-position-repeat rate (13.8% of bucket-0
+rows, 5.0% overall).  **That was wrong**, and the histogram says so:
+
+| r | 1 | 2 | 3 | 4-7 | 8-15 | 16-31 | 32+ |
+|---|---|---|---|---|---|---|---|
+| % PSQT mass, d8 500g | 7.65 | 5.99 | 5.15 | 19.84 | 29.89 | 24.37 | 7.12 |
+| % PSQT mass, d6 1200g | 6.34 | 5.27 | 4.74 | 18.65 | 31.80 | 26.37 | 6.83 |
+
+92.4% of PSQT mass sits at r >= 2 (d8, 2.15M contributions); 93.7% at d6 over
+5.03M contributions; 94% in the first 24-game probe.  Mass-weighted mean
+r = 15.9.  FT rows are more extreme still (95.5-96.5% at r >= 2).
+
+The reason is that **r counts feature PERSISTENCE, not position repetition**.  A
+pawn on e4 with a static king gives r = 40 across a quiet stretch in which no
+position ever recurs.  The exact-repeat rate measured a different thing.
+
+Consequently the exponent form is not surgical at all.  Implied gradient-mass
+reduction: **1.75x at beta = 0.25, 2.86x at 0.5, 5.94x at beta = 1** — i.e.
+beta = 1 is a *larger* intervention than the rejected alpha = 1 (3.6x
+displacement), so 6.10's dose-response applies with full force.
+
+### 6.11.7 CV(r): the mechanism is real
+
+| CV band | <0.1 | 0.1-0.25 | 0.25-0.5 | 0.5-1.0 | 1.0-2.0 | >2.0 |
+|---|---|---|---|---|---|---|
+| % contributions, d8 500g | 0.8 | 0.3 | 3.1 | 60.4 | 34.3 | 1.1 |
+| % contributions, d6 1200g | 0.5 | 0.1 | 2.0 | 65.3 | 31.2 | 1.0 |
+
+**Weighted mean CV = 0.95 (d8) / 0.94 (d6)**, replicated across depth on
+independent samples.  96% of contributions sit on cells with CV >= 0.5.  Since
+CV(r) is the step-size CV, a typical PSQT cell's Adam step swings by ~±95%
+purely from how long the feature happened to persist that game, and Adam is
+currently attenuating mean steps to `1/sqrt(1+CV^2) = 0.73` to pay for it.
+
+Two reasons this is conservative: the estimator uses the `/n` population form,
+biased low (by 29% at n = 2), and CV ≈ 1 is what an exponential distribution of
+persistence times gives, which is what one would expect physically.
+
+### 6.11.8 Why the scale-neutral form, and why shrinkage
+
+The exponent fixes the variance but also cuts the mean ~5.9x.  Adam is
+scale-invariant in steady state, so a uniform cut *ought* to cost nothing — it
+costs something because `v` adapts over ~1000 touches (beta2 = 0.999) while a
+median PSQT cell receives only ~450 touches in a 300k-game iteration.  **`v`
+never catches up within a run, so a mass cut acts as a straight LR cut for the
+whole iteration.**  That is the most likely explanation of alpha = 1's 3.6x
+displacement drop, and 6.10 showed such cuts lose Elo.
+
+`rbar/r` avoids this: the current game's r cancels exactly, so r's variance is
+removed immediately and completely *however poor rbar is*.  What remains is
+rbar's drift between batches, of size ~CV/sqrt(n), which decays as the run
+proceeds — so k damps the early estimate rather than capping quality.
+
+An earlier min-games threshold was replaced by shrinkage.  The threshold value
+(4) was arbitrary, and the measurement that appeared to support it (min = 1 and
+min = 4 both giving 0.93x) could not discriminate them: over 1200 games nearly
+every cell accumulates far more than 4 appearances, so both spent the run in the
+same regime.  Worse, a hard cutoff gives cells below it *no* normalisation —
+full CV = 0.95 noise — precisely for the rare features the argument is about.
+Coverage measured after 1200 d6 games:
+
+    n=0: 3.4%   n=1-3: 7.5%   n=4-15: 17.0%   n=16-63: 27.2%   n=64+: 44.9%
+
+72% of contributions come from cells with >= 16 prior games (where a threshold
+is irrelevant), and ~11% from cells with n < 4 (where a threshold would have
+switched the mechanism off).  Shrinkage covers that 11% with the bucket prior
+instead of skipping it.
+
+### 6.11.9 Validation
+
+1200 games at d6 from an identical seed, PSQT displacement over touched cells:
+
+| mode | mean\|dw\| | vs baseline |
+|---|---|---|
+| off | 37.26 | 1.00x |
+| `TDLEAF_FEATURE_DEDUP=1` | 15.32 | **0.41x** |
+| `TDLEAF_FEATURE_RBAR=8` | 38.87 | **1.04x** |
+
+The exponent cuts displacement 2.4x — the disguised LR cut.  The scale-neutral
+form leaves it at 1.04x, marginally above baseline, in the direction the
+mean-restoration argument predicts (0.73 -> 1.0) though well short of the
+predicted +37%.
+
+Gates, all re-verified after the weight-array refactor:
+
+- default byte-identical to a binary built from pre-change sources;
+- `TDLEAF_REP_HIST=1` alone byte-identical — the diagnostic is a pure observer;
+- exponent mode still produces its *pre-refactor* md5, proving the refactor
+  behaviour-preserving;
+- rbar produces a distinct state; both modes together hard-error.
+
+### 6.11.10 Open items
+
+1. **The +37% did not materialise** (1.04x, not 1.37x).  No confirmed
+   explanation.  The likeliest is that `v` is inherited from the seed's long
+   history at the pre-normalisation scale, so the restored mean cannot show
+   until `v` re-adapts — which predicts the ratio drifts up over a real
+   300k-game run.  That is a prediction, not a measurement.
+2. **rbar makes the update history-dependent**, so the actor/learner
+   bit-exactness gate of 5.3 will NOT hold: a learner restarted mid-run rebuilds
+   its rbar history from scratch and diverges from an uninterrupted run.
+   Tolerable for an A/B, but it must be decided before this becomes a default,
+   and closing it means persisting the `rv_*` tables into `.tdleaf.bin` (a
+   format bump).
+3. **No Elo measurement yet.**  Everything above is mechanism and weight-level.
+   The natural production arm is `TDLEAF_FEATURE_RBAR=8` against unset with
+   `--continue m260720-2.2e6g`, directly comparable to the alpha pair's
+   +53 / +39.  Note 6.10's measurement-power caveat: 1000-game gauntlets carry
+   ±16 on a difference, so only large effects will read.
+
+## Methodology notes (6.11)
+
+- Gradient path: `nnue_training.cpp` `nnue_accumulate_gradients` (per-record
+  accumulation, per-feature loop) and `nnue_apply_gradients` (per-batch step,
+  `pcnt[b]++`); batch trigger in `tdleaf.cpp` `tdleaf_update_after_game`.
+- Feature indexing: `nnue.cpp` `halfkav2_feature` and the `KingBuckets` table.
+- Offline batching: `nnue_batch_train.cpp` epoch-level `std::shuffle` of
+  `train_idx`; collision arithmetic from corpus rows/games in
+  `m260720-2.5e6g_work/train/train.log`.
+- Game length: `accumulated N-ply game` lines of
+  `m260720-2.5e6g_work/traj/learner.log` (200k games).
+- Calibration runs: single-process `--selfplay` with `TDLEAF_REP_HIST=1` — 500
+  games at d8 and 1200 at d6, both seeded from `m260720-3e6g_final`.  Read the
+  LAST cumulative report in the log, not the first (each batch apply prints one).
+- Displacement comparison: `psqt_w` deltas over cells with a positive count
+  delta, four arms from an identical seed copy at 1200 games each.
+- Byte-exactness gate: baseline binary from `git show <merge-commit>:` copies of
+  `tdleaf.{cpp,h}` and `nnue_training.cpp`, 24 `--selfplay` games at d6,
+  `.tdleaf.bin` md5 compared (baseline `86c89ad4d951f0e6f2e3201bc9a33b0c`).
