@@ -71,6 +71,36 @@ float tdleaf_feature_dedup()
     return beta;
 }
 
+// tdleaf_feature_rbar — min prior games before the scale-neutral rbar/r weight
+// is trusted for a cell (0 = mode disabled).  Mutually exclusive with
+// TDLEAF_FEATURE_DEDUP; setting both is a hard error rather than a silent
+// precedence rule.
+// ---------------------------------------------------------------------------
+int tdleaf_feature_rbar()
+{
+    static int min_games = -1;
+    if (min_games < 0) {
+        min_games = TDLEAF_FEATURE_RBAR;
+        const char *p = getenv("TDLEAF_FEATURE_RBAR");
+        if (p && *p) {
+            char *end = nullptr;
+            long v = strtol(p, &end, 10);
+            if (end == p || *end || v < 0 || v > 1000000) {
+                fprintf(stderr, "TDLeaf: TDLEAF_FEATURE_RBAR=%s is not a "
+                                "non-negative integer.\n", p);
+                exit(1);
+            }
+            min_games = (int)v;
+        }
+        if (min_games > 0 && tdleaf_feature_dedup() > 0.0f) {
+            fprintf(stderr, "TDLeaf: TDLEAF_FEATURE_RBAR and TDLEAF_FEATURE_DEDUP "
+                            "are mutually exclusive — set exactly one.\n");
+            exit(1);
+        }
+    }
+    return min_games;
+}
+
 // ---------------------------------------------------------------------------
 // Feature-repetition histogram (env TDLEAF_REP_HIST=1) — calibration for the
 // above.  Buckets the per-game occurrence count r of every feature CONTRIBUTION
@@ -121,9 +151,13 @@ static double td_rep_m_pq  [TD_REP_NB];   // |grad| mass,   PSQT (row,bucket)
 // need a further per-game side array; the mass-weighted view is already in the
 // marginal histogram.
 // ---------------------------------------------------------------------------
-static uint32_t *rv_n   = nullptr;   // games in which this cell appeared
+static uint32_t *rv_n   = nullptr;   // games in which this PSQT cell appeared
 static double   *rv_sr  = nullptr;   // sum of r
 static double   *rv_sr2 = nullptr;   // sum of r^2
+// FT rows are indexed by fi alone (no bucket), so the rbar mode needs its own
+// per-row running mean.  sr2 is not tracked here — the CV report is PSQT-only.
+static uint32_t *rvf_n  = nullptr;
+static double   *rvf_sr = nullptr;
 
 static bool tdleaf_rv_alloc()
 {
@@ -132,10 +166,13 @@ static bool tdleaf_rv_alloc()
     rv_n   = (uint32_t *)calloc(n, sizeof(uint32_t));
     rv_sr  = (double   *)calloc(n, sizeof(double));
     rv_sr2 = (double   *)calloc(n, sizeof(double));
-    if (!rv_n || !rv_sr || !rv_sr2) {
+    rvf_n  = (uint32_t *)calloc(NNUE_FT_INPUTS, sizeof(uint32_t));
+    rvf_sr = (double   *)calloc(NNUE_FT_INPUTS, sizeof(double));
+    if (!rv_n || !rv_sr || !rv_sr2 || !rvf_n || !rvf_sr) {
         fprintf(stderr, "TDLeaf: rep-hist variance tables allocation failed\n");
-        free(rv_n); free(rv_sr); free(rv_sr2);
+        free(rv_n); free(rv_sr); free(rv_sr2); free(rvf_n); free(rvf_sr);
         rv_n = nullptr; rv_sr = nullptr; rv_sr2 = nullptr;
+        rvf_n = nullptr; rvf_sr = nullptr;
         return false;
     }
     return true;
@@ -236,6 +273,7 @@ void tdleaf_check_env()
         "TDLEAF_TRACE_UPDATE",    // diagnostic: per-record gradient trace file
         "TDLEAF_STACK_NORM_ALPHA",// per-game per-stack record normalisation exponent (REJECTED, see 6.10)
         "TDLEAF_FEATURE_DEDUP",   // per-feature within-game vote normalisation exponent
+        "TDLEAF_FEATURE_RBAR",    // scale-neutral rbar/r mode (min prior games)
         "TDLEAF_REP_HIST",        // diagnostic: feature-repetition histogram
     };
     int bad = 0;
@@ -264,13 +302,14 @@ void tdleaf_check_env()
     fprintf(stderr,
             "TDLeaf config: K=%.0f lambda=%.4f batch=%d grad_clip=%.2f wd=%.1e "
             "score_clip=%.1fxP id_var_sigma2=%.0f stack_norm_alpha=%.3g "
-            "feature_dedup=%.3g rep_hist=%d\n"
+            "feature_dedup=%.3g feature_rbar=%d rep_hist=%d\n"
             "TDLeaf LR0: FC=%.4g FC2=%.4g FC_bias=%.4g FT=%.4g FT_bias=%.4g PSQT=%.4g\n",
             (double)TDLEAF_K, (double)TDLEAF_LAMBDA, TDLEAF_BATCH_SIZE,
             (double)TDLEAF_GRAD_CLIP_NORM, (double)TDLEAF_WEIGHT_DECAY,
             (double)TDLEAF_SCORE_CLIP_PAWNS, (double)TDLEAF_ID_VAR_SIGMA2,
             (double)tdleaf_stack_norm_alpha(),
-            (double)tdleaf_feature_dedup(), (int)tdleaf_rep_hist_enabled(),
+            (double)tdleaf_feature_dedup(), tdleaf_feature_rbar(),
+            (int)tdleaf_rep_hist_enabled(),
             (double)TDLEAF_ADAM_LR0, (double)TDLEAF_ADAM_FC2_LR0,
             (double)TDLEAF_ADAM_FC_BIAS_LR0, (double)TDLEAF_ADAM_FT_LR0,
             (double)TDLEAF_ADAM_FT_BIAS_LR0, (double)TDLEAF_ADAM_PSQT_LR0);
@@ -589,12 +628,21 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
     // Each feature can occur at most once per perspective per record, so
     // r <= 2*T <= 2*MAX_GAME_PLY, which bounds the reciprocal table below.
     const float dedup_beta = tdleaf_feature_dedup();
+    const int   rbar_min   = tdleaf_feature_rbar();
     const bool  want_hist  = tdleaf_rep_hist_enabled();
-    const bool  want_rep   = (dedup_beta > 0.0f) || want_hist;
+    const bool  want_rep   = (dedup_beta > 0.0f) || (rbar_min > 0) || want_hist;
+    // The rbar mode needs the across-game running means maintained every game,
+    // not only when the histogram is on.
+    const bool  want_stats = want_hist || (rbar_min > 0);
     static uint16_t feat_rep_ft[NNUE_FT_INPUTS];                          //  44 KB
     static uint16_t feat_rep_pq[(size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS]; // 352 KB
     static const int REP_MAX = 2 * MAX_GAME_PLY + 1;
     static float feat_rep_recip[REP_MAX + 1];
+    // Precomputed per-cell weights handed to nnue_accumulate_gradients.  Only
+    // cells this game touches are written, and only those are read back during
+    // its accumulation, so no reset pass is needed for them.
+    static float feat_w_ft[NNUE_FT_INPUTS];                               //  88 KB
+    static float feat_w_pq[(size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS];      // 704 KB
 
     // Walk helper: visit every (record, perspective, feature) the accumulation
     // loop will touch.  Used three times — count, histogram, reset — so the
@@ -630,6 +678,7 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
         });
     }
     if (dedup_beta > 0.0f) {
+        // Exponent mode: w = r^-beta, from a table built once per process.
         static float recip_built_for = -1.0f;
         if (recip_built_for != dedup_beta) {
             recip_built_for = dedup_beta;
@@ -638,9 +687,29 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
                 feat_rep_recip[r] = (r == 1) ? 1.0f
                                              : 1.0f / powf((float)r, dedup_beta);
         }
-        g_feat_rep_ft    = feat_rep_ft;
-        g_feat_rep_psqt  = feat_rep_pq;
-        g_feat_rep_recip = feat_rep_recip;   // gates the whole mechanism downstream
+        walk_features([&](int, int fi, size_t pi) {
+            feat_w_ft[fi] = feat_rep_recip[feat_rep_ft[fi]];
+            feat_w_pq[pi] = feat_rep_recip[feat_rep_pq[pi]];
+        });
+        g_feat_w_ft   = feat_w_ft;
+        g_feat_w_psqt = feat_w_pq;
+    } else if (rbar_min > 0 && tdleaf_rv_alloc()) {
+        // Scale-neutral mode: w = rbar_cell / r, using the running mean over
+        // PRIOR games only (the stats are updated in the teardown walk below,
+        // after this game's accumulation, so there is no self-reference).
+        // Cells with too little history keep w = 1.0 rather than guessing.
+        walk_features([&](int, int fi, size_t pi) {
+            uint16_t r_ft = feat_rep_ft[fi];
+            uint16_t r_pq = feat_rep_pq[pi];
+            feat_w_ft[fi] = (rvf_n[fi] >= (uint32_t)rbar_min && r_ft > 0)
+                          ? (float)(rvf_sr[fi] / (double)rvf_n[fi] / (double)r_ft)
+                          : 1.0f;
+            feat_w_pq[pi] = (rv_n[pi]  >= (uint32_t)rbar_min && r_pq > 0)
+                          ? (float)(rv_sr[pi]  / (double)rv_n[pi]  / (double)r_pq)
+                          : 1.0f;
+        });
+        g_feat_w_ft   = feat_w_ft;
+        g_feat_w_psqt = feat_w_pq;
     }
 
     for (int t = 0; t < T; t++) {
@@ -695,19 +764,21 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
     // sees a non-zero r.  That gives exactly one (cell, game) sample for the
     // across-game statistics without a second dirty list.
     if (want_rep) {
-        const bool rv = want_hist && tdleaf_rv_alloc();
+        const bool rv = want_stats && tdleaf_rv_alloc();
         walk_features([&](int, int fi, size_t pi) {
             if (rv && feat_rep_pq[pi] != 0) {
                 double r = (double)feat_rep_pq[pi];
                 rv_n[pi]++; rv_sr[pi] += r; rv_sr2[pi] += r * r;
             }
+            if (rv && feat_rep_ft[fi] != 0) {
+                rvf_n[fi]++; rvf_sr[fi] += (double)feat_rep_ft[fi];
+            }
             feat_rep_ft[fi] = 0;
             feat_rep_pq[pi] = 0;
         });
     }
-    g_feat_rep_ft    = nullptr;
-    g_feat_rep_psqt  = nullptr;
-    g_feat_rep_recip = nullptr;
+    g_feat_w_ft   = nullptr;
+    g_feat_w_psqt = nullptr;
 }
 
 // ---------------------------------------------------------------------------

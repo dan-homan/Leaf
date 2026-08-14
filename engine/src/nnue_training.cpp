@@ -82,16 +82,15 @@ static uint32_t *psqt_weights_cnt = nullptr;  // update count per PSQT weight
 // tables for the duration of one game's accumulation and nulls them afterwards;
 // they are null in every other context, including the offline batch trainer's
 // worker threads, so those paths are bit-for-bit unaffected.
-//   g_feat_rep_ft[fi]                     - times this game used FT row fi
-//   g_feat_rep_psqt[fi*PSQT_BKTS + bkt]   - times it used that (row, bucket)
-//   g_feat_rep_recip[r]                   - r^-beta, precomputed; null = disabled
-// A single null check on g_feat_rep_recip gates the whole mechanism, and the
-// table's [1] entry is exactly 1.0f so the common r == 1 case takes the
-// untouched fast path.
+//   g_feat_w_ft[fi]                   - weight for FT row fi this game
+//   g_feat_w_psqt[fi*PSQT_BKTS + bkt] - weight for that (row, bucket) this game
+// tdleaf.cpp precomputes both (whichever mode is active — see tdleaf.h), so all
+// mode logic stays out of this hot loop and a single null check gates it.
+// Entries are exactly 1.0f wherever the mechanism is a no-op, which keeps the
+// common case on the untouched fast path below.
 // ---------------------------------------------------------------------------
-static const uint16_t *g_feat_rep_ft    = nullptr;
-static const uint16_t *g_feat_rep_psqt  = nullptr;
-static const float    *g_feat_rep_recip = nullptr;
+static const float *g_feat_w_ft   = nullptr;
+static const float *g_feat_w_psqt = nullptr;
 // grad_ft_w / grad_psqt_w / ft_dirty now live in g_grad (see NNUEGradBuf above);
 // aliased back to their historical names so the code below is unchanged.
 static float    *&grad_ft_w       = g_grad.grad_ft_w;    // FT weight gradients
@@ -844,9 +843,9 @@ void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
             // the r == 1 fast path below keeps that case arithmetically identical
             // to the pre-change code.
             float w_ft = 1.0f, w_psqt = 1.0f;
-            if (g_feat_rep_recip) {
-                w_ft   = g_feat_rep_recip[g_feat_rep_ft[fi]];
-                w_psqt = g_feat_rep_recip[g_feat_rep_psqt[fi * NNUE_PSQT_BKTS + s]];
+            if (g_feat_w_ft) {
+                w_ft   = g_feat_w_ft[fi];
+                w_psqt = g_feat_w_psqt[fi * NNUE_PSQT_BKTS + s];
             }
             float *gfw = gb->grad_ft_w + (size_t)fi * NNUE_HALF_DIMS;
             if (w_ft == 1.0f) {

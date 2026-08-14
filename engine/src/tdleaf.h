@@ -139,6 +139,44 @@ float tdleaf_stack_norm_alpha();
 static const float TDLEAF_FEATURE_DEDUP = 0.0f;
 // Effective exponent for this process (default above, or TDLEAF_FEATURE_DEDUP).
 float tdleaf_feature_dedup();
+
+// ---------------------------------------------------------------------------
+// Approach 4b — SCALE-NEUTRAL per-feature normalisation (the "r-bar" mode).
+//
+// Weight each contribution by rbar_cell / r instead of r^-beta, where rbar_cell
+// is the running mean of r for that cell over PRIOR games.  Removes the
+// variance of r while preserving each cell's mean gradient magnitude.
+//
+// Why this is the better-motivated form (docs 6.11):
+//
+// 1. The exponent mode also cuts the MEAN by ~5.9x at beta = 1 (measured: 92%
+//    of PSQT gradient mass sits at r >= 2, mass-weighted mean r = 15.9).  Adam
+//    is scale-invariant in steady state, so a uniform cut ought to cost
+//    nothing — but v adapts with an effective window of 1/(1-beta2) = 1000
+//    touches while a median PSQT cell gets only ~450 touches in a 300k-game
+//    iteration.  v never catches up within a run, so a mass cut acts as a
+//    straight LR cut for the whole iteration.  That is almost certainly what
+//    the rejected alpha knob's 3.6x displacement drop actually was, and 6.10
+//    showed such cuts lose Elo.
+// 2. The measured across-game CV(r) is 0.95 (d8, 500 games, 2.1M
+//    contributions; 96% of contributions on cells with CV >= 0.5).  Since
+//    CV(r) IS the Adam step-size CV, the noise this targets is real and large.
+//    Adam currently attenuates mean steps to 1/sqrt(1+CV^2) = 0.73 to pay for
+//    the outliers.
+//
+// Net effect of rbar/r: step CV 0.95 -> 0, and mean step 0.73 -> 1.0, i.e. a
+// ~37% INCREASE in displacement.  It therefore moves WITH 6.10's dose-response
+// (more displacement, less noise) instead of against it.
+//
+// Value = the minimum number of prior games a cell needs before rbar is
+// trusted; below it the weight is 1.0 (no bootstrap guessing).  0 disables the
+// mode entirely.  Mutually exclusive with TDLEAF_FEATURE_DEDUP.
+//
+// Caveat: unlike the exponent, this makes the update depend on training
+// history, so the byte-exact regression gate only covers the disabled path.
+static const int TDLEAF_FEATURE_RBAR = 0;
+// Effective min-games threshold (default above, or TDLEAF_FEATURE_RBAR).
+int tdleaf_feature_rbar();
 // Diagnostic: TDLEAF_REP_HIST=1 accumulates the distribution of per-game
 // feature occurrence counts r (by occurrence and by |gradient| mass, for both
 // the FT-row and the PSQT (row,bucket) granularity) and prints a cumulative
