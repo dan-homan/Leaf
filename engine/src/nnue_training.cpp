@@ -1155,9 +1155,11 @@ void nnue_apply_gradients(float lr_scale)
     const float fc_lr      = lr_scale * warmup_factor * TDLEAF_ADAM_LR0;
     const float fc2_lr     = lr_scale * warmup_factor * TDLEAF_ADAM_FC2_LR0;
     const float fc_bias_lr = lr_scale * warmup_factor * TDLEAF_ADAM_FC_BIAS_LR0;
-    const float ft_lr      = lr_scale * warmup_factor * ft_session_factor * TDLEAF_ADAM_FT_LR0;
+    // TD_RBAR_LR_COMP expands to nothing unless the binary was built with
+    // TDLEAF_RBAR_LR_COMP=<f> (see tdleaf.h) — FT weights and PSQT only.
+    const float ft_lr      = lr_scale * warmup_factor * ft_session_factor * TDLEAF_ADAM_FT_LR0 TD_RBAR_LR_COMP;
     const float ft_bias_lr = lr_scale * warmup_factor * TDLEAF_ADAM_FT_BIAS_LR0;
-    const float psqt_lr    = lr_scale * warmup_factor * TDLEAF_ADAM_PSQT_LR0;
+    const float psqt_lr    = lr_scale * warmup_factor * TDLEAF_ADAM_PSQT_LR0 TD_RBAR_LR_COMP;
 
     // Full Adam step for FC layers and FT biases — per-weight bias correction.
     // bc1 (beta1=0.9): skipped at cnt>=20 (0.9^20≈0.12 → bc1≈0.88, close to 1).
@@ -1411,9 +1413,9 @@ static NNUEApplyParams nnue_apply_compute_params(float lr_scale)
     p.fc_lr       = lr_scale * warmup_factor * TDLEAF_ADAM_LR0;
     p.fc2_lr      = lr_scale * warmup_factor * TDLEAF_ADAM_FC2_LR0;
     p.fc_bias_lr  = lr_scale * warmup_factor * TDLEAF_ADAM_FC_BIAS_LR0;
-    p.ft_lr       = lr_scale * warmup_factor * ft_session_factor * TDLEAF_ADAM_FT_LR0;
+    p.ft_lr       = lr_scale * warmup_factor * ft_session_factor * TDLEAF_ADAM_FT_LR0 TD_RBAR_LR_COMP;
     p.ft_bias_lr  = lr_scale * warmup_factor * TDLEAF_ADAM_FT_BIAS_LR0;
-    p.psqt_lr     = lr_scale * warmup_factor * TDLEAF_ADAM_PSQT_LR0;
+    p.psqt_lr     = lr_scale * warmup_factor * TDLEAF_ADAM_PSQT_LR0 TD_RBAR_LR_COMP;
     p.ft_bc2_cold = 1.0f - powf(TDLEAF_ADAM_BETA2, (float)ft_t);
     p.ft_bc2_warm = 1.0f - powf(TDLEAF_ADAM_BETA2, (float)t_adam);
     return p;

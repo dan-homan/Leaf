@@ -411,6 +411,19 @@ struct BTWorker {
 // ---------------------------------------------------------------------------
 int nnue_batch_train(int argc, char *argv[])
 {
+#ifdef TDLEAF_RBAR_LR_COMP
+    // The FT/PSQT LR compensation exists to offset the Adam step-size rise the
+    // rbar per-feature reweighting causes online (docs 6.12).  The offline
+    // trainer is NOT reweighted, so here the same factor is a bare LR cut and
+    // would confound the arm it is meant to control.  Refuse; compile the batch
+    // trainer without the flag (train.py already builds it separately).
+    fprintf(stderr,
+            "batch-train: this binary was built with TDLEAF_RBAR_LR_COMP=%g, "
+            "which is an ONLINE-only correction — using it offline is an "
+            "uncontrolled LR cut.  Use an uncompensated binary for "
+            "--batch-train.\n", (double)TD_RBAR_LR_COMP_VALUE);
+    return 1;
+#endif
     // ---- Options --------------------------------------------------------
     const char *files   = nullptr;
     const char *out_pfx = "bt";

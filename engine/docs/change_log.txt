@@ -1,5 +1,28 @@
 Changes since 2017_12_24
 
+2026_08_14 -- TDLEAF_RBAR_LR_COMP: compile-time FT-weight + PSQT learning-rate
+               compensation for the rbar mode ("Arm A"), plus train.py
+               --online-lr-comp which applies it to the actor/learner binary
+               only.  The first rbar production arm (RBAR=8, 300k games at d8)
+               confirmed the mechanism and lost 76 Elo doing it: gradient L2
+               norm 0.147 -> 0.153 (mass preserved, as designed) but PSQT
+               displacement 1.00x -> 1.47x, iteration total +53 -> -23.
+               Removing r's within-game variance shrinks Adam's v by
+               sqrt(1+CV^2) and leaves m alone, so the same gradient buys a
+               bigger step; Adam absorbs any rescaling of the weight, so the LR
+               is the only place the step size can be given back.  0.68 =
+               1/1.47 (measured, vs 0.725 from theory).
+               Compile-time rather than an env var because a runtime multiplier
+               read inside nnue_apply_gradients perturbed codegen under
+               -O3 -ffast-math -flto (1164 of 263 MB of .tdleaf.bin bytes
+               differed by +/-1) even with the branch never taken, breaking the
+               byte-exactness gate.  As a macro expanding to nothing the default
+               build is token-identical to the pre-change sources.  Two hard
+               guards keep a compensated binary from being misused: it refuses
+               to start without TDLEAF_FEATURE_RBAR, and refuses --batch-train
+               (the offline trainer is not reweighted, so there it would be a
+               bare LR cut).  See docs/Online_Learning_Investigation.md 6.12.
+
 2026_08_14 -- TDLeaf per-feature vote normalisation (TDLEAF_FEATURE_DEDUP /
                TDLEAF_FEATURE_RBAR) + repetition calibration (TDLEAF_REP_HIST).
                Targets the repeated-measures problem directly rather than via

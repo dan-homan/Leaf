@@ -205,6 +205,74 @@ float tdleaf_feature_dedup();
 static const int TDLEAF_FEATURE_RBAR = 0;
 // Effective pseudo-count k (default above, or TDLEAF_FEATURE_RBAR).
 int tdleaf_feature_rbar();
+
+// ---------------------------------------------------------------------------
+// LR compensation for the rbar mode ("Arm A", docs 6.12).  COMPILE-TIME:
+//
+//     perl comp.pl armA NNUE=1 TDLEAF=1 TDLEAF_RBAR_LR_COMP=0.68f
+//
+// (or `train.py --online-lr-comp 0.68`, which applies it to the actor/learner
+// binary only and leaves the batch trainer alone).
+//
+// The first production arm (TDLEAF_FEATURE_RBAR=8, m260720 2.2e6 -> 2.5e6, 300k
+// games at d8) confirmed the mechanism and lost 76 Elo doing it:
+//
+//   gradient L2 norm      0.147 -> 0.153  (+4%, mass preserved as designed)
+//   PSQT displacement     1.00x -> 1.47x  (exposure-weighted over buckets)
+//   iteration total       +53   -> -23    (foreign anchor)
+//
+// i.e. the same gradient mass produced a 1.47x larger Adam step, because
+// removing r's variance shrinks v by sqrt(1+CV^2) while leaving m alone.  That
+// is intrinsic to the mode, and CANNOT be undone by rescaling the weight: Adam
+// is scale-invariant per weight, so any constant folded into rbar/r is absorbed
+// by v.  The LR is the one factor that survives the normalisation, so it is the
+// only place the compensation can go.
+//
+// 1/1.47 = 0.68 (the MEASURED ratio, not the theoretical 1/sqrt(1+CV^2) = 0.725
+// from CV(r) = 0.95 — v had probably still not fully re-adapted at 300k games,
+// and per-bucket ratios ran 1.10x (b0) to 2.10x (b7), so a single scalar can
+// only match the exposure-weighted mean).  Verify post-hoc with
+// bucket_phase_analysis.py: the compensated arm should sit at ~1.0x overall,
+// slightly under in b0 and over in b7.
+//
+// Applies to the FT-weight and PSQT LRs only — the two sections the reweighting
+// touches.  FC weights/biases and FT biases are dense and unweighted, so their
+// LRs must NOT move or the arm stops being a controlled comparison.
+//
+// Why compile-time and not a runtime global.  A runtime multiplier has to be
+// read inside nnue_apply_gradients, and that alone — even behind an `if` that
+// is never taken with compensation off — changes what the optimiser does with
+// the surrounding FP code under -O3 -ffast-math -flto.  Measured: 1164 of
+// 263 MB of .tdleaf.bin bytes differed by +/-1 after 80 d6 games, a pure 1-ulp
+// scatter, but enough to break the byte-exactness gate.  A probe build with
+// the multiply neutralised and everything else present reproduced the baseline
+// md5 exactly, isolating the multiply as the sole cause.  As a macro that
+// expands to nothing, the default build's token stream is identical to the
+// pre-change sources, so the gate holds by construction.
+//
+// Scope.  Because it is compile-time it applies to whatever the binary does,
+// INCLUDING --batch-train — but the offline trainer is not reweighted, so for
+// it this would be a bare LR cut and a confound.  tdleaf_check_env() therefore
+// hard-errors when a compensated binary is (a) run without the rbar mode on or
+// (b) used for batch training.  In the normal train.py flow this cannot arise:
+// the flag goes to the train_hl_a actor/learner binary and the bt binary is
+// compiled separately without it.
+//
+// Purpose of the arm: separate the two things the first run confounded — the
+// 1.47x step increase (magnitude) and the variance removal itself (the actual
+// hypothesis).  At matched displacement, a result near the +53 baseline says
+// variance removal is Elo-neutral and closes the line as alpha was closed; a
+// result well above says the line lives and the exact per-weight form (feeding
+// Adam's v the UNWEIGHTED magnitude while stepping with the denoised numerator)
+// is worth building.  A result still well below says the reweighting itself is
+// harmful, independent of step size.
+#ifdef TDLEAF_RBAR_LR_COMP
+#define TD_RBAR_LR_COMP        * (TDLEAF_RBAR_LR_COMP)
+#define TD_RBAR_LR_COMP_VALUE  ((float)(TDLEAF_RBAR_LR_COMP))
+#else
+#define TD_RBAR_LR_COMP                      /* nothing — default build */
+#define TD_RBAR_LR_COMP_VALUE  1.0f
+#endif
 // Diagnostic: TDLEAF_REP_HIST=1 accumulates the distribution of per-game
 // feature occurrence counts r (by occurrence and by |gradient| mass, for both
 // the FT-row and the PSQT (row,bucket) granularity) and prints a cumulative

@@ -51,6 +51,7 @@ Binary naming: `run/Leaf_v<version>` — e.g. `Leaf_v2026_03_09a`, `Leaf_vtrain_
 | `TDLEAF=1` | Enable TDLeaf(λ) learning (requires NNUE=1) |
 | `TDLEAF_READONLY=1` | Load `.tdleaf.bin` weights but skip updates |
 | `TDLEAF_LOG_STEP_CLIPS=1` | Enable per-batch step-clip telemetry (writes `tdleaf_telemetry.log` next to the binary; default off) |
+| `TDLEAF_RBAR_LR_COMP=<f>` | Scale the **online** FT-weight and PSQT LRs by `f`, compensating the Adam step-size rise the `TDLEAF_FEATURE_RBAR` reweighting produces for free (docs 6.12; 0.68 matches the measured 1.47×).  Compile-time, not an env var — a runtime multiplier perturbs codegen under `-ffast-math` and breaks the byte-exactness gate.  Such a binary **refuses to start** without `TDLEAF_FEATURE_RBAR` and **refuses `--batch-train`** (the offline trainer is not reweighted).  Prefer `train.py --online-lr-comp`, which flags only the actor/learner binary. |
 | `MATERIAL_ONLY=1` | `score_pos()` returns raw material balance only |
 | `NNUE_NET=<file>` | Override default network file (`nn-leaf-260414.nnue`) |
 | `NNUE_EMBED=1` | Embed the `.nnue` file into the binary via incbin (requires `NNUE=1` and `NNUE_NET=<file>`). The net file must exist in `run/` or the current directory at compile time. At runtime, no external `.nnue` file is needed. |

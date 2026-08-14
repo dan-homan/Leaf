@@ -163,8 +163,13 @@ def binary_baked_net_matches(binary, net_name):
     return net_name.encode() in blob
 
 
-def compile_binary(version, net_name, tdleaf, force=False):
-    """Compile Leaf_v<version> in run/; returns the binary path."""
+def compile_binary(version, net_name, tdleaf, force=False, extra_flags=()):
+    """Compile Leaf_v<version> in run/; returns the binary path.
+
+    extra_flags are passed through to comp.pl verbatim (KEY=VALUE -> -D
+    KEY=VALUE).  Callers passing them must also force the recompile: a stale
+    binary of the same name is indistinguishable from a freshly flagged one.
+    """
     binary = RUN_DIR / f"Leaf_v{version}"
     if binary.exists() and not force:
         if binary_baked_net_matches(binary, net_name):
@@ -177,6 +182,7 @@ def compile_binary(version, net_name, tdleaf, force=False):
     flags = ["NNUE=1", f"NNUE_NET={net_name}"]
     if tdleaf:
         flags.append("TDLEAF=1")
+    flags += list(extra_flags)
     sh(["perl", COMP_PL, version] + flags + ["OVERWRITE"], cwd=RUN_DIR)
     if not binary.exists():
         die(f"compile did not produce {binary}")
@@ -451,6 +457,15 @@ def main():
                     help="Reuse an existing <tag>_work directory")
     ap.add_argument("--recompile", action="store_true",
                     help="Force recompile of helper binaries")
+    ap.add_argument("--online-lr-comp", type=float, default=None, metavar="F",
+                    help="Build the actor/learner binary with "
+                         "TDLEAF_RBAR_LR_COMP=F, scaling the ONLINE FT-weight "
+                         "and PSQT learning rates by F.  Compensates the Adam "
+                         "step-size rise the TDLEAF_FEATURE_RBAR reweighting "
+                         "produces for free (docs 6.12); 0.68 matches the "
+                         "measured 1.47x.  The batch trainer is built without "
+                         "it.  Requires TDLEAF_FEATURE_RBAR in the environment "
+                         "— the engine refuses to start otherwise.")
     ap.add_argument("--keep-epoch-states", action="store_true",
                     help="Keep every epoch's .tdleaf.bin in <tag>_work/train/ "
                          "(default: only the promoted epoch's state survives; "
@@ -539,9 +554,25 @@ def main():
     # ---- Binaries --------------------------------------------------------
     # Only train_hl_a is needed: the actor/learner split runs frozen actors and
     # one learner, all from the same binary.
+    # bt is deliberately built WITHOUT --online-lr-comp: the offline trainer is
+    # not per-feature reweighted, so the compensation would be a bare LR cut
+    # there (the engine hard-errors if a compensated binary is batch-trained).
     bt_bin = compile_binary("bt", args.net, tdleaf=True, force=args.recompile)
     if not args.skip_online:
-        tr_a = compile_binary("train_hl_a", args.net, tdleaf=True, force=args.recompile)
+        online_flags = []
+        if args.online_lr_comp is not None:
+            if not os.environ.get("TDLEAF_FEATURE_RBAR"):
+                die("--online-lr-comp compensates the TDLEAF_FEATURE_RBAR "
+                    "reweighting, but TDLEAF_FEATURE_RBAR is not set in the "
+                    "environment — the binary would refuse to start.  Run as "
+                    "`env TDLEAF_FEATURE_RBAR=<k> python3 train.py ... "
+                    f"--online-lr-comp {args.online_lr_comp}`")
+            online_flags.append(f"TDLEAF_RBAR_LR_COMP={args.online_lr_comp}f")
+            log(f"online FT/PSQT LR compensation: x{args.online_lr_comp} "
+                f"(rbar k={os.environ['TDLEAF_FEATURE_RBAR']})")
+        tr_a = compile_binary("train_hl_a", args.net, tdleaf=True,
+                              force=args.recompile or bool(online_flags),
+                              extra_flags=online_flags)
         shutil.copy2(tr_a, LEARN_DIR / tr_a.name)
 
     # ---- Phase 1: promote state -----------------------------------------

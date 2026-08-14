@@ -1877,3 +1877,206 @@ Gates, all re-verified after the weight-array refactor:
 - Byte-exactness gate: baseline binary from `git show <merge-commit>:` copies of
   `tdleaf.{cpp,h}` and `nnue_training.cpp`, 24 `--selfplay` games at d6,
   `.tdleaf.bin` md5 compared (baseline `86c89ad4d951f0e6f2e3201bc9a33b0c`).
+
+## 6.12 The rbar production arm: the mechanism works, and that is why it lost (2026-08-14)
+
+The arm proposed in 6.11.10 was run: `TDLEAF_FEATURE_RBAR=8`, 300k games at d8
+from `m260720-2.2e6g_final`, otherwise identical to the alpha pair.
+
+```sh
+env TDLEAF_FEATURE_RBAR=8 python3 train.py \
+    --tag m260720-2.5e6g-rbar8 --continue m260720-2.2e6g \
+    --games 300000 --depth 8 --concurrency 12 --recompile \
+    --gauntlet-anchors Leaf_vclassic_eval --gauntlet-epochs --gauntlet-tdleaf --gauntlet
+```
+
+### 6.12.1 The prediction of 6.11.10 item 1 was confirmed
+
+The 1200-game d6 pre-test measured only 1.04x displacement against a predicted
+1.37x, and 6.11.10 guessed the shortfall was the `v` transient — `v` inherited
+from the seed's long history at the pre-normalisation scale — which predicted
+the ratio would drift up over a real 300k-game run.  It did:
+
+| bkt | alpha=0 `on/upd` | rbar8 `on/upd` | ratio |
+|---|---|---|---|
+| 0 | 14.85 | 16.37 | 1.10 |
+| 1 | 11.04 | 14.29 | 1.29 |
+| 2 | 11.38 | 13.77 | 1.21 |
+| 3 | 10.10 | 15.81 | 1.57 |
+| 4 | 9.06 | 13.88 | 1.53 |
+| 5 | 8.30 | 11.34 | 1.37 |
+| 6 | 8.14 | 14.91 | 1.83 |
+| 7 | 7.94 | 16.68 | 2.10 |
+| **b0/b7** | **1.87** | **0.98** | |
+
+Exposure-weighted: **1.47x**, against the sqrt(1+CV^2) = 1.38 prediction.
+
+Crucially, the gradients themselves did not change.  From the learner clip
+telemetry (final cumulative block, N = 37 500 batches):
+
+| arm | mean grad L2 norm | clip fires |
+|---|---|---|
+| alpha=0 | 0.147 | 0 |
+| alpha=1 | **0.009** | 0 |
+| rbar8 | **0.153** | 0 |
+
+rbar8's gradient mass is within 4% of baseline — exactly the scale-neutrality
+the mode was designed for — while the *applied step* grew 1.47x.  That is the
+mechanism working as specified: removing r's variance shrinks Adam's `v` by
+sqrt(1+CV^2) and leaves `m` alone, so the same gradient buys a larger step.
+(Contrast alpha=1, which cut gradient mass 16x to achieve a 3.6x displacement
+cut — Adam absorbing most of a blanket scale cut, as 6.11.8 argued.)
+
+### 6.12.2 It cost 76 Elo
+
+Seed = −36.3 vs `Leaf_vclassic_eval`.
+
+| arm | rel. displacement | b0/b7 | online Δ | offline Δ | **iteration total** |
+|---|---|---|---|---|---|
+| frozen (6.1) | 0 | — | 0 | +7 | +7 |
+| alpha=1 | 0.26x | 0.60 | −16.7 | +56.0 | +39 |
+| alpha=0 | 1.00x | 1.87 | −31.6 | +84.6 | **+53** |
+| rbar8 | **1.47x** | 0.98 | **−190.7** | +167.8 | **−23** |
+
+A 1.47x step increase produced 6x the online damage.  The offline phase clawed
+back +168 (epoch ladder +181 / +200 against its own pretrain — a repair ladder,
+not a quality one) and still finished 76 Elo behind the baseline arm.
+
+The corpus degraded with the actors.  The *same* seed net, evaluated on each
+run's own held-out slice before any offline training:
+
+| arm | seed val MSE | outcome MSE | draw rate |
+|---|---|---|---|
+| alpha=0 | 0.006829 | 0.0886 | 34.6% |
+| alpha=1 | 0.006829 | 0.0883 | 34.5% |
+| rbar8 | **0.007559** | 0.0905 | 33.6% (35.0 -> 33.2 over the run) |
+
+Weaker actors, more decisive games, a noisier corpus.  6.10's framing — the
+online phase's product is the corpus — cuts both ways.
+
+### 6.12.3 What this does to the dose-response curve
+
+6.10 read three interventions as monotone in displacement and left open
+"whether the online phase can be made *more* productive rather than less."  The
+fourth point breaks the monotonicity: the curve is an inverted U with its peak
+at or just below the current default.  Going 3.8x *below* baseline costs 14
+Elo; going 1.47x *above* costs 76.  That asymmetry — slow decay below the
+optimum, a cliff above it — is the classic learning-rate response, which
+suggests **the online LR is already at the edge of its stable range.**
+
+Two things are worth recording as closed or damaged:
+
+- rbar8 delivered the flat bucket profile the alpha=0.5 proposal was aiming for
+  (b0/b7 = 0.98) and produced the worst iteration in the series.  Third
+  independent result against flattening as a lever.
+- 6.10's open item 2 is answered in the negative *for this direction*: more
+  displacement of this kind is not better.
+
+### 6.12.4 The confound, and why the LR is the only place to fix it
+
+The run cannot distinguish two explanations:
+
+1. **magnitude** — a 1.47x step is simply past the stability edge, and any
+   intervention producing it would lose the same way;
+2. **the reweighting itself** — the within-game repetition count `r` carries
+   real signal, and averaging it away discards evidence.
+
+They are confounded *by construction*, because the step rise is not an
+implementation choice: removing the within-game variance necessarily raises the
+Adam step by sqrt(1+CV^2), and **no rescaling of the weight can undo it, since
+Adam absorbs constant scale factors per weight.**  The learning rate is the one
+factor that survives the `m/sqrt(v)` normalisation, so it is the only available
+compensation.
+
+This also settles the status of `TDLEAF_FEATURE_DEDUP=1` as a "next thing to
+try": it is not a separate hypothesis.  Per weight, dedup's gradient stream is
+rbar's divided by the per-feature constant `rbar_i`, and Adam is scale-invariant
+per weight, so **in steady state the two produce identical steps.**  They differ
+only in the transient — dedup's new scale is ~1/16 of the `v` inherited from
+2.2M games, so it would start near 0.4x and climb toward the same 1.47x.  Dedup
+is rbar at an accidental, drifting, per-feature-varying lower LR: it might score
+better by luck and would explain nothing.
+
+### 6.12.5 Arm A — rbar at matched displacement
+
+Build the actor/learner binary with the FT-weight and PSQT LRs scaled by
+1/1.47 = **0.68**:
+
+```sh
+env TDLEAF_FEATURE_RBAR=8 python3 train.py \
+    --tag m260720-2.5e6g-rbar8lr --continue m260720-2.2e6g \
+    --games 300000 --depth 8 --concurrency 12 --recompile --online-lr-comp 0.68 \
+    --gauntlet-anchors Leaf_vclassic_eval --gauntlet-epochs --gauntlet-tdleaf --gauntlet
+```
+
+0.68 is the MEASURED ratio, not the theoretical 1/sqrt(1+CV^2) = 0.725 implied
+by CV(r) = 0.95 — `v` had probably still not fully re-adapted at 300k games.  A
+single scalar can only match the exposure-weighted mean; per-bucket ratios ran
+1.10x (b0) to 2.10x (b7), so the compensated arm should land slightly under
+baseline in b0 and over in b7.  Check with `bucket_phase_analysis.py` before
+reading the Elo.
+
+Reading the result:
+
+- **near +53** — variance removal is Elo-neutral at matched step, and the
+  repeated-measures line closes exactly as the alpha line did;
+- **well above +53** — the line lives, and the exact per-weight form is worth
+  building: feed Adam's `v` the UNWEIGHTED gradient magnitude while stepping
+  with the denoised numerator, which is self-calibrating per weight instead of
+  using one hand-fitted global scalar (cost: a second accumulator stream on the
+  FT hot path);
+- **still well below** — the reweighting itself is harmful independent of step
+  size, and `r` is carrying signal rather than noise.
+
+6.10's measurement-power caveat applies: 1000-game gauntlets carry ±16 on a
+difference, so only the third outcome would read unambiguously.
+
+### 6.12.6 Implementation
+
+`TDLEAF_RBAR_LR_COMP` is a **compile-time** flag, not an env var, and that is a
+deliberate consequence of the byte-exactness gate.  A runtime multiplier must be
+read inside `nnue_apply_gradients`, and doing so — even behind an `if` that is
+never taken when compensation is off — changed what the optimiser did with the
+surrounding FP code under `-O3 -ffast-math -flto`: 1164 of 263 MB of
+`.tdleaf.bin` bytes differed by ±1 after 80 d6 games.  A pure 1-ulp scatter, but
+a gate failure.  A probe build carrying every other edit with only the multiply
+neutralised reproduced the baseline md5 exactly, isolating the multiply as the
+sole cause.  As a macro expanding to nothing, the default build's token stream is
+identical to the pre-change sources and the gate holds by construction.
+
+Because it is compile-time it would also apply to `--batch-train`, where the
+gradients are *not* reweighted and the factor would be a bare LR cut.  Two hard
+guards close that: `tdleaf_check_env()` refuses to start a compensated binary
+with `TDLEAF_FEATURE_RBAR` unset, and `nnue_batch_train()` refuses outright.  In
+the normal `train.py` flow neither can fire — `--online-lr-comp` goes to the
+`train_hl_a` actor/learner binary and `bt` is compiled separately without it.
+
+Gates, 80 `--selfplay` games at d6 from a shared `m260720-2.2e6g_final` copy:
+
+| build | env | md5 | |
+|---|---|---|---|
+| pre-change (`7b94d9a`) | — | `bdbabfae…` | |
+| Arm A sources | — | `bdbabfae…` | **identical** |
+| pre-change | `RBAR=8` | `705c675b…` | |
+| Arm A sources | `RBAR=8` | `705c675b…` | **identical** — rbar itself untouched |
+| `TDLEAF_RBAR_LR_COMP=0.68f` | `RBAR=8` | `e6c95980…` | distinct |
+
+Mean |ΔPSQT| over touched cells across those runs: off 9.526, rbar 9.841
+(1.03x — the same `v` transient as the 1200-game d6 calibration), compensated
+6.431, i.e. **0.65x of uncompensated** against the intended 0.68.
+
+## Methodology notes (6.12)
+
+- Runs: `learn/m260720-2.5e6g{,-a1,-rbar8}_final.json`; per-run trainer logs and
+  post-online states under each `<tag>_work/train/`.
+- Bucket profiles: `bucket_phase_analysis.py <2.2e6_final> <work/train state>
+  <final>` per arm.
+- Gradient norms: last `TDLeaf clip stats` block of each
+  `<tag>_work/traj/learner.log` (cumulative, N = 37 500 batches).
+- Draw rate: `result=` fields of the learner log in 20k-game blocks (300k games
+  per arm, so ±0.3% per block — the 35.0 -> 33.2 drift is real).
+- Corpus quality: first `val MSE` line of each `<tag>_work/train/train.log` —
+  the seed net scored on that run's own held-out 5% before any offline step.
+- Byte-exactness gates: 80 `--selfplay` games at d6, `--tdleaf-out` redirecting
+  the write so all arms share one unmodified input state; baseline binary built
+  from a `git worktree` at `7b94d9a`.  Baseline md5s above.

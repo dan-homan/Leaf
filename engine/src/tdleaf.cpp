@@ -330,7 +330,8 @@ void tdleaf_check_env()
             "TDLeaf config: K=%.0f lambda=%.4f batch=%d grad_clip=%.2f wd=%.1e "
             "score_clip=%.1fxP id_var_sigma2=%.0f stack_norm_alpha=%.3g "
             "feature_dedup=%.3g feature_rbar=%d rep_hist=%d\n"
-            "TDLeaf LR0: FC=%.4g FC2=%.4g FC_bias=%.4g FT=%.4g FT_bias=%.4g PSQT=%.4g\n",
+            "TDLeaf LR0: FC=%.4g FC2=%.4g FC_bias=%.4g FT=%.4g FT_bias=%.4g PSQT=%.4g"
+            " (online FT/PSQT x%.3g)\n",
             (double)TDLEAF_K, (double)TDLEAF_LAMBDA, TDLEAF_BATCH_SIZE,
             (double)TDLEAF_GRAD_CLIP_NORM, (double)TDLEAF_WEIGHT_DECAY,
             (double)TDLEAF_SCORE_CLIP_PAWNS, (double)TDLEAF_ID_VAR_SIGMA2,
@@ -339,7 +340,23 @@ void tdleaf_check_env()
             (int)tdleaf_rep_hist_enabled(),
             (double)TDLEAF_ADAM_LR0, (double)TDLEAF_ADAM_FC2_LR0,
             (double)TDLEAF_ADAM_FC_BIAS_LR0, (double)TDLEAF_ADAM_FT_LR0,
-            (double)TDLEAF_ADAM_FT_BIAS_LR0, (double)TDLEAF_ADAM_PSQT_LR0);
+            (double)TDLEAF_ADAM_FT_BIAS_LR0, (double)TDLEAF_ADAM_PSQT_LR0,
+            (double)TD_RBAR_LR_COMP_VALUE);
+
+#ifdef TDLEAF_RBAR_LR_COMP
+    // A compensated binary exists for exactly one purpose: to run the rbar mode
+    // at matched displacement (docs 6.12).  Used any other way it is a silent,
+    // uncontrolled LR cut on FT + PSQT, so refuse rather than mislead.
+    if (tdleaf_feature_rbar() <= 0) {
+        fprintf(stderr,
+                "TDLeaf: this binary was built with TDLEAF_RBAR_LR_COMP=%g "
+                "(FT/PSQT LR compensation for the rbar mode) but "
+                "TDLEAF_FEATURE_RBAR is not set.  That would be a bare LR cut, "
+                "not a controlled arm.  Set TDLEAF_FEATURE_RBAR=<k> or use an "
+                "uncompensated binary.\n", (double)TD_RBAR_LR_COMP_VALUE);
+        exit(1);
+    }
+#endif
 }
 
 // True when the leaf/root TSV dump is enabled (TDLEAF_DUMP_TSV env var).
@@ -661,6 +678,8 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
     // The rbar mode needs the across-game running means maintained every game,
     // not only when the histogram is on.
     const bool  want_stats = want_hist || (rbar_k > 0);
+    // (The LR compensation that pairs with this mode is compile-time — see
+    // TDLEAF_RBAR_LR_COMP in tdleaf.h — so there is nothing to set here.)
     static uint16_t feat_rep_ft[NNUE_FT_INPUTS];                          //  44 KB
     static uint16_t feat_rep_pq[(size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS]; // 352 KB
     static const int REP_MAX = 2 * MAX_GAME_PLY + 1;
