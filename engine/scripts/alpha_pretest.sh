@@ -32,6 +32,12 @@ ALPHAS=${ALPHAS:-"0 0.5 1"}
 # measurement compared against production iterations.  Match production unless
 # deliberately probing this.
 GAMES_PER_ACTOR=${GAMES_PER_ACTOR:-1000}
+# Opening-shuffle base seed (selfplay_run.py gives actor N generation g the
+# seed base + 1000*g).  train.py derives it per iteration as
+# zlib.crc32(tag) & 0x7FFFFFFF, so a hardcoded value here is a deviation from
+# production — and was the last unexcluded difference when this harness failed
+# to reproduce production's bucket profile (6.9).
+SHUFFLE_SEED=${SHUFFLE_SEED:-20260813}
 
 BINARY=Leaf_valphapre
 # The .tdleaf.bin carries a content hash of the .nnue it was trained against and
@@ -64,7 +70,7 @@ done
 
 mkdir -p "$OUT"
 echo "alpha pre-test: $GAMES games, depth $DEPTH, $ACTORS actors, alphas: $ALPHAS"
-echo "refresh: $GAMES_PER_ACTOR games/actor   out: $OUT"
+echo "refresh: $GAMES_PER_ACTOR games/actor   shuffle-seed: $SHUFFLE_SEED   out: $OUT"
 echo "seed state: $SEED_STATE   base net: $NET"
 echo
 
@@ -85,7 +91,7 @@ for A in $ALPHAS; do
         --actors "$ACTORS" --depth "$DEPTH" \
         --games-per-actor "$GAMES_PER_ACTOR" --total-games "$GAMES" \
         --traj-dir traj --refresh-scores --delete-consumed \
-        --seed 20260813 > run.log 2>&1 )
+        --seed "$SHUFFLE_SEED" > run.log 2>&1 )
 
     # Hard guards: a silently-unloaded state or a wrong alpha invalidates the arm.
     if grep -rq "Refusing to load" "$ARM"/run.log "$ARM"/traj/*.log 2>/dev/null; then
