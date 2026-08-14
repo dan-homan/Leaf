@@ -1583,10 +1583,12 @@ not costing Elo.
 ### Status of the alpha line: CLOSED
 
 - `TDLEAF_STACK_NORM_ALPHA` stays at its default **0.0**, a verified byte-exact
-  no-op.  Do not ship a non-zero default.  The knob and
-  `scripts/alpha_pretest.sh` remain in the tree as the reproduction handle for
-  this experiment; whether to delete them under the repo's
-  retire-and-remove convention is a separate call.
+  no-op.  Do not ship a non-zero default.  The knob remains in the tree as the
+  reproduction handle for this experiment; `scripts/alpha_pretest.sh` was
+  deleted (2026-08-14) under the repo's retire-and-remove convention — it never
+  reproduced production's bucket profile (6.9) and production iterations are
+  the instrument of record.  Its runs survive in `learn/alphapre_work/` and
+  `learn/alphactl_*_work/`.
 - **Do not run alpha=0.5.**  It interpolates between two arms that already
   differ by less than the measurement error.
 - If alpha=1 vs alpha=0 is ever worth settling properly, the cheap route is a
