@@ -2194,3 +2194,179 @@ has now failed twice under direct test.
   shows far more negative offline-vs-online projection (−0.37 to −0.55) than
   either rbar arm (−0.04 to −0.32) while scoring 51 Elo better, so offline
   reversal of online movement does not track iteration outcome.
+
+## 6.14 Reframing: online play as hypothesis generation — and batch size as the clean magnitude knob (2026-08-15)
+
+With both update-rule lines closed (alpha, 6.4-6.10; per-feature normalisation,
+6.11-6.13), D. Homan reframed what the online phase is *for*, and the reframing
+selects the next knob.
+
+### 6.14.1 The mechanism, as it now reads
+
+> Online learning is productive in the sense that it moves the gameplay enough
+> that the variety in the positions used in offline batches is genuinely an
+> advantage for learning how to weight those features across a much larger set
+> of games.  I perhaps should not be too worried about some Elo loss during
+> online learning (as long as it does not become excessive), as the engine is
+> updating features that look good/bad over a small number of games; that
+> information then goes into the play in subsequent games, those features are
+> presumably stress-tested in the subsequent games, and the offline learning
+> sorts it out in the end.
+>
+> — D. Homan, 2026-08-15
+
+This is the strongest reading yet of the whole Part 6 result set, and it fits
+every arm.  The online phase is a **hypothesis generator**: batch-8 Adam steps
+revalue features on the evidence of a handful of games, which is far too little
+evidence to be right.  Being wrong is not the failure mode — it is the point.
+The revaluation immediately changes how the engine *plays*, so the next games
+probe wherever the new weights have moved, and the corpus accumulates positions
+that test the hypothesis.  The offline pass then adjudicates over 55M rows with
+a global shuffle, where 512 unrelated positions per batch average away exactly
+the small-sample noise the online phase introduced.
+
+Three previously separate observations become one story under it:
+
+- **Frozen generation nets +7** (6.1) while learning iterations net +24..+95.
+  A frozen generator proposes no hypotheses, so the corpus tests none and its
+  consolidation is close to a no-op — it labels positions with evaluations the
+  seed already produces.
+- **Online Elo is reliably negative** (−16.7, −31.6) **and the iteration still
+  gains** (+39, +53).  The online phase is mid-experiment; scoring it on its own
+  strength is scoring a hypothesis before the data are in.
+- **rbar lost at matched displacement** (6.13).  It did not reduce movement; it
+  changed *which* hypotheses got proposed, by asserting that a feature true for
+  3 plies and one true for 60 are equally supported.  Worse hypotheses, same
+  budget.
+
+### 6.14.2 What follows for measurement
+
+The corollary is a rule, not just an interpretation: **do not optimise the
+online phase's own Elo.**  It is an intermediate quantity, and three arms have
+now shown it moving opposite to the iteration total (alpha=1 improved online Δ
+by 15 and lost 14 overall).  The only figure of merit is the iteration total
+against a foreign anchor.
+
+The open question the rule leaves is the one word "excessive".  There must be a
+level of online displacement beyond which the generator degrades faster than the
+corpus informs — rbar8's −190.7 online Δ was certainly past it, though that arm
+cannot locate the boundary because its displacement was misdirected as well as
+large.  Locating it is a magnitude question, and every magnitude arm so far has
+confounded magnitude with something else.
+
+### 6.14.3 Why batch size is the knob, and not the update rule
+
+`TDLEAF_BATCH_SIZE` (8 games) varies displacement magnitude while holding
+direction quality exactly fixed.  Nothing is reweighted, nothing normalised
+away; each game contributes in proportion to what it contains, exactly as at the
+default.  The only change is how many games are averaged before each Adam step.
+
+Magnitude scales close to `1/batch`.  Adam's per-step size is `lr x m_hat /
+sqrt(v_hat)`, which is O(lr) per touched weight regardless of gradient scale, and
+the learner takes `games/batch` steps — 37 500 per 300k-game iteration at batch
+8.  So batch 4 is roughly 2x the displacement and batch 16 roughly 0.5x, in the
+one dimension that has never been varied cleanly.
+
+It is also **the honest version of what rbar was reaching for**.  rbar attacked
+gradient variance by dividing out each game's within-game repetition count,
+which destroyed the persistence signal (6.13.3).  A larger batch attacks the
+same variance by averaging over *more independent games* — persistence still
+enters in proportion, nothing is discarded, and each feature appears in more
+batches so Adam's `v` is estimated from denser coverage.  Same target,
+information-preserving mechanism, opposite sign on the displacement it costs.
+
+Contrast the three magnitude interventions to date:
+
+| knob | changes magnitude | changes direction | outcome |
+|---|---|---|---|
+| freeze | yes (to zero) | n/a | +7 |
+| `TDLEAF_STACK_NORM_ALPHA` | yes (0.26x) | **yes** — redistributes across material buckets | +39 |
+| `TDLEAF_FEATURE_RBAR` | yes (1.47x / 1.04x) | **yes** — discards persistence | −23 / −12 |
+| `TDLEAF_BATCH_SIZE` | yes (~1/batch) | **no** | untested |
+
+### 6.14.4 What the existing data says — and does not
+
+**Batch size: nothing usable.**  It has moved three times, every change bundled
+with others and every judgement made before the foreign anchor was adopted:
+
+| date | change | bundled with |
+|---|---|---|
+| 2026_03_19 | introduced at 4 | mini-batch accumulation itself |
+| 2026_04_12 | 4 -> 16, "improve learning stability" | depth -> 8, 5000-game sub-iterations |
+| 2026_04_13 | 16 -> 4 | 3-fold-repetition fixes |
+| 2026_05_01 | 8 -> 4 | K 240 -> 400, FC LR 0.05 -> 0.10 |
+
+None of it survives as evidence.  Part 3.4 proposed `TDLEAF_BATCH_SIZE` 8 -> 64
+as the cheapest mechanism-targeted A/B on its list; it was never run.
+
+**Actor refresh cadence: one clean A/B, measuring the wrong observable.**  The
+`alphactl_gpa1000` control of 6.9 — 200k games at d6, 11 actors, seed
+`m260720-3e6g_final`, everything else identical:
+
+| cadence | PSQT `on/upd` b0..b7 | b0/b7 | PSQT med\|dw\| |
+|---|---|---|---|
+| 500 games/actor | 6.85 8.78 8.97 7.87 7.20 7.42 7.50 7.28 | 0.94 | 42.95 |
+| 1000 (production) | 7.16 8.67 8.93 7.84 7.33 7.47 7.31 7.33 | 0.98 | 44.09 |
+
+2.7% apart.  That result is close to uninformative for the question 6.14.1
+raises, for a mechanical reason: the learner runs `--refresh-scores`, which
+rescores every trajectory on current weights before computing TD targets, so
+**actor staleness never reaches the labels.**  Cadence acts only on the
+behaviour policy — which positions get played — while the measurement above is
+weight displacement, downstream of the gradient.  It found nothing because it
+was looking downstream of where the knob acts.  Under 6.14.1 cadence controls
+precisely the interesting thing (how fast the position distribution tracks the
+hypotheses), and we have neither an Elo measurement of it nor a corpus-diversity
+observable to measure it with.
+
+Note also that seed val MSE on a run's own corpus does **not** work as a
+corpus-novelty proxy: alpha=0 and alpha=1 both read 0.006829 while their offline
+gains differed by 29 Elo.  A cadence experiment needs a better observable first.
+Every production iteration in the chain ran at 1000; the sidecar JSONs do not
+record the field because nothing ever varied it.
+
+### 6.14.5 The proposed arms
+
+Batch 4 and batch 16 against the batch-8 baseline's +53, same frame as every
+other Part 6 arm (`--continue m260720-2.2e6g`, 300k games at d8, foreign anchor):
+
+| arm | expected displacement | reads |
+|---|---|---|
+| batch 4 | ~2x | is more well-directed displacement better, or is "excessive" nearby? |
+| batch 8 | 1x (baseline, +53) | — |
+| batch 16 | ~0.5x | does halving well-directed displacement cost like alpha's 0.26x did (−14)? |
+
+Two confounds to control:
+
+1. **Warmup is counted in Adam steps.**  `TDLEAF_ADAM_WARMUP = 50` and
+   `TDLEAF_FT_SESSION_WARMUP = 100` are step counts, so changing batch size
+   silently changes the warmup in *game* terms — 400 games at batch 8, 200 at
+   batch 4, 800 at batch 16.  The 2026_04_12 change-log entry flagged this at
+   the time.  Negligible against 300k games, but it must not be blamed later.
+2. **Measurement power.**  1000-game gauntlets carry ±16 on a difference, so
+   only effects of alpha's size or larger will read.  Two arms bracketing the
+   default give a shape, which is how every conclusion in Part 6 was actually
+   reached.
+
+If the response is flat in both directions, the online phase is insensitive to
+magnitude across a 4x range and the "excessive" boundary is far outside it — in
+which case the next question is cadence, and it needs a corpus-diversity metric
+built first.  If batch 4 gains, displacement is under-supplied at the default
+and the same lever can be pushed further (or moved to the LR, which is
+equivalent to first order).  If batch 4 loses and batch 16 is flat, the default
+already sits at the boundary.
+
+## Methodology notes (6.14)
+
+- Batch-size history: `docs/change_log.txt` entries dated 2026_03_19,
+  2026_04_12, 2026_04_13, 2026_05_01.  Current value `TDLEAF_BATCH_SIZE = 8` in
+  `src/tdleaf.h`; the batch trigger is in `tdleaf.cpp`
+  `tdleaf_update_after_game`, which calls `nnue_apply_gradients` once the
+  pending game count reaches it.
+- Cadence control: `learn/alphactl_gpa1000.log` and
+  `learn/alphactl_gpa1000_work/a0/` against `learn/alphapre_work/a0/`.  The
+  cadence flag is `selfplay_run.py --games-per-actor` (default 1000), surfaced
+  by `train.py --games-per-actor`.
+- Warmup constants: `TDLEAF_ADAM_WARMUP`, `TDLEAF_FT_SESSION_WARMUP` in
+  `src/tdleaf.h`; both consumed in `nnue_training.cpp` as `warmup_factor` /
+  `ft_session_factor` against the step counters `t_adam` / `t_ft_session`.
