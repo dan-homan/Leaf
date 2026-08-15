@@ -1,5 +1,46 @@
 Changes since 2017_12_24
 
+2026_08_15 -- docs only, NO code change: carried the Part 6 investigation record
+               (docs/Online_Learning_Investigation.md 6.1-6.14) onto main.  Two
+               attempts to improve the TDLeaf online update rule were run to
+               production A/B and BOTH REJECTED, so main's rule is unchanged —
+               and that unchanged rule is the baseline every arm below was
+               measured against.  Recorded here so the changelog does not imply
+               the question was never asked.
+
+               Arms, all 300k games at d8 from m260720-2.2e6g, scored as
+               iteration total vs the foreign anchor Leaf_vclassic_eval:
+
+                 frozen generation (no online learning)             +7
+                 TDLEAF_STACK_NORM_ALPHA=1  (0.26x displacement)   +39
+                 DEFAULT — all knobs off    (1.00x)                +53
+                 TDLEAF_FEATURE_RBAR=8 + LR comp 0.68 (1.04x)      -12
+                 TDLEAF_FEATURE_RBAR=8                (1.47x)      -23
+
+               Alpha redistributed displacement across material buckets; it
+               worked decisively at the weight level (b0/b7 1.87 -> 0.60 at
+               identical exposure) and gained nothing.  The per-feature vote
+               normalisation pooled each game's repeated contributions per
+               feature; at MATCHED displacement it was still 65 Elo behind,
+               because r counts feature PERSISTENCE rather than position
+               repetition and duration is evidence, not noise.
+
+               Freeze-generation is also closed (docs 6.1-6.2): the frozen
+               iteration netted +7 on 1.7x the games while learning iterations
+               netted +24..+95, and frozen consolidation RAISED val MSE every
+               epoch.  Online learning stays ON during generation.
+
+               Standing conclusions: displacement MAGNITUDE is not the axis,
+               direction quality is; do not optimise the online phase's own Elo
+               (it is reliably negative while the iteration gains); the draw
+               rate, not gradient norms, is the health canary.
+
+               Code for the rejected knobs is parked, byte-exact at its
+               defaults, on branches tdleaf-stack-norm-alpha and
+               tdleaf-feature-dedup.  Next arm (docs 6.14): TDLEAF_BATCH_SIZE,
+               the one knob that varies displacement magnitude with direction
+               quality held fixed.
+
 2026_07_20 -- Simplification Phase 3 (code cleanup): removed the epoch-based
                experience-replay ring buffer (was disabled at TDLEAF_REPLAY_K=0)
                and retired the in-engine multi-writer .tdleaf.bin merge.
