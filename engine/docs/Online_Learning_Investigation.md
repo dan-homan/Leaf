@@ -2080,3 +2080,117 @@ Mean |ΔPSQT| over touched cells across those runs: off 9.526, rbar 9.841
 - Byte-exactness gates: 80 `--selfplay` games at d6, `--tdleaf-out` redirecting
   the write so all arms share one unmodified input state; baseline binary built
   from a `git worktree` at `7b94d9a`.  Baseline md5s above.
+
+## 6.13 Arm A result: the reweighting itself is the cost — line closed (2026-08-15)
+
+```sh
+env TDLEAF_FEATURE_RBAR=8 python3 train.py \
+    --tag m260720-2.5e6g-rbar8lr --continue m260720-2.2e6g \
+    --games 300000 --depth 8 --concurrency 12 --recompile --online-lr-comp 0.68 \
+    --gauntlet-anchors Leaf_vclassic_eval --gauntlet-epochs --gauntlet-tdleaf --gauntlet
+```
+
+### 6.13.1 The compensation did its job
+
+Exposure-weighted PSQT displacement against the alpha=0 baseline:
+
+| arm | rel. displacement | per-bucket b0 -> b7 |
+|---|---|---|
+| rbar8 | 1.468x | 1.10 1.29 1.21 1.57 1.53 1.37 1.83 2.10 |
+| rbar8 + comp 0.68 | **1.039x** | 0.76 0.91 0.88 1.03 1.06 0.97 1.37 1.60 |
+
+Ratio of the two arms: 0.708 against the 0.68 applied — the LR landed where it
+was aimed.  The per-bucket shape is exactly what 6.12.5 predicted from a single
+scalar against ratios spanning 1.10x-2.10x: under baseline in the deep endgame,
+over it in the opening.  Total displacement is matched to within 4%.
+
+### 6.13.2 And it bought 11 of the 76 Elo
+
+Seed = −36.3 vs `Leaf_vclassic_eval`.
+
+| arm | rel. displacement | b0/b7 | online Δ | offline Δ | **iteration total** |
+|---|---|---|---|---|---|
+| frozen (6.1) | 0 | — | 0 | +7 | +7 |
+| alpha=1 | 0.26x | 0.60 | −16.7 | +56.0 | +39 |
+| alpha=0 (default) | 1.00x | 1.87 | −31.6 | +84.6 | **+53** |
+| **rbar8 + comp** | **1.04x** | 0.89 | **−142.7** | +131.0 | **−12** |
+| rbar8 | 1.47x | 0.98 | −190.7 | +167.8 | −23 |
+
+**At matched displacement the reweighting is still 65 Elo behind baseline.**
+Removing the 1.47x step increase recovered 11 Elo of the 76-Elo gap; the other
+~85% is the reweighting itself.  Corpus quality moved with it — seed val MSE on
+each run's own held-out slice: 0.006829 (baseline), 0.007188 (compensated),
+0.007559 (uncompensated).  Draw rate 33.6%, drifting 34.6 -> 33.0, same as the
+uncompensated arm.  Gradient L2 norm 0.153, zero clip fires, identical to rbar8
+as expected (the LR change does not touch gradients).
+
+This is outcome 3 of the three listed in 6.12.5.
+
+### 6.13.3 What was actually wrong with the premise
+
+`r` is not a repeated measurement.  6.11.6 already established that it counts
+feature **persistence**, not position repetition — a pawn on e4 with a static
+king yields r = 40 with no position ever recurring, which is why the
+mass-weighted mean r is 15.9 and 92% of PSQT gradient mass sits at r >= 2.  That
+was recorded at the time as "the intervention is not surgical."  The right
+reading, visible now, is stronger: **duration is evidence.**  A feature true for
+60 plies of a won game is better support for that outcome than one true for 3,
+and `r` is the natural encoding of it.  Averaging each game to one vote per
+feature tells the learner those two are equally informative, and that is a loss
+of real signal, not of noise.
+
+The variance argument (6.11.7: CV(r) = 0.95 IS the Adam step-size CV) was
+correct as arithmetic and irrelevant as a diagnosis.  The step-size variation it
+identified is not a defect to be removed — it is the mechanism by which
+persistence reaches the weights.
+
+### 6.13.4 Retraction: there is no evidence of an online LR ceiling
+
+6.12.3 read the four-point curve as an inverted U and inferred that "the online
+LR is already at the edge of its stable range," from the single observation that
+rbar8's 1.47x cost 76 Elo where alpha's 3.8x cut cost 14.  **That inference is
+withdrawn.**  It rested on a point now known to be dominated by the reweighting
+rather than by step size: at 1.04x the same reweighting still loses 65.
+
+Removing the confounded point, the genuine magnitude evidence is unchanged from
+6.10 and still monotone increasing — frozen +7, alpha=1 (0.26x) +39, alpha=0
+(1.00x) +53 — and the only within-family magnitude pair runs the *other* way
+(rbar 1.47x = −23 vs 1.04x = −12).  The synthesis that fits both: displacement
+magnitude is not the axis; **direction quality is.**  Well-directed displacement
+pays for itself and more of it is better (the alpha family); misdirected
+displacement costs, and more of it costs more (the rbar family).  6.10's open
+item 2 therefore reverts to open — "can the online phase be made more
+productive" has not been answered, only "not by destroying information."
+
+### 6.13.5 Status of the knobs
+
+`TDLEAF_FEATURE_DEDUP`, `TDLEAF_FEATURE_RBAR` and `TDLEAF_RBAR_LR_COMP` stay in
+tree at their disabled defaults, banner-marked as tested and rejected, on the
+same terms as `TDLEAF_STACK_NORM_ALPHA`: byte-exact when off, retained so the
+result stays reproducible.  `TDLEAF_REP_HIST` stays as a live diagnostic — it is
+a pure observer and the r distribution it measures is now a documented property
+of the training signal rather than a defect.
+
+`TDLEAF_FEATURE_DEDUP` was never run in production and does not need to be:
+6.12.4 shows it is asymptotically the same update as rbar (the two gradient
+streams differ per weight by the constant `rbar_i`, which Adam absorbs), so it
+can only differ in the `v` transient.
+
+Two lines are now closed by the same shape of evidence — an intervention that
+works exactly as designed at the weight level and loses Elo doing it.  Alpha
+(6.4-6.10) redistributed displacement across material buckets; rbar (6.11-6.13)
+removed within-game repetition.  Both were aimed at the same intuition, that the
+online phase over-weights endgames with repeated positions, and the intuition
+has now failed twice under direct test.
+
+## Methodology notes (6.13)
+
+- Run: `learn/m260720-2.5e6g-rbar8lr_final.json`, `<tag>_work/` alongside it.
+- Compensation confirmed in-run via the learner banner: `TDLeaf LR0: ...
+  (online FT/PSQT x0.68)`, `feature_rbar=8`.
+- Displacement ratios: exposure-weighted mean of per-bucket `on/upd` from
+  `bucket_phase_analysis.py`, weights = that arm's own `upd_on`.
+- The `proj` / `cos` columns were examined and are NOT diagnostic here: alpha=1
+  shows far more negative offline-vs-online projection (−0.37 to −0.55) than
+  either rbar arm (−0.04 to −0.32) while scoring 51 Elo better, so offline
+  reversal of online movement does not track iteration outcome.

@@ -97,6 +97,27 @@ float tdleaf_stack_norm_alpha();
 // ---------------------------------------------------------------------------
 // Approach 4 — per-feature within-game vote normalisation ("feature dedup").
 //
+// TESTED AND REJECTED (2026-08-15, docs/Online_Learning_Investigation.md 6.13),
+// together with the rbar form below and its LR compensation.  Two production
+// arms at 300k games / d8 from the same seed as the alpha pair:
+//
+//   rbar k=8               1.47x displacement   iteration total  -23
+//   rbar k=8 + LR comp     1.04x displacement   iteration total  -12
+//   (baseline, knobs off)  1.00x displacement   iteration total  +53
+//
+// At MATCHED displacement the reweighting is still 65 Elo behind, so the cost
+// is the reweighting itself, not the step size it inflates.  Why: `r` counts
+// feature PERSISTENCE, not position repetition (6.11.6 — a pawn on e4 with a
+// static king gives r = 40 with nothing recurring), and duration is evidence.
+// A feature true for 60 plies of a won game supports that outcome better than
+// one true for 3; pooling each game to one vote per feature asserts they are
+// equally informative and discards real signal.  The CV(r) = 0.95 variance
+// argument below is correct arithmetic and the wrong diagnosis: that variation
+// IS how persistence reaches the weights.
+// KEEP AT 0.0, and note that the rbar mode is asymptotically the SAME update
+// (see 6.12.4), so neither form needs re-testing.  Retained as the
+// reproduction handle, byte-exact when off.
+//
 // Each FEATURE's repeated contributions within one game are AVERAGED before
 // entering the batch sum, so a game casts one vote per feature rather than one
 // per ply.  Contributions still SUM across the batch's 8 games, which is the
@@ -150,6 +171,9 @@ float tdleaf_feature_dedup();
 
 // ---------------------------------------------------------------------------
 // Approach 4b — SCALE-NEUTRAL per-feature normalisation (the "r-bar" mode).
+//
+// TESTED AND REJECTED — see the banner on TDLEAF_FEATURE_DEDUP above for the
+// two production arms and the reason.  KEEP AT 0.
 //
 // Weight each contribution by rbar_cell / r instead of r^-beta, where rbar_cell
 // is the running mean of r for that cell over PRIOR games.  Removes the
@@ -207,7 +231,15 @@ static const int TDLEAF_FEATURE_RBAR = 0;
 int tdleaf_feature_rbar();
 
 // ---------------------------------------------------------------------------
-// LR compensation for the rbar mode ("Arm A", docs 6.12).  COMPILE-TIME:
+// LR compensation for the rbar mode ("Arm A", docs 6.12).  COMPILE-TIME.
+//
+// OUTCOME (docs 6.13): it worked — exposure-weighted displacement 1.47x -> 1.04x
+// against baseline, the two arms differing by 0.708 against the 0.68 applied —
+// and the compensated arm still scored -12 against the baseline's +53.  So it
+// did its job as a control and the mode it controls is rejected.  Retained as
+// the reproduction handle; there is no reason to build with it again.
+//
+// Usage:
 //
 //     perl comp.pl armA NNUE=1 TDLEAF=1 TDLEAF_RBAR_LR_COMP=0.68f
 //

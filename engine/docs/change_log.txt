@@ -1,5 +1,26 @@
 Changes since 2017_12_24
 
+2026_08_15 -- TDLeaf per-feature vote normalisation TESTED AND REJECTED; knobs
+               (TDLEAF_FEATURE_DEDUP / _RBAR / TDLEAF_RBAR_LR_COMP) stay at
+               their disabled, byte-exact defaults with rejection banners, on
+               the same terms as TDLEAF_STACK_NORM_ALPHA.
+               The LR-compensated arm matched baseline displacement (1.04x
+               exposure-weighted, vs 1.47x uncompensated; the two arms differ by
+               0.708 against the 0.68 applied) and still scored -12 against the
+               baseline's +53.  Removing the step-size inflation recovered 11 of
+               the 76 Elo; the other ~85% is the reweighting itself.
+               Why it fails: r counts feature PERSISTENCE, not position
+               repetition, and duration is evidence — a feature true for 60
+               plies of a won game supports that outcome better than one true
+               for 3.  Pooling each game to one vote per feature discards that.
+               The CV(r) = 0.95 step-variance argument is correct arithmetic and
+               the wrong diagnosis.
+               Also RETRACTS the "online LR is at its stability edge" inference
+               of the previous entry: it rested on the uncompensated arm, now
+               known to be dominated by the reweighting rather than step size.
+               Genuine magnitude evidence remains monotone increasing.
+               See docs/Online_Learning_Investigation.md 6.13.
+
 2026_08_14 -- TDLEAF_RBAR_LR_COMP: compile-time FT-weight + PSQT learning-rate
                compensation for the rbar mode ("Arm A"), plus train.py
                --online-lr-comp which applies it to the actor/learner binary
