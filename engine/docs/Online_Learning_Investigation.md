@@ -2385,3 +2385,137 @@ already sits at the boundary.
 - Warmup constants: `TDLEAF_ADAM_WARMUP`, `TDLEAF_FT_SESSION_WARMUP` in
   `src/tdleaf.h`; both consumed in `nnue_training.cpp` as `warmup_factor` /
   `ft_session_factor` against the step counters `t_adam` / `t_ft_session`.
+
+## 6.15 The batch-16 arm: batch size is not a magnitude knob — and online Elo loss is the dosage meter (2026-08-15)
+
+`TDLEAF_BATCH_SIZE = 16`, 300k games at d8 from `m260720-2.2e6g_final`,
+otherwise identical to every other Part 6 arm.
+
+### 6.15.1 6.14.3's central prediction was wrong
+
+6.14.3 argued displacement scales as `1/batch`, since Adam's per-step size is
+O(lr) regardless of gradient scale and the learner takes `games/batch` steps.
+Batch 16 halves the steps — 18 750 applied batches against the baseline's
+37 500 — so displacement should have halved.  It did not move at all:
+
+| measure | batch 8 (baseline) | batch 16 |
+|---|---|---|
+| Adam steps | 37 500 | **18 750** |
+| mean grad L2 norm | 0.147 | **0.213** (x1.449) |
+| net PSQT mean \|dw\| | 319.83 | **319.18** |
+| net PSQT L2 | 1.700e5 | **1.688e5** |
+| PSQT cells touched | 126 108 | 126 051 |
+| per-bucket `on/upd` b0..b7 | 14.85 11.04 11.38 10.10 9.06 8.30 8.14 7.94 | 14.84 11.42 11.63 10.22 8.93 8.76 8.38 7.92 |
+
+Displacement matched to 0.2%.  Half the steps, the same distance travelled.
+
+**Why** (interpretation, but the numbers constrain it tightly).  Gradients are
+*summed* across the batch's games, not averaged, and the norm rose by 1.449 ~
+sqrt(2) — the signature of adding twice as many near-independent per-game
+gradients.  Adam then normalises the step to O(1) whatever that scale is.  So
+per-step size is unchanged and only the step *count* halved, which for a pure
+random walk would give sqrt(0.5) = 0.707 of the net distance and for perfectly
+coherent drift 0.5.  Measured 1.00.  The steps must therefore be roughly twice
+as mutually coherent — exactly what averaging more games per step buys, since
+the cancelling component is the sampling noise in each step's direction.
+**Fewer steps, each cleaner, cancel less, and arrive at the same place.**
+
+Batch size is therefore *not* the magnitude knob 6.14 wanted.  It is a
+**signal-to-noise knob at constant displacement.**
+
+### 6.15.2 And cleaner steps lost 34 Elo
+
+Seed = −36.3 vs `Leaf_vclassic_eval`.
+
+| arm | net displacement | Adam steps | online Δ | offline Δ | **total** |
+|---|---|---|---|---|---|
+| frozen (6.1) | 0 | 0 | 0 | +7 | +7 |
+| **batch 16** | **1.00x** | **18 750** | **−7.7** | **+27.0** | **+19.3** |
+| alpha=1 | 0.26x | 37 500 | −16.7 | +56.0 | +39.3 |
+| **batch 8 (default)** | 1.00x | 37 500 | −31.6 | +84.6 | **+53.0** |
+| rbar8 + LR comp | 1.04x | 37 500 | −142.7 | +131.0 | −12 |
+| rbar8 | 1.47x | 37 500 | −190.7 | +167.8 | −23 |
+
+The run was healthy in every other respect — draw rate 34.7% flat (baseline
+34.6%), zero clip fires, seed val MSE on its own corpus 0.006746 against the
+baseline's 0.006829, i.e. marginally *less* novel content.  It simply explored
+less and the offline phase found correspondingly less to extract (+27.0 against
++84.6).
+
+**Displacement does not order these outcomes.**  Batch 16 and the baseline sit
+at identical net displacement and differ by 34 Elo; alpha=1 at 0.26x beats batch
+16 at 1.00x.  Two arms are now dead against weight displacement as the
+explanatory variable.
+
+### 6.15.3 What does order them: online Elo damage
+
+Sort the six arms by how much the online phase degrades its own play:
+
+| \|online Δ\| | 0 | 7.7 | 16.7 | 31.6 | 142.7 | 190.7 |
+|---|---|---|---|---|---|---|
+| iteration total | +7 | +19.3 | +39.3 | **+53.0** | −12 | −23 |
+| offline gain / \|online Δ\| | — | 3.51 | 3.35 | 2.68 | 0.92 | 0.88 |
+
+Monotone increasing across the whole well-directed family, and roughly linear —
+a fit through frozen and the baseline gives `total ~ 7 + 1.46 x |online Δ|`,
+which predicts +18.2 at batch 16 (actual +19.3) and +31.4 at alpha=1 (actual
++39.3), both inside the ±16 measurement band.  Then it collapses on the two
+rbar arms.
+
+This sharpens 6.14.1 into something operational.  The online phase's Elo loss is
+not a cost to be tolerated — **it is the meter reading how much exploration
+happened**, and while the exploration is well-directed it pays back ~2.7-3.5x in
+the offline phase.  The rbar arms show the other regime: damage of the wrong
+kind returns less than 1x.
+
+The mechanism this suggests (interpretation, untested directly): the value the
+corpus carries comes from the **noise** component of the online movement, not
+the coherent component.  The coherent part is the average gradient — precisely
+what the offline pass computes for itself from 512-position batches, so moving
+the generator along it adds nothing the offline phase could not find.  The noisy
+part is what perturbs play into regions the current weights would not otherwise
+visit.  Batch 16 averaged the noise away and kept the coherence; it kept the
+generator strong (online Δ only −7.7) and starved the corpus.  Alpha=1 shrank
+every step but kept all 37 500 of them, and 37 500 small noisy perturbations
+explored more than 18 750 clean ones — which is why it beat batch 16 despite
+one quarter the displacement.
+
+### 6.15.4 The prediction for batch 4
+
+Batch 4 doubles the step count to 75 000 and makes each step noisier (predicted
+grad norm ~0.147/sqrt(2) ~ 0.104).  By 6.15.1's accounting net displacement
+should again come out near 1.00x — more steps, each less coherent.  If 6.15.3
+holds, the arm should show **more** online damage and a **higher** iteration
+total: `|online Δ|` in the −55 to −65 range and a total near +85 to +95.
+
+That is a real prediction with a real way to be wrong, and three ways it could
+fail informatively:
+
+1. **Displacement moves after all** — then 6.15.1's coherence account is
+   incomplete and the compensation is a coincidence of this batch ratio.
+2. **Damage rises but the total does not follow** — then the linear relation is
+   local and the "excessive" boundary sits between 32 and 143, which is exactly
+   the unexplored gap.
+3. **The corpus degrades** — watch seed val MSE and the draw rate.  The rbar
+   arms reached 0.0072-0.0076 and drifted 35.0 -> 33.2 on draws; batch 4 staying
+   near 0.0068 and 34.6% would show the damage is exploratory rather than
+   destructive.
+
+Batch 4's noise is *sampling* noise from averaging fewer games — unbiased, and
+unlike rbar's, which systematically discarded persistence.  That is the reason
+to expect it stays in the well-directed family, and it is an assumption, not a
+measurement.
+
+## Methodology notes (6.15)
+
+- Run: `learn/m260720-2.5e6g-batch16_final.json`, `<tag>_work/` alongside.
+- Batch size confirmed in-run from the learner banner (`batch=16`) and from the
+  applied-batch count: `grep -c "applied batch" <tag>_work/traj/learner.log`
+  = 18 750 = 300 000 / 16.
+- Net displacement: `psqt_w` delta seed -> post-online over cells with any
+  change, via `compare_nnue_learning.read_tdleaf_fc`; both mean \|dw\| and the
+  full L2 norm reported because the median-based `on/upd` column of
+  `bucket_phase_analysis.py` normalises by update count and would have hidden
+  the result (`upd_on` fell ~16%, unevenly by bucket, since a bigger batch makes
+  each weight appear in a larger fraction of batches).
+- Gradient norms: last `TDLeaf clip stats` block of each learner log.
