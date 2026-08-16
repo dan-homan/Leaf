@@ -2519,3 +2519,145 @@ measurement.
   the result (`upd_on` fell ~16%, unevenly by bucket, since a bigger batch makes
   each weight appear in a larger fraction of batches).
 - Gradient norms: last `TDLeaf clip stats` block of each learner log.
+
+## 6.16 The batch-4 arm: batch 8 is the optimum, and the dosage relation breaks (2026-08-16)
+
+`TDLEAF_BATCH_SIZE = 4`, same frame as every other Part 6 arm.
+
+### 6.16.1 What 6.15 got right
+
+6.15.1's mechanical account holds precisely across the full 4x range:
+
+| batch | Adam steps | mean grad L2 norm | net PSQT mean \|dw\| | net PSQT L2 |
+|---|---|---|---|---|
+| 16 | 18 750 | 0.213 | 319.18 | 1.6882e5 |
+| 8 | 37 500 | 0.147 | 319.83 | 1.6999e5 |
+| **4** | **75 000** | **0.101** | **322.53** | **1.7123e5** |
+
+- **Gradient norm scales as sqrt(batch)** — 0.101 / 0.147 / 0.213, successive
+  ratios 1.455 and 1.449 against sqrt(2) = 1.414.  6.15.4 predicted ~0.104 for
+  batch 4; measured 0.101.  Gradients sum across games and the per-game
+  directions are near-independent, exactly as claimed.
+- **Net displacement is invariant to batch size** — 1% across a 4x range, with
+  the step count varying 4x.  Whatever the batch, the run travels the same
+  distance.  6.15.1's coherence-compensation account is confirmed on a third
+  point, and weight displacement is now firmly established as *not* the axis.
+
+### 6.16.2 What it got wrong
+
+6.15.4 predicted `|online Δ|` of −55 to −65 and a total of +85 to +95.  Both
+were wrong, and not narrowly:
+
+| batch | online Δ | offline Δ | **total** |
+|---|---|---|---|
+| 16 | −7.7 | +27.0 | +19.3 |
+| **8 (default)** | −31.6 | +84.6 | **+53.0** |
+| **4** | **−31.7** | +71.0 | **+39.3** |
+
+**Online damage saturated.**  Batch 4 doubled the step count and made each step
+sqrt(2) noisier, and degraded its own play by 31.7 Elo against the baseline's
+31.6 — identical to within a rounding error, where 6.15.4 expected roughly
+double.  Its post-online net measured −68.0 vs classic against the baseline's
+−67.9.
+
+This is not one of the three failure modes 6.15.4 named; it is a fourth.  The
+dosage relation `total ~ 7 + 1.46 x |online Δ|` predicted +53.3 for batch 4 and
+the arm delivered +39.3, so **online Elo damage is necessary but not sufficient**
+— two arms with identical damage differ by 14 Elo in what the offline phase
+recovers (+84.6 against +71.0).  The relation should be treated as a rough
+ordering across mechanisms, not a law.
+
+A speculative account of the saturation, offered as a hypothesis and nothing
+more: the gradient depends on the current weights, so once play degrades far
+enough the TD errors grow and the update turns corrective.  That feedback would
+cap online damage at a level set by the LR and the loss surface rather than by
+the batch size, with batch 16's steps simply too coherent to wander out to the
+cap.  It predicts an LR sweep moves the cap where batch size cannot.
+
+### 6.16.3 The batch-size response, stated honestly
+
+| batch | total | vs baseline | significance |
+|---|---|---|---|
+| 16 | +19.3 | −33.7 | **2.2 sigma — resolved** |
+| 8 | +53.0 | — | — |
+| 4 | +39.3 | −13.7 | 0.9 sigma — not resolved |
+
+With 1000-game gauntlets at ±11, a difference of two carries ±15.6.  So the
+defensible statement is: **batch 16 is clearly worse than batch 8, and batch 4
+is not better** (it points lower, but a 0.9 sigma gap is not a measurement).
+The three points describe an inverted U peaking at the current default, but only
+the upper side is resolved.
+
+`TDLEAF_BATCH_SIZE = 8` stays.  It reached its current value through the
+confounded history in 6.14.4 and is now, for the first time, supported.
+
+### 6.16.4 A metric that needs no gauntlet
+
+The angle between each arm's online and offline PSQT displacement, computed
+straight from the three `.tdleaf.bin` files:
+
+| arm | cos(online, offline) | corpus novelty (seed val MSE) | total |
+|---|---|---|---|
+| batch 16 | −0.089 | 0.006746 | +19.3 |
+| **batch 8** | **−0.113** | **0.006829** | **+53.0** |
+| batch 4 | −0.211 | 0.007009 | +39.3 |
+| alpha=1 | −0.244 | 0.006829 | +39.3 |
+| rbar8 + comp | −0.305 | 0.007188 | −12 |
+| rbar8 | −0.334 | 0.007559 | −23 |
+
+Both columns order the six arms monotonically, and the total peaks in the middle
+of each — little disagreement between the phases means the offline pass had
+nothing to correct and the iteration gains little; large disagreement means the
+online phase went somewhere the corpus does not support and offline spends its
+budget undoing it.  The optimum sits at modest disagreement, cos ~ −0.11.
+
+Two caveats, both serious.  There is **no repeat-run noise floor**: two
+identically configured runs play different games and would not give cos = 1, and
+that baseline was never measured, so the absolute scale is uncalibrated.  And
+alpha=1 ties the baseline exactly on val MSE while scoring 14 lower, which is
+the same tie that disqualified val MSE as a novelty proxy in 6.14.4.  Six points,
+two candidate metrics, no held-out test — this is a hypothesis to check, not an
+instrument.  It is worth checking because it costs no games.
+
+### 6.16.5 What is left: the learning rate
+
+Batch size is closed in both directions, and it turned out to vary
+signal-to-noise at constant displacement rather than magnitude.  That leaves the
+learning rate as **the last clean magnitude knob, and the only one never tested
+in isolation**:
+
+| knob | displacement | step count | direction quality |
+|---|---|---|---|
+| `TDLEAF_STACK_NORM_ALPHA` | 0.26x | unchanged | **changed** (redistributes by bucket) |
+| `TDLEAF_FEATURE_RBAR` | 1.04-1.47x | unchanged | **changed** (discards persistence) |
+| `TDLEAF_BATCH_SIZE` | **1.00x** | 0.5x - 2x | changed (SNR per step) |
+| **LR scale** | **directly proportional** | unchanged | **unchanged** |
+
+Adam's step is `lr x m_hat/sqrt(v_hat)` with the second factor O(1), so scaling
+every section's LR by a constant scales displacement by that constant, with the
+step count fixed and every direction untouched.  Nothing else in this
+investigation has that property — every previous magnitude arm changed direction
+quality as a side effect, which is precisely what made all of them
+uninterpretable as magnitude tests.
+
+It also tests 6.16.2's saturation hypothesis directly, which predicts online
+damage moves with LR where it would not move with batch size.
+
+Suggested arms: LR x1.5 and LR x0.67 on all sections uniformly (the same
+compile-time-macro treatment as `TDLEAF_RBAR_LR_COMP`, so the default build
+stays byte-exact).  Uniform is the right first cut — the per-section LRs are
+calibrated to ~0.001 x median(\|w\|) and their *ratios* are not what is in
+question.
+
+## Methodology notes (6.16)
+
+- Run: `learn/m260720-2.5e6g-batch4_final.json`, `<tag>_work/` alongside.
+- Batch confirmed from the learner banner (`batch=4`) and the applied-batch
+  count, 75 000 = 300 000 / 4.
+- Health: draw rate 34.3% flat across fifths (34.4 34.6 34.2 34.1 34.4), zero
+  clip fires — the arm is not a degenerate run, it simply consolidated less.
+  Epoch ladder +65/+65, picked epoch 1 (baseline: +39/+63, picked 2).
+- cos(online, offline): PSQT weight deltas seed -> post-online and post-online
+  -> final, flattened, via `compare_nnue_learning.read_tdleaf_fc`.  Reported
+  because the per-bucket `proj` column of `bucket_phase_analysis.py` is a
+  per-bucket regression coefficient and does not aggregate to a single number.
