@@ -2643,11 +2643,10 @@ uninterpretable as magnitude tests.
 It also tests 6.16.2's saturation hypothesis directly, which predicts online
 damage moves with LR where it would not move with batch size.
 
-Suggested arms: LR x1.5 and LR x0.67 on all sections uniformly (the same
-compile-time-macro treatment as `TDLEAF_RBAR_LR_COMP`, so the default build
-stays byte-exact).  Uniform is the right first cut — the per-section LRs are
-calibrated to ~0.001 x median(\|w\|) and their *ratios* are not what is in
-question.
+Suggested arms: LR x1.5 and LR x0.67 on all sections uniformly.  Uniform is the
+right first cut — the per-section LRs are calibrated to ~0.001 x median(\|w\|)
+and their *ratios* are not what is in question.  6.17 has the recipe, including
+how to keep the offline phase out of it.
 
 ## Methodology notes (6.16)
 
@@ -2661,3 +2660,145 @@ question.
   -> final, flattened, via `compare_nnue_learning.read_tdleaf_fc`.  Reported
   because the per-bucket `proj` column of `bucket_phase_analysis.py` is a
   per-bucket regression coefficient and does not aggregate to a single number.
+
+## 6.17 The LR arm — parked recipe (written 2026-08-16, not yet run)
+
+D. Homan raised the obvious objection to 6.16.5: the `TDLEAF_ADAM_*_LR0`
+constants are shared with the offline batch trainer, so moving them moves both
+phases and the arm confounds the thing it is meant to isolate.  Correct — but
+the two phases are already separated by an existing runtime flag, so no new
+code is needed.
+
+### 6.17.1 Why the phases are separable for free
+
+Effective LR at both ends is `lr_scale x warmup_factor x SECTION_LR0`.  The
+phases differ only in `lr_scale`:
+
+| phase | call site | `lr_scale` |
+|---|---|---|
+| online | `tdleaf.cpp:563,639` — `nnue_apply_gradients()` | **1.0** (the default) |
+| offline | `nnue_batch_train.cpp:688,690` — `nnue_apply_gradients(lr_scale)` | `--bt-lr`, default **0.25** |
+
+So scaling every `SECTION_LR0` by `k` and passing `--bt-lr 0.25/k` scales the
+online product by `k` and leaves the offline product exactly where it was.
+`--bt-lr` is already a `train.py` flag and is recorded in the run sidecar as
+`bt_lr`, so the arm self-documents.
+
+### 6.17.2 The recipe
+
+Edit the six constants in `src/tdleaf.h:119-125`:
+
+| constant | baseline | k = 1.5 | k = 0.67 |
+|---|---|---|---|
+| `TDLEAF_ADAM_LR0` (FC0/FC1 w) | 0.005 | 0.0075 | 0.00335 |
+| `TDLEAF_ADAM_FC2_LR0` | 0.07 | 0.105 | 0.0469 |
+| `TDLEAF_ADAM_FC_BIAS_LR0` | 1.5 | 2.25 | 1.005 |
+| `TDLEAF_ADAM_FT_LR0` | 0.015 | 0.0225 | 0.01005 |
+| `TDLEAF_ADAM_FT_BIAS_LR0` | 0.02 | 0.03 | 0.0134 |
+| `TDLEAF_ADAM_PSQT_LR0` | 13.0 | 19.5 | 8.71 |
+
+```sh
+# k = 1.5 (more online displacement)
+python3 train.py --tag m260720-2.5e6g-lr15 --continue m260720-2.2e6g \
+    --games 300000 --depth 8 --concurrency 12 --recompile --bt-lr 0.16666667 \
+    --gauntlet-anchors Leaf_vclassic_eval --gauntlet-epochs --gauntlet-tdleaf --gauntlet
+
+# k = 0.67 (less)
+python3 train.py --tag m260720-2.5e6g-lr067 --continue m260720-2.2e6g \
+    --games 300000 --depth 8 --concurrency 12 --recompile --bt-lr 0.37313433 \
+    --gauntlet-anchors Leaf_vclassic_eval --gauntlet-epochs --gauntlet-tdleaf --gauntlet
+```
+
+The learner banner prints `TDLeaf LR0: ...` at startup — check it against the
+table before letting 300k games run, exactly as the batch arms were checked
+against `batch=N`.
+
+### 6.17.3 Three things to know
+
+1. **Weight decay rides along, and should.**  AdamW's decoupled decay is
+   `TDLEAF_WEIGHT_DECAY x section_lr x w` (`nnue_training.cpp:1168, 1189, 1210,
+   1261`), deliberately tied to the section LR so the relative pull-to-zero is
+   constant across sections.  `k` therefore scales decay too: online FT
+   shrinkage per iteration goes from ~5.5% at baseline to ~8.2% at k = 1.5.
+   That is standard AdamW semantics, not a leak — decoupling it would make "LR"
+   mean something non-standard here.  The `--bt-lr` compensation restores the
+   *offline* decay exactly, since it scales through the same product.
+2. **The step clip does not rescale.**  `clip_adam_step` runs on the unit-less
+   `m_hat/sqrt(v_hat)` *before* the LR multiply (`nnue_training.cpp:1144-1145`),
+   so `TDLEAF_ADAM_STEP_CLIP = 30` stays a fixed bound on the normalised step
+   and the whole displacement change passes through.  This is what makes LR a
+   clean proportional knob with no saturation hidden in the clip.
+3. **Exact compensation needs a power of two.**  `0.25/1.5 = 0.16666667` is not
+   representable, so the offline phase will not be bit-identical to the
+   baseline.  The residual is ~1e-8 relative — below the float-summation
+   variation `--bt-threads` already introduces between runs, and irrelevant at
+   Elo scale.  If exactness is wanted, `k = 2` (`--bt-lr 0.125`) and `k = 0.5`
+   (`--bt-lr 0.5`) are the clean pair, though 2x is a larger jump than is
+   indicated first given that rbar's misdirected 1.47x was catastrophic.
+
+### 6.17.4 What it should show, and what falsifies what
+
+Pre-committed, so the reading is not chosen after the fact:
+
+**Arm-validity checks** (these confirm the arm is what it claims, before any
+Elo is read):
+
+- **net PSQT displacement should scale with k** — ~480 mean \|dw\| at k = 1.5
+  against the baseline's 319.83.  This would be the *first* knob in the whole
+  investigation to move it; alpha, rbar and batch size all failed to (6.16.1).
+  If displacement does not scale with LR, the Adam step model underlying every
+  argument in Parts 6.11-6.16 is wrong and that is the finding.
+- **gradient L2 norm should not move** from 0.147.  LR is applied after the
+  gradient and after the clip; if the norm moves, something else changed.
+- **step count fixed at 37 500.**
+
+**The substantive readings:**
+
+- **Online damage moves with k** — confirms 6.16.2's saturation hypothesis (that
+  the ~31.6 Elo cap is set by the LR and the loss surface, and batch 16 simply
+  had steps too coherent to reach it).
+- **Online damage stays at ~31.6 at k = 1.5** — the cap is not LR-set either,
+  and something else entirely bounds how far online play can degrade.  That
+  would be the more interesting result and would need its own investigation.
+- **Total rises at k = 1.5** — displacement magnitude does matter for
+  well-directed movement, the default is under-supplied, and the lever can be
+  pushed further.
+- **Total falls both ways** — the default is a genuine optimum on the last clean
+  axis, the magnitude question is closed, and what remains is actor refresh
+  cadence (6.14.4), which needs a corpus-diversity observable built first —
+  possibly `cos(online, offline)` from 6.16.4, which costs no games.
+
+Health canaries as for every arm: draw rate near 34.6% and flat across fifths,
+seed val MSE on the run's own corpus near 0.0068, zero clip fires.  The rbar
+arms are the reference for what unhealthy looks like — 33.2% drifting and
+0.0072-0.0076.
+
+### 6.17.5 The alternative, and why not
+
+`tdleaf-feature-dedup` already carries a scoped compile-time pattern
+(`TDLEAF_RBAR_LR_COMP`, 6.12.6): an online-only LR multiplier applied to the
+actor/learner binary, with the batch trainer compiled without it and a hard
+refusal if a compensated binary is asked to `--batch-train`.  Generalising it to
+all six sections and dropping its rbar precondition is a small job.
+
+It is not worth doing.  It is strictly more machinery for the same experiment,
+it would drag a rejected-knob branch into a clean arm, and `--bt-lr` achieves
+the same separation with a flag that already exists and is already logged.  The
+compile-time route earns its keep only when the default build must stay
+byte-exact — which was the whole reason it existed for `TDLEAF_RBAR_LR_COMP`,
+and is not a requirement here, since an LR arm is a deliberate one-off edit
+rather than a shipped knob.
+
+## Methodology notes (6.17)
+
+- `lr_scale` asymmetry: `nnue.h` declares `nnue_apply_gradients(float lr_scale =
+  1.0f)`; the online callers in `tdleaf.cpp` take the default, the batch trainer
+  passes `--bt-lr` through at `nnue_batch_train.cpp:688,690`.
+- The six constants and the effective-LR product are in
+  `nnue_training.cpp` `nnue_apply_gradients` (serial, online) and
+  `nnue_apply_compute_params` (threaded, offline) — both read the same
+  constants, so the `--bt-lr` compensation covers both paths.
+- Baselines to compare against, all from `m260720-2.5e6g` (batch 8, LR x1):
+  net PSQT mean \|dw\| 319.83, L2 1.6999e5, grad norm 0.147, 37 500 steps,
+  online Δ −31.6, offline Δ +84.6, total +53.0, draw 34.6%, seed val MSE
+  0.006829.
