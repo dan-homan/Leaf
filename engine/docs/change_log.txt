@@ -1,5 +1,80 @@
 Changes since 2017_12_24
 
+2026_08_29 -- TDLeaf --refresh-scores: refresh the ROOT-side quantities too, not
+               just the leaf static.  tdleaf_rebuild_record previously refreshed
+               only score_stm, leaving score_root_stm and root_static at actor
+               vintage.  Those two are read by tdleaf_dump_game, which runs IN
+               THE LEARNER, so every offline corpus carried root labels (and a
+               root quietness test) one actor-refresh epoch stale, while the
+               leaf rows next to them were current.  The leaf row's own quiet
+               gate was worse than stale: it compared a REFRESHED leaf static
+               against an ACTOR-vintage root score — mixed vintage, a silent
+               side effect of turning --refresh-scores on.
+
+               Fix (tdleaf.cpp tdleaf_rebuild_record, under refresh_score):
+                 score_root_stm += s * (leaf_current - leaf_actor),
+                     s = (leaf STM == root STM) ? +1 : -1
+                 root_static     = eval of an accumulator rebuilt on root_pos
+               The root score is the value backed up from the PV leaf, so it
+               equals s*leaf_static + delta with delta the search-vs-static
+               residual (quiescence tail past the stored PV, TT cutoff,
+               aspiration bound).  Holding delta fixed keeps what the SEARCH
+               contributed (which leaf it chose) and re-values that leaf with
+               the current net.  Mate announcements (|score| > MATE/2) are not
+               evaluations and pass through untouched.
+
+               Identity preserved: when weights have not moved the refresh is
+               an exact no-op on all three quantities — verified over 20,596
+               records with a frozen learner, max |diff| = 0.  A side identity
+               falls out: the leaf quiet gate becomes |delta|, a property of
+               the actor's search alone, so it no longer moves as the learner
+               drifts.
+
+               Measured on 15,641 games at d8 (8 actors, gpa 1000, m260720
+               seed), paired old-vs-new within one run:
+                 leaf-static drift over the staleness window  mean 15.8 cp
+                     (median 11, p90 34, p99 79); sawtooth visible against the
+                     actor-respawn boundary
+                 leaf quiet gate: 6.08% of records flip.  91,799 rows (5.6%)
+                     are quiet (median |delta| 45) but dropped because the net
+                     moved; 49,934 rows (3.1%) are NOT quiet (median |delta|
+                     68) but admitted because drift masked it.  The gate
+                     variable was |drift - s*delta| against an intended
+                     |delta|, with std(drift) 22 cp and corr(|delta|,|drift|)
+                     = +0.015 — independent contamination, not a threshold nudge
+                 root cp label: mean |change| 14.7 cp, 51.7% of rows shift
+                     >10 cp; RMS shift in target space 0.0153, ~17% of a
+                     typical training residual
+                 half-fixing (score only, not root_static) is worse than either
+                     end state — refresh both or neither
+
+               Offline effect, paired A/B on 50k fresh games at d8 (each root
+               row emitted twice: same FEN, same gate decision, only cp
+               differing; leaf rows identical).  Both arms batch-trained from
+               one post-online seed; val split is a gid hash so all runs score
+               the same 464,664 positions, and MSE(outcome) is comparable
+               because the outcome column is shared.  Baseline 0.086129 in
+               every run:
+                 refreshed  seed1000 ep1 0.085969  ep2 0.085987
+                 stale      seed1000 ep1 0.086006  ep2 0.086030
+                 refreshed  seed2000 ep1 0.085990  ep2 0.085959
+                 stale      seed2000 ep1 0.086018  ep2 0.086004
+               Refreshed wins 4/4 by 2.8-4.5e-5; as reduction from baseline it
+               captures ~1.65e-4 vs ~1.24e-4, about 33% more outcome-MSE
+               improvement from the same offline phase.  MSE(blend) is NOT
+               comparable across arms (each arm's blend target embeds its own
+               cp labels) and the stale arm scores marginally better on it —
+               the expected "fits its own labels" artifact.  Elo not measured.
+
+               Generation health unaffected: 50,000 games, 0 rejected, 35.0%
+               draw rate (healthy band 35-40% at d8).
+
+               Also adds TDLEAF_REFRESH_DIAG (compile flag, default 0): keeps
+               the actor-vintage values alongside the refreshed ones and dumps
+               a <prefix>.<pid>.diag.tsv plus a paired actor-label root corpus,
+               for reproducing the measurements above.  Production builds are
+               unaffected.
+
 2026_08_15 -- docs only, NO code change: carried the Part 6 investigation record
                (docs/Online_Learning_Investigation.md 6.1-6.14) onto main.  Two
                attempts to improve the TDLeaf online update rule were run to

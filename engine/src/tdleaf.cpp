@@ -441,6 +441,10 @@ static void tdleaf_dump_game(const TDGameRecord &rec, float result)
 {
     static FILE    *leaf_f = nullptr;
     static FILE    *root_f = nullptr;
+#if TDLEAF_REFRESH_DIAG
+    static FILE    *diag_f = nullptr;
+    static FILE    *stale_f = nullptr;   // paired root corpus, actor-vintage label
+#endif
     static int      dump_quiet_cp = 60;
     static int      dump_max_cp   = 1500;
     static uint32_t dump_gid      = 0;
@@ -472,6 +476,17 @@ static void tdleaf_dump_game(const TDGameRecord &rec, float result)
             };
             leaf_f = open_dump("leaf");
             root_f = open_dump("root");
+#if TDLEAF_REFRESH_DIAG
+            // Unfiltered per-record refresh telemetry: actor-vintage vs
+            // refreshed leaf static (L), root search score (R) and root
+            // static (rs).  Gate decisions left to offline analysis.
+            stale_f = open_dump("rootstale");
+            snprintf(path, sizeof(path), "%s.%d.diag.tsv", prefix, (int)getpid());
+            diag_f = fopen(path, "a");
+            if (diag_f && ftell(diag_f) == 0)
+                fprintf(diag_f, "gid\tply\tendply\tdepth\twtm\trootwtm\t"
+                                "L0\tL1\tR0\tR1\trs0\trs1\tresult\n");
+#endif
             if (leaf_f && root_f)
                 fprintf(stderr, "TDLeaf: dumping leaf+root positions to %s.%d.{leaf,root}.tsv "
                                 "(quiet<=%d cp, max=%d cp)\n",
@@ -511,6 +526,16 @@ static void tdleaf_dump_game(const TDGameRecord &rec, float result)
             }
         }
 
+#if TDLEAF_REFRESH_DIAG
+        if (diag_f)
+            fprintf(diag_f, "%u\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%s\n",
+                    dump_gid, r.game_ply, final_game_ply, (int)r.id_depth,
+                    (int)r.wtm, root_wtm,
+                    r.score_stm_actor, r.score_stm,
+                    r.score_root_stm_actor, r.score_root_stm,
+                    r.root_static_actor, r.root_static, res_str);
+#endif
+
         // ---- Root row: search-score label, depth = achieved ID depth -----
         if (root_f) {
             if (abs(r.root_static - r.score_root_stm) <= dump_quiet_cp) {
@@ -520,12 +545,28 @@ static void tdleaf_dump_game(const TDGameRecord &rec, float result)
                     fprintf(root_f, "%s\t%d\t%s\t%d\t%d\t%u\t%d\n",
                             fen, cp_white, res_str, r.game_ply, (int)r.id_depth,
                             dump_gid, final_game_ply);
+#if TDLEAF_REFRESH_DIAG
+                    // Same row, same gate decision, ACTOR-VINTAGE label — the
+                    // paired control that isolates the score refresh from the
+                    // quietness-gate change.
+                    if (stale_f) {
+                        int cp_stale = root_wtm ? r.score_root_stm_actor
+                                                : -r.score_root_stm_actor;
+                        fprintf(stale_f, "%s\t%d\t%s\t%d\t%d\t%u\t%d\n",
+                                fen, cp_stale, res_str, r.game_ply,
+                                (int)r.id_depth, dump_gid, final_game_ply);
+                    }
+#endif
                 }
             }
         }
     }
     if (leaf_f) fflush(leaf_f);   // survive process kills at match end
     if (root_f) fflush(root_f);
+#if TDLEAF_REFRESH_DIAG
+    if (diag_f) fflush(diag_f);
+    if (stale_f) fflush(stale_f);
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -623,8 +664,52 @@ void tdleaf_rebuild_record(TDRecord &r, bool refresh_score)
     pc = (pc < 1) ? 1 : (pc > 32) ? 32 : pc;
     r.stack = (pc - 1) / 4;
 
-    if (refresh_score)
+#if TDLEAF_REFRESH_DIAG
+    r.score_stm_actor       = r.score_stm;
+    r.score_root_stm_actor  = r.score_root_stm;
+    r.root_static_actor     = r.root_static;
+#endif
+
+    if (refresh_score) {
+        const int leaf_actor = r.score_stm;
         r.score_stm = nnue_evaluate_acc_raw(r.acc, r.psqt, (int)r.wtm, pc);
+
+        // Re-express the ROOT search score on current weights.  The root score
+        // is the value backed up from the PV leaf, so it equals s*leaf_static
+        // plus a residual delta (quiescence tail beyond the stored PV, TT
+        // cutoff, aspiration bound):
+        //     s     = +1 if leaf STM == root STM else -1   (leaf POV -> root POV)
+        //     delta = score_root_stm - s*leaf_actor        (actor-vintage)
+        //     new   = s*leaf_current + delta = old + s*(leaf_current - leaf_actor)
+        // Holding delta fixed keeps the part the SEARCH contributed (which leaf
+        // it chose) and re-values that leaf with the current net — so the label
+        // stops lagging the learner by an actor-refresh epoch, while staying an
+        // exact identity when the weights have not moved.
+        //
+        // Mate announcements (|score| near MATE) are not evaluations; shifting
+        // them by an eval delta is meaningless, so they pass through untouched.
+        if (r.score_root_stm > -MATE / 2 && r.score_root_stm < MATE / 2) {
+            const int sgn = ((int)r.wtm == (int)r.root_wtm) ? 1 : -1;
+            r.score_root_stm += sgn * (r.score_stm - leaf_actor);
+        }
+
+        // Root static eval on current weights, from an accumulator rebuilt on
+        // the stored root position.  Without this the root quietness test
+        // (|root_static - score_root_stm|) would compare a refreshed score
+        // against an actor-vintage static — the same mixed-vintage error the
+        // refresh exists to remove.  (rebuild_record is learner-only, and the
+        // .tdg format always ships root_pos.)  Same piece-count formula as
+        // tdleaf_record_ply's root path: PAWN..KING over both sides.
+        NNUEAccumulator root_acc;
+        nnue_init_accumulator(root_acc, r.root_pos);
+        int pc_root = 0;
+        for (int sd = 0; sd < 2; sd++)
+            for (int pt = PAWN; pt <= KING; pt++)
+                pc_root += r.root_pos.plist[sd][pt][0];
+        pc_root = (pc_root < 1) ? 1 : (pc_root > 32) ? 32 : pc_root;
+        r.root_static = nnue_evaluate_acc_raw(root_acc.acc, root_acc.psqt,
+                                              (int)r.root_pos.wtm, pc_root);
+    }
 }
 
 // ---------------------------------------------------------------------------

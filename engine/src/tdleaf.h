@@ -153,6 +153,14 @@ static const int   TDLEAF_BATCH_SIZE    = 8;        // accumulate gradients acro
 // ---------------------------------------------------------------------------
 // Per-ply record: accumulator snapshot + search score
 // ---------------------------------------------------------------------------
+// Optional per-record refresh telemetry (compile with TDLEAF_REFRESH_DIAG=1):
+// keeps the ACTOR-vintage leaf static / root search score / root static
+// alongside the refreshed ones, and makes tdleaf_dump_game emit a
+// <prefix>.<pid>.diag.tsv carrying both.  Off (0) in production.
+#ifndef TDLEAF_REFRESH_DIAG
+#define TDLEAF_REFRESH_DIAG 0
+#endif
+
 struct TDRecord {
     int16_t acc [2][NNUE_HALF_DIMS];   // raw accumulator [perspective][dim]
     int32_t psqt[2][NNUE_PSQT_BKTS];  // PSQT sums [perspective][bucket]
@@ -188,6 +196,13 @@ struct TDRecord {
     position root_pos;
     int      root_static;
     int8_t   id_depth;    // ID iteration count ≈ achieved search depth
+#if TDLEAF_REFRESH_DIAG
+    // Actor-vintage values, preserved by tdleaf_rebuild_record before the
+    // --refresh-scores rewrite.  Telemetry only.
+    int      score_stm_actor;
+    int      score_root_stm_actor;
+    int      root_static_actor;
+#endif
 };
 
 // ---------------------------------------------------------------------------
@@ -236,9 +251,15 @@ int learner_main(int argc, char *argv[]);
 
 // Reconstruct a TDRecord's derived snapshot fields (leaf accumulator/PSQT,
 // active features, stack) from its stored leaf position using the current
-// weights.  refresh_score additionally re-evaluates score_stm (the learner's
-// --refresh-scores).  Bit-exact vs the online-recorded snapshot when weights
-// are unchanged.
+// weights.  refresh_score (the learner's --refresh-scores) additionally
+// re-evaluates every stored EVALUATION on current weights:
+//   score_stm      leaf static, from the rebuilt leaf accumulator
+//   score_root_stm root search score, re-expressed as s*leaf_static + delta,
+//                  holding the search-vs-static residual delta fixed (the
+//                  search picked the leaf; the current net values it)
+//   root_static    root static, from an accumulator rebuilt on root_pos
+// Bit-exact vs the online-recorded snapshot when weights are unchanged (the
+// refresh is then an identity on all three).
 void tdleaf_rebuild_record(struct TDRecord &r, bool refresh_score);
 
 // Set by selfplay.cpp when --traj-out is active: forces tdleaf_record_ply to
