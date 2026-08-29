@@ -196,6 +196,8 @@ static bool selfplay_write_traj(const SelfplayConfig &cfg, const TDGameRecord &r
     h.nnue_content_hash = nnue_get_content_hash();
     h.result_white_pov  = result_w;
     h.n_records         = rec.n_plies;
+    // Informational only: no consumer reads h.gid (the learner assigns its own
+    // corpus gid in tdleaf_dump_game).  Kept for offline .tdg inspection.
     h.gid               = (((uint32_t)getpid() & 0xFFF) << 20) | (seq & 0xFFFFF);
     bool ok = fwrite(&h, sizeof(h), 1, f) == 1;
     for (int t = 0; ok && t < rec.n_plies; t++) {
@@ -294,8 +296,18 @@ static SelfplayTerm selfplay_play_game(const SelfplayEpdLine &op, const Selfplay
         if (mate == 2) { result_w = 0.5f; game.T++; return SP_TERM_STALEMATE; }
         if (game.pos.fifty >= 100) { result_w = 0.5f; game.T++; return SP_TERM_FIFTY; }
         {
+            // Scan back at stride 2 (same-STM) no further than the last
+            // irreversible move.  setboard() starts every game at T >= 1 with
+            // fifty == 0 and fifty can only grow in step with T, so the floor is
+            // currently >= 1 on its own — but clamping makes that explicit
+            // rather than depending on an invariant established in game_rec.cpp,
+            // and matches tdleaf_self_adjudicate's floor.  Without it, any future
+            // change that seeds pos.fifty from the opening (e.g. an EPD reader
+            // that parses the halfmove clock) turns this into a negative index.
+            int rep_floor = game.T - game.pos.fifty;
+            if (rep_floor < 0) rep_floor = 0;
             int rep_count = 0;
-            for (int ri = game.T - 2; ri >= game.T - game.pos.fifty && rep_count < 2; ri -= 2)
+            for (int ri = game.T - 2; ri >= rep_floor && rep_count < 2; ri -= 2)
                 if (game.ts.tdata[0].plist[ri] == game.pos.hcode) rep_count++;
             if (rep_count >= 2) { result_w = 0.5f; game.T++; return SP_TERM_REP; }
         }

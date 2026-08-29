@@ -491,13 +491,34 @@ static void tdleaf_dump_game(const TDGameRecord &rec, float result)
                 fprintf(stderr, "TDLeaf: dumping leaf+root positions to %s.%d.{leaf,root}.tsv "
                                 "(quiet<=%d cp, max=%d cp)\n",
                         prefix, (int)getpid(), dump_quiet_cp, dump_max_cp);
-            // gid: unique across concurrent processes (pid in high bits).
+            // gid layout: 12-bit pid tag in the high bits, 20-bit per-process
+            // game counter in the low bits.  The corpus's train/val split and
+            // dedup key off gid, so two distinct games must not share one.
+            //   - Within a process: the 20-bit counter wraps after 1,048,575
+            //     games and would then silently collide with this run's own
+            //     early games.  Guarded below.
+            //   - Across processes: only 12 bits of pid, so N concurrent
+            //     dumping processes collide with probability ~N(N-1)/2 / 4096
+            //     (~0.7% at N=8).  This only arises when several --selfplay
+            //     actors dump TSV directly; the actor/learner recipe has a
+            //     single learner writing the corpus, so it is collision-free.
             dump_gid = ((uint32_t)getpid() & 0xFFF) << 20;
         }
     }
     if (!leaf_f && !root_f) return;
 
     dump_gid++;
+    // Counter overflow into the pid tag: warn once rather than silently
+    // emitting a gid that duplicates one from early in this same run.
+    if ((dump_gid & 0xFFFFF) == 0) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            fprintf(stderr, "TDLeaf: WARNING — corpus gid counter wrapped past 2^20 games "
+                            "in this process; gids are no longer unique and the "
+                            "train/val split will merge games.\n");
+        }
+    }
     const char *res_str = (result > 0.75f) ? "1" : (result < 0.25f) ? "0" : "0.5";
     char fen[110];
     // Result-decay reference N_game: the last recorded root game-ply (the engine's

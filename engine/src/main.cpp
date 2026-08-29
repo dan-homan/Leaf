@@ -252,12 +252,36 @@ int main(int argc, char *argv[])
         char tdleaf_path[512];
         snprintf(tdleaf_path, sizeof(tdleaf_path), "%s%s",
                  engine_cfg.exec_path, NNUE_TDLEAF_BIN);
+        // Does a state file actually exist?  nnue_load_fc_weights returns false
+        // both for "no such file" (normal on a fresh start) and for "file is
+        // there but unusable" (corrupt, truncated, or built against a different
+        // net) — and those two cases deserve very different reactions.
+        auto file_exists = [](const char *p) {
+            FILE *fp = fopen(p, "rb");
+            if (!fp) return false;
+            fclose(fp);
+            return true;
+        };
+        bool present = file_exists(tdleaf_path) || file_exists(NNUE_TDLEAF_BIN);
+
         bool loaded = nnue_load_fc_weights(tdleaf_path);
         if (!loaded)
             loaded = nnue_load_fc_weights(NNUE_TDLEAF_BIN);
         // No weights file found: nnue_diag.tdleaf_loaded stays false; the
         // hint to run --init-nnue is shown on demand by the `netinfo` command
         // rather than printed unconditionally here.
+        //
+        // But a state file that EXISTS and fails to load means an entire
+        // training run is not in memory.  Silently continuing on the base
+        // .nnue would let a run restart from scratch unnoticed, so say so —
+        // and note that a partial load may have overwritten some arrays.
+        if (!loaded && present) {
+            fprintf(stderr,
+                    "TDLeaf: WARNING — a .tdleaf.bin is present but could NOT be loaded "
+                    "(truncated, corrupt, or built for a different .nnue).\n"
+                    "TDLeaf: learned weights are NOT in memory; continuing on the base "
+                    "net.  Do not train on top of this without checking the state file.\n");
+        }
         (void)loaded;
       }
 #endif

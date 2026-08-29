@@ -1,5 +1,70 @@
 Changes since 2017_12_24
 
+2026_08_29b -- Code review of tdleaf.cpp / nnue_training.cpp / selfplay.cpp:
+               four fixes, one of them a state-durability bug.
+
+               1. nnue_save_fc_weights checked NONE of its 42 fwrite calls, did
+               not check fclose, and renamed the temp file over the live
+               .tdleaf.bin unconditionally — then returned true.  rename() is
+               atomic, but atomicity only installs whatever the temp CONTAINS.
+               A write error (disk full during a checkpoint — saves fire every
+               8 games, the file is 263 MB, and a training run writes multi-GB
+               corpora to the same volume) therefore replaced an entire
+               multi-million-game state with a truncated file and logged
+               success.  The 4 MB setvbuf buffer means ENOSPC usually surfaces
+               at fclose, the one call whose result was discarded.
+               Now: ferror(f) + fclose() are both checked, and on failure the
+               temp is removed, the live file is left alone, and false is
+               returned.  Verified against a real 60 MB volume: the pre-existing
+               file survived intact, the temp was cleaned up, and the caller saw
+               the failure.
+
+               1b. main.cpp discarded the load result ((void)loaded), so the
+               corrupt file produced by the above would silently fall back to
+               the base .nnue and restart a run from scratch unnoticed — and a
+               partial load may already have overwritten some live arrays.  Now
+               distinguishes "no state file" (normal, silent) from "state file
+               present but unloadable" (loud warning).  The load path itself was
+               already correct — every fread there is checked.
+
+               2. Step-clip telemetry was dead in the parallel apply path.
+               nnue_apply_gradients_parallel merged the per-thread maxima and
+               clip counts and then zeroed them WITHOUT the
+               #if TDLEAF_LOG_STEP_CLIPS emit block the serial path has, so the
+               merge was dead code and --bt-threads > 1 (train.py's default of 8
+               — i.e. all production offline training) wrote no telemetry at
+               all.  The trap: a TDLEAF_LOG_STEP_CLIPS=1 build made to diagnose
+               step clipping in the batch trainer showed an empty log, which
+               reads as "no clipping".  Emit + reset are now one function
+               (nnue_emit_step_clip_telemetry) called by both paths, so the
+               counters cannot be zeroed without being written first.  Verified:
+               744 lines at --bt-threads 1, 92 KB at --bt-threads 8.
+
+               3. Adam first-moment bias correction was skipped from update 20
+               onward.  With BETA1 = 0.9 the factor 1/(1-B1^t) is still 1.138 at
+               t=20 — a 12% understated step — and 1.044 at t=30.  v_hat was
+               corrected unconditionally, so the asymmetry looks unintended.
+               Counts are PER WEIGHT, so this biased each weight during its own
+               updates 20..50; for rarely touched PSQT / FT rows that is late in
+               a run, not a startup transient.  Threshold raised to 60 (0.18%
+               residual error).  NOTE: this changes training numerics — new runs
+               are not bit-comparable with pre-fix runs.  The online/learner
+               bit-exactness equivalence is unaffected (both use this path).
+
+               4. selfplay.cpp's 3-fold repetition scan had no floor clamp,
+               unlike the equivalent in tdleaf_self_adjudicate.  Safe today
+               (setboard starts each game at T >= 1 with fifty == 0, and fifty
+               grows in step with T), but safe only by an invariant two files
+               away — an EPD reader that ever seeded pos.fifty would turn it
+               into a negative index.  Clamped explicitly.
+
+               Also documented, no behaviour change: the .tdg header's h.gid is
+               written but never read (the learner assigns its own corpus gid),
+               and tdleaf_dump_game's gid packs a 12-bit pid with a 20-bit game
+               counter — added a one-shot warning if that counter wraps past
+               2^20 games in one process, which would silently alias gids and
+               merge games in the trainer's by-game train/val split.
+
 2026_08_29 -- TDLeaf --refresh-scores: refresh the ROOT-side quantities too, not
                just the leaf static.  tdleaf_rebuild_record previously refreshed
                only score_stm, leaving score_root_stm and root_static at actor

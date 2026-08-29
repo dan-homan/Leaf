@@ -179,7 +179,14 @@ static inline float nnue_adam_step(float g, float &m, float &v, uint32_t cnt,
     m = TDLEAF_ADAM_BETA1 * m + (1.0f - TDLEAF_ADAM_BETA1) * g;
     v = TDLEAF_ADAM_BETA2 * v + (1.0f - TDLEAF_ADAM_BETA2) * g * g;
     uint32_t eff_t = cnt + 1;
-    float m_hat = (eff_t >= 20) ? m
+    // Skip the first-moment bias correction only once it is genuinely
+    // negligible.  With BETA1 = 0.9 the correction factor 1/(1-B1^t) is still
+    // 1.138 at t=20 (a 12% understated step) and 1.044 at t=30; it reaches
+    // 1.002 at t=60.  Counts are PER WEIGHT, so a threshold that is too low
+    // biases every weight during its own updates 20..50 — which for rarely
+    // touched PSQT / FT rows can be late in a run, not just at startup.
+    const uint32_t BC1_SKIP_AFTER = 60;
+    float m_hat = (eff_t >= BC1_SKIP_AFTER) ? m
         : m / (1.0f - powf(TDLEAF_ADAM_BETA1, (float)eff_t));
     float v_hat = v / (1.0f - powf(TDLEAF_ADAM_BETA2, (float)eff_t));
     float step  = m_hat / (sqrtf(v_hat) + TDLEAF_ADAM_EPS);
@@ -1073,6 +1080,56 @@ float nnue_clip_gradients(float max_norm)
 }
 
 // ---------------------------------------------------------------------------
+// Step-clip telemetry — write one line per Adam batch to
+// <engine_cfg.exec_path>tdleaf_telemetry.log, then reset the accumulators.
+// Written to a file (not stderr) because cutechess-cli captures engine stderr
+// internally; our telemetry would otherwise be invisible.  Multiple concurrent
+// training engines share the same file path: each opens it in append mode, and
+// Linux guarantees atomic appends up to PIPE_BUF (4 KB), so line granularity
+// is preserved across processes without explicit locking.
+//
+// Single fprintf + fflush per line = one write() syscall.  File handle is
+// cached across calls (reopened lazily on first use).
+// Disabled at compile time with -D TDLEAF_LOG_STEP_CLIPS=0 (the default).
+//
+// MUST be called by BOTH apply paths.  The reset lives here rather than at the
+// call sites so the parallel path cannot zero the counters without emitting
+// them first — which is exactly what it used to do, leaving --bt-threads > 1
+// (i.e. all production offline training) silently producing no telemetry.
+// ---------------------------------------------------------------------------
+static void nnue_emit_step_clip_telemetry()
+{
+#if TDLEAF_LOG_STEP_CLIPS
+    {
+        // engine_cfg is declared in extern.h, already included via the unity build.
+        static FILE *tele_fp = nullptr;
+        if (tele_fp == nullptr) {
+            char path[FILENAME_MAX + 64];
+            snprintf(path, sizeof(path), "%stdleaf_telemetry.log", engine_cfg.exec_path);
+            tele_fp = fopen(path, "a");
+            // If fopen failed (e.g., read-only dir), silently skip — telemetry
+            // is best-effort; the engine must not die over it.
+        }
+        if (tele_fp) {
+            fprintf(tele_fp,
+                    "[tdleaf step-clip] t_adam=%u  max|step| FC=%.2f FT=%.2f FTB=%.2f PSQT=%.2f  "
+                    "clips FC=%llu FT=%llu FTB=%llu PSQT=%llu  (clip=%.1f)\n",
+                    (unsigned)t_adam,
+                    step_max_fc, step_max_ft, step_max_ft_bias, step_max_psqt,
+                    (unsigned long long)step_clips_fc,
+                    (unsigned long long)step_clips_ft,
+                    (unsigned long long)step_clips_ft_bias,
+                    (unsigned long long)step_clips_psqt,
+                    (double)TDLEAF_ADAM_STEP_CLIP);
+            fflush(tele_fp);
+        }
+    }
+#endif
+    step_max_fc = step_max_ft = step_max_ft_bias = step_max_psqt = 0.0f;
+    step_clips_fc = step_clips_ft = step_clips_ft_bias = step_clips_psqt = 0;
+}
+
+// ---------------------------------------------------------------------------
 // nnue_apply_gradients — update FP32 weights from accumulators, increment counts,
 //                        then zero the accumulators.
 // Only weights that received a non-zero gradient this game are updated / counted.
@@ -1310,44 +1367,7 @@ void nnue_apply_gradients(float lr_scale)
                                 std::min( 32767.0f, roundf(ft_biases_f32[d])));
     }
 
-    // Step-clip telemetry — write one line per batch to <engine_cfg.exec_path>tdleaf_telemetry.log.
-    // Written to a file (not stderr) because cutechess-cli captures engine stderr
-    // internally; our telemetry would otherwise be invisible.  Multiple concurrent
-    // training engines share the same file path: each opens it in append mode, and
-    // Linux guarantees atomic appends up to PIPE_BUF (4 KB), so line granularity
-    // is preserved across processes without explicit locking.
-    //
-    // Single fprintf + fflush per line = one write() syscall.  File handle is
-    // cached across calls (reopened lazily on first use).
-    // Disabled at compile time with -D TDLEAF_LOG_STEP_CLIPS=0.
-#if TDLEAF_LOG_STEP_CLIPS
-    {
-        // engine_cfg is declared in extern.h, already included via the unity build.
-        static FILE *tele_fp = nullptr;
-        if (tele_fp == nullptr) {
-            char path[FILENAME_MAX + 64];
-            snprintf(path, sizeof(path), "%stdleaf_telemetry.log", engine_cfg.exec_path);
-            tele_fp = fopen(path, "a");
-            // If fopen failed (e.g., read-only dir), silently skip — telemetry
-            // is best-effort; the engine must not die over it.
-        }
-        if (tele_fp) {
-            fprintf(tele_fp,
-                    "[tdleaf step-clip] t_adam=%u  max|step| FC=%.2f FT=%.2f FTB=%.2f PSQT=%.2f  "
-                    "clips FC=%llu FT=%llu FTB=%llu PSQT=%llu  (clip=%.1f)\n",
-                    (unsigned)t_adam,
-                    step_max_fc, step_max_ft, step_max_ft_bias, step_max_psqt,
-                    (unsigned long long)step_clips_fc,
-                    (unsigned long long)step_clips_ft,
-                    (unsigned long long)step_clips_ft_bias,
-                    (unsigned long long)step_clips_psqt,
-                    (double)TDLEAF_ADAM_STEP_CLIP);
-            fflush(tele_fp);
-        }
-    }
-#endif
-    step_max_fc = step_max_ft = step_max_ft_bias = step_max_psqt = 0.0f;
-    step_clips_fc = step_clips_ft = step_clips_ft_bias = step_clips_psqt = 0;
+    nnue_emit_step_clip_telemetry();
 }
 
 // ===========================================================================
@@ -1546,8 +1566,7 @@ void nnue_apply_gradients_parallel(float lr_scale, int nthreads,
         step_clips_psqt += tclip[t*4+3];
         for (int fi : tapplied[t]) g_applied_ft_rows.push_back(fi);
     }
-    step_max_fc = step_max_ft = step_max_ft_bias = step_max_psqt = 0.0f;
-    step_clips_fc = step_clips_ft = step_clips_ft_bias = step_clips_psqt = 0;
+    nnue_emit_step_clip_telemetry();
 }
 
 // ---------------------------------------------------------------------------
@@ -2029,7 +2048,25 @@ bool nnue_save_fc_weights(const char *path)
 
     // (v12: the v11 PSQT init slot-means block was removed.)
 
-    fclose(f);
+    // ---- Verify the temp file is COMPLETE before installing it -----------
+    // rename() is atomic, but atomicity only guarantees that whatever the temp
+    // file contains gets installed — valid or not.  Renaming a short write over
+    // the live state destroys the entire accumulated run (this file is the only
+    // copy of a multi-million-game chain), and the caller would log success.
+    //
+    // ferror() reports any write error that occurred on the stream, so one
+    // check covers every fwrite above.  fclose() is checked separately because
+    // the 4 MB setvbuf buffer means most data is flushed there — ENOSPC on a
+    // full disk typically surfaces at fclose, not at the fwrite calls.
+    bool write_ok = (ferror(f) == 0);
+    if (fclose(f) != 0) write_ok = false;
+    if (!write_ok) {
+        fprintf(stderr, "TDLeaf: write error on %s (disk full?) — live state at %s "
+                        "left UNCHANGED\n", tmp_path, path);
+        remove(tmp_path);
+        tdleaf_release_lock(lock_fd);
+        return false;
+    }
 
     // Atomic rename: temp → final (replaces the old file in one syscall).
     if (rename(tmp_path, path) != 0) {
