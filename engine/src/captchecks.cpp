@@ -39,6 +39,8 @@ void position::captchecks(move_list *list, int delta_score)
 void position::add_cc(int fsq, int tsq, move_list *list, char type, int delta_score)
 {
 
+  if(list->count >= MAX_MOVES) return;    // bounds guard (see add_move)
+
   int i = list->count;                 // move list index
   int pawn_bonus = 0;
 

@@ -60,6 +60,32 @@ windows, LMR reduction tables) were tuned for the classical eval.  The NNUE eval
 different score distribution and may benefit from re-tuning these constants.  CLOP or
 a self-play tournament with systematic variation would be the appropriate approach.
 
+### Under-promotion move ordering (gauntlet needed)
+
+`moves.cpp` `add_move` scores a queen promotion at 20,000,000 and derives the
+under-promotions from it by subtraction:
+
+```
+    queen   20,000,000
+    rook    20,000,000 - 9,000,050 = 10,999,950
+    bishop  20,000,000 - 9,000,060 = 10,999,940
+    knight  20,000,000 - 9,000,070 = 10,999,930
+```
+
+Captures top out around `10,000,000 + 1000*PTYPE + pawn_bonus` ~= 10,006,000, the
+counter-move is 8,000,000 and the killers are 6,000,000 / 4,000,000 — so **all
+three under-promotions currently sort ahead of every capture, killer and
+counter-move.**  The 50/60/70 offsets deliberately encode the R > B > N
+preference, and the placement is deliberate too (confirmed 2026-08-29), so this
+is NOT a bug — but it has never been measured.
+
+Open question: is ordering R/B/N promotions above all captures actually worth it?
+Knight under-promotions are occasionally decisive (fork/check), but rook and
+bishop under-promotions essentially never are outside of stalemate avoidance.
+An arm that moves the under-promotion band below the capture band (subtract
+~10,000,000 instead of ~9,000,050) is a one-line change and a clean gauntlet
+target.  Judge with a foreign anchor, not a family match.
+
 ---
 
 ## NNUE Infrastructure

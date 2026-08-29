@@ -39,6 +39,8 @@ int position::captures(move_list *list, int delta_score)
 // fsq = from square,  tsq = to square
 int position::add_capt(int fsq, int tsq, move_list *list, char type, int delta_score)
 {
+  if(list->count >= MAX_MOVES) return 0;   // bounds guard (see add_move)
+
   int i = list->count;      // index of move list
 
   // add move to list...

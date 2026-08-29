@@ -55,8 +55,28 @@ int position::verify_move(move_list *list, ts_thread_data *tdata, move tmove)
   else if(PTYPE(sq[tmove.b.from]) == KING)  
     king_moves(list, tmove.b.from, tdata);
 
-  for(int i=0;i<list->count;i++) 
-    if(list->mv[i].m.b.to == tmove.b.to) return 1;
+  // Match on everything that changes how exec_move interprets the move --
+  // from/to/promote and the execution-relevant type bits -- not just `to`.
+  // Matching on `to` alone let a TT-collision move with plausible geometry but
+  // bogus type bits verify successfully, and callers feed the verified move
+  // straight into the PV (search.cpp pc[0][1]) and thence to exec_move, where a
+  // spurious EP bit silently removes the piece behind the destination.  In FRC
+  // this also disambiguates a castle from a plain king move to the same square.
+  //
+  // PAWN_PUSH7 is masked out: it is purely advisory (exec_move never reads it)
+  // and the generators disagree on it -- add_move and add_cc set it, add_capt
+  // does not -- so comparing it would wrongly reject a legitimate hash move that
+  // was stored from a qsearch node.  Every other type bit (CAPTURE, CASTLE, EP,
+  // PAWN_PUSH, PROMOTE) is agreed on by all three generators and is read by
+  // exec_move, so those must match.
+  const uint8_t tmask = (uint8_t)(~PAWN_PUSH7);
+  for(int i=0;i<list->count;i++) {
+    const move &g = list->mv[i].m;
+    if(g.b.from == tmove.b.from && g.b.to == tmove.b.to
+       && g.b.promote == tmove.b.promote
+       && (uint8_t)(g.b.type & tmask) == (uint8_t)(tmove.b.type & tmask))
+      return 1;
+  }
 
 
   return 0;
@@ -68,6 +88,14 @@ int position::verify_move(move_list *list, ts_thread_data *tdata, move tmove)
 // Move is scored for alpha-beta algorithm
 void position::add_move(int fsq, int tsq, move_list *list, char type, ts_thread_data *tdata)
 {
+  // Bounds guard.  The promotion branch below writes FOUR entries (Q/R/B/N), so
+  // reserve that much headroom.  These generators are pseudo-legal when not in
+  // check, so the count can exceed the 218-move legal maximum; the only previous
+  // guard was an assert in search.cpp, which is compiled out (define.h sets
+  // NDEBUG unless DEBUG_ASSERTS=1) and fired after the overwrite anyway.
+  // Dropping a move at the limit is vastly preferable to corrupting memory.
+  if(list->count > MAX_MOVES - 4) return;
+
   int i = list->count;                 // move list index
 
   // add move to list

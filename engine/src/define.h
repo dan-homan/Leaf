@@ -170,7 +170,7 @@
 // maximum game length
 #define MAX_GAME_PLY   1000
 // maximum number of moves in position
-#define MAX_MOVES      220
+#define MAX_MOVES      256       // > max pseudo-legal (the 218 legal max plus king moves into check)
 
 // Color flags
 #define WHITE 1

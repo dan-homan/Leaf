@@ -1192,7 +1192,13 @@ int search_node::pvs(int alpha, int beta, int depth, int in_pv, int move_to_skip
    }
    // avoid repeating a position if possible
    int test_ply = ply;
-   for(int ri = ts->turn+test_ply-3; ri >= ts->turn+test_ply-pos.fifty-1; ri -= 2) {
+   // Floor the scan at 0.  The inner while already guards ri > 0, but the outer
+   // ri -= 2 can step 1 -> -1 whenever the lower bound is negative, indexing
+   // plist[] out of bounds.  Unreachable today only because setboard() zeroes
+   // pos.fifty (game_rec.cpp), so fifty can never exceed the plies played since
+   // the position was set -- an invariant in another file.  Make it explicit.
+   for(int ri = ts->turn+test_ply-3;
+       ri >= MAX(0, ts->turn+test_ply-pos.fifty-1); ri -= 2) {
      // account for IID or singular tests in move sequence
      while(ri > 0 && tdata->plist[ri] == tdata->plist[ri-1]) { ri--; test_ply--; }
      // check code for rep.
@@ -2089,7 +2095,13 @@ int search_node::qsearch(int alpha, int beta, int qply)
     }
    // avoid repeating a position if possible
    int test_ply = ply;
-   for(int ri = ts->turn+test_ply-3; ri >= ts->turn+test_ply-pos.fifty-1; ri -= 2) {
+   // Floor the scan at 0.  The inner while already guards ri > 0, but the outer
+   // ri -= 2 can step 1 -> -1 whenever the lower bound is negative, indexing
+   // plist[] out of bounds.  Unreachable today only because setboard() zeroes
+   // pos.fifty (game_rec.cpp), so fifty can never exceed the plies played since
+   // the position was set -- an invariant in another file.  Make it explicit.
+   for(int ri = ts->turn+test_ply-3;
+       ri >= MAX(0, ts->turn+test_ply-pos.fifty-1); ri -= 2) {
      // account for IID or singular tests in move sequence
      while(ri > 0 && tdata->plist[ri] == tdata->plist[ri-1]) { ri--; test_ply--; }
      // check code for rep.

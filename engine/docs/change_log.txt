@@ -1,5 +1,66 @@
 Changes since 2017_12_24
 
+2026_08_29c -- Code review of search / movegen (search.cpp, swap.cpp, moves.cpp,
+               captures.cpp, captchecks.cpp, attacks.cpp): three fixes.
+
+               1. verify_move matched only the DESTINATION square, ignoring the
+               move's type and promote fields.  It is the sole guard admitting a
+               TT-sourced move into the PV (search.cpp pc[0][1], the two root
+               fail-low/fail-high sites) and the trust gate for TT entries in
+               pvs() and qsearch().  On a Zobrist collision a move with plausible
+               geometry but bogus type bits therefore verified, and callers hand
+               it straight to exec_move — where a spurious EP bit removes the
+               piece behind the destination and SUCCEEDS.  That matters doubly
+               here because pc[0] is what tdleaf_record_ply walks to find the
+               training leaf, so a corrupted PV entry becomes a corrupted label.
+               Now matches from/to/promote plus the execution-relevant type bits.
+               In FRC it additionally disambiguates a castle from a plain king
+               move to the same square.
+
+               PAWN_PUSH7 is deliberately masked out of the comparison: it is
+               purely advisory (exec_move never reads it) and the generators
+               disagree on it — add_move and add_cc set it, add_capt does not —
+               so including it would wrongly reject a legitimate hash move stored
+               from a qsearch node.  A first attempt that compared the full 32-bit
+               move did exactly that and perturbed play (60-game selfplay went
+               +19=28-13 -> +15=25-20); with the mask, 60 games at depth 8
+               reproduce the pre-fix result EXACTLY, confirming the guard now
+               rejects only genuine collisions.
+
+               2. Move-list overflow had no runtime guard.  MAX_MOVES was 220;
+               add_move's promotion branch writes FOUR entries (Q/R/B/N) and
+               add_capt / add_cc one each, none bounds-checked.  The only guard,
+               assert(moves.count < MAX_MOVES) in search.cpp, is compiled out
+               (define.h sets NDEBUG unless DEBUG_ASSERTS=1) and fired after the
+               overwrite regardless.  add_move only filters illegal moves when
+               `check` is set, so out of check these are PSEUDO-legal counts,
+               which exceed the 218-move legal maximum by however many king moves
+               step into attack.  Added bounds guards to all three add_* entry
+               points and raised MAX_MOVES to 256 (move_rec is 8 bytes, so +288
+               bytes per list).  Reachable only from constructed positions, not
+               from FRC/book training openings.
+
+               3. The 3-fold repetition scan in pvs() and qsearch() had no floor
+               clamp: the inner while guards ri > 0, but the outer `ri -= 2` can
+               step 1 -> -1 whenever ts->turn+test_ply-pos.fifty-1 is negative,
+               indexing plist[] out of bounds.  Unreachable today only because
+               setboard() zeroes pos.fifty (game_rec.cpp), so fifty can never
+               exceed the plies played since the position was set — an invariant
+               in another file.  Clamped explicitly in both, matching the same fix
+               made to selfplay.cpp's copy of this loop.
+
+               Reviewed and found correct (recorded so they are not re-flagged):
+               swap()'s `&& lsq` guards (a1 is a corner, nothing can be behind
+               it); attackers[side][0].s being uninitialised but never read
+               (count[side] is pre-incremented to 1); attacked()'s sqr < 48 /
+               sqr > 15 pawn guards (rank-7 and rank-2 squares are unreachable by
+               enemy pawns); every file-wrap guard in the xray scans; and the
+               null-move bookkeeping in pvs().
+
+               Under-promotion move ordering (R/B/N sort above all captures) was
+               reviewed, confirmed deliberate, and left alone — logged in
+               docs/TODO.md as a gauntlet target.
+
 2026_08_29b -- Code review of tdleaf.cpp / nnue_training.cpp / selfplay.cpp:
                four fixes, one of them a state-durability bug.
 
