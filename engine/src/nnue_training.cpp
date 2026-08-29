@@ -161,6 +161,11 @@ static inline float clip_adam_step(float step, float &max_track, uint64_t &clip_
     return step;
 }
 
+// bc1 (beta1=0.9) is skipped only once negligible — see BC1_SKIP_AFTER below.
+// bc2 (beta2=0.999) is ALWAYS applied (0.999^20 ~ 0.98 -> bc2 = 0.02; skipping it
+// would give ~7x oversized steps).  The unit-less step m_hat/sqrt(v_hat) is
+// clipped to TDLEAF_ADAM_STEP_CLIP before the LR multiply.
+//
 // Session-local FT step counter — intentionally NOT persisted.  v_ft_w is zeroed
 // at every startup (too large to persist), so bc2 must be computed relative to the
 // current session's step count, not the global t_adam.  Using min(t_adam, t_ft_session)
@@ -1183,35 +1188,24 @@ void nnue_apply_gradients(float lr_scale)
     const float ft_bias_lr = lr_scale * warmup_factor * TDLEAF_ADAM_FT_BIAS_LR0;
     const float psqt_lr    = lr_scale * warmup_factor * TDLEAF_ADAM_PSQT_LR0;
 
-    // Full Adam step for FC layers and FT biases — per-weight bias correction.
-    // bc1 (beta1=0.9): skipped at cnt>=20 (0.9^20≈0.12 → bc1≈0.88, close to 1).
-    // bc2 (beta2=0.999): ALWAYS applied (0.999^20≈0.98 → bc2=0.02; skipping gives ~7× oversized steps).
-    // The unit-less step m_hat/sqrt(v_hat) is clipped to TDLEAF_ADAM_STEP_CLIP
-    // before the LR multiply to bound the worst-case per-weight update.
-    // lr is passed in so the same routine handles FC weights, FC2 weights,
-    // FC biases, etc. — only the LR differs.
+    // Full Adam step for FC layers, PSQT and FT biases.  These are thin wrappers
+    // over nnue_adam_step (above) — the SINGLE implementation shared with the
+    // parallel apply path — differing only in learning rate and which telemetry
+    // accumulators they feed.
+    //
+    // They used to be three verbatim copies of that routine.  That duplication
+    // was a live trap: raising the bc1 skip threshold from 20 to 60 touched only
+    // nnue_adam_step, so the corrected value reached the offline
+    // --bt-threads > 1 arm while the ONLINE / trajectory-learner arm (which
+    // reaches Adam through this serial function) silently kept the old value —
+    // breaking the serial/parallel bit-identity documented at the parallel
+    // apply, in exactly the direction the fix was written to remove.  Keep these
+    // as delegations; do not re-inline the arithmetic.
     auto do_step = [&](float g, float &m, float &v, uint32_t cnt, float lr) -> float {
-        m = TDLEAF_ADAM_BETA1 * m + (1.0f - TDLEAF_ADAM_BETA1) * g;
-        v = TDLEAF_ADAM_BETA2 * v + (1.0f - TDLEAF_ADAM_BETA2) * g * g;
-        uint32_t eff_t = cnt + 1;
-        float m_hat = (eff_t >= 20) ? m
-            : m / (1.0f - powf(TDLEAF_ADAM_BETA1, (float)eff_t));
-        float v_hat = v / (1.0f - powf(TDLEAF_ADAM_BETA2, (float)eff_t));
-        float step  = m_hat / (sqrtf(v_hat) + TDLEAF_ADAM_EPS);
-        step = clip_adam_step(step, step_max_fc, step_clips_fc);
-        return lr * step;
+        return nnue_adam_step(g, m, v, cnt, lr, step_max_fc, step_clips_fc);
     };
-    // PSQT Adam step — same per-weight BC but uses TDLEAF_ADAM_PSQT_LR0.
     auto do_step_psqt = [&](float g, float &m, float &v, uint32_t cnt) -> float {
-        m = TDLEAF_ADAM_BETA1 * m + (1.0f - TDLEAF_ADAM_BETA1) * g;
-        v = TDLEAF_ADAM_BETA2 * v + (1.0f - TDLEAF_ADAM_BETA2) * g * g;
-        uint32_t eff_t = cnt + 1;
-        float m_hat = (eff_t >= 20) ? m
-            : m / (1.0f - powf(TDLEAF_ADAM_BETA1, (float)eff_t));
-        float v_hat = v / (1.0f - powf(TDLEAF_ADAM_BETA2, (float)eff_t));
-        float step  = m_hat / (sqrtf(v_hat) + TDLEAF_ADAM_EPS);
-        step = clip_adam_step(step, step_max_psqt, step_clips_psqt);
-        return psqt_lr * step;
+        return nnue_adam_step(g, m, v, cnt, psqt_lr, step_max_psqt, step_clips_psqt);
     };
 
     for (int s = 0; s < NNUE_LAYER_STACKS; s++) {
@@ -1347,15 +1341,7 @@ void nnue_apply_gradients(float lr_scale)
     // Without a reduced LR, biases race ahead, suppressing dimensions before the
     // FT weights have learned useful features — the classic dying-ReLU problem.
     auto do_step_ft_bias = [&](float g, float &m, float &v, uint32_t cnt) -> float {
-        m = TDLEAF_ADAM_BETA1 * m + (1.0f - TDLEAF_ADAM_BETA1) * g;
-        v = TDLEAF_ADAM_BETA2 * v + (1.0f - TDLEAF_ADAM_BETA2) * g * g;
-        uint32_t eff_t = cnt + 1;
-        float m_hat = (eff_t >= 20) ? m
-            : m / (1.0f - powf(TDLEAF_ADAM_BETA1, (float)eff_t));
-        float v_hat = v / (1.0f - powf(TDLEAF_ADAM_BETA2, (float)eff_t));
-        float step  = m_hat / (sqrtf(v_hat) + TDLEAF_ADAM_EPS);
-        step = clip_adam_step(step, step_max_ft_bias, step_clips_ft_bias);
-        return ft_bias_lr * step;
+        return nnue_adam_step(g, m, v, cnt, ft_bias_lr, step_max_ft_bias, step_clips_ft_bias);
     };
     for (int d = 0; d < NNUE_HALF_DIMS; d++) {
         if (grad_ft_bias[d] == 0.0f) continue;

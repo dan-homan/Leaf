@@ -1,5 +1,48 @@
 Changes since 2017_12_24
 
+2026_08_29e -- Fix an INCOMPLETE fix: the 2026_08_29b Adam bias-correction change
+               reached only the parallel apply path.  Found by cloud code review.
+
+               Raising the bc1 skip threshold 20 -> 60 edited nnue_adam_step,
+               which is called ONLY from nnue_apply_gradients_parallel.  The
+               serial nnue_apply_gradients carried three verbatim COPIES of the
+               same arithmetic as local lambdas (do_step, do_step_psqt,
+               do_step_ft_bias), each still hard-coding `eff_t >= 20`.  Those
+               copies are what the ONLINE arm runs: tdleaf_update_after_game and
+               tdleaf_flush_batch (so also the --learn-stream trajectory learner,
+               the sole .tdleaf.bin writer in the actor/learner recipe), plus
+               --batch-train --bt-threads 1.
+
+               So the corrected value reached offline --bt-threads > 1 while the
+               online arm — named in 2026_08_29b as the motivation, since
+               per-weight counts put rarely-touched PSQT/FT rows in the 20..59
+               window late in a run — kept the old 12%-at-t=20 understated step.
+               It also silently broke the serial/parallel bit-identity asserted
+               in the comment on the parallel apply.
+
+               Fixed by DELETING the duplication rather than patching the
+               constant in three more places: the three lambdas are now one-line
+               delegations to nnue_adam_step, so there is a single implementation
+               and the identity is structural instead of two copies happening to
+               agree.  Comments updated; a note warns against re-inlining.
+
+               Verified with a corpus run at fresh per-weight counts (an existing
+               mature .tdleaf.bin has counts far past 60, so the window is never
+               entered and the bug is invisible — the first attempt at this test
+               showed all four arms identical for exactly that reason):
+
+                                  threads=1        threads=8
+                   pre-fix        0.018458         0.018453     <- serial != parallel
+                   post-fix       0.018452         0.018453     <- agree to 1e-6
+
+               threads=8 is byte-identical before and after (the already-correct
+               path is untouched); threads=1 changed (the fix now reaches the
+               online arm); the residual 1e-6 is gradient-summation order for
+               1 vs 8 workers, unrelated to bc1.
+
+               NOTE: this changes online training numerics again — runs from
+               before this commit are not bit-comparable with runs after it.
+
 2026_08_29d -- Code review of hash.cpp / smp.cpp: two fixes.
 
                1. The lock-less hash verification (Hyatt/Mann) was defeated
