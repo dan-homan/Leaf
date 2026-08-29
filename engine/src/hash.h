@@ -33,12 +33,31 @@ struct hash_rec
   char hr_depth;   // note that stored depths cannot be larger than 127
   unsigned char hr_data;  // first 5 bits = id, next 2 = flag, next 1 = mate_ext
   
-  // lock-less hashing of hash key
+  // Lock-less hashing (Hyatt/Mann): store key ^ packed(data), so a torn read is
+  // caught when get_key() fails to reproduce the probe key.
+  //
+  // Each field is cast to its UNSIGNED width before widening to h_code.  A
+  // signed field would sign-extend to 64 bits and set every higher bit, so the
+  // fields OR-ed in above it would land on bits that are already 1 and
+  // contribute nothing -- leaving torn writes in them undetectable.  That is
+  // the common case, not an edge case: roughly half of all stored scores are
+  // negative, and depth -2 is both this table's initial value and what
+  // put_move() writes.  (At score == -1 the mask degenerated to all ones, i.e.
+  // the stored key stopped depending on the data at all.)
+  //
+  // Field layout, disjoint by construction: score 0..15, data 16..23,
+  // depth 24..31, move 32..63.
   inline void set_key(h_code uncoded_key,int16_t sc, unsigned char dat, char dep, int32_t hmove_t) {
-    hr_key = uncoded_key^(h_code(sc)|(h_code(dat)<<16)|(h_code(dep)<<24)|(h_code(hmove_t)<<32));
+    hr_key = uncoded_key^((h_code)(uint16_t)sc
+                         |((h_code)(uint8_t)dat<<16)
+                         |((h_code)(uint8_t)dep<<24)
+                         |((h_code)(uint32_t)hmove_t<<32));
   }
   inline h_code get_key() {
-    return (hr_key^(h_code(hr_score)|(h_code(hr_data)<<16)|(h_code(hr_depth)<<24)|(h_code(hr_hmove.t)<<32)));
+    return (hr_key^((h_code)(uint16_t)hr_score
+                   |((h_code)(uint8_t)hr_data<<16)
+                   |((h_code)(uint8_t)hr_depth<<24)
+                   |((h_code)(uint32_t)hr_hmove.t<<32)));
   }
 
 };
@@ -70,12 +89,20 @@ struct pawn_rec
 
   pawn_data data;
 
-  // lock-less hashing of hash key
+  // Lock-less hashing -- see hash_rec above on the unsigned casts.
+  //
+  // The two 64-bit bitboards are XOR-mixed rather than OR-ed: OR-ing two full
+  // 64-bit values makes them overlap completely and throws away most of their
+  // information (any pair with the same OR is indistinguishable).  WHITE's board
+  // is rotated by 32 first so that swapping the two boards changes the result.
+  // Coverage is unchanged from before: score + both attack bitboards.  The byte
+  // fields (open / half-open files, passed masks) are still not covered.
   inline void set_key(h_code uncoded_key,int16_t sc, uint64_t bpa, uint64_t wpa) {
-    key = uncoded_key^(h_code(sc)|h_code(bpa)|h_code(wpa));
+    key = uncoded_key^(h_code)(uint16_t)sc^bpa^((wpa<<32)|(wpa>>32));
   }
   inline h_code get_key() {
-    return (key^(h_code(data.score)|(h_code(data.pawn_attacks[BLACK]))|(h_code(data.pawn_attacks[WHITE]))));
+    return (key^(h_code)(uint16_t)data.score^data.pawn_attacks[BLACK]
+               ^((data.pawn_attacks[WHITE]<<32)|(data.pawn_attacks[WHITE]>>32)));
   }
 };
 
@@ -88,12 +115,17 @@ struct score_rec
 
   int32_t padding1;
 
-  // lock-less hashing of hash key
+  // Lock-less hashing -- see hash_rec above on the unsigned casts.
+  // Field layout: score 0..15, qchecks[0] 16..23, qchecks[1] 24..31.
   inline void set_key(h_code uncoded_key,int16_t sc, char qc0, char qc1) {
-    key = uncoded_key^(h_code(sc)|(h_code(qc0)<<16)|(h_code(qc1)<<24));
+    key = uncoded_key^((h_code)(uint16_t)sc
+                      |((h_code)(uint8_t)qc0<<16)
+                      |((h_code)(uint8_t)qc1<<24));
   }
   inline h_code get_key() {
-    return (key^(h_code(score)|(h_code(qchecks[0])<<16)|(h_code(qchecks[1])<<24)));
+    return (key^((h_code)(uint16_t)score
+                |((h_code)(uint8_t)qchecks[0]<<16)
+                |((h_code)(uint8_t)qchecks[1]<<24)));
   }
 };
 
@@ -111,18 +143,21 @@ struct cmove_rec
   char padding2;
   int16_t padding3;
 
-  // lock-less hashing of hash key
+  // Lock-less hashing -- see hash_rec above on the unsigned casts.  depth1/depth2
+  // initialise to -2, which under the old signed widening flooded bits 32..63 and
+  // erased the move's contribution entirely.
+  // Field layout: move 0..31, depth 32..39.
   inline void set_key1(h_code uncoded_key,int32_t mv, char depth) {
-    key1 = uncoded_key^(h_code(mv)|(h_code(depth)<<32));
+    key1 = uncoded_key^((h_code)(uint32_t)mv|((h_code)(uint8_t)depth<<32));
   }
   inline h_code get_key1() {
-    return (key1^(h_code(move1)|(h_code(depth1)<<32)));
+    return (key1^((h_code)(uint32_t)move1|((h_code)(uint8_t)depth1<<32)));
   }
   inline void set_key2(h_code uncoded_key,int32_t mv, char depth) {
-    key2 = uncoded_key^(h_code(mv)|(h_code(depth)<<32));
+    key2 = uncoded_key^((h_code)(uint32_t)mv|((h_code)(uint8_t)depth<<32));
   }
   inline h_code get_key2() {
-    return (key2^(h_code(move2)|(h_code(depth2)<<32)));
+    return (key2^((h_code)(uint32_t)move2|((h_code)(uint8_t)depth2<<32)));
   }
 };
 

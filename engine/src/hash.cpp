@@ -31,9 +31,33 @@
 
 #include <assert.h>
 #include <cstdlib>
+#include <cstdio>
 
 // Round n up to the next multiple of 64 for aligned_alloc()
 static inline size_t align64(size_t n) { return (n + 63ULL) & ~63ULL; }
+
+//--------------------------------------------------------------
+// Checked allocation for the hash tables.  aligned_alloc's result was
+// previously used unchecked and dereferenced immediately by the init loop
+// below, so an allocation failure was a NULL write rather than a diagnosable
+// error.  That matters because set_hash_size() -> close_hash() + open_hash()
+// runs once PER GAME from selfplay_new_game_reset(), so a 50k-game training
+// run repeats it 50,000 times; a single transient failure would take the actor
+// down with a segfault and no explanation.  An oversized `hash` value from the
+// user reaches the same path.
+//--------------------------------------------------------------
+static void *hash_alloc(size_t bytes, const char *what)
+{
+  void *p = aligned_alloc(64, align64(bytes));
+  if(!p) {
+    fprintf(stderr,
+            "FATAL: could not allocate %.1f MB for the %s table.\n"
+            "       Reduce the hash size and retry.\n",
+            double(bytes)/1048576.0, what);
+    exit(EXIT_FAILURE);
+  }
+  return p;
+}
 
 //--------------------------------------------
 // Function to set the hash table size 
@@ -80,7 +104,7 @@ void set_hash_size(unsigned int Mbytes)
 //--------------------------------------------
 void open_hash()
 {
- hash_table = (hash_bucket*)aligned_alloc(64, align64(TAB_SIZE * sizeof(hash_bucket)));
+ hash_table = (hash_bucket*)hash_alloc(TAB_SIZE * sizeof(hash_bucket), "main hash");
  // initialize key values in table
  hash_bucket *h;
  for(uintptr_t i = 0; i < TAB_SIZE; i++) {
@@ -93,7 +117,7 @@ void open_hash()
      h->rec[j].hr_data = 0;
    }
  }
- pawn_table = (pawn_rec*)aligned_alloc(64, align64(PAWN_SIZE * sizeof(pawn_rec)));
+ pawn_table = (pawn_rec*)hash_alloc(PAWN_SIZE * sizeof(pawn_rec), "pawn hash");
  pawn_rec *p;
  for(uintptr_t i = 0; i < PAWN_SIZE; i++) {
    p = pawn_table+i;
@@ -108,7 +132,7 @@ void open_hash()
    p->data.passed_b = 0;
    p->data.padding1 = 0;
  }
- score_table = (score_rec*)aligned_alloc(64, align64(SCORE_SIZE * sizeof(score_rec)));
+ score_table = (score_rec*)hash_alloc(SCORE_SIZE * sizeof(score_rec), "score hash");
  score_rec *s;
  for(uintptr_t i = 0; i < SCORE_SIZE; i++) {
    s = score_table+i;
@@ -118,7 +142,7 @@ void open_hash()
    s->qchecks[1] = 0;
    s->padding1 = 0;
  }
- cmove_table = (cmove_rec*)aligned_alloc(64, align64(CMOVE_SIZE * sizeof(cmove_rec)));
+ cmove_table = (cmove_rec*)hash_alloc(CMOVE_SIZE * sizeof(cmove_rec), "combination-move");
  cmove_rec *c;
  for(uintptr_t i = 0; i < CMOVE_SIZE; i++) {
    c = cmove_table+i;
@@ -142,10 +166,13 @@ void open_hash()
 //--------------------------------------------
 void close_hash()
 {
- free(hash_table);
- free(pawn_table);
- free(score_table);
- free(cmove_table);
+ // Null after free: close_hash() runs immediately before every open_hash(), and
+ // leaving dangling pointers behind means any failure between the two turns a
+ // later free() into a double free.
+ free(hash_table);  hash_table  = nullptr;
+ free(pawn_table);  pawn_table  = nullptr;
+ free(score_table); score_table = nullptr;
+ free(cmove_table); cmove_table = nullptr;
 }
 
 

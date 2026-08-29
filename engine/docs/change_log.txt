@@ -1,5 +1,79 @@
 Changes since 2017_12_24
 
+2026_08_29d -- Code review of hash.cpp / smp.cpp: two fixes.
+
+               1. The lock-less hash verification (Hyatt/Mann) was defeated
+               whenever a stored field was negative -- in ALL FOUR record types.
+               The packing widened each field with a SIGNED cast:
+
+                 hr_key = key ^ (h_code(sc)|(h_code(dat)<<16)
+                                |(h_code(dep)<<24)|(h_code(hmove_t)<<32))
+
+               A negative value sign-extends to 64 bits and sets every higher
+               bit, so each field OR-ed in above it lands on bits that are
+               already 1 and contributes nothing.  Measured:
+
+                 score=   100 -> mask=0000303909030064   (fields disjoint, OK)
+                 score=    -1 -> mask=ffffffffffffffff   (key independent of ALL data)
+                 score=-21000 -> mask=ffffffffffffadf8
+
+               Two entries differing in data, depth AND move produce a
+               byte-identical lock-less key once the score is negative, so the
+               torn write the scheme exists to catch goes undetected.  set_key
+               and get_key shared the defect, so it never produced FALSE
+               mismatches -- it simply stopped detecting real ones.  The trigger
+               is the common case, not an edge: roughly half of all stored scores
+               are negative, and depth -2 is both the table's initial value and
+               what put_move() writes (which erased the hash move's contribution
+               in hash_rec and cmove_rec alike).  This is load-bearing under lazy
+               SMP -- smp.cpp runs N threads through root_pvs() on these shared
+               tables.
+
+               Each field is now cast to its unsigned width before widening, so
+               the layouts are disjoint by construction: hash_rec score 0..15,
+               data 16..23, depth 24..31, move 32..63; score_rec score 0..15,
+               qchecks 16..31; cmove_rec move 0..31, depth 32..39.
+
+               pawn_rec was worse: it OR-ed two FULL 64-bit bitboards with no
+               shifts (sc|bpa|wpa), so they overlapped completely and most of
+               their information was discarded even for positive values.  Now
+               XOR-mixed with WHITE's board rotated by 32 so that swapping the
+               two boards changes the result.  Coverage is unchanged (score +
+               both attack bitboards); the byte fields are still not covered.
+
+               Verified: single-threaded selfplay (60 games, d8) is byte-for-byte
+               identical before and after -- as expected, since set_key/get_key
+               changed together and only the DETECTION of torn writes improves.
+               4-thread selfplay stable, 0 errors.
+
+               2. open_hash() used aligned_alloc's result unchecked and
+               dereferenced it immediately in the init loop, so an allocation
+               failure was a NULL write rather than a diagnosable error.  This
+               path runs once PER GAME via set_hash_size() from
+               selfplay_new_game_reset(), so a 50k-game training run repeats it
+               50,000 times.  All four tables now allocate through a checked
+               helper that names the table and the size before exiting, and
+               close_hash() nulls the pointers so a failure between close and
+               reopen cannot turn a later free() into a double free.
+
+               CAVEAT on reach: macOS reserves address space lazily, so
+               aligned_alloc returns non-NULL even for a 16 TB request (measured)
+               -- the check will not convert an oversized `hash` value into a
+               clean error there; that would need an explicit upper bound on the
+               requested size, which was NOT added.  The check does its job where
+               the allocator genuinely fails (no overcommit, cgroup/ENOMEM,
+               address-space exhaustion).
+
+               Reviewed, not changed: `int done` and the other cross-thread flags
+               are neither volatile nor atomic (formally a data race; works in
+               practice because SEARCH_INTERRUPT_CHECK calls non-inlined code that
+               forces a reload).  PTHREAD_CANCEL_ASYNCHRONOUS in smp.cpp is safe
+               only because close_extra_threads() is confined to the tree_search
+               destructor -- do not wire it to a runtime `cores` change.  The
+               per-game 96 MB hash free/alloc/touch in selfplay is a real cost
+               that the existing 5-bit h_id generation counter could replace, but
+               that changes search behaviour and needs measuring.
+
 2026_08_29c -- Code review of search / movegen (search.cpp, swap.cpp, moves.cpp,
                captures.cpp, captchecks.cpp, attacks.cpp): three fixes.
 
