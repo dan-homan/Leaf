@@ -55,7 +55,11 @@ Binary naming: `run/Leaf_v<version>` — e.g. `Leaf_v2026_03_09a`, `Leaf_vtrain_
 | `NNUE_NET=<file>` | Override default network file (`nn-leaf-260414.nnue`) |
 | `NNUE_EMBED=1` | Embed the `.nnue` file into the binary via incbin (requires `NNUE=1` and `NNUE_NET=<file>`). The net file must exist in `run/` or the current directory at compile time. At runtime, no external `.nnue` file is needed. |
 | `OVERWRITE` | Skip overwrite prompt |
-| `NATIVE=1` | Compile with `-march=native -mtune=native` (max perf, non-portable). Default uses `-march=x86-64-v3` (AVX2, portable across Intel Haswell+ and AMD Zen 1+). |
+| `NATIVE=1` | Tune for the build machine (`-march=native`, or `-mcpu=native` on arm64). Fast but **non-portable — never use for a distributed binary**. Default is portable: `-march=x86-64-v3` on x86-64 targets, and untuned on macOS (measured identical in NPS and node count on Apple Silicon) |
+| `CXX=<compiler>` | Compiler to invoke (default `g++`). Set to a cross compiler, e.g. `CXX=x86_64-w64-mingw32-g++` |
+| `WINDOWS=1` | Target Windows: appends `.exe`, defines `MINGW=1`, links `-static` (one self-contained exe, no MinGW DLLs). Auto-detected when building under MSYS2/Cygwin |
+| `STATIC=1` | Static-link libstdc++/libgcc (Linux; implied on Windows) so release binaries run on older distros |
+| `MACOS_MIN=<ver>` | macOS deployment target (default `11.0`, the first macOS with Apple Silicon). **Do not remove the default** — without it clang stamps the binary with the build host's OS version and it refuses to launch on anything older |
 | `KNOWLEDGE=<N>` | Set compile-time default for `chess_skill` / `game.knowledge_scale` (1-100, default 100 = full strength).  Equivalent to setting the Skill slider to `N` at runtime; useful for building binaries pinned to a strength level for automated testing. |
 
 The `.nnue` network file and `.tdleaf.bin` weights file must reside in the same directory as the binary (unless `NNUE_EMBED=1` was used, in which case no external `.nnue` file is needed).

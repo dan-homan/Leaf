@@ -146,8 +146,24 @@ perl comp.pl <version> NNUE=1 OVERWRITE
 | `TDLEAF_READONLY=1` | Load trained weights but skip updates |
 | `MATERIAL_ONLY=1` | `score_pos()` returns raw material balance only |
 | `OVERWRITE` | Skip overwrite prompt |
-| `NATIVE=1` | `-march=native` (max perf, non-portable); default is `-march=x86-64-v3` |
+| `NATIVE=1` | Tune for the build machine (`-march=native`, or `-mcpu=native` on arm64). Fast but **non-portable — never use for a distributed binary**. Default is portable: `-march=x86-64-v3` on x86-64 targets, and untuned on macOS (measured identical in NPS and node count on Apple Silicon) |
+| `CXX=<compiler>` | Compiler to invoke (default `g++`). Set to a cross compiler, e.g. `CXX=x86_64-w64-mingw32-g++` |
+| `WINDOWS=1` | Target Windows: appends `.exe`, defines `MINGW=1`, links `-static` (one self-contained exe, no MinGW DLLs). Auto-detected when building under MSYS2/Cygwin |
+| `STATIC=1` | Static-link libstdc++/libgcc (Linux; implied on Windows) so release binaries run on older distros |
+| `MACOS_MIN=<ver>` | macOS deployment target (default `11.0`, the first macOS with Apple Silicon). **Do not remove the default** — without it clang stamps the binary with the build host's OS version and it refuses to launch on anything older |
 | `KNOWLEDGE=<N>` | Compile-time default for the Skill level (1–100, default 100 = full strength) |
+
+Builds are **portable by default** — the flags above only need changing to cross-compile
+or to deliberately trade portability for speed on a machine you control.
+
+```sh
+# Portable Linux x86-64 release binary
+perl comp.pl 1.0 NNUE=1 NNUE_EMBED=1 NNUE_NET=<net>.nnue STATIC=1
+
+# Windows x86-64, cross-compiled from macOS or Linux with MinGW-w64
+perl comp.pl 1.0 NNUE=1 NNUE_EMBED=1 NNUE_NET=<net>.nnue \
+    WINDOWS=1 CXX=x86_64-w64-mingw32-g++
+```
 
 The network file must be in the same directory as the binary (unless `NNUE_EMBED=1`).  The opening book (`main_bk.dat`) must also be present.
 

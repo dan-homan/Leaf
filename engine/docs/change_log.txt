@@ -1,5 +1,51 @@
 Changes since 2017_12_24
 
+2026_08_30c -- comp.pl: portable-by-default builds, cross-compilation support, and
+               a compile-failure exit code.  Prep for the 1.0 multi-platform
+               release (Mac arm64 / Linux x86-64 / Windows x86-64).
+
+               RELEASE BLOCKER FIXED.  macOS builds carried no deployment target,
+               so clang stamped each binary with the BUILD HOST's OS version --
+               "minos 26.0" here.  A released binary would have refused to launch
+               on any older macOS, with an unhelpful OS-level error, and the fault
+               is invisible locally because the build host always satisfies its own
+               stamp.  Now passes -mmacosx-version-min=11.0 (first macOS with Apple
+               Silicon); overridable with MACOS_MIN=<ver>.  Verified: minos 11.0.
+
+               Dropped -march=native -mtune=native from the macOS default.  It was
+               tuning every build to the build machine for no gain: measured three
+               builds on a fixed-time search and got IDENTICAL node counts
+               (6 271 365) with NPS differences inside run-to-run noise (1.548M /
+               1.545M / 1.552M).  On Apple clang arm64 -march=native appears inert.
+               NATIVE=1 still opts in, and now emits the correct arm64 spelling
+               (-mcpu=native) rather than the x86 one.
+
+               New build-system arguments, all consumed by comp.pl rather than
+               forwarded to the compiler: CXX=<compiler> (cross compilers),
+               WINDOWS=1 (.exe suffix, -D MINGW=1, -static, and target-correct ISA
+               flags even when cross-compiling from an arm64 Mac; also auto-detected
+               under MSYS2/Cygwin), STATIC=1 (-static-libstdc++ -static-libgcc for
+               Linux binaries that must run on older distros), MACOS_MIN=<ver>.
+               ARM Linux targets no longer receive x86 flags.
+
+               Two incidental bugs found while editing:
+               - NATIVE=1 fell through to the catch-all branch and was ALSO passed
+                 as a dead "-D NATIVE=1".  CXX= would have been mangled the same way
+                 (-D CXX=... ) had it not been consumed explicitly.
+               - comp.pl never checked the compiler's exit status, so a FAILED
+                 compile exited 0.  bundle_engine.sh runs under `set -e` but would
+                 not have caught it: with a binary of the same name left over from
+                 an earlier build, cp succeeds and a STALE engine gets shipped.  Now
+                 dies with the compiler's exit code (verified: exit 2) and says so.
+
+               Verified: default macOS build minos 11.0, arm64, links only libc++
+               and libSystem; TDLEAF training build compiles and starts with the
+               correct config banner; NNUE_EMBED build via build_release.sh produces
+               a working app whose bundled engine matches the reference binary
+               exactly (same 6 271 365 nodes, 1.55M nps) and now carries minos 11.0;
+               WINDOWS=1 emits the right command line and fails cleanly when no
+               MinGW compiler is installed.
+
 2026_08_30b -- GUI cross-platform portability fixes (ahead of need: 1.0 ships the
                GUI for macOS only, but these are prerequisites for any later
                Windows/Linux GUI and are cheap to verify on macOS today).
