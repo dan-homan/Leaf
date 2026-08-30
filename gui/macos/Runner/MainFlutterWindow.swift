@@ -23,30 +23,10 @@ class MainFlutterWindow: NSWindow {
     self.setFrame(NSRect(x: x, y: y, width: width, height: height), display: true)
     self.minSize = NSSize(width: 900, height: 600)
 
+    // File picking is handled by the file_selector plugin (registered above),
+    // which works on macOS, Windows and Linux.  This used to be a hand-rolled
+    // NSOpenPanel MethodChannel, which made the Browse button macOS-only.
     RegisterGeneratedPlugins(registry: flutterViewController)
-
-    let channel = FlutterMethodChannel(
-      name: "leaf_gui/file_picker",
-      binaryMessenger: flutterViewController.engine.binaryMessenger
-    )
-    channel.setMethodCallHandler { (call, result) in
-      if call.method == "pickFile" {
-        DispatchQueue.main.async {
-          let panel = NSOpenPanel()
-          panel.canChooseFiles = true
-          panel.canChooseDirectories = false
-          panel.allowsMultipleSelection = false
-          panel.title = "Select engine executable"
-          if panel.runModal() == .OK, let url = panel.url {
-            result(url.path)
-          } else {
-            result(nil)
-          }
-        }
-      } else {
-        result(FlutterMethodNotImplemented)
-      }
-    }
 
     super.awakeFromNib()
   }

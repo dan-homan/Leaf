@@ -43,9 +43,20 @@ class EngineRegistry {
 
   List<RegisteredEngine> get engines => List.unmodifiable(_engines);
 
+  /// Home directory for the engine registry.
+  ///
+  /// `HOME` is not set on Windows, where the equivalents are `USERPROFILE` and
+  /// `APPDATA`; without this fallback the registry silently landed in whatever
+  /// the current working directory happened to be.  Unix keeps using `HOME` so
+  /// existing `~/.leafgui/engines.json` files are found unchanged.
+  static String get _homeDir =>
+      Platform.environment['HOME'] ??
+      Platform.environment['USERPROFILE'] ??
+      Platform.environment['APPDATA'] ??
+      Directory.current.path;
+
   static File get _file {
-    final home = Platform.environment['HOME'] ?? '.';
-    final dir = Directory(p.join(home, '.leafgui'));
+    final dir = Directory(p.join(_homeDir, '.leafgui'));
     if (!dir.existsSync()) dir.createSync(recursive: true);
     return File(p.join(dir.path, 'engines.json'));
   }

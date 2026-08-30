@@ -86,7 +86,11 @@ UCI protocol over stdin/stdout pipes. `UciEngine` class spawns the engine proces
 `UCI_AnalyseMode` is set true on entering analysis (and on `loadFen`, which enters analysis and starts an infinite search), false on exit and at new-game init.
 
 ### Engine Registry & Picker
-`EngineRegistry` (singleton) persists known engines to `~/.leafgui/engines.json`. Engines are auto-registered after a successful UCI handshake. The `EnginePicker` widget provides a dropdown of registered engines plus a browse button using a native macOS file picker (via `MethodChannel('leaf_gui/file_picker')` → `NSOpenPanel` in `MainFlutterWindow.swift`).
+`EngineRegistry` (singleton) persists known engines to `~/.leafgui/engines.json`. Engines are auto-registered after a successful UCI handshake. The `EnginePicker` widget provides a dropdown of registered engines plus a browse button using the **`file_selector`** plugin (`openFile()`), which works on macOS, Windows and Linux.
+
+**Two portability rules, both fixed 2026-08-30 — don't regress them:**
+- The browse button used to be a hand-rolled `MethodChannel('leaf_gui/file_picker')` → `NSOpenPanel` in `MainFlutterWindow.swift`. That threw `MissingPluginException` off macOS. The Swift handler is deleted; use `file_selector`.
+- `EngineRegistry._homeDir` falls back `HOME` → `USERPROFILE` → `APPDATA` → cwd. `HOME` is unset on Windows, where the registry would otherwise land in the current working directory.
 
 ### Engine vs Engine Mode
 `GameMode.engineVsEngine` runs two engines: engine 1 (white) via `engineProvider`, engine 2 (black) via `engine2Provider`. Each has its own config, info, state, skill level, and name providers. A 5-second watchdog timer (`_eveWatchdog`) detects stalls where an engine goes idle unexpectedly and nudges it with a `sync()` + `go` command. The `_ignoreNextBestMove` / `_ignoreNextBestMove2` flags prevent stale bestmove responses from being applied after a `stop` command. A monotonic `_gameId` counter guards against stale async init callbacks across game boundaries.
@@ -130,7 +134,7 @@ Move SAN notation: `game.history[i].meta?.moveMeta?.formatted` (NOT `meta?.forma
 
 ## Current State (MVP / Tier 1)
 
-Working: board display, piece movement, engine communication, new game dialog, Chess960, time controls (game+inc, fixed time, fixed depth), clocks, move list with navigation (back/forward/jump), engine output (dual display in engine-vs-engine, white-POV eval), FEN copy/load, undo, ponder support (setting mirrored to the engine's Ponder option), engine-vs-engine mode with watchdog recovery, engine registry with persistent storage, engine picker UI with native file browser, engine names displayed on board clocks, skill level per engine, UCI_Chess960 support, UCI_AnalyseMode, full move-history position commands (engine repetition detection), bundled engine distribution (embedded NNUE net via `bundle_engine.sh`).
+Working: board display, piece movement, engine communication, new game dialog, Chess960, time controls (game+inc, fixed time, fixed depth), clocks, move list with navigation (back/forward/jump), engine output (dual display in engine-vs-engine, white-POV eval), FEN copy/load, undo, ponder support (setting mirrored to the engine's Ponder option), engine-vs-engine mode with watchdog recovery, engine registry with persistent storage, engine picker UI with a cross-platform file browser, engine names displayed on board clocks, skill level per engine, UCI_Chess960 support, UCI_AnalyseMode, full move-history position commands (engine repetition detection), bundled engine distribution (embedded NNUE net via `bundle_engine.sh`).
 
 ## TODO
 

@@ -6,8 +6,8 @@
 // Software Foundation, either version 3 of the License, or (at your option)
 // any later version.  See the LICENSE file at the root of this repository.
 
+import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import '../../services/engine_registry.dart';
 
 /// Reusable engine picker: dropdown of registered engines + browse button.
@@ -85,10 +85,13 @@ class EnginePicker extends StatelessWidget {
               tooltip: 'Browse...',
               constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
               onPressed: () async {
-                const channel = MethodChannel('leaf_gui/file_picker');
-                final path =
-                    await channel.invokeMethod<String>('pickFile');
-                if (path != null) onChanged(path);
+                // file_selector works on macOS, Windows and Linux.  No type
+                // filter: engine executables usually have no extension on
+                // Unix, and .exe on Windows.
+                final file = await openFile(
+                  confirmButtonText: 'Select',
+                );
+                if (file != null) onChanged(file.path);
               },
             ),
           ],

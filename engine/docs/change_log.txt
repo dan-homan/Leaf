@@ -1,5 +1,45 @@
 Changes since 2017_12_24
 
+2026_08_30b -- GUI cross-platform portability fixes (ahead of need: 1.0 ships the
+               GUI for macOS only, but these are prerequisites for any later
+               Windows/Linux GUI and are cheap to verify on macOS today).
+
+               1. File picker.  The Browse button in engine_picker.dart called
+               MethodChannel('leaf_gui/file_picker'), implemented as NSOpenPanel in
+               MainFlutterWindow.swift -- macOS-only, and off macOS it would throw
+               MissingPluginException.  Since choosing an engine binary is how the
+               app is used, that is a hard break, not a cosmetic one.  Replaced with
+               the file_selector plugin (openFile()), which has macOS, Windows and
+               Linux implementations; the Swift MethodChannel handler is deleted.
+
+               2. Engine registry path.  engine_registry.dart used
+               Platform.environment['HOME'] ?? '.', and HOME is unset on Windows, so
+               the registry would have silently landed in the current working
+               directory.  Now falls back HOME -> USERPROFILE -> APPDATA -> cwd.
+               Unix keeps using HOME, so existing ~/.leafgui/engines.json files are
+               found unchanged (no migration needed) -- this is why path_provider
+               was NOT used, despite being the more idiomatic choice: it would have
+               relocated the registry on macOS and orphaned existing ones.
+
+               Knock-on: file_selector is the project's FIRST plugin with native
+               macOS code, which made the build need a package manager.  Flutter
+               reported "All plugins found for macos are Swift Packages, but your
+               project still has CocoaPods integration", then failed because
+               CocoaPods is not installed.  Rather than add a Ruby gem to the
+               release path, removed the (entirely vestigial) CocoaPods integration
+               as Flutter itself recommends: deleted macos/Podfile and the two
+               "#include? Pods-Runner" lines from Flutter-Debug/Release.xcconfig.
+               No pod deintegrate was needed -- project.pbxproj had zero CocoaPods
+               references and macos/Pods/ never existed, i.e. pod install had never
+               been run.  Plugins now resolve via Swift Package Manager, which needs
+               no extra tooling.
+
+               Verified: flutter analyze clean, flutter test 3/3 passing,
+               ./scripts/build_release.sh builds a working 77 MB app, 204
+               FileSelectorPlugin symbols linked into the Runner binary, and the app
+               launches and stays running.  NOT verified: the file dialog itself,
+               which needs a human to click Browse -- do that before tagging 1.0.
+
 2026_08_30a -- Documentation accuracy pass ahead of an engine + GUI release.  No
                code changes.
 

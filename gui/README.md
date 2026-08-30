@@ -17,7 +17,7 @@ LeafGUI supports standard chess and Fischer Random (Chess960), with UCI protocol
 - Move list with full game history and navigation (back, forward, jump to move)
 - FEN copy/paste and position loading
 - Engine registry: remembers previously used engines for quick selection
-- Engine picker with native file browser and dropdown of known engines
+- Engine picker with a native file browser (cross-platform via `file_selector`) and dropdown of known engines
 - Per-engine skill level adjustment
 - Engine names displayed on board clocks
 - Watchdog recovery for engine-vs-engine stalls
@@ -132,6 +132,11 @@ LeafGUI is built on top of several excellent open-source libraries:
 - **[flutter_riverpod](https://pub.dev/packages/flutter_riverpod)** (MIT License) by Remi Rousselet
   Reactive state management for Flutter.
   Repository: https://github.com/rrousselGit/riverpod
+
+### Platform Integration
+
+- **[file_selector](https://pub.dev/packages/file_selector)** (BSD-3-Clause) by the Flutter team
+  Cross-platform native file open/save dialogs (macOS, Windows, Linux).
 
 ### Engine
 
