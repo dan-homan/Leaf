@@ -1,5 +1,103 @@
 Changes since 2017_12_24
 
+2026_08_30a -- Documentation accuracy pass ahead of an engine + GUI release.  No
+               code changes.
+
+               Online_Learning_Investigation.md: the file-level TL;DR was Part 1's
+               (2026-07-14) and did not carry Part 6's result.  Retitled the doc to
+               its real scope (Parts 1-6, two chains, the merge -> actor/learner
+               regime change) and added a standing-conclusions summary at the top:
+               keep online learning ON during generation (frozen generation closed
+               at d6 AND d8); the online phase's product is the corpus, not its own
+               Elo, so do not optimise online Elo; direction quality is the axis,
+               not displacement magnitude (alpha / rbar / batch-size all closed);
+               batch 8 is now measured as the optimum; the uniform LR scale is the
+               one clean lever left (6.17, parked).  Part 1's TL;DR relabelled as
+               Part-1-only and its TDLEAF_LR_* recommendation marked unrunnable.
+
+               TRAINING.md: removed the paragraph documenting TDLEAF_LR_{...} and
+               TDLEAF_FREEZE_PASSTHROUGH as live runtime knobs -- they were deleted
+               in simplification Phase 1 and a TDLEAF binary now HARD-ERRORS on
+               them, so the doc told the reader to do something that refuses to
+               start.  Diagnostic Flags split into compile-time flags and the
+               complete runtime env allowlist.  "Current settled recipe" now leads
+               with the generation recipe (online learning stays on) and the two
+               Part-6 rules.  TDLEAF_FREEZE described as a control tool, not a
+               production generation mode.  --init-nnue over an existing companion
+               refuses, it does not "merge-save" (the merge is gone).
+
+               SCRIPT_USE.md: match.py is the rating/gauntlet tool only -- removed
+               three claims that online training runs through it via UCI
+               self-adjudication and one example depending on the removed
+               multi-writer merge.  Indexed selfplay_run.py and the six analysis
+               one-offs that had no entry.
+
+               TODO.md: replaced the prioritized-experience-replay item (the replay
+               buffer was removed in Phase 3) with the open LR-scale arm; corrected
+               the win-only-write item, which proposed refactoring a merge path
+               that no longer exists; Phases D/E marked done in the sequencing
+               summary.
+
+               Dangling references to docs/MAINSTREAM_PLAN.md (deleted 2026-07-14,
+               folded into TODO.md) fixed in TODO.md, history/README.md,
+               engine/CLAUDE.md and README.md.  selfplay.cpp added to the unity
+               build include order in engine/CLAUDE.md.  search.par removed from
+               the root CLAUDE.md key facts (it no longer exists).  README.md
+               training results updated from the 2026-07 numbers to the m260720
+               chain (2.5M self-play games, +17 +/- 11 vs classic_eval -- the
+               self-trained net passed the hand-crafted eval), stale flutter PATH
+               export replaced, KNOWLEDGE= added to the flag table.  gui/README.md
+               placeholder github.com/user/Leaf link fixed, Xcode prerequisite and
+               bundle_engine.sh step documented.
+
+               Licensing unified on GPL v3-or-later across the whole repository
+               (the GUI previously read "All rights reserved", contradicting the
+               engine and the project README).  Added LICENSE at the repo root
+               (GPL v3 text, matching engine/docs/license.txt, which stays because
+               the C++ source headers cite it by name).  Short GPL headers added to
+               all 20 gui/lib/*.dart files, MainFlutterWindow.swift (the one Runner
+               file carrying project code), gui/bundle_engine.sh, and all 24 Python
+               scripts under engine/scripts/ -- none had one.  License sections in
+               README.md and gui/README.md rewritten to say GPL v3-or-later and to
+               note that the third-party MIT Flutter packages and the tools under
+               tools/ keep their own (GPL-compatible) terms.  Verified: flutter
+               analyze clean, all Python scripts still byte-compile with module
+               docstrings intact.
+
+NNUE_EMBED=1 is now canonical for release, and the two overlapping
+               bundling scripts were collapsed onto it.  They previously disagreed:
+               gui/bundle_engine.sh built its own embedded-net engine, while
+               scripts/build_release.sh copied a pre-built binary plus a separate
+               .nnue that it guessed by running `strings` over the binary -- so a
+               release could ship a net that did not match the one it was built
+               against.  build_release.sh now only drives the Flutter build and
+               delegates the engine step to bundle_engine.sh (single source of
+               truth); its obsolete engine_version argument is replaced by an
+               optional --net.  bundle_engine.sh gained --net, an existence check
+               on the net, and a rebuild trigger when the net is newer than the
+               binary (it previously only checked the sources).  Both copy LICENSE
+               into the .app Resources -- a GPL distribution should carry its
+               licence.  build_release.sh also had the same two stale facts
+               corrected as the docs did: the $HOME/develop/flutter/bin PATH export
+               (flutter is a Homebrew cask on PATH) and copying search.par (gone).
+
+               Verified end to end: ./scripts/build_release.sh produces a 77 MB
+               LeafGUI.app whose bundled engine reports "NNUE: (embedded)" and
+               answers uci correctly when run from a directory containing no .nnue
+               file; Resources/ holds LICENSE and engines/{Leaf,main_bk.dat} only.
+
+               README.md, gui/README.md, NNUE.md and the root CLAUDE.md updated to
+               lead with the embedded build and name build_release.sh as the
+               release entry point.
+
+               .gitignore ignores everything by default and un-ignores named root
+               files, so the new LICENSE would NOT have been tracked or shipped --
+               added "!LICENSE".
+
+               TODO.md gained a Release (1.0) section: the README training numbers
+               cite the m260720 chain at the 2.5M-game point archived in this repo
+               and must be refreshed from the completed chain before tagging.
+
 2026_08_29e -- Fix an INCOMPLETE fix: the 2026_08_29b Adam bias-correction change
                reached only the parallel apply path.  Found by cloud code review.
 

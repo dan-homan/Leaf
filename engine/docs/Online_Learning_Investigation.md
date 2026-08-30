@@ -1,13 +1,103 @@
-# Online Learning Investigation — material_260708 hybrid-loop chain
+# Online Learning Investigation — the TDLeaf online phase, Parts 1–6
 
-Date: 2026-07-14 (updated same day with the learning-target redesign and the
-first A/B results — see "Part 2" below)
-Analysis: Claude Code session, investigating stalling/regressing online (TDLeaf)
-phases in the `material_260708` hybrid-loop training chain, followed by the
-design, implementation, and first validation of replacement learning targets
-(branch `tdleaf-score-trace`, commit 898ff44).
+Scope: 2026-07-14 → 2026-08-16, across two hybrid-loop training chains
+(`material_260708`, then `m260720`) and the regime change between them (13-writer
+merge → actor/learner split).  Written across a series of Claude Code sessions
+with D. Homan.  This is the research record; it is carried on `main` regardless
+of which branch a given experiment's code sat on.
+
+**Read the standing conclusions below first.**  The body is chronological and
+several of its early conclusions were later overturned by their own follow-up
+experiments — Part 1's TL;DR and Part 3.7/4.5's "retire online learning" in
+particular.  Where a section was retracted it says so inline, but the summary
+here is the only place that reflects all six parts at once.
 
 ---
+
+## TL;DR — standing conclusions (current, through Part 6)
+
+1. **Keep online learning ON during generation.**  Freeze-generate → consolidate
+   is closed at *both* depths: d6 in Part 4.3 (`seedctl-dedup`, flat at −3/−10
+   Elo) and d8 in Part 6.1–6.2 (the frozen `3e6` iteration used 1.7× the games of
+   the one before it and returned **+7 against +53**, and its consolidation made
+   validation MSE **rise at every epoch**).  A frozen generator labels positions
+   with evaluations the seed already reproduces, so there is no descent direction
+   left to find.  `TDLEAF_FREEZE=1` remains the right tool for *controls*, and is
+   mandatory-with-dedup if ever used for production generation, but it is not the
+   generation mode.
+
+2. **The online phase's product is the corpus, not its own Elo.**  Online play is
+   a *hypothesis generator*: batch-8 Adam steps revalue features on the evidence
+   of a handful of games — far too little evidence to be right — which
+   immediately changes how the engine plays, so the next games probe wherever the
+   weights moved and the corpus accumulates positions that test the hypothesis.
+   The offline pass then adjudicates over ~55M rows with a global shuffle, where
+   512 unrelated positions per batch average away exactly the small-sample noise
+   the online phase introduced (6.14.1).
+
+3. **Corollary, and it is a rule: do not optimise the online phase's own Elo.**
+   Online Δ is reliably negative (−17 to −32 in the current regime) while the
+   iteration still nets +24 to +53, and three separate arms have now shown online
+   Δ moving *opposite* to the iteration total.  The only figure of merit is the
+   **iteration total against a foreign anchor** — family matches compress real
+   gains by roughly 5× (Part 4.6).
+
+4. **Direction quality is the axis, not displacement magnitude.**  Every
+   update-rule and magnitude knob tested has been rejected on production A/B:
+   `TDLEAF_STACK_NORM_ALPHA` (6.10 — works at the weight level, bought nothing),
+   per-feature `dedup`/`rbar` vote normalisation (6.12–6.13 — cost 76 Elo, and
+   still lost 65 at *matched* displacement), and batch size (6.15–6.16).  Net
+   weight displacement turns out to be **invariant to batch size across a 4×
+   range**, which is what disqualified that knob as a magnitude test.  `main`
+   carries the update rule unchanged; the experimental branches
+   (`tdleaf-stack-norm-alpha`, `tdleaf-feature-dedup`) are kept for reproduction
+   only and are byte-exact no-ops at their defaults.
+
+5. **`TDLEAF_BATCH_SIZE = 8` stays, and is now measured rather than inherited.**
+   Batch 16 is clearly worse (+19.3 total vs +53.0, 2.2σ); batch 4 is not better
+   (+39.3, 0.9σ — points lower but unresolved).  The three points describe an
+   inverted U peaking at the default, with only the upper side resolved (6.16.3).
+
+6. **The health canary is the draw rate** (~35–40% at d8), plus game length — not
+   gradient norms or clip counts.  Both online-stability collapses (adjudication
+   spiral, stale TD targets) kept nominal gradient telemetry throughout.  The two
+   hard rules they bought are in `TRAINING.md`: play to natural termination, and
+   keep TD targets on current weights (the learner's `--refresh-scores`).
+
+7. **The one clean lever still untested is a uniform LR scale** — the only knob
+   that moves displacement without also changing direction quality or step count.
+   Recipe parked in 6.17, not yet run.
+
+**What changed underneath the early parts.**  Part 1 read the late online phases
+as a zero-mean random walk and recommended decaying the LRs; Part 3.5's `seedctl`
+control then read the offline gain as *repair of online self-damage*, and
+Part 3.7/4.5 drew the consequence "retire online learning, freeze the generator."
+That consequence does not survive contact with a healthy online phase.  Both
+results were measured in the 13-writer merge regime, where online displacement was
+large enough to swamp whatever signal the drift carried; under the actor/learner
+split with `--refresh-scores` and natural termination the displacement is smaller
+and the balance flips (6.3).  The measurements stand; the regime changed
+underneath the conclusion.
+
+**Reading map**
+
+| Part | Chain / regime | What it settled |
+|---|---|---|
+| 1 | `material_260708`, 13-writer merge | Ruled out corruption; framed the online plateau (conclusion later superseded) |
+| 2 | same | Learning-target redesign (blend/hybrid/root) — all rejected, code removed in simplification Phase 1 |
+| 3 | same | Online loss is target-independent; `seedctl` control; endgame-correlation reinterpretation |
+| 4 | same | `TDLEAF_FREEZE`, the duplication landmine, book-diversity retired, depth as the lever |
+| 5 | transition | Internal self-play, the equivalence study, the actor/learner split + its two stability landmines |
+| 6 | `m260720`, actor/learner | Frozen generation closed at d8; online-as-hypothesis-generator; alpha / rbar / batch-size all closed; LR arm parked |
+
+---
+
+# Part 1 — The plateau: signal, noise, and what offline was actually doing (2026-07-14)
+
+Original framing: investigating stalling/regressing online (TDLeaf) phases in the
+`material_260708` hybrid-loop training chain, followed by the design,
+implementation, and first validation of replacement learning targets (branch
+`tdleaf-score-trace`, commit 898ff44).
 
 ## Initial question (Daniel Homan)
 
@@ -60,7 +150,7 @@ Rank  Name                                 Elo     ±  Games   Score   Oppo  Dra
 
 ## Findings
 
-### TL;DR
+### TL;DR (Part 1 only — superseded in part; see the standing conclusions at the top)
 
 The data rules out corruption events (hypothesis 2), mostly rules out the
 simple "fewer decisive games" version of hypothesis 1, and strongly supports a
@@ -156,6 +246,12 @@ within-game batches of 8, and a validation-gated stopping rule. So moving the
 online update toward the offline design is well-motivated by this data.
 
 ### Recommendations, in order of cost
+
+> **Stale as written (2026-08).**  Recommendation 1's `TDLEAF_LR_*` env vars were
+> removed in simplification Phase 1 — a TDLEAF binary now *hard-errors* at startup
+> on any `TDLEAF_*` variable outside its allowlist, so this text is not runnable.
+> Recommendation 2 was run (Parts 3–4) and its conclusion was later overturned at
+> d8 (Part 6).  Kept as the record of what was proposed at the time.
 
 1. **Cheapest, no code:** decay the online LRs across the chain via the
    existing `TDLEAF_LR_*` env vars — e.g. have train.py scale them

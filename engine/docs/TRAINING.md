@@ -69,7 +69,7 @@ perl comp.pl train_hl_a NNUE=1 NNUE_NET=nn-fresh.nnue TDLEAF=1 OVERWRITE
 
 # 2. Initialize a fresh network (default material values baked into PSQT).
 #    Use --init-nnue-noprior for uniform 100 cp instead.  Delete any stale companion
-#    .tdleaf.bin FIRST — --init-nnue over an existing one merge-saves, not resets.
+#    .tdleaf.bin FIRST — --init-nnue refuses to run when one already exists.
 ./Leaf_vtrain_hl_a --init-nnue --write-nnue nn-fresh.nnue
 
 # 3. Run actor/learner self-play (from learn/, with the binary installed there).
@@ -374,10 +374,16 @@ per-weight bias correction and monitoring.
 | `TDLEAF_SCORE_CLIP_PAWNS` | 1.0 | Clip threshold for inter-ply score-change attenuation: `score_clip_cp = SCORE_CLIP_PAWNS × max(value[PAWN], 100 cp)`. With PAWN fixed, the threshold is effectively constant at 100 cp. Set to a large value to disable |
 | `TDLEAF_ID_VAR_SIGMA2` | 10000 cp² | Iterative-deepening stability weight: `id_weight = 1 / (1 + id_score_variance / SIGMA2)`. Larger values are more tolerant of ID score instability. Set to a large value to disable |
 
-Runtime LR sweep via env vars `TDLEAF_LR_{FC,FC2,FC_BIAS,FT,FT_BIAS,PSQT}` (each a
-multiplier on the corresponding `TDLEAF_ADAM_*_LR0`, default 1.0) and
-`TDLEAF_FREEZE_PASSTHROUGH=1` (holds the FC0 passthrough row fixed).
+All of the above are **compile-time constants in `src/tdleaf.h`** — change them
+there and rebuild.  There is no runtime override: the `TDLEAF_LR_{FC,FC2,FC_BIAS,FT,FT_BIAS,PSQT}`
+multipliers and `TDLEAF_FREEZE_PASSTHROUGH` were removed in simplification Phase 1,
+and a TDLEAF binary now **hard-errors at startup** on any `TDLEAF_*` environment
+variable outside its allowlist (see [Diagnostic Flags](#diagnostic-flags) below).
 
+`TDLEAF_BATCH_SIZE = 8` is the measured optimum, not just the inherited default:
+batch 16 scored 34 Elo worse per iteration (2.2σ) and batch 4 was not better, with
+net weight displacement invariant across the whole 4× range — see
+`Online_Learning_Investigation.md` 6.15–6.16 before changing it.
 Set `TDLEAF_BATCH_SIZE = 1` to restore per-game Adam steps.
 Set `TDLEAF_ADAM_WARMUP = 0` to disable warmup.
 Set `TDLEAF_WEIGHT_DECAY = 0.0` to disable weight decay.
@@ -635,8 +641,12 @@ ply; skipped entirely when the env var is unset).
 runtime — games are recorded and dumped exactly as in a learning run, but
 gradient accumulation, weight application, and all `.tdleaf.bin` writes are
 skipped, so the corpus labels come from a fixed net.  This is the tool for
-generate-only hybrid-loop iterations (see Parts 3–4 of
-`Online_Learning_Investigation.md`).  Do **not** use the compile-time
+**controls that isolate label quality**, and it is what the actor processes of the
+actor/learner split run.  It is *not* a production generation mode: freeze-generate
+→ consolidate is closed at both d6 and d8 (see
+[Current settled recipe](#current-settled-recipe) below and
+`Online_Learning_Investigation.md` Parts 4 and 6).  If ever used for production
+generation anyway, corpus dedup is mandatory — see the determinism caveat below.  Do **not** use the compile-time
 `TDLEAF_READONLY=1` flag for this: it compiles out the record/update hooks
 entirely, so a READONLY binary plays with frozen weights but **dumps no
 corpus** (it exists for rating/inference binaries that load a `.tdleaf.bin`
@@ -1152,7 +1162,32 @@ directory is derived from that path, not from `run/`.
 
 ### Current settled recipe
 
-`--bt-K 220` with the default pure λ-return target is the current consolidation
+**Generation: online learning stays ON.**  The actor/learner split with the learner
+learning as it consumes — never `TDLEAF_FREEZE=1` — is the recipe of record, and it
+is what `train.py` does by default.  Frozen generation was tried as a production
+mode and is closed at both depths: at d8 with a mature chain behind it, a frozen
+500k-game iteration returned **+7 Elo against +53** for the learning iteration
+before it on 1.7× the games, and its offline consolidation made validation MSE
+*rise* at every epoch — a frozen generator labels positions with evaluations the
+seed already reproduces, so there is nothing for consolidation to find.  See
+`Online_Learning_Investigation.md` Part 6.
+
+Two consequences worth internalising before tuning anything online:
+
+- **Do not optimise the online phase's own Elo.**  It is reliably negative (−17 to
+  −32 per iteration) while the iteration still nets +24 to +53 — the online phase
+  is a hypothesis generator whose product is the *corpus*, and scoring it on its
+  own strength is scoring a hypothesis before the data are in.  Judge iterations
+  only by the total against a **foreign anchor**; family matches compress real
+  gains by roughly 5×.
+- **Direction quality, not displacement magnitude, is the axis.**  Every knob that
+  reweighted or rescaled the online update — stack-norm alpha, per-feature
+  vote normalisation, batch size — was rejected on production A/B.  `TDLEAF_BATCH_SIZE
+  = 8` is now measured as the optimum.  The one clean magnitude lever never tested
+  in isolation is a uniform LR scale (recipe parked in `Online_Learning_Investigation.md`
+  6.17).
+
+**Consolidation:** `--bt-K 220` with the default pure λ-return target is the current
 recipe: `--bt-lambda` and `--bt-leaf-lambda` default to `1.0` and stay dormant scale
 knobs, and `--bt-td-lambda` (default `TDLEAF_LAMBDA` = 0.985) is the single knob of
 record for how fast the outcome term's weight decays away from the game end.
@@ -1310,11 +1345,30 @@ See [Adam Optimizer](#adam-optimizer) above.
 
 ### Diagnostic Flags
 
+**Compile-time** (`-D` on the `comp.pl` line):
+
 | Flag | Effect |
 |------|--------|
 | `TDLEAF=1` | Enable all learning code |
 | `TDLEAF_READONLY=1` | Load weights but skip gradient updates (inference only) |
 | `TDLEAF_CHECK_SCORE=1` | Print direct vs propagated leaf score on every ply |
+| `TDLEAF_LOG_STEP_CLIPS=1` | Per-batch step-clip telemetry to `tdleaf_telemetry.log` |
+
+**Runtime environment** — this is the *entire* allowlist.  `tdleaf_check_env()`
+runs at `main()` entry in every TDLEAF build, logs the effective training config
+(K, λ, per-section LRs, batch size), and **hard-errors on any other `TDLEAF_*`
+variable**, including retired ones left over in a shell.  Adding a new one
+requires adding it to the allowlist in `src/tdleaf.cpp` or the binary refuses to
+start.
+
+| Variable | Effect |
+|----------|--------|
+| `TDLEAF_FREEZE=1` | Play and dump normally, but skip all weight updates and `.tdleaf.bin` writes (frozen actors; generate-only controls) |
+| `TDLEAF_DUMP_TSV=<prefix>` | Dump root + leaf training corpora during play |
+| `TDLEAF_DUMP_QUIET_CP=<cp>` | Quiet gate for the dump (default 60) |
+| `TDLEAF_DUMP_MAX_CP=<cp>` | \|cp\| cap for the dump (default 1500) |
+| `TDLEAF_CHECK_ACC=1` | Diagnostic: verify walked-vs-rebuilt leaf accumulators per record |
+| `TDLEAF_TRACE_UPDATE=<file>` | Diagnostic: per-record gradient trace in exact hex |
 
 ### Recalibrating K/λ (Reproducing the analysis)
 

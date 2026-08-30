@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+# Leaf chess engine — training and analysis tooling.
+# Copyright (C) 2026 Daniel C. Homan
+#
+# This program is free software: you can redistribute it and/or modify it under
+# the terms of the GNU General Public License as published by the Free Software
+# Foundation, either version 3 of the License, or (at your option) any later
+# version.  See the LICENSE file at the root of this repository.
 #
 # Run a head-to-head match or gauntlet between chess engines using a tournament
 # driver (fastchess by default, cutechess-cli available via --driver=cutechess).

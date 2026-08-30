@@ -38,8 +38,10 @@ The `comp.pl` script automatically resolves the net file's absolute path (search
 directory and `../run/`) and passes it as `NNUE_NET_PATH` to the compiler.
 
 At runtime, the embedded binary loads the network from memory without needing any external
-`.nnue` file.  This is useful for distribution — a single self-contained binary with no
-data file dependencies (other than `main_bk.dat` for the opening book).
+`.nnue` file.  **This is the canonical form for release builds** — a single self-contained
+binary with no data-file dependencies other than `main_bk.dat` for the opening book, which
+also makes it impossible to pair a shipped binary with the wrong network.  `gui/bundle_engine.sh`
+(driven by `scripts/build_release.sh`) builds the distributed engine this way.
 
 The binary size increases by the size of the `.nnue` file (~26 MB for the default net).
 The `.tdleaf.bin` weights file is NOT embedded and must still be provided externally if

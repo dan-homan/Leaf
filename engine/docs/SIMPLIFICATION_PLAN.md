@@ -1,6 +1,10 @@
 # Simplification Plan — Consolidating Around Actor/Learner Self-Play
 
-**Status:** Phases 1–3 landed (2026-07-20).
+**Status:** COMPLETE — Phases 1–3 all landed (2026-07-20).  The one item never
+closed is the compile-flag audit at the end of Phase 3 (does `TDLEAF_LOG_STEP_CLIPS`
+still earn its keep?).  Everything below this line is the record of a finished
+plan; the per-phase notes are chronological, so an "still open" remark inside an
+earlier note refers to that moment, not to today.
 
 > **Phase 3 (code cleanup) done.** With the actor/learner learner the sole `.tdleaf.bin`
 > writer, the in-engine multi-writer merge was retired: `nnue_save_fc_weights` is now a
@@ -162,7 +166,9 @@ check plus `TDLEAF_CHECK_ACC=1` are the guardrails.
   - Fix `selfplay_run.py`'s docstring line "inherits `TDLEAF_TARGET` etc." (that var is
     gone after Phase 1).
 - Prune stale docs:
-  - `Online_Learning_Investigation.md` → `docs/history/` (reads as a finished writeup).
+  - ~~`Online_Learning_Investigation.md` → `docs/history/`~~ — **not done, deliberately.**
+    It is still actively cited from TRAINING.md and it kept growing (Parts 5–6 landed
+    after this plan was written), so it stays a living doc.
   - TODO.md: Phase D/E internal-self-play items are largely delivered by actor/learner;
     close them out.
 

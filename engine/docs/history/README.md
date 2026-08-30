@@ -7,8 +7,10 @@ design looks the way it does, and to stop dead ends from being silently
 re-attempted — but none of it describes the system as it exists today. For that,
 see the living docs one level up in `engine/docs/`: `NNUE.md` (network
 architecture), `TRAINING.md` (online + offline training, the hybrid loop),
-`SCRIPT_USE.md` (script/CLI reference), `TODO.md` (open work), and
-`MAINSTREAM_PLAN.md` (the one still-pending roadmap, internal self-play).
+`SCRIPT_USE.md` (script/CLI reference), `TODO.md` (open work),
+`Online_Learning_Investigation.md` (the standing research record for the online
+phase — read its top-of-file conclusions), and `SIMPLIFICATION_PLAN.md`
+(the completed consolidation around actor/learner self-play).
 
 ## What's here
 

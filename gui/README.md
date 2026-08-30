@@ -1,6 +1,6 @@
 # LeafGUI
 
-A cross-platform chess GUI for the [Leaf](https://github.com/user/Leaf) chess engine, built with [Flutter](https://flutter.dev/).
+A cross-platform chess GUI for the [Leaf](https://github.com/dan-homan/Leaf) chess engine, built with [Flutter](https://flutter.dev/).
 
 LeafGUI supports standard chess and Fischer Random (Chess960), with UCI protocol compatibility for engine communication.
 
@@ -35,8 +35,10 @@ LeafGUI supports standard chess and Fischer Random (Chess960), with UCI protocol
 
 ### Prerequisites
 
-- [Flutter SDK](https://docs.flutter.dev/get-started/install) (3.41+)
+- [Flutter SDK](https://docs.flutter.dev/get-started/install) (Dart SDK 3.11.4+)
 - A compiled Leaf binary
+- macOS builds need **full Xcode**, not just the Command Line Tools
+  (`flutter analyze` and `flutter test` work without it)
 
 ### Setup
 
@@ -56,6 +58,23 @@ LeafGUI supports standard chess and Fischer Random (Chess960), with UCI protocol
    ```
    flutter run -d macos
    ```
+
+### Bundling the engine into the .app (macOS)
+
+`bundle_engine.sh` builds Leaf with the NNUE net embedded (`NNUE_EMBED=1`) and copies
+it — plus the opening book and the licence text — into the built app, so the release
+bundle has no external net dependency.  This is the canonical release form.
+
+```
+flutter build macos --release
+./bundle_engine.sh [--net <file.nnue>]
+```
+
+Or do both steps at once from the repository root:
+
+```
+./scripts/build_release.sh
+```
 
 ## Project Structure
 
@@ -121,4 +140,11 @@ LeafGUI is built on top of several excellent open-source libraries:
 
 ## License
 
-Copyright (c) 2026 Daniel Homan. All rights reserved.
+Copyright (C) 2026 Daniel C. Homan.
+
+LeafGUI is free software, released under the **GNU General Public License, version 3
+or later** — the same licence as the Leaf engine it ships with.  See
+[`LICENSE`](../LICENSE) at the root of this repository for the full text.
+
+This applies to LeafGUI's own source.  The third-party packages listed above keep
+their own (MIT) licences, which are GPL-compatible.

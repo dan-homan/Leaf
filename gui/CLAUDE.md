@@ -2,6 +2,9 @@
 
 A Flutter chess GUI for the Leaf chess engine.
 
+Licensed GPL v3-or-later, same as the engine (`LICENSE` at the repo root). Every
+file under `lib/` carries a short GPL header — keep it on new files.
+
 ## Build & Run
 
 Flutter is installed via Homebrew (`brew install --cask flutter`) and is on the PATH.

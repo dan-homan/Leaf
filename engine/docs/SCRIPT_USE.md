@@ -7,6 +7,7 @@ since engines, `.nnue` files, and `.tdleaf.bin` files live there.
 | Script | Description |
 | --- | --- |
 | [`train.py`](#trainpy) | One-command hybrid-loop iteration: online self-play generation, offline threaded batch training, and gauntlet rating, with `--continue` chaining across iterations. |
+| [`selfplay_run.py`](#selfplay_runpy) | Actor/learner self-play driver: N frozen actors emit `.tdg` trajectories, one learner owns the optimizer.  The generation engine `train.py` wraps. |
 | [`match.py`](#matchpy) | Runs head-to-head or gauntlet matches between engines via fastchess/cutechess, interactively or from the CLI. |
 | [`make_training_epd.py`](#make_training_epdpy) | Generates a combined FRC + Polyglot-book opening EPD file for TDLeaf training. |
 | [`compare_nnue_learning.py`](#compare_nnue_learningpy) | Visualises NNUE weight changes between a baseline `.nnue` and a trained `.tdleaf.bin`. |
@@ -21,8 +22,18 @@ since engines, `.nnue` files, and `.tdleaf.bin` files live there.
 | [`analyze_calibration.py`](#analyze_calibrationpy) | Calibrates sigmoid temperature K and lambda decay from the parquet produced by `extract_positions.py`. |
 | [`extract_quiet_positions.py`](#extract_quiet_positionspy) | Builds an offline-training TSV position corpus from existing self-play PGNs. |
 | [`diff_tdleaf_checkpoints.py`](#diff_tdleaf_checkpointspy) | Diffs two `.tdleaf.bin` checkpoints section by section to monitor training drift. |
+| `analyze_tdleaf.py` | Parameter coverage and quantisation diagnostics for a `.tdleaf.bin` + `.nnue` pair. |
+| `analyze_fc0_passthrough.py` | Per-row FC0 drift analysis, isolating the passthrough row (output 15) from the 15 regular rows. |
+| `bucket_phase_analysis.py` | Per-material-bucket phase analysis of a seed → post-online → final chain (first used in `Online_Learning_Investigation.md` Part 3). |
+| `label_quality_by_bucket.py` | Per-material-bucket label quality from a hybrid-loop corpus TSV. |
+| `distill_alignment.py` | Control analysis: does consolidating the *seed* on the hybrid corpus move it toward the online endpoint? |
+| `engine_discovery.py` | Shared library (not a CLI): engine discovery/resolution and the interactive picker used by `match.py`. |
 | [`older/training_run.py`](#oldertraining_runpy) | **Archived.** Interactive TDLeaf(λ) training-run manager (legacy UCI-pair workflow); superseded by `train.py` / `selfplay_run.py`. |
 | [`older/migrate_legacy_work.py`](#oldermigrate_legacy_workpy) | One-time migration of pre-`train.py` training iterations into the current per-run archive layout. |
+
+The six unlinked analysis scripts near the bottom of the table are research
+one-offs with no section below — run them with `--help`, and see
+`docs/Online_Learning_Investigation.md` for the analyses that motivated them.
 
 ---
 
@@ -169,9 +180,11 @@ instead).  Supports Leaf binaries and external UCI engines (e.g. Stockfish,
 placed in `tools/engines/<name>/`).  **Invoke from `run/` or `learn/`**
 (symlinked into both) or `scripts/`.
 
-fastchess is UCI-only: the engine self-adjudicates game outcomes for TDLeaf
-learning (`tdleaf_self_adjudicate()`), which is how online training runs by
-default today — no xboard game loop is required.  cutechess-cli supports
+`match.py` is the **rating / gauntlet tool only** — it is no longer a training
+generator.  Training generation runs through `selfplay_run.py` (actor/learner),
+which uses the engine's own in-process results, not UCI self-adjudication.
+`tdleaf_self_adjudicate()` still exists for a learning binary played under UCI
+outside training (GUI/analysis).  cutechess-cli supports
 xboard as well, so the engine receives explicit `result` commands instead;
 pass `--driver=cutechess --proto xboard` for that path.
 
@@ -195,9 +208,8 @@ cd run/
 # Head-to-head, 200 games
 python3 match.py Leaf_vA Leaf_vB -n 200 -c 4 -tc 5+0.05
 
-# Multi-iteration symmetric self-play (both engines learn; restart between
-# iterations so each picks up the merged .tdleaf.bin weights)
-python3 match.py Leaf_vtrain_a Leaf_vtrain_b -n 500 -i 10 --wait 500
+# Multi-iteration gauntlet; engines restart between iterations
+python3 match.py Leaf_vA Leaf_vB -n 500 -i 10
 
 # Gauntlet: probe engine vs multiple opponents; all games appended to one PGN
 python3 match.py Leaf_vnew Leaf_v1 Leaf_v2 Leaf_v3 \
@@ -237,7 +249,7 @@ etc.) without manual `dir=` configuration.
 | `--fischer-random` | off | Chess960 starting positions |
 | `--no-adjudication` | off | Disable score-based early adjudication (`-draw`/`-resign`); games run to a natural ending (mate/stalemate/repetition/50-move/insufficient material), capped by `-maxmoves 400`. Useful early in training when evals are noisy. |
 | `--ponder` | off | Enable pondering (cutechess only; fastchess doesn't expose it — a warning is printed if combined with `--driver=fastchess`) |
-| `--wait MS` | 0 | Milliseconds between games (useful when sharing a `.tdleaf.bin`) |
+| `--wait MS` | 0 | Milliseconds between games (a legacy throttle from the multi-writer era; not needed for gauntlets) |
 | `--depth1 N` / `--depth2 N` | — | Limit engine1/engine2 search to depth N |
 | `--openings FILE` | — | Openings file: `.epd`, `.pgn`, or `.bin` (polyglot book; fastchess doesn't support `.bin`) |
 | `--no-repeat` | off | One game per round (`-rounds N`, no `-games 2 -repeat`): removes the driver's color-swapped duplicate pair per opening, at the cost of per-opening color balance; recommended for symmetric self-play.  Does **not** guarantee opening uniqueness by itself — fastchess cycles a shuffled book order, so openings recycle once total games exceed the book size. |
@@ -253,10 +265,8 @@ prints a summary table (Opponent, Games, W, D, L, Score%, Elo diff) at the end.
 ### Protocol notes
 
 The default protocol is **UCI**, and the default driver **fastchess** requires
-UCI for both engines. Leaf auto-detects UCI, so no special flags are needed —
-this is also how online TDLeaf training runs by default (`match.py Leaf_vtrain_a
-Leaf_vtrain_b ...` from `learn/`), via UCI self-adjudication. To run under
-xboard instead (e.g. for external xboard-only engines), pass `--driver=cutechess
+UCI for both engines. Leaf auto-detects UCI, so no special flags are needed. To
+run under xboard instead (e.g. for external xboard-only engines), pass `--driver=cutechess
 --proto xboard` (or `--proto1`/`--proto2` for per-engine overrides).
 
 For a cross-protocol parity test (same Leaf binary, UCI vs xboard):

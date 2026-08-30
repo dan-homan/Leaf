@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+# Leaf chess engine — training and analysis tooling.
+# Copyright (C) 2026 Daniel C. Homan
+#
+# This program is free software: you can redistribute it and/or modify it under
+# the terms of the GNU General Public License as published by the Free Software
+# Foundation, either version 3 of the License, or (at your option) any later
+# version.  See the LICENSE file at the root of this repository.
 """analyze_tdleaf.py — diagnose parameter coverage and quantisation in .tdleaf.bin + .nnue.
 
 Reports per-section statistics for the FP32 shadow-weights file (.tdleaf.bin) and,

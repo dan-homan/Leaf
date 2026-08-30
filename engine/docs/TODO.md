@@ -10,7 +10,8 @@ file tracks only what's still open.
 
 ### Internal self-play — Phases D & E (DELIVERED)
 
-**Full spec:** `docs/MAINSTREAM_PLAN.md` (Phases D and E).  Original design:
+**Full spec:** the "Internal Self-Play" roadmap later in this file (the former
+`docs/MAINSTREAM_PLAN.md`, folded in here 2026-07-14).  Original design:
 `~/.claude/projects/-Users-homand-Leaf/memory/single-process-selfplay-tdleaf-plan.md`.
 
 Phases A–C are done (pure-PSQT + format v12, gauge machinery deleted, per-record
@@ -24,11 +25,10 @@ STM + game-ply λ^Δ), and **Phases D and E have since landed:**
   (`--traj-out` / `--learn-stream`, driven by `scripts/selfplay_run.py`): N−1
   frozen actors emit `.tdg` trajectories, ONE learner owns the optimizer.  This is
   now the sole `train.py` generation mode (the multi-writer `--selfplay-gen` and
-  `--uci-pair-gen` paths were removed).  With no concurrent writers left in the
-  pipeline, simplifying the in-engine multi-writer `.tdleaf.bin` merge protocol to
-  a plain atomic write is now unblocked — tracked as Phase 3 in
-  `docs/SIMPLIFICATION_PLAN.md` (its own reviewed change; the merge is still the
-  save mechanism, so it needs a byte-exact regression).
+  `--uci-pair-gen` paths were removed).  The follow-on cleanup that unblocked —
+  replacing the in-engine multi-writer `.tdleaf.bin` merge with a plain atomic
+  write — **also landed** (Phase 3, `docs/SIMPLIFICATION_PLAN.md`), validated
+  byte-exact.  Nothing in this section is outstanding.
 
 ### Open items
 
@@ -47,12 +47,17 @@ STM + game-ply λ^Δ), and **Phases D and E have since landed:**
 - [ ] Bayeselo pool rating (not head-to-heads) once a consolidated net gets
       close to classic_eval.
 
-### Prioritized experience replay
+### Online learning-rate scale — the last untested magnitude knob
 
-The replay buffer currently iterates over all buffered games with equal weight.  Games
-with larger total TD error (`Σ|e[t]|`) contain more learning signal and should be
-replayed with higher priority.  Simplest variant: weight each game by its cumulative
-absolute TD error, or skip games where total error is near zero.
+Every update-rule and magnitude arm tried so far was rejected because it changed
+*direction quality* as a side effect (stack-norm alpha redistributes by bucket;
+per-feature `rbar` discards persistence; batch size varies SNR per step at constant
+displacement).  A uniform scale on every section's `TDLEAF_ADAM_*_LR0` is the only
+knob that moves displacement in proportion while leaving step count and every
+gradient direction untouched.  Suggested arms: ×1.5 and ×0.67.  The recipe —
+including how to keep the offline phase out of it, since the trainer shares those
+constants — is written up and parked in `docs/Online_Learning_Investigation.md`
+§6.17.  Judge by iteration total against a foreign anchor, never by online Elo.
 
 ### Search parameter tuning
 The search's pruning parameters (null-move margins, futility thresholds, aspiration
@@ -85,6 +90,17 @@ bishop under-promotions essentially never are outside of stalemate avoidance.
 An arm that moves the under-promotion band below the capture band (subtract
 ~10,000,000 instead of ~9,000,050) is a one-line change and a clean gauntlet
 target.  Judge with a foreign anchor, not a family match.
+
+---
+
+## Release (1.0)
+
+- [ ] **Refresh the training numbers in `README.md` before tagging 1.0.** The
+      "Offline Training & the Hybrid Loop" section currently cites the `m260720`
+      chain at 2.5M games (+17 ± 11 vs `Leaf_vclassic_eval`), which is the last
+      iteration archived in this repo. The chain is still running and is well past
+      that; take the final figure from the completed chain's sidecar rather than
+      from this snapshot.
 
 ---
 
@@ -159,10 +175,15 @@ NNUE; correctness is expected but **unverified with `THREADS > 1`**.
 ### Win-only .tdleaf.bin writes (`TDLEAF_WIN_ONLY_WRITE`)
 
 Compile-time flag that suppresses writing `.tdleaf.bin` after draws and losses.
-Gradients still applied to in-memory weights and other-process deltas still merged from disk on
-all games; only the disk write is gated on `td_result >= 1.0`.  Requires refactoring
-`nnue_save_fc_weights` to split its read+merge phase from its write phase.
-See memory for full implementation plan.
+Gradients still applied to in-memory weights; only the disk write is gated on
+`td_result >= 1.0`.
+
+**Note (2026-08):** this item was written for the multi-writer era, where the save
+path re-read the file and merged other processes' deltas, so skipping a write also
+skipped an *import*.  That machinery is gone — `nnue_save_fc_weights` is now a plain
+atomic write of in-memory state, so the proposed refactor is moot and the flag would
+be a one-line gate.  Whether selective checkpointing is desirable at all under the
+single-writer learner is unexamined; the learner's saves are already infrequent.
 
 ---
 
@@ -314,8 +335,8 @@ it matters, the same salt mechanism extends per-board — but measure first, sam
 A  merge pure-PSQT, defaults on          DONE — see docs/history/TRAINING_HISTORY.md
 B  delete gauge machinery, v12           DONE — see docs/history/TRAINING_HISTORY.md
 C  per-record STM + λ^Δ, harness mode    DONE — see docs/history/TRAINING_HISTORY.md
-D  internal self-play, single board      gate: TD-error metric (D2), then 500k rig (D4)
-E  multi-board                           gate: globals audit, then rig again
+D  internal self-play, single board      DONE — shipped as --selfplay (src/selfplay.cpp)
+E  multi-board                           DONE (as actor/learner split, not multi-board)
 ```
 
 Line numbers cited are as of `da9e57a` — re-verify before editing; the unity build means LSP

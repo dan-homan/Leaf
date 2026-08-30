@@ -28,15 +28,17 @@ testing/         Test suites and opening books
 # Console engine (from engine/run/)
 cd engine/run/ && perl comp.pl <version> NNUE=1
 
-# GUI (from gui/)
-cd gui/ && flutter pub get && flutter build macos --release
+# GUI release build (from repo root) — flutter is on PATH via Homebrew cask
+./scripts/build_release.sh
 ```
 
 ## Key Facts
 
 - Author: Daniel C. Homan
+- Licence: GPL v3-or-later across engine, scripts, and GUI (`LICENSE` at repo root; source files carry short headers)
 - Engine and GUI developed in collaboration with Claude Code (Anthropic)
-- Engine binary: `engine/run/Leaf_v<version>` — requires `main_bk.dat`, `search.par`, and `.nnue` in same directory
+- Engine binary: `engine/run/Leaf_v<version>` — requires `main_bk.dat` and the `.nnue` net in the same directory (unless built `NNUE_EMBED=1`).  `search.par` no longer exists; search defaults are compiled in
+- Release engine builds are always `NNUE_EMBED=1` (net compiled in); `gui/bundle_engine.sh` owns that step, `scripts/build_release.sh` drives the Flutter build around it
 - GUI dev path: hardcoded in `gui/lib/models/engine_config.dart`, checks bundled path first
 - macOS sandbox disabled to allow engine subprocess spawning
 - GUI opens as a Flutter project from the `gui/` directory

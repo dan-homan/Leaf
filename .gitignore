@@ -17,6 +17,7 @@ scripts/*
 !.gitignore
 !README.md
 !CLAUDE.md
+!LICENSE
 engine/.DS_Store
 
 # Local-only, machine-specific (not tracked)
