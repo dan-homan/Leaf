@@ -152,12 +152,18 @@ def open_corpus(path):
 ROW_KIND = {"both": 0, "root": 1, "leaf": 2}
 
 
-def corpus_row_counts(path):
+def corpus_row_counts(path, gate_cp=0):
     """(total, root, leaf) data rows, cached alongside the corpus as
     <path>.rows.  Counting a multi-GB .gz costs a full decompress and the
     window re-reads the same archives every iteration, so it is paid once.
-    A one-field cache from before the root/leaf split is ignored and rewritten."""
-    cache = Path(str(path) + ".rows")
+    A one-field cache from before the root/leaf split is ignored and rewritten.
+
+    GATE_CP > 0 counts only rows that survive the quiet re-cut (|cp - gate| <=
+    GATE_CP), so a budget built from these numbers means "rows actually trained
+    on".  Rows with no `gate` column (corpora dumped before 2026-09-03) were
+    already gated at dump time and pass through.  Each gate width gets its own
+    cache file so the unfiltered <path>.rows stays valid."""
+    cache = Path(str(path) + (f".rows.g{gate_cp}" if gate_cp > 0 else ".rows"))
     if cache.is_file():
         parts = cache.read_text().split()
         if len(parts) >= 3:
@@ -170,8 +176,11 @@ def corpus_row_counts(path):
         for line in f:
             if line.startswith("#") or line.startswith("fen\t"):
                 continue
-            col = line.split("\t", 6)
+            col = line.rstrip("\n").split("\t")
             if len(col) < 5:
+                continue
+            if gate_cp > 0 and len(col) >= 8 and \
+               abs(int(col[1]) - int(col[7])) > gate_cp:
                 continue
             total += 1
             if col[4] == "0":
@@ -251,7 +260,8 @@ def share_quotas(sizes, total):
     return quota
 
 
-def write_corpus(corpus_path, sources, sizes, quota, game_ply_axis, row_kind=0):
+def write_corpus(corpus_path, sources, sizes, quota, game_ply_axis, row_kind=0,
+                 gate_cp=0):
     """Sample, renumber and dedup SOURCES into CORPUS_PATH.
 
     SOURCES is [(label, [files], generator_elo)] and QUOTA[i] rows are taken
@@ -304,6 +314,14 @@ def write_corpus(corpus_path, sources, sizes, quota, game_ply_axis, row_kind=0):
                         if row_kind == 1 and p[4] == "0":
                             continue
                         if row_kind == 2 and p[4] != "0":
+                            continue
+                        # Quiet re-cut, for the same reason and at the same
+                        # point: generation now dumps wide (--quiet-cp 1000) and
+                        # every row carries its `gate`, so the width that
+                        # actually trains is chosen HERE.  Pre-2026-09-03
+                        # corpora have no gate column and were gated at dump.
+                        if gate_cp > 0 and len(p) >= 8 and \
+                           abs(int(p[1]) - int(p[7])) > gate_cp:
                             continue
                         acc += want
                         if acc < size:
@@ -583,6 +601,19 @@ def main():
                          "nothing: the gate is consulted in the dump path only, "
                          "never in the TD update.  Pass 60 to reproduce the "
                          "historical corpora")
+    ap.add_argument("--bt-quiet-cp", type=int, default=60, metavar="CP",
+                    help="Quiet gate applied at CORPUS ASSEMBLY: keep a row only "
+                         "when |cp - gate| <= CP.  This is the width that "
+                         "actually trains, and it is the counterpart of the wide "
+                         "--quiet-cp dump — every row carries its `gate`, so the "
+                         "decision is made here rather than being burned in at "
+                         "generation.  Default 60: A2 found 60/120/200 flat "
+                         "(+103.7/+100.7/+100.3) but ungated much worse (+67.5), "
+                         "i.e. training on the raw wide dump costs ~28 Elo.  "
+                         "Budget and quotas count only surviving rows.  0 "
+                         "disables the re-cut and trains on the dump as-is.  "
+                         "Corpora dumped before 2026-09-03 have no gate column "
+                         "and pass through — they were gated at dump time")
     ap.add_argument("--skip-train", action="store_true",
                     help="Skip offline training (generate-only)")
     ap.add_argument("--corpus", action="append", default=[],
@@ -954,9 +985,13 @@ def main():
     # budget: with --bt-rows root over a natural corpus, filtering after
     # sampling would have delivered ~45% of the requested rows.
     row_kind = ROW_KIND[args.bt_rows]
+    gate_cp = args.bt_quiet_cp
     log("counting corpus rows (cached as <corpus>.rows) ...")
-    sizes = [sum(corpus_row_counts(c)[row_kind] for c in files)
+    sizes = [sum(corpus_row_counts(c, gate_cp)[row_kind] for c in files)
              for _, files, _ in sources]
+    if gate_cp > 0:
+        log(f"--bt-quiet-cp {gate_cp}: budget and quotas count only rows within "
+            f"the gate (dump gate was --quiet-cp {args.quiet_cp})")
     if row_kind:
         log(f"--bt-rows {args.bt_rows}: budget and quotas count {args.bt_rows} "
             f"rows only")
@@ -983,7 +1018,7 @@ def main():
         f"(axis={'game-ply' if game_ply_axis else 'legacy record-index'}, "
         f"dedup) ...")
     rows, gid_next, dropped, per_source = write_corpus(
-        corpus_path, sources, sizes, quota, game_ply_axis, row_kind)
+        corpus_path, sources, sizes, quota, game_ply_axis, row_kind, gate_cp)
     log(f"{rows:,} positions assembled from {gid_next:,} distinct games "
         f"({dropped:,} duplicate rows dropped)")
 
@@ -1275,6 +1310,7 @@ def main():
         "bt_K": args.bt_K,
         "bt_td_lambda": args.bt_td_lambda,
         "bt_rows": args.bt_rows,
+        "bt_quiet_cp": args.bt_quiet_cp,
         "corpus_rows": rows,
         "corpus_games": gid_next,
         "corpus_window": [

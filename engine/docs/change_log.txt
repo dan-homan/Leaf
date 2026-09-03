@@ -1,5 +1,30 @@
 Changes since 2017_12_24
 
+2026_09_03e -- train.py --bt-quiet-cp: wire up the other half of A2.
+
+               Generation has dumped WIDE (--quiet-cp 1000) since 2026_09_03b on
+               the grounds that every row now carries its `gate` column and the
+               width can be re-cut offline.  The re-cut was never wired into
+               train.py: the trainer's --bt-quiet-cp existed but nothing passed
+               it, so the next leg would have trained on the raw wide dump --
+               exactly A2's `gnone` arm, -27.9 +- 11.3 Elo.  Measured on the
+               a2gate wide corpus, only 57% of root rows fall inside 60 cp, so
+               this was not a rounding error.
+
+               --bt-quiet-cp CP (default 60) applies the gate at corpus ASSEMBLY,
+               beside the --bt-rows filter and for the same reason: budget and
+               per-source quotas count only surviving rows, so the re-cut shrinks
+               the corpus rather than silently delivering a fraction of the
+               requested training set.  corpus_row_counts() takes the gate and
+               caches per width (<corpus>.rows.g60), leaving the unfiltered
+               <corpus>.rows valid.  Recorded in the sidecar as bt_quiet_cp.
+
+               Rows with no `gate` column (corpora dumped before 2026_09_03) pass
+               through untouched -- they were gated at dump time -- so a corpus
+               window mixing old and new archives is gated consistently at 60.
+
+               scripts/train.py, docs/TRAINING.md, docs/SCRIPT_USE.md.
+
 2026_09_03d -- Generation throughput: stop reallocating the hash tables once per
                game, and default training to a 16 MB hash.  +25% game generation
                at depth 8 / 14 actors.  See docs/Generation_Throughput.md.

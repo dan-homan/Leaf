@@ -938,6 +938,16 @@ labels are good because search resolved a tactic a static eval cannot represent.
 See `docs/Offline_Learning_Investigation.md` Part 4.  Dumping wide is still correct:
 it costs nothing, and it makes the width a knob rather than a baked-in decision.
 
+The knob is **`train.py --bt-quiet-cp` (default 60)**, and it acts at corpus
+*assembly*, not at training: the budget and the per-source quotas count only rows
+that survive the gate, so the re-cut shrinks the corpus instead of silently
+delivering a fraction of the requested training set — the same failure mode
+`--bt-rows root` had.  Only ~57% of a wide dump's root rows fall inside 60 cp, so
+this matters: assembling a wide corpus without the re-cut reproduces the `gnone`
+arm and costs ~28 Elo.  Corpora dumped before 2026-09-03 have no `gate` column
+and pass through untouched — they were already gated at dump time, so a window
+that mixes old and new corpora is gated consistently at 60 either way.
+
 > **Current defaults:** `--bt-K 220` cp with the default pure λ-return target —
 > `--bt-lambda` and `--bt-leaf-lambda` default to `1.0` and stay dormant scale knobs;
 > `--bt-td-lambda` (default `TDLEAF_LAMBDA` = 0.985) is the single knob of record for
