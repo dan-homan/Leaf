@@ -99,13 +99,24 @@ void set_hash_size(unsigned int Mbytes)
 
 
 //--------------------------------------------
-// Function with allocates space for the hash 
-//   tables and generates the hash codes
+// Wipe the hash tables in place.
+//
+// This is the whole "start a new game" requirement: the tables must not carry
+// entries from the previous game, but their geometry is unchanged, so there is
+// no reason to hand the memory back to the allocator and fault it in again.
+// The former path (set_hash_size() -> close_hash() + open_hash()) did exactly
+// that ONCE PER GAME under self-play, and the free/aligned_alloc + page-fault
+// + kernel page-zeroing round trip measured ~20% of total game time at depth 6
+// with the default 128 MB.  open_hash() now allocates and delegates here, so
+// there is one copy of the initialisation and the post-condition is identical.
 //--------------------------------------------
-void open_hash()
+void clear_hash()
 {
- hash_table = (hash_bucket*)hash_alloc(TAB_SIZE * sizeof(hash_bucket), "main hash");
- // initialize key values in table
+ // The SIZE globals carry non-zero compile-time defaults, so a call before
+ // open_hash() would walk null pointers.  Every real caller runs after the
+ // startup set_hash_size(), but guard rather than rely on that.
+ if(!hash_table || !pawn_table || !score_table || !cmove_table) return;
+
  hash_bucket *h;
  for(uintptr_t i = 0; i < TAB_SIZE; i++) {
    h = hash_table + i;
@@ -117,7 +128,6 @@ void open_hash()
      h->rec[j].hr_data = 0;
    }
  }
- pawn_table = (pawn_rec*)hash_alloc(PAWN_SIZE * sizeof(pawn_rec), "pawn hash");
  pawn_rec *p;
  for(uintptr_t i = 0; i < PAWN_SIZE; i++) {
    p = pawn_table+i;
@@ -132,7 +142,6 @@ void open_hash()
    p->data.passed_b = 0;
    p->data.padding1 = 0;
  }
- score_table = (score_rec*)hash_alloc(SCORE_SIZE * sizeof(score_rec), "score hash");
  score_rec *s;
  for(uintptr_t i = 0; i < SCORE_SIZE; i++) {
    s = score_table+i;
@@ -142,7 +151,6 @@ void open_hash()
    s->qchecks[1] = 0;
    s->padding1 = 0;
  }
- cmove_table = (cmove_rec*)hash_alloc(CMOVE_SIZE * sizeof(cmove_rec), "combination-move");
  cmove_rec *c;
  for(uintptr_t i = 0; i < CMOVE_SIZE; i++) {
    c = cmove_table+i;
@@ -157,6 +165,20 @@ void open_hash()
    c->padding2 = 0;
    c->padding3 = 0;
  }
+}
+
+
+//--------------------------------------------
+// Function with allocates space for the hash 
+//   tables and generates the hash codes
+//--------------------------------------------
+void open_hash()
+{
+ hash_table  = (hash_bucket*)hash_alloc(TAB_SIZE  * sizeof(hash_bucket), "main hash");
+ pawn_table  = (pawn_rec*)   hash_alloc(PAWN_SIZE * sizeof(pawn_rec),    "pawn hash");
+ score_table = (score_rec*)  hash_alloc(SCORE_SIZE* sizeof(score_rec),   "score hash");
+ cmove_table = (cmove_rec*)  hash_alloc(CMOVE_SIZE* sizeof(cmove_rec),   "combination-move");
+ clear_hash();
  lmr_init_tables();
 }
 

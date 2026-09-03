@@ -90,14 +90,19 @@ static bool selfplay_load_epd(const char *path, std::vector<SelfplayEpdLine> &ou
 
 // ---------------------------------------------------------------------------
 // Per-game engine state reset — mirrors the UCI `ucinewgame` handler so a
-// selfplay game starts from the same clean state as a harness game: full
-// hash-table realloc (TT probes match on key only, so stale entries from the
+// selfplay game starts from the same clean state as a harness game: the hash
+// tables are wiped (TT probes match on key only, so stale entries from the
 // previous game WOULD be probed without this), h_id/depth trackers, and
 // history/reply tables.
+//
+// clear_hash(), not set_hash_size(): the geometry never changes between games,
+// so the old free/aligned_alloc round trip bought nothing and cost a full
+// page-fault-in of the table every game -- ~20% of game time at depth 6 with
+// the default 128 MB hash, paid 500,000 times in a single training iteration.
 // ---------------------------------------------------------------------------
 static void selfplay_new_game_reset()
 {
-    set_hash_size(engine_cfg.hash_size);
+    clear_hash();
     game.ts.last_ponder = 0;
     game.ts.last_depth  = 1;
     game.ts.singular_response.t = NOMOVE;

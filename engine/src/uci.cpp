@@ -718,8 +718,11 @@ void uci_loop(game_rec *gr)
         } else if (tok == "ucinewgame") {
             // Finish the previous game's TDLeaf update before resetting state.
             uci_finish_game();
-            // Reset engine state for a new game
-            set_hash_size(engine_cfg.hash_size);
+            // Reset engine state for a new game.  clear_hash() wipes the
+            // tables in place; the old set_hash_size() call re-allocated them
+            // at the same size, which under a long match meant faulting the
+            // whole table back in once per game for no benefit.
+            clear_hash();
             game.setboard((char*)i_pos, 'w', (char*)"KQkq", (char*)"-");
             game.T = 1;
             game.ts.last_ponder = 0;

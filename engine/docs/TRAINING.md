@@ -1119,6 +1119,33 @@ invisible to grad-norm/clip monitors.
 `material_260708-d8t-3al3` iteration: draws steady 35–40% across 188k games,
 final net +23±17 over its seed, foreign anchor +80 vs classic.
 
+### Generation throughput
+
+Two things dominate wall-clock generation speed, both measured in
+`docs/Generation_Throughput.md`:
+
+1. **Hash size (`--hash`, default 16 MB).**  The engine wipes its hash tables
+   once per game, so an oversized table is a per-game tax paid 500,000 times in
+   an iteration.  Dropping the old 128 MB default to 16 MB is worth **+25%
+   generation throughput at depth 8** with no measurable change in outcomes or
+   termination mix (600 games/arm).  Raise it only when generating at much
+   greater depth than 8.
+2. **The learner is a single-threaded ceiling** at ~13–18 games/s, and its work
+   per game is *depth-independent* (`--refresh-scores` rebuilds two accumulators
+   per record; it never searches).  At depth 8 and 10 the actors supply well
+   under that, so it does not bind.  At depth 6 it does — actors then sit in the
+   0.5 s backpressure sleep waiting on `traj_max_pending`, and adding actors
+   makes it *worse*, because the extra processes take clock away from the
+   learner that is setting the rate.  Watch for it by checking whether the
+   `.tdg` count in `<tag>_work/traj/` is pinned near 500.
+
+Note that per-actor `games/s` in `traj/actor_*.log` is not a work rate: a
+blocked actor reports a low rate while doing nothing.
+
+Not worth chasing on a laptop-class CPU: all-core clock throttling costs roughly
+60% of ideal scaling at 16 actors, applies to any driver, and is not a
+regression.
+
 ## The Hybrid Loop Workflow — `scripts/train.py`
 
 One command per hybrid-loop iteration, run from `engine/learn/`:

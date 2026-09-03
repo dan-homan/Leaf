@@ -287,9 +287,10 @@ python3 match.py Leaf_vtrain_fresh_a Leaf_vtrain_fresh_b -c 5 -tc 0:03+0.05 --wa
 engine/
   src/          Source code (unity-built via Leaf.cc)
   docs/         Documentation (NNUE.md, TRAINING.md, SCRIPT_USE.md, TODO.md,
-                Online_Learning_Investigation.md, SIMPLIFICATION_PLAN.md,
-                change_log.txt, history/ for retired designs and experiment
-                write-ups)
+                Online_Learning_Investigation.md,
+                Offline_Learning_Investigation.md, Generation_Throughput.md,
+                SIMPLIFICATION_PLAN.md, change_log.txt, history/ for retired
+                designs and experiment write-ups)
   scripts/      Python automation scripts
   run/          Compiled binaries + runtime config (opening book, incl.
                 main_bk.dat) — binaries land here only as a compile-time

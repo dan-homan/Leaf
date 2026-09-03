@@ -1,5 +1,73 @@
 Changes since 2017_12_24
 
+2026_09_03d -- Generation throughput: stop reallocating the hash tables once per
+               game, and default training to a 16 MB hash.  +25% game generation
+               at depth 8 / 14 actors.  See docs/Generation_Throughput.md.
+
+               The reported symptom was that internal self-play generates ~30-50%
+               slower per game than the old fastchess driver on the Linux box for
+               large runs, suspected NUMA/memory-affinity.  Measured otherwise:
+
+               - NUMA ruled out.  One NUMA node; numactl is not installed.  There
+                 is nothing to bind and fastchess was not binding anything.
+               - Memory contention ruled out.  A pure-ALU, cache-resident loop
+                 with no memory traffic and no syscalls reproduces the self-play
+                 scaling curve almost exactly (per-core rel. to N=1: 0.74/0.55/
+                 0.43/0.41 at N=2/4/8/16 vs self-play 0.75/0.56/0.41/0.34).  The
+                 multi-process loss is all-core clock throttling on a laptop-class
+                 8940HX (~3.5 GHz single -> ~1.3-1.5 GHz all-core), which any
+                 driver pays.  Aggregate tops out at ~5-6x the single-actor rate.
+               - The hash hypothesis was RIGHT.  selfplay_new_game_reset() and the
+                 UCI ucinewgame handler called set_hash_size() to start a clean
+                 game -- i.e. close_hash() + open_hash(): free all four tables,
+                 aligned_alloc them again at the SAME size, and walk every entry.
+                 At the 128 MB default that is a munmap/mmap round trip plus a
+                 full page-fault-in and 128 MB of init writes, per game, per
+                 actor, 500,000 times per training iteration.
+
+               Fix, in two independent parts (they compose):
+                 clear_hash() (new) wipes the tables in place; open_hash() now
+                 allocates and delegates to it, so one copy of the init code and
+                 an identical post-condition.  Worth +7% at 1 actor, +3% at 14.
+                 selfplay_run.py --hash / train.py --hash default to 16 MB (was
+                 128).  Worth +25% at either actor count -- writing 128 MB per
+                 game is the larger cost and throttling does not compress it.
+                 `hash <MB>` must precede --selfplay/--learn-stream: main()
+                 dispatches to the driver on that flag and never returns to the
+                 argument loop.
+
+               Depth 8, 30 games/actor, identical game set per arm:
+                 realloc/128MB (shipped)  0.949 g/s (N=1)   5.013 g/s (N=14)
+                 realloc/16MB             1.123 (+18%)      6.302 (+26%)
+                 clear/128MB              1.020 (+7%)       5.166 (+3%)
+                 clear/16MB               1.220 (+29%)      6.279 (+25%)
+
+               16 MB costs nothing in game quality: 600 games/arm, same openings,
+               draw rate 36.7% (128 MB) vs 38.2% (16 MB), ~0.5 sigma and both
+               inside the healthy 35-40% band; termination mix flat (mate 380 vs
+               371, 3-rep 149 vs 151).  A 40-game pilot suggested a mate ->
+               repetition drift; it did not survive n=600.
+
+               Also measured, NOT changed: the single learner is a hard ceiling at
+               ~13-18 games/s (17.9 idle, 12.3 with 4 competing cores, 13.0 with
+               8), and its per-game work is depth-INDEPENDENT (--refresh-scores
+               rebuilds two accumulators per record; it never searches).  At depth
+               6 that binds -- a live 8-actor pipeline sat at 449/500 pending .tdg
+               with the learner at 9.2 games/s and actors asleep in the 0.5 s
+               backpressure loop.  At depth 8 actors supply only ~5-6 games/s, so
+               it does not bind and no change was made.  This IS a real structural
+               difference from fastchess (where learning lived in each engine and
+               scaled with concurrency); if generation ever returns to shallow
+               depth, fix the learner, not the actor count -- extra actors past
+               saturation take clock away from the process setting the rate.
+
+               Requires a rebuild of the training binary (train.py --recompile).
+
+               src/hash.cpp, src/hash.h, src/selfplay.cpp, src/uci.cpp,
+               scripts/selfplay_run.py, scripts/train.py,
+               docs/Generation_Throughput.md (new), docs/TRAINING.md,
+               docs/SCRIPT_USE.md.
+
 2026_09_03c -- A2 answered (the quiet gate is CORRECT), and the chain head moves
                to m260720-5.5e6gR (+155.1, up 58.9 Elo).
 

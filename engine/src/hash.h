@@ -164,6 +164,7 @@ struct cmove_rec
 /* Number of hash related functions */
 void open_hash();
 void close_hash();
+void clear_hash();
 void set_hash_size(unsigned int Mbytes);
 void put_hash(h_code *h_key, int score, int alpha, int beta, int depth, int hmove, int h_id, int ply);
 int get_hash(h_code *h_key, int *hflag, int *hdepth, move *gmove, int ply, int *singular);

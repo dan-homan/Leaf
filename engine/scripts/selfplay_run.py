@@ -50,6 +50,15 @@ def main():
                     help="Training binary (in cwd) with --selfplay/--learn-stream")
     ap.add_argument("--epd", required=True, help="Opening book EPD")
     ap.add_argument("--actors", type=int, default=4)
+    ap.add_argument("--hash", type=int, default=16,
+                    help="Per-process hash size in MB (default 16).  The engine "
+                         "wipes its tables once per game, so an oversized table "
+                         "is pure per-game cost: at depth 8 the default 128 MB "
+                         "measured 25%% slower generation than 16 MB (14 actors, "
+                         "AMD 8940HX), for no change in outcome or termination "
+                         "mix over 600 games/arm.  A depth-8 search touches far "
+                         "fewer positions than 16 MB holds; raise this only if "
+                         "generating at much greater depth.")
     ap.add_argument("--depth", type=int, default=8)
     ap.add_argument("--games-per-actor", type=int, default=1000,
                     help="Actor respawn cadence = weight refresh interval")
@@ -92,7 +101,8 @@ def main():
     traj = Path(args.traj_dir)
     traj.mkdir(exist_ok=True)
 
-    learner_cmd = [f"./{binary}", "--learn-stream", str(traj),
+    learner_cmd = [f"./{binary}", "hash", str(args.hash),
+                   "--learn-stream", str(traj),
                    "--total-games", str(args.total_games)]
     if args.tdleaf_out:
         learner_cmd += ["--tdleaf-out", args.tdleaf_out]
@@ -119,7 +129,7 @@ def main():
     def spawn(slot):
         generation[slot] += 1
         seed = args.seed + 1000 * generation[slot]
-        cmd = [f"./{binary}", "--selfplay",
+        cmd = [f"./{binary}", "hash", str(args.hash), "--selfplay",
                "--epd", args.epd,
                "--epd-shuffle", str(seed),
                "--epd-offset", str(slot), "--epd-stride", str(args.actors),

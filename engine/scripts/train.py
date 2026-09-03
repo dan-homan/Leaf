@@ -547,6 +547,9 @@ def main():
     ap.add_argument("--games", type=int, default=400000)
     ap.add_argument("--depth", type=int, default=8)
     ap.add_argument("--concurrency", type=int, default=9)
+    ap.add_argument("--hash", type=int, default=16,
+                    help="Per-actor hash size in MB passed to generation "
+                         "(default 16; see selfplay_run.py --hash)")
     ap.add_argument("--openings", default="training_openings.epd")
     # Online generation is always the actor/learner split (scripts/selfplay_run.py):
     # concurrency-1 FROZEN actors play internal self-play and emit .tdg trajectories;
@@ -847,6 +850,7 @@ def main():
             "--binary", "Leaf_vtrain_hl_a",
             "--epd", args.openings,
             "--actors", n_actors,
+            "--hash", args.hash,
             "--depth", args.depth,
             "--games-per-actor", args.games_per_actor,
             "--total-games", args.games,
