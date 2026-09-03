@@ -412,6 +412,16 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
 //
 // Both apply |cp| <= TDLEAF_DUMP_MAX_CP (default 1500).  QUIET_CP default 60
 // (TDLEAF_DUMP_QUIET_CP).
+//
+// Column 8, "gate": the value the quietness test compared cp against, in the
+// SAME POV as cp — root static for root rows, the propagated root search score
+// for leaf rows.  The gate condition is therefore exactly
+//     |cp - gate| <= TDLEAF_DUMP_QUIET_CP
+// for both files, which makes the gate RE-CUTTABLE OFFLINE: dump once with a
+// wide QUIET_CP and every narrower gate is a filter over the same rows.  That
+// turns the gate-width question into a paired offline experiment (same games,
+// same labels, only the admitted row population differs) instead of two
+// divergent generation runs.  Consumers that only know 7 columns ignore it.
 // ---------------------------------------------------------------------------
 
 // FEN board+stm from a stored position (castling/ep are not NNUE features and
@@ -467,7 +477,7 @@ static void tdleaf_dump_game(const TDGameRecord &rec, float result)
                         // axis off this line; legacy corpora without it use the
                         // old record-index axis.
                         fprintf(f, "# tdleaf-corpus axis=game-ply\n");
-                        fprintf(f, "fen\tcp\tresult\tply\tdepth\tgid\tendply\n");
+                        fprintf(f, "fen\tcp\tresult\tply\tdepth\tgid\tendply\tgate\n");
                     }
                 } else {
                     fprintf(stderr, "TDLeaf: cannot open dump file %s\n", path);
@@ -538,11 +548,17 @@ static void tdleaf_dump_game(const TDGameRecord &rec, float result)
                                                          : -r.score_root_stm;
             if (abs(r.score_stm - root_leaf_pov) <= dump_quiet_cp) {
                 int cp_white = r.wtm ? r.score_stm : -r.score_stm;
+                // Column 8 "gate": what the quietness test compared cp against,
+                // same POV as cp, so the gate is |cp - gate| <= QUIET_CP and can
+                // be RE-CUT OFFLINE.  Dump wide once and every narrower gate is
+                // a filter away — no second generation run, and the arms are
+                // then perfectly paired (same games, same labels).
+                int gate_white = r.wtm ? root_leaf_pov : -root_leaf_pov;
                 if (cp_white <= dump_max_cp && cp_white >= -dump_max_cp) {
                     tdleaf_dump_fen(r.pos, r.wtm, fen);
-                    fprintf(leaf_f, "%s\t%d\t%s\t%d\t0\t%u\t%d\n",
+                    fprintf(leaf_f, "%s\t%d\t%s\t%d\t0\t%u\t%d\t%d\n",
                             fen, cp_white, res_str, r.game_ply, dump_gid,
-                            final_game_ply);
+                            final_game_ply, gate_white);
                 }
             }
         }
@@ -561,11 +577,16 @@ static void tdleaf_dump_game(const TDGameRecord &rec, float result)
         if (root_f) {
             if (abs(r.root_static - r.score_root_stm) <= dump_quiet_cp) {
                 int cp_white = root_wtm ? r.score_root_stm : -r.score_root_stm;
+                // Column 8 "gate": the root STATIC eval, same POV as cp.  The
+                // gate was |cp - gate| <= QUIET_CP, so a wide dump re-cuts to
+                // any narrower gate offline.  This is the quantity Part 1 found
+                // the label's value is proportional to.
+                int gate_white = root_wtm ? r.root_static : -r.root_static;
                 if (cp_white <= dump_max_cp && cp_white >= -dump_max_cp) {
                     tdleaf_dump_fen(r.root_pos, (bool)root_wtm, fen);
-                    fprintf(root_f, "%s\t%d\t%s\t%d\t%d\t%u\t%d\n",
+                    fprintf(root_f, "%s\t%d\t%s\t%d\t%d\t%u\t%d\t%d\n",
                             fen, cp_white, res_str, r.game_ply, (int)r.id_depth,
-                            dump_gid, final_game_ply);
+                            dump_gid, final_game_ply, gate_white);
 #if TDLEAF_REFRESH_DIAG
                     // Same row, same gate decision, ACTOR-VINTAGE label — the
                     // paired control that isolates the score refresh from the

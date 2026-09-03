@@ -109,8 +109,14 @@ struct BTRecord {
     uint32_t gid;       // game id (validation split key + per-game N lookup)
     uint8_t  depth;     // search depth of the cp label; 0 = no search label
                         // (leaf-dump rows) → weighted by --bt-leaf-lambda
-    uint8_t  pad;
+    uint8_t  has_gate;  // 1 if the corpus carried the 8th "gate" column
     uint16_t ply;       // 1-based ply of the position (result-decay distance)
+    int16_t  gate;      // what the dump-time quietness test compared cp against
+                        // (root static for root rows, the propagated root search
+                        // score for leaf rows), same POV as cp.  The dump gate
+                        // was |cp - gate| <= TDLEAF_DUMP_QUIET_CP, so a corpus
+                        // dumped wide re-cuts to any narrower gate here via
+                        // --bt-quiet-cp.
 };
 
 // ---------------------------------------------------------------------------
@@ -196,6 +202,8 @@ static void bt_decode(const BTRecord &r, position &pos)
 // register their ply); corpora with endply (all current ones) are exact.
 static int    bt_rows_mode     = 2;
 static size_t bt_rows_filtered = 0;
+static long   quiet_cp = 0;        // --bt-quiet-cp: 0 = keep the dump-time gate
+static size_t bt_gate_filtered = 0;
 
 static bool bt_load_file(const char *path, std::vector<BTRecord> &out,
                          std::unordered_map<uint32_t, uint32_t> &gid_map,
@@ -242,7 +250,19 @@ static bool bt_load_file(const char *path, std::vector<BTRecord> &out,
         if (bt_rows_mode == 0 && depth != 0) { bt_rows_filtered++; continue; }
         if (bt_rows_mode == 1 && depth == 0) { bt_rows_filtered++; continue; }
         unsigned long gid = strtoul(p + 1, &p, 10);
-        long endply = (*p == '\t') ? strtol(p + 1, nullptr, 10) : 0;
+        long endply = 0, gate = 0;
+        bool has_gate = false;
+        if (*p == '\t') {
+            endply = strtol(p + 1, &p, 10);
+            if (*p == '\t') { gate = strtol(p + 1, nullptr, 10); has_gate = true; }
+        }
+        // Training-time quiet gate — re-cut a widely-dumped corpus.  Rows with
+        // no gate column are kept: their gate is unknowable, and legacy corpora
+        // were already cut at dump time.
+        if (quiet_cp > 0 && has_gate && labs(cp - gate) > quiet_cp) {
+            bt_gate_filtered++;
+            continue;
+        }
 
         BTRecord r;
         if (!bt_parse_fen(line, r)) { skipped++; continue; }
@@ -251,6 +271,8 @@ static bool bt_load_file(const char *path, std::vector<BTRecord> &out,
         r.cp      = (int16_t)cp;
         r.result2 = result2;
         r.depth   = (uint8_t)((depth < 0) ? 0 : (depth > 255) ? 255 : depth);
+        r.has_gate = has_gate ? 1 : 0;
+        r.gate    = (int16_t)((gate > 32000) ? 32000 : (gate < -32000) ? -32000 : gate);
         // Compact the gid.  Dump gids are (pid & 0xFFF) << 20 plus a counter
         // (tdleaf.cpp), i.e. sparse and up to ~4.3e9 — indexing gid_N by the
         // raw value cost GBs of padding on a single corpus (7.2 GB for a max
@@ -471,6 +493,7 @@ int nnue_batch_train(int argc, char *argv[])
         else if ((v = next("--bt-loss-gamma"))) loss_gamma = (float)atof(v);
         else if ((v = next("--bt-leaf-lambda"))) leaf_lambda = (float)atof(v);
         else if ((v = next("--bt-td-lambda")))   { td_lambda = (float)atof(v); td_lambda_explicit = true; }
+        else if ((v = next("--bt-quiet-cp"))) quiet_cp = atol(v);
         else if (strcmp(argv[i], "--bt-diag") == 0) diag_only = true;
         else if ((v = next("--bt-rows"))) {
             bt_rows_mode = (strcmp(v, "leaf") == 0) ? 0
@@ -541,6 +564,10 @@ int nnue_batch_train(int argc, char *argv[])
             clip_every, (double)loss_gamma,
             corpus_game_ply ? "game-ply" : "record-index(legacy)",
             (bt_rows_mode == 0) ? "leaf" : (bt_rows_mode == 1) ? "root" : "both");
+    if (quiet_cp > 0)
+        fprintf(stderr, "batch-train: --bt-quiet-cp %ld — %zu rows dropped at "
+                        "load for |cp - gate| over the gate\n",
+                quiet_cp, bt_gate_filtered);
     if (bt_rows_mode != 2)
         fprintf(stderr, "batch-train: --bt-rows %s — %zu %s rows filtered at load\n",
                 (bt_rows_mode == 0) ? "leaf" : "root", bt_rows_filtered,
@@ -644,7 +671,8 @@ int nnue_batch_train(int argc, char *argv[])
                    cov = 0, dcp = 0, dcp2 = 0, d = 0, lab = 0, out = 0;
             double h[8] = {0,0,0,0,0,0,0,0};   // |dcp| histogram, 10 cp bins
         };
-        const int NB = 24;   // 0=all, 1..7=gap, 8..15=piece stacks, 16..23=|label-net| cp
+        const int NB = 32;   // 0=all, 1..7=gap, 8..15=stacks, 16..23=|label-net|,
+                             // 24..31 = |cp-gate|, the DUMP-TIME quiet gate
         std::vector<std::vector<DBin>> tbin(threads,
                                             std::vector<DBin>(2 * NB));
         pool.run([&](int tid) {
@@ -669,10 +697,20 @@ int nnue_batch_train(int argc, char *argv[])
                        : (g < 128) ? 4 : (g < 256) ? 5 : 6;
                 int cls = (r.depth == 0) ? 0 : 1;
                 int hb0 = (int)(fabs(dcp) / 10.0);  if (hb0 > 7) hb0 = 7;
+                // |cp - gate| = the dump-time quietness measure.  Binning on
+                // it answers "what does widening TDLEAF_DUMP_QUIET_CP buy?"
+                // directly, and unlike the |label-net| bins it does not depend
+                // on which net is loaded.
+                int nidx = 3;
                 int idx[4] = { cls * NB, cls * NB + 1 + gb,
-                               cls * NB + 8 + (pc - 1) / 4,
-                               cls * NB + 16 + hb0 };
-                for (int k = 0; k < 4; k++) {
+                               cls * NB + 8 + (pc - 1) / 4, 0 };
+                if (r.has_gate) {
+                    int q = (int)(labs((long)r.cp - r.gate) / 20);
+                    idx[nidx++] = cls * NB + 24 + (q > 7 ? 7 : q);
+                } else {
+                    idx[nidx++] = cls * NB + 16 + hb0;
+                }
+                for (int k = 0; k < nidx; k++) {
                     DBin &b = tb[idx[k]];
                     b.n++;   b.res += rl;   b.res2 += rl * rl;
                     b.out_net += ro * ro;
@@ -738,6 +776,11 @@ int nnue_batch_train(int argc, char *argv[])
                 if (q < 7) snprintf(nb, sizeof(nb), "  |dcp|%d-%d", q * 10, q * 10 + 10);
                 else       snprintf(nb, sizeof(nb), "  |dcp|>70");
                 row(nb, B[cls * NB + 16 + q]);
+            }
+            for (int q = 0; q < 8; q++) {
+                if (q < 7) snprintf(nb, sizeof(nb), "  gate%d-%d", q * 20, q * 20 + 20);
+                else       snprintf(nb, sizeof(nb), "  gate>140");
+                row(nb, B[cls * NB + 24 + q]);
             }
         }
         fprintf(stderr, "batch-train: diag complete (no training performed)\n");

@@ -792,6 +792,7 @@ fen  cp  result  ply  depth  gid  [endply]
 | `depth` | search depth of the eval label; **0 = no search label** (see below) |
 | `gid` | stable game id — the trainer splits train/validation **by game** |
 | `endply` | *(optional)* the game's true final ply — exact distance base for the result decay. When absent, the trainer falls back to the per-`gid` max ply seen in the corpus (short by the quiet-filtered game tail, a mild ~uniform over-weighting of the result). Both corpus producers write it since 2026-07-04. |
+| `gate` | *(optional, in-engine dumps since 2026-09-03)* the value the dump-time quietness test compared `cp` against, in the **same POV as `cp`** — root static for root rows, the propagated root search score for leaf rows. The dump gate was exactly `|cp − gate| ≤ TDLEAF_DUMP_QUIET_CP`, so **the gate is re-cuttable offline** with `--bt-quiet-cp` (see below). Consumers that know only 7 columns ignore it. |
 
 **Ply units:** both corpus producers write true **game plies** (every half-move)
 in the `ply`/`endply` columns (game-ply λ^Δ era, since 2026-07-07) — the
@@ -887,6 +888,39 @@ material stack), and by `|label − net|` in 10 cp bins.
 Use it to decide whether a corpus is worth consolidating *before* spending an epoch
 on it, and to compare corpora (or generation settings) against a fixed net.  See
 `docs/Offline_Learning_Investigation.md` for the analysis this was built for.
+
+#### Re-cutting the quiet gate offline — `--bt-quiet-cp`
+
+The dump-time quietness gate (`TDLEAF_DUMP_QUIET_CP`, default 60 cp) used to be an
+**irreversible** decision: rows it rejected were never written, so the only way to
+ask "was the gate too tight?" was to regenerate — and two generation runs from the
+same seed diverge, confounding the gate with different games.
+
+Since 2026-09-03 both dump files carry a `gate` column recording what the test
+compared `cp` against, so the condition `|cp − gate| ≤ QUIET_CP` can be re-applied
+at training time:
+
+```sh
+# generate once with the gate wide open ...
+TDLEAF_DUMP_QUIET_CP=1000 python3 selfplay_run.py ...
+
+# ... then any narrower gate is a filter over the SAME rows, perfectly paired
+./Leaf_vbt --batch-train corpus.tsv --bt-quiet-cp 60    # reproduces the old default
+./Leaf_vbt --batch-train corpus.tsv --bt-quiet-cp 200
+./Leaf_vbt --batch-train corpus.tsv                     # no gate at all
+```
+
+`--bt-quiet-cp 0` (the default) keeps whatever the dump applied.  Rows with no
+`gate` column are always kept — their gate is unknowable, and legacy corpora were
+already cut at dump time.  `--bt-diag` bins by `|cp − gate|` when the column is
+present, so the value of each gate width can be read off **before** training
+anything.
+
+**The gate is therefore now a training-time hyperparameter, and generation should
+dump wide.**  The cost is corpus size (the 60 cp gate discards ~45% of root
+positions); the benefit is that the gate width, which Part 1 of
+`docs/Offline_Learning_Investigation.md` shows is the axis the label's whole value
+lies along, stops being baked into the data.
 
 > **Current defaults:** `--bt-K 220` cp with the default pure λ-return target —
 > `--bt-lambda` and `--bt-leaf-lambda` default to `1.0` and stay dormant scale knobs;

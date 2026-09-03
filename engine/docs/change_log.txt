@@ -1,5 +1,43 @@
 Changes since 2017_12_24
 
+2026_09_03b -- The corpus quiet gate becomes re-cuttable offline (unblocks A2).
+
+               TDLEAF_DUMP_QUIET_CP (default 60 cp) was applied at dump time and
+               was therefore irreversible: rows it rejected were never written,
+               so asking "was the gate too tight?" meant regenerating -- and two
+               runs from the same seed diverge, confounding the gate with
+               different games.  Part 1 had already measured that a search
+               label's value is proportional to its disagreement with the net
+               (dMSE_out +0.04% under 10 cp rising to +8.42% above 70 cp) while
+               the gate discards 44.6% of root positions ranked by exactly that
+               quantity -- so this was the blocking question.
+
+               Both dump files now write an 8th column, "gate": the value the
+               quietness test compared cp against, in the SAME POV as cp (root
+               static for root rows, the propagated root search score for leaf
+               rows).  The gate condition is exactly |cp - gate| <= QUIET_CP, so
+
+                 --bt-quiet-cp N   re-applies any narrower gate at LOAD time
+
+               turning gate width from a data-time decision into a training-time
+               hyperparameter.  Dump once with the gate wide and every narrower
+               gate is a filter over the same games and the same labels -- a
+               perfectly paired experiment.  --bt-diag additionally bins by
+               |cp - gate|, so each gate width can be priced before training
+               anything.
+
+               This also delivers, for one integer column, the "keep the PGN so
+               the gate can be changed after the fact" capability -- without
+               keeping PGNs.
+
+               Backward compatible in both directions: the trainer ignores the
+               extra column in old builds, keeps rows that have no gate column,
+               and train.py's corpus assembly preserves it.  Verified: 8-column
+               corpora load and train unchanged, and --bt-quiet-cp 30/60 over a
+               corpus with known gate deltas kept exactly the predicted 38.5%
+               and 84.6% of rows.
+
+
 2026_09_03  -- Root rows only: --bt-rows now defaults to root (+36 Elo), and the
                corpus budget counts the selected row type.
 

@@ -94,12 +94,32 @@ held-out corpus is the cheap between-arm proxy.
       is applied at dump time and is irreversible, which is exactly what blocks
       A2 from being answered offline on data already in hand.
 
-- [ ] **A2 — Widen the corpus quiet gate (needs generation, cheapest decisive
-      test of the central finding).**  Regenerate a *small* corpus (~100k games,
-      d8) with `TDLEAF_DUMP_QUIET_CP=200` alongside a `=60` control from the same
-      seed and openings, then consolidate each and gauntlet.  `--bt-diag` on both
-      predicts the answer before any training: the 200 cp corpus should show a much
-      larger aggregate `ΔMSE_out` than the 60 cp one.
+- [ ] **A2 — Widen the corpus quiet gate.**  Part 1 measured a search label's
+      value as proportional to its disagreement with the net (`ΔMSE_out` +0.04%
+      under 10 cp rising to **+8.42%** above 70 cp), while `TDLEAF_DUMP_QUIET_CP
+      = 60` discards **44.6% of root positions** ranked by exactly that quantity.
+
+      **Enabling change landed 2026-09-03:** both dump files now carry a `gate`
+      column (what the quietness test compared `cp` against, same POV), so the
+      gate condition `|cp − gate| ≤ QUIET_CP` is re-cuttable offline via
+      `--bt-quiet-cp`.  A2 therefore no longer needs two divergent generation
+      runs — dump once with the gate wide and every narrower gate is a filter
+      over the **same games and same labels**, perfectly paired.
+
+      Remaining steps:
+      1. Generate with `TDLEAF_DUMP_QUIET_CP` wide (1000 ≈ off).  Corpus grows
+         ~1.8× in root rows; disk cost is trivial next to the information.
+      2. `--bt-diag` on the result, binned by `|cp − gate|`, to price each gate
+         width **before** training anything.  This alone may settle A2.
+      3. If the diagnostic confirms, row-matched training arms at gate
+         60 / 120 / 200 / off, then gauntlet.  Row-matching isolates *row
+         quality*; the unmatched version additionally buys ~1.8× the rows.
+
+      **Open decision: should `TDLEAF_DUMP_QUIET_CP` default to wide?**  Dumping
+      wide is strictly more information at ~1.8× corpus size and costs the online
+      phase nothing (the gate affects dumping only, never the TD update).  Left
+      at 60 pending a call on disk budget.
+
 - [ ] **A3 — Replace the eval-gap gate with a direct tactical gate.**  The gate
       exists to exclude positions a static eval cannot represent, but
       `|static − search|` is a proxy that is perfectly correlated with
