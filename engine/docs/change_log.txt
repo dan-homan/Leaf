@@ -1,5 +1,53 @@
 Changes since 2017_12_24
 
+2026_09_03c -- A2 answered (the quiet gate is CORRECT), and the chain head moves
+               to m260720-5.5e6gR (+155.1, up 58.9 Elo).
+
+               A2.  Four row-matched arms over the SAME 100k games (7,829,099 rows
+               each, Bresenham-spread so every arm sees all 100k games), gate
+               60 / 120 / 200 / none, one epoch, identical seed:
+
+                 g60   +103.7 +- 11.5     g120  +100.7 +- 11.5
+                 g200  +100.3 +- 11.4     gnone  +67.5 +- 11.2
+
+               60-200 is flat; removing the gate is much worse.  The gnone anchor
+               (-36) and its paired family match (+6.9) disagreed in SIGN, so both
+               anchors were replicated with fresh seeds.  Pooled over 2000 games
+               per arm: g60 +100.9 +- 8.1, gnone +73.0 +- 7.9, i.e. gnone - g60 =
+               -27.9 +- 11.3 (2.5 sigma) on the foreign anchor versus +6.9 +- 11.0
+               in family.  Genuine non-transitivity: two nets 15k steps apart from
+               one seed share blind spots, so a family match read ZERO on a real
+               28 Elo regression.  Foreign anchor is the figure of merit.
+
+               RETRACTION.  Part 1 argued the gate "removes the only rows with
+               anything to say" and that the discarded tail is "real, learnable
+               evaluation error".  The first half is right about INFORMATION --
+               the tail's labels are up to 52% better than the net at predicting
+               outcomes (corr +0.73) -- but training on them costs 28 Elo.  Those
+               labels are good precisely BECAUSE search resolved a tactic, which
+               is what a static eval cannot represent.  dMSE_out prices label
+               information, an upper bound on usable signal, never a training
+               recommendation; the caveat is now attached to --bt-diag in
+               TRAINING.md.  The 60 cp gate is vindicated.
+
+               Dumping stays WIDE regardless (default 1000): it costs the online
+               phase nothing, recovers 1.76x the root rows and 1.39x the leaf
+               rows, and makes gate width a --bt-quiet-cp knob instead of a
+               baked-in decision.  Not settled: 7.8M rows / ~15k steps had power
+               for 28 Elo but not 5-10, and a gate TIGHTER than 60 was never
+               tested (dMSE_out is negative below 40 cp).
+
+               CHAIN HEAD.  m260720-5.5e6gR promoted from the Part 3 root arm:
+               +155.1 +- 12.1 vs +96.2 for the superseded m260720-5.5e6g_final,
+               and +17.0 +- 11.0 over a1m_ep1 head-to-head -- all from archived
+               games, no new generation.  parent_tag is m260720-5.5e6g (sibling
+               semantics: naming the grandparent would make the corpus window skip
+               5.5e6g's own corpus); games_this_iter=0 and depth=null since it
+               generated nothing.  --continue m260720-5.5e6gR verified to resolve
+               net, state, anchors, auto-opponent and a 4-corpus window whose
+               generators span +103.4..+112.9.
+
+
 2026_09_03b -- The corpus quiet gate becomes re-cuttable offline (unblocks A2).
 
                TDLEAF_DUMP_QUIET_CP (default 60 cp) was applied at dump time and

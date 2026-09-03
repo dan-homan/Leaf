@@ -889,6 +889,15 @@ Use it to decide whether a corpus is worth consolidating *before* spending an ep
 on it, and to compare corpora (or generation settings) against a fixed net.  See
 `docs/Offline_Learning_Investigation.md` for the analysis this was built for.
 
+> **⚠️ `ΔMSE_out` prices label *information*, not label *usability*.**  It is an
+> upper bound on the signal a corpus can offer, not a training recommendation.
+> The clearest case: rows with `|cp − gate| > 140` carry labels **52% better than
+> the net** at predicting game outcomes (corr +0.73), and training on them costs
+> **28 Elo** — their labels are good precisely because *search resolved a tactic*,
+> which is exactly what a static evaluator cannot represent
+> (`Offline_Learning_Investigation.md` Part 4).  High `ΔMSE_out` means "worth
+> investigating", never "worth training on".  Rate by gauntlet.
+
 #### Re-cutting the quiet gate offline — `--bt-quiet-cp`
 
 The dump-time quietness gate (`TDLEAF_DUMP_QUIET_CP`, default 60 cp) used to be an
@@ -916,11 +925,18 @@ already cut at dump time.  `--bt-diag` bins by `|cp − gate|` when the column i
 present, so the value of each gate width can be read off **before** training
 anything.
 
-**The gate is therefore now a training-time hyperparameter, and generation should
-dump wide.**  The cost is corpus size (the 60 cp gate discards ~45% of root
-positions); the benefit is that the gate width, which Part 1 of
-`docs/Offline_Learning_Investigation.md` shows is the axis the label's whole value
-lies along, stops being baked into the data.
+**The gate is therefore now a training-time hyperparameter, and generation dumps
+wide by default** (`TDLEAF_DUMP_QUIET_CP = 1000`, recovering 1.76× the root rows
+and 1.39× the leaf rows the 60 cp gate admitted).  It costs the online phase
+nothing — the gate is consulted in the dump path only, never in the TD update.
+
+**On the gate width itself: 60 cp is right, and widening it does not help.**  A
+row-matched four-arm test (gate 60 / 120 / 200 / none over the same 100k games)
+found 60–200 flat and *no gate at all* **28 Elo worse** against the foreign anchor.
+The tail the gate discards carries the information but not usable signal — those
+labels are good because search resolved a tactic a static eval cannot represent.
+See `docs/Offline_Learning_Investigation.md` Part 4.  Dumping wide is still correct:
+it costs nothing, and it makes the width a knob rather than a baked-in decision.
 
 > **Current defaults:** `--bt-K 220` cp with the default pure λ-return target —
 > `--bt-lambda` and `--bt-leaf-lambda` default to `1.0` and stay dormant scale knobs;

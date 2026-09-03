@@ -165,6 +165,17 @@ sufficient for "learnable by a static net".  Some of that tail *is* tactics.  Th
 fix is therefore to widen the gate and add a *direct* tactical exclusion, not to
 remove filtering altogether — see 1.7.)
 
+> **⚠️ RETRACTED by Part 4 (2026-09-03).**  The caveat immediately above was the
+> right one and this section did not weight it heavily enough.  The discarded tail
+> does carry the information — Part 4.2 confirms it at far larger effect size —
+> but training on it makes the net **28 Elo worse** against a foreign anchor
+> (Part 4.3).  Those labels are good *because search resolved a tactic*, which is
+> exactly why a static evaluator cannot absorb them.  **The claim in this section
+> that "most of the discarded tail is real, learnable evaluation error" is wrong,
+> and the 60 cp gate is vindicated.**  `ΔMSE_out` prices label information, an
+> upper bound on usable signal — never read it as a training recommendation.
+> See Part 4.4.
+
 Note also that this measurement understates the truncation.  The gate is applied
 against the **generating** net's static eval at dump time; the diagnostic compares
 against the promoted seed, which differs by 500k games of online displacement.
@@ -206,7 +217,9 @@ The offline phase is not misconfigured in its optimizer, its LRs, or its target
 algebra.  It is **data-starved on both channels at once**:
 
 1. the eval-bootstrap channel is gated shut by `TDLEAF_DUMP_QUIET_CP = 60`,
-   which discards 45% of root positions ranked by informativeness;
+   which discards 45% of root positions ranked by informativeness
+   (**superseded — Part 4 shows that tail is unlearnable and the gate is
+   correct**);
 2. the outcome channel has one 500k-game corpus per pass and overfits in two epochs.
 
 Both are addressable, and (2) is addressable *entirely offline on data already on
@@ -593,3 +606,191 @@ region near its optimum, so moderate mis-tuning should cost little.
 `--bt-leaf-lambda` swept over a few values (and/or a leaf-specific `--bt-td-lambda`).
 Worth doing only when deciding whether to keep *generating* leaf rows at all — see
 the generation questions in `TODO.md` — not before.
+
+---
+
+## Part 4 — A2: the quiet gate is doing its job (2026-09-03)
+
+### 4.1 The enabling change: the gate became re-cuttable
+
+`TDLEAF_DUMP_QUIET_CP` was applied at dump time, so rows it rejected were never
+written and the only way to ask "was the gate too tight?" was to regenerate — but
+online learning stays on during generation, so two runs from one seed diverge and
+the gate is confounded with different games.
+
+Both dump files now carry an 8th **`gate`** column: the value the quietness test
+compared `cp` against, in the same POV.  The condition is uniform across both
+files — `|cp − gate| ≤ QUIET_CP` — where
+
+- **root** rows: `gate` = root **static** eval, `cp` = root **search** score;
+- **leaf** rows: `gate` = propagated root **search** score, `cp` = leaf **static** eval.
+
+So one wide dump re-cuts to any narrower gate offline (`--bt-quiet-cp`), and
+`--bt-diag` prices each width (`|cp − gate|` bins) before training anything.  The
+dump default moved to `QUIET_CP = 1000` (effectively open) in both the engine and
+`train.py --quiet-cp`; the gate is consulted **only** in the dump path, never in
+the TD update, so widening costs the online phase nothing.
+
+Measured on a fresh 100k-game d8 run, this recovers a lot of previously-destroyed
+data — **1.76× the root rows** and 1.39× the leaf rows the 60 cp gate admitted:
+
+| file | rows | /game | ≤60 | ≤120 | ≤200 |
+|---|---|---|---|---|---|
+| root | 13.80M | 138 | 56.7% | 77.9% | 88.6% |
+| leaf | 13.95M | 139 | 72.1% | 86.2% | 93.0% |
+
+### 4.2 The diagnostic says the discarded rows are the informative ones
+
+`--bt-diag` on the wide root dump, against the net that generated it, binned by the
+gate quantity:
+
+| \|cp − gate\| | share | ΔMSE_out | corr |
+|---|---|---|---|
+| 0–20 | 23.8% | **−1.17%** | +0.01 |
+| 20–40 | 18.9% | −0.57% | +0.05 |
+| 40–60 | 13.4% | +0.91% | +0.12 |
+| 60–80 | 9.5% | +3.32% | +0.19 |
+| 80–100 | 6.9% | +6.93% | +0.26 |
+| 100–120 | 5.1% | +10.96% | +0.33 |
+| 120–140 | 3.8% | +15.71% | +0.40 |
+| **> 140** | **18.5%** | **+52.63%** | **+0.73** |
+
+Priced as whole corpora with `--bt-quiet-cp`: gate 60 → **−0.46%**, 120 → +1.29%,
+200 → +3.50%, 400 → +6.84%, none → **+12.45%**.  The rows the production gate
+*keeps* have labels that predict game outcomes no better than the net already
+does; all the label information sits in the tail it discards.
+
+### 4.3 …and the training arms say that information is unusable
+
+Four arms, each **exactly 7,829,099 rows** (the 60 cp arm's ceiling) drawn from the
+**same 100k games**, Bresenham-spread so every arm sees all 100k games, same seed
+(the run's own post-online state), same hyperparameters, 1 epoch.  Only the
+admitted row population differs — a perfectly paired experiment.
+
+| arm | mean \|cp − gate\| | anchor Elo vs `classic_eval` | paired vs `g60` |
+|---|---|---|---|
+| **`g60`** (production) | 25.8 | **+103.7 ± 11.5** | — |
+| `g120` | 42.1 | +100.7 ± 11.5 | −16.0 ± 11.0 |
+| `g200` | 55.7 | +100.3 ± 11.4 | +4.2 ± 11.0 |
+| **`gnone`** | 93.6 | **+67.5 ± 11.2** | +6.9 ± 11.0 |
+
+**No gate width beats 60.**  `g120` and `g200` are flat on both measurements
+(their two paired reads disagree in sign, −16.0 and +4.2, which is the noise floor
+of two ±11 matches between near-identical nets).  Removing the gate is clearly
+worse.
+
+**The `gnone` anchor/family conflict, and its resolution.**  The anchor said
+`gnone` was 36 Elo *worse*; the paired family match said +6.9 *better* — a 43 Elo
+disagreement in sign.  Both matches were clean (no time losses, crashes or illegal
+moves; comparable adjudication rates).  Rather than pick the convenient one, both
+anchors were replicated with independent fastchess seeds:
+
+| arm | run 1 | run 2 | **pooled (2000 games)** |
+|---|---|---|---|
+| `g60` | +103.7 ± 11.5 | +98.1 ± 11.4 | **+100.9 ± 8.1** |
+| `gnone` | +67.5 ± 11.2 | +78.4 ± 11.3 | **+73.0 ± 7.9** |
+
+**`gnone` − `g60` = −27.9 ± 11.3 (2.5σ) on the foreign anchor, versus +6.9 ± 11.0
+in family.**  The anchor result replicates; the disagreement is genuine
+non-transitivity, not noise.  Two nets separated by a 15k-step update from one
+common seed share their blind spots, so the family match cannot see a difference
+that a foreign evaluator punishes.  This is the sharpest illustration yet of the
+chain's standing rule — **the foreign anchor is the figure of merit** — and a
+warning that a family head-to-head can read *zero* on a real 28 Elo regression.
+
+### 4.4 Retraction: Part 1 over-read its own diagnostic
+
+Part 1.5 concluded that the gate "removes the mis-evaluated quiet positions along
+with the tactical ones, and those are the only positions with anything to say",
+and argued from `ΔMSE_out` that "most of the discarded tail is real, learnable
+evaluation error."
+
+**The second claim is wrong and the experiment says so.**  The discarded tail does
+carry the information — 4.2 confirms that at much larger effect size than Part 1
+could see — but training on it makes the net *worse*, by 28 Elo against a foreign
+anchor.  Those are positions where the search score is high-quality precisely
+*because search resolved a tactic*, and a static evaluator cannot represent what
+search saw.  Feeding them in injects targets the network cannot fit, and it pays
+for the attempt.
+
+**The methodological lesson, which now attaches permanently to `--bt-diag`:
+`ΔMSE_out` prices label *information*, which is an upper bound on usable signal,
+not a substitute for it.**  A label can know more about how the game ends and still
+be a worse thing to train on.  Part 1's caveat ("necessary but not sufficient for
+learnable by a static net") was correct and should have been weighted more heavily
+than the monotone table it accompanied.
+
+**The gate at 60 cp is vindicated.**  It is not a legacy accident; it is doing the
+job it was designed to do.
+
+### 4.5 What is settled and what is not
+
+Settled: widening the gate does not help, and removing it hurts.  The 60/120/200
+band is flat, so there is no cheap Elo in this knob.
+
+**Not settled — the scale.**  These arms are 7.8M rows and ~15k optimizer steps,
+4% of the Part 3 arms.  The test had the power to resolve `gnone`'s 28 Elo but
+would not resolve a 5–10 Elo difference between 60, 120 and 200.  A tighter gate
+than 60 was not tested at all, and the diagnostic's negative `ΔMSE_out` for
+`|cp − gate| < 40` hints the optimum could sit *below* 60.
+
+The infrastructure now makes any of that a filter away: the gate is a training-time
+hyperparameter, dumps are wide by default, and re-asking costs one `--bt-quiet-cp`
+sweep on a corpus already on disk.  That is the durable result of A2 even though
+its headline answer was "no".
+
+### Methodology notes (Part 4)
+
+- Generation: `train.py --tag a2gate --continue m260720-5.5e6g --games 100000
+  --depth 8 --concurrency 17 --recompile --skip-train`.  `--recompile` is
+  **mandatory** — `train.py` reuses an existing `Leaf_vtrain_hl_a` when the baked
+  net matches, and a stale binary would have dumped no `gate` column.
+- Arms built by one pass over the root dump per arm, filtering on `|cp − gate|`
+  then Bresenham-sampling to the common 7,829,099-row budget; verified each arm's
+  max `|cp − gate|` equals its nominal gate and each covers all 100,000 games.
+- Seed for all four arms was the a2gate post-online state, md5-verified identical
+  across arms.
+- Anchor matches are 1000 games at 3+0.05 with FRC openings; the `g60`/`gnone`
+  replicates used fresh fastchess seeds (`match.py` fixes none), so the pooled
+  figures are 2000 independent games per arm.
+
+
+---
+
+## Chain head: `m260720-5.5e6gR` (2026-09-03)
+
+The Part 3 `root` arm is the strongest net the chain has produced and was promoted
+to the head so `--continue` starts from it:
+
+| net | Elo vs `Leaf_vclassic_eval` |
+|---|---|
+| **`m260720-5.5e6gR`** (new head) | **+155.1 ± 12.1** |
+| `m260720-5.5e6g` (previous head) | +96.2 ± 11.4 |
+| `a1m_ep1` (Part 2 best) | +148.7 ± 12.0 |
+
+**+58.9 Elo over the superseded head, from games already on disk** — no new
+generation.  It beat `a1m_ep1` by +17.0 ± 11.0 head-to-head.
+
+Artifacts: `m260720-5.5e6gR_final.{nnue,tdleaf.bin,json}` plus the rating binary
+`Leaf_vm260720-5.5e6gR-final`.  The `.tdleaf.bin` pairing hash (`0x0A3B39CB`)
+matches the previous head, i.e. it pairs with the base `m260720.nnue` as every
+consolidated state in this chain does.
+
+Two sidecar details worth knowing, because both are easy to get wrong:
+
+- **`parent_tag` is `m260720-5.5e6g`, not `m260720-5e6g`.**  This net is an
+  *alternative consolidation of the same 5.5e6g online phase* (it was seeded from
+  that phase's post-online state), so `5.5e6g_final` is a sibling rather than an
+  ancestor.  Naming the grandparent instead would have been defensible
+  genealogically but breaks the corpus window: `chain_corpora` walks `parent_tag`,
+  so it would silently **skip `5.5e6g`'s corpus** — the freshest and least stale
+  one — while still reaching back to the stale `3.5e6g`.  With the parent set
+  correctly, `--corpus-window 4` resolves to `5.5e6g / 5e6g / 4.5e6g / 4e6g`,
+  generators +109.8 / +103.4 / +112.9 / +111.0, all within 10 Elo.
+- **`games_this_iter` is 0 and `depth` is null.**  This iteration generated no
+  games; it re-consolidated existing ones, all already counted.  `cumulative_games`
+  stays 5,500,000.
+
+Because it was produced by the investigation's arms rather than a `train.py` run,
+`epoch_ladder` is empty and `corpus_window.rows_used` records the arm's build
+quotas.  The provenance is in the sidecar's `note` field.

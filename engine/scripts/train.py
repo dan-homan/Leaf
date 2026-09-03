@@ -570,9 +570,16 @@ def main():
                          "training on them both overfits and leaks "
                          "validation; frozen deterministic pairs are the "
                          "worst case (one unique game per opening).")
-    ap.add_argument("--quiet-cp", type=int, default=60,
-                    help="TDLEAF_DUMP_QUIET_CP for the dump (default 60)")
-    # offline consolidation
+    ap.add_argument("--quiet-cp", type=int, default=1000,
+                    help="TDLEAF_DUMP_QUIET_CP for generation: a row is dumped "
+                         "when |cp - gate| <= this.  Default 1000 (effectively "
+                         "open) since 2026-09-03 — every row now carries the "
+                         "`gate` column, so the gate is re-cut at TRAINING time "
+                         "with the trainer's --bt-quiet-cp and dumping narrow "
+                         "only destroys information.  Costs the online phase "
+                         "nothing: the gate is consulted in the dump path only, "
+                         "never in the TD update.  Pass 60 to reproduce the "
+                         "historical corpora")
     ap.add_argument("--skip-train", action="store_true",
                     help="Skip offline training (generate-only)")
     ap.add_argument("--corpus", action="append", default=[],

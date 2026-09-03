@@ -94,40 +94,30 @@ held-out corpus is the cheap between-arm proxy.
       is applied at dump time and is irreversible, which is exactly what blocks
       A2 from being answered offline on data already in hand.
 
-- [ ] **A2 — Widen the corpus quiet gate.**  Part 1 measured a search label's
-      value as proportional to its disagreement with the net (`ΔMSE_out` +0.04%
-      under 10 cp rising to **+8.42%** above 70 cp), while `TDLEAF_DUMP_QUIET_CP
-      = 60` discards **44.6% of root positions** ranked by exactly that quantity.
+- [x] **A2 — Widen the corpus quiet gate. DONE — the gate is correct; widening
+      does not help.**  Enabled by the `gate` column (dumps re-cut offline via
+      `--bt-quiet-cp`).  Row-matched arms over the same 100k games (7,829,099 rows
+      each) at gate 60 / 120 / 200 / none: 60–200 flat, **none is 27.9 ± 11.3 Elo
+      worse** on the pooled foreign anchor (2000 games/arm, replicated).  The
+      discarded tail carries the label information (`ΔMSE_out` +52% in the top
+      bin) but it is **not learnable** — those labels are good because search
+      resolved a tactic.  Part 1's "the gate throws away the signal" reading is
+      retracted; see `Offline_Learning_Investigation.md` Part 4.4.
+      Scale caveat: 7.8M rows / ~15k steps had power for 28 Elo, not for 5–10, so
+      a 60-vs-120-vs-200 difference of that size is not excluded — and a gate
+      *tighter* than 60 was never tested (the diagnostic's negative `ΔMSE_out`
+      below 40 cp hints the optimum may sit under 60).
 
-      **Enabling change landed 2026-09-03:** both dump files now carry a `gate`
-      column (what the quietness test compared `cp` against, same POV), so the
-      gate condition `|cp − gate| ≤ QUIET_CP` is re-cuttable offline via
-      `--bt-quiet-cp`.  A2 therefore no longer needs two divergent generation
-      runs — dump once with the gate wide and every narrower gate is a filter
-      over the **same games and same labels**, perfectly paired.
+- [ ] **A3 — Direct tactical exclusion instead of the eval-gap proxy.**  Now
+      *lower* priority than when filed: A2 showed the eval-gap gate is not merely
+      a proxy that happens to work, it is doing real damage-prevention, and
+      widening it buys nothing.  A direct test (root in check, best move is a
+      capture/promotion/check) might still dominate it — admitting mis-evaluated
+      quiet positions while still excluding tactics is a strictly better filter
+      *if* the two populations separate.  The A2 machinery makes this cheap to
+      evaluate offline once the dump carries the tactical flags; that column is
+      the only new work.
 
-      Remaining steps:
-      1. Generate with `TDLEAF_DUMP_QUIET_CP` wide (1000 ≈ off).  Corpus grows
-         ~1.8× in root rows; disk cost is trivial next to the information.
-      2. `--bt-diag` on the result, binned by `|cp − gate|`, to price each gate
-         width **before** training anything.  This alone may settle A2.
-      3. If the diagnostic confirms, row-matched training arms at gate
-         60 / 120 / 200 / off, then gauntlet.  Row-matching isolates *row
-         quality*; the unmatched version additionally buys ~1.8× the rows.
-
-      **Open decision: should `TDLEAF_DUMP_QUIET_CP` default to wide?**  Dumping
-      wide is strictly more information at ~1.8× corpus size and costs the online
-      phase nothing (the gate affects dumping only, never the TD update).  Left
-      at 60 pending a call on disk budget.
-
-- [ ] **A3 — Replace the eval-gap gate with a direct tactical gate.**  The gate
-      exists to exclude positions a static eval cannot represent, but
-      `|static − search|` is a proxy that is perfectly correlated with
-      informativeness.  Replace/supplement it with the standard direct tests —
-      root in check, best move is a capture or promotion or gives check — which
-      exclude tactics *without* excluding mis-evaluations.  (This is what
-      Stockfish-lineage data filtering does; it does not filter on eval gap at
-      all.)  Depends on A2 confirming the gate is the binding constraint.
 - [ ] **A4 — Drop or down-weight leaf rows.**  Leaf rows are 54% of every corpus
       and every offline pass, and buy `ΔMSE_out = +0.41%` against root rows'
       +2.08%.  `--bt-rows root` at 2× epochs costs the same wall clock.  Check

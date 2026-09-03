@@ -410,8 +410,8 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
 //     (an operational test — unresolved tactics show up as static-vs-search
 //     disagreement).
 //
-// Both apply |cp| <= TDLEAF_DUMP_MAX_CP (default 1500).  QUIET_CP default 60
-// (TDLEAF_DUMP_QUIET_CP).
+// Both apply |cp| <= TDLEAF_DUMP_MAX_CP (default 1500).  QUIET_CP
+// (TDLEAF_DUMP_QUIET_CP) defaults to 1000 — effectively open, see below.
 //
 // Column 8, "gate": the value the quietness test compared cp against, in the
 // SAME POV as cp — root static for root rows, the propagated root search score
@@ -455,7 +455,13 @@ static void tdleaf_dump_game(const TDGameRecord &rec, float result)
     static FILE    *diag_f = nullptr;
     static FILE    *stale_f = nullptr;   // paired root corpus, actor-vintage label
 #endif
-    static int      dump_quiet_cp = 60;
+    // Default WIDE (2026-09-03).  The gate used to be applied here and was
+    // irreversible; now that every row carries the `gate` column it can be
+    // re-cut at training time with --bt-quiet-cp, so dumping narrow only
+    // destroys information.  It costs the online phase nothing — the gate is
+    // consulted in the dump path only, never in the TD update.  Set
+    // TDLEAF_DUMP_QUIET_CP=60 to reproduce the historical corpora.
+    static int      dump_quiet_cp = 1000;
     static int      dump_max_cp   = 1500;
     static uint32_t dump_gid      = 0;
     static bool     dump_init     = false;
