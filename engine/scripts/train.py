@@ -141,12 +141,201 @@ def sh(cmd, cwd, env=None, check=True):
     return r.returncode
 
 
+def open_corpus(path):
+    """Open a corpus TSV for reading, transparently handling .gz (archived
+    <tag>_work/corpus.tsv.gz files are gzipped; live dumps are not)."""
+    return (gzip.open(path, "rt", errors="replace") if str(path).endswith(".gz")
+            else open(path, errors="replace"))
+
+
+# --bt-rows -> index into the (total, root, leaf) count triple.
+ROW_KIND = {"both": 0, "root": 1, "leaf": 2}
+
+
+def corpus_row_counts(path):
+    """(total, root, leaf) data rows, cached alongside the corpus as
+    <path>.rows.  Counting a multi-GB .gz costs a full decompress and the
+    window re-reads the same archives every iteration, so it is paid once.
+    A one-field cache from before the root/leaf split is ignored and rewritten."""
+    cache = Path(str(path) + ".rows")
+    if cache.is_file():
+        parts = cache.read_text().split()
+        if len(parts) >= 3:
+            try:
+                return tuple(int(x) for x in parts[:3])
+            except ValueError:
+                pass
+    total = root = leaf = 0
+    with open_corpus(path) as f:
+        for line in f:
+            if line.startswith("#") or line.startswith("fen\t"):
+                continue
+            col = line.split("\t", 6)
+            if len(col) < 5:
+                continue
+            total += 1
+            if col[4] == "0":
+                leaf += 1
+            else:
+                root += 1
+    try:
+        cache.write_text(f"{total} {root} {leaf}\n")
+    except OSError:
+        pass
+    return total, root, leaf
+
+
+def final_anchor_elo(tag, anchors):
+    """Elo of <tag>'s promoted net against the first gauntlet anchor it shares
+    with ANCHORS (falling back to its first final-gauntlet entry), or None."""
+    if not tag:
+        return None
+    p = LEARN_DIR / f"{tag}_final.json"
+    if not p.is_file():
+        return None
+    try:
+        with open(p) as f:
+            fg = json.load(f).get("final_gauntlet") or []
+    except (OSError, ValueError):
+        return None
+    for a in anchors or []:
+        for e in fg:
+            if e.get("opponent") == a:
+                return e.get("elo")
+    return fg[0].get("elo") if fg else None
+
+
+def chain_corpora(continue_tag, window, anchors):
+    """Walk parent_tag back from CONTINUE_TAG and return up to WINDOW entries
+    (tag, corpus_path, generator_elo) for chain iterations that still have an
+    archived corpus.
+
+    A corpus is labelled by its GENERATOR — the net that played those games,
+    which is that iteration's PARENT's promoted net, not its own.  (Getting
+    this backwards is what made the A1 arm silently include a corpus 75 Elo
+    staler than the rest; see docs/Offline_Learning_Investigation.md 2.1.)"""
+    out, tag, seen = [], continue_tag, set()
+    while tag and len(out) < window and tag not in seen:
+        seen.add(tag)
+        parent = None
+        sc = LEARN_DIR / f"{tag}_final.json"
+        if sc.is_file():
+            try:
+                with open(sc) as f:
+                    parent = json.load(f).get("parent_tag")
+            except (OSError, ValueError):
+                parent = None
+        corpus = LEARN_DIR / f"{tag}_work" / "corpus.tsv.gz"
+        if corpus.is_file():
+            out.append((tag, corpus, final_anchor_elo(parent, anchors)))
+        tag = parent
+    return out
+
+
+def share_quotas(sizes, total):
+    """Split TOTAL rows as evenly as possible across sources, capped at each
+    source's own size, redistributing whatever a small source cannot take."""
+    quota = [0] * len(sizes)
+    active = [i for i in range(len(sizes)) if sizes[i] > 0]
+    remaining = min(total, sum(sizes))
+    while active and remaining > 0:
+        share = max(1, remaining // len(active))
+        for i in list(active):
+            take = min(share, sizes[i] - quota[i], remaining)
+            quota[i] += take
+            remaining -= take
+            if quota[i] >= sizes[i]:
+                active.remove(i)
+            if remaining == 0:
+                break
+    return quota
+
+
+def write_corpus(corpus_path, sources, sizes, quota, game_ply_axis, row_kind=0):
+    """Sample, renumber and dedup SOURCES into CORPUS_PATH.
+
+    SOURCES is [(label, [files], generator_elo)] and QUOTA[i] rows are taken
+    from SOURCES[i] (which holds SIZES[i] rows), spread evenly by a Bresenham
+    accumulator so every game contributes rather than taking a prefix of the
+    shards.
+
+    Two things happen per row beyond the sampling:
+
+    * **gid renumbering, per source.**  Raw dump gids are (pid & 0xFFF) << 20
+      plus a counter (tdleaf.cpp), so the same gid recurs across iterations;
+      concatenating corpora unchanged would fuse two unrelated games into one
+      endply / validation-split unit.
+    * **Dedup**, unconditional.  Duplicate rows (identical in every field but
+      gid) come from replayed games — worst case a frozen deterministic pair,
+      one unique game per opening — and straddle the trainer's by-game split,
+      both overfitting and leaking validation.  Keys are 8-byte blake2b of the
+      gid-stripped row stored as ints (~5 GB at 134M rows vs ~9 GB for full
+      digests); a truncation collision costs one falsely-dropped row with
+      probability ~5e-4 per 134M-row corpus.  Dedup runs AFTER sampling, so the
+      set is sized by the budget, not by the union of every window corpus.
+
+    Returns (rows_written, distinct_games, duplicates_dropped, rows_per_source).
+    """
+    rows = dropped = gid_next = 0
+    seen = set()
+    per_source = []
+    with open(corpus_path, "w") as out:
+        if game_ply_axis:
+            out.write("# tdleaf-corpus axis=game-ply\n")
+        for (_tag, files, _elo), size, want in zip(sources, sizes, quota):
+            if want <= 0 or size <= 0:
+                per_source.append(0)
+                continue
+            gmap = {}
+            acc = 0
+            taken = 0
+            for src in files:
+                with open_corpus(src) as f:
+                    for line in f:
+                        if line.startswith("#") or line.startswith("fen\t"):
+                            continue
+                        p = line.rstrip("\n").split("\t")
+                        if len(p) < 6:
+                            continue
+                        # Row-type filter FIRST, so the Bresenham accumulator
+                        # counts only eligible rows and `want` means "rows
+                        # actually trained on".  Filtering after sampling would
+                        # silently deliver a fraction of the requested budget.
+                        if row_kind == 1 and p[4] == "0":
+                            continue
+                        if row_kind == 2 and p[4] != "0":
+                            continue
+                        acc += want
+                        if acc < size:
+                            continue
+                        acc -= size
+                        # fen cp result ply depth gid endply — drop gid (5)
+                        key = int.from_bytes(hashlib.blake2b(
+                            "\t".join(p[:5] + p[6:]).encode(),
+                            digest_size=8).digest(), "little")
+                        if key in seen:
+                            dropped += 1
+                            continue
+                        seen.add(key)
+                        g = gmap.get(p[5])
+                        if g is None:
+                            g = gid_next
+                            gmap[p[5]] = g
+                            gid_next += 1
+                        p[5] = str(g)
+                        out.write("\t".join(p) + "\n")
+                        rows += 1
+                        taken += 1
+            per_source.append(taken)
+    return rows, gid_next, dropped, per_source
+
+
 def _corpus_is_game_ply(path):
     """True if a corpus TSV carries the '# tdleaf-corpus axis=game-ply' marker
     (Phase C dumps, ply column = game-ply).  Absence means legacy record-index
     axis.  Only the leading comment/header block is scanned, so this is cheap
     even on multi-GB dumps."""
-    with open(path) as f:
+    with open_corpus(path) as f:
         for line in f:
             if line.startswith("#"):
                 if "axis=game-ply" in line:
@@ -388,6 +577,31 @@ def main():
                     help="Skip offline training (generate-only)")
     ap.add_argument("--corpus", action="append", default=[],
                     help="Extra corpus TSV(s) to include in training (repeatable)")
+    ap.add_argument("--corpus-window", type=int, default=4, metavar="N",
+                    help="Dilute this run's dump with the archived corpora of "
+                         "up to N prior iterations from the --continue chain, "
+                         "holding the TOTAL row count fixed (see --corpus-rows) "
+                         "so epoch cost is unchanged.  Measured worth ~45 Elo: "
+                         "row-matched arms differing only in game diversity "
+                         "scored +112.9 (500k games) vs +148.7 (2.5M games) "
+                         "against the classical anchor.  0 disables the window "
+                         "and trains on this run's corpus alone (the pre-A1 "
+                         "behaviour).  Needs --continue to find the chain. "
+                         "Default: 4")
+    ap.add_argument("--corpus-rows", type=int, default=0, metavar="N",
+                    help="Total row budget for the assembled corpus, split "
+                         "evenly across this run's dump and each window corpus. "
+                         "0 (default) = auto: match this run's own dump row "
+                         "count, so the window changes WHICH games the rows "
+                         "come from without changing how many there are")
+    ap.add_argument("--corpus-window-max-stale", type=float, default=0.0,
+                    metavar="ELO",
+                    help="Drop window corpora whose GENERATOR rates more than "
+                         "ELO below the freshest generator in the window "
+                         "(corpus labels distil their generator, so a stale "
+                         "corpus pulls the net backwards through the eval "
+                         "bootstrap).  0 (default) = no filter; the generator "
+                         "Elo of every corpus is logged either way")
     ap.add_argument("--bt-threads", type=int, default=8,
                     help="Worker threads for within-batch gradient compute "
                          "(single-process; default 8)")
@@ -406,14 +620,23 @@ def main():
                     help="Focal-gamma loss exponent (d(1-d))^gamma: "
                          "1.0=MSE (default), 0.0=cross-entropy, 0.5=between")
     ap.add_argument("--bt-rows", choices=["leaf", "root", "both"],
-                    default="both",
-                    help="Which corpus rows to train on, by the depth column "
-                         "(leaf = static-eval rows, depth 0; root = "
-                         "search-score rows, depth > 0).  Filtered at trainer "
-                         "load, so the archived corpus.tsv.gz stays complete "
-                         "and row-mode sweeps can rerun from one corpus via "
-                         "--skip-online --corpus (default: both)")
-    # gauntlet
+                    default="root",
+                    help="Which corpus rows to train on, by the depth column: "
+                         "'root' (depth > 0, search-score labels), 'leaf' "
+                         "(depth 0, the generator's own static eval), or "
+                         "'both'.  Default 'root' since 2026-09-03: at a fixed "
+                         "row budget root-only beat leaf-only by +35.6 +- 11.0 "
+                         "head-to-head and the natural mix by +46 on the "
+                         "foreign anchor, so the ~54%% of every corpus that is "
+                         "leaf rows was worse than useless at the margin "
+                         "(docs/Offline_Learning_Investigation.md Part 3).  "
+                         "Budget and quotas count only the selected row type, "
+                         "and the archived corpus.tsv.gz holds only that type "
+                         "— use 'both' to keep the full mix.  "
+                         "NOTE the outcome/eval blend (--bt-lambda / "
+                         "--bt-leaf-lambda / --bt-td-lambda) was calibrated on "
+                         "the MIXTURE and has never been retuned per row type; "
+                         "see Part 3.5")
     ap.add_argument("--gauntlet", nargs="*", default=[],
                     help="Opponent binaries in learn/ for the FINAL gauntlet "
                          "(rates the promoted best-epoch net; empty = skip). "
@@ -654,58 +877,104 @@ def main():
         return
 
     # ---- Phase 4: assemble corpus ----------------------------------------
-    inputs = dump_files + [Path(c) for c in args.corpus]
-    if not inputs:
-        die("nothing to train on (no dumps and no --corpus)")
-    for c in inputs:
+    primary = dump_files + [Path(c) for c in args.corpus]
+    for c in primary:
         if not c.is_file():
             die(f"corpus not found: {c}")
-    # Detect corpus axis (game-ply vs legacy record-index).  Concatenation
-    # strips '#' comment lines, which would erase the "# tdleaf-corpus
-    # axis=game-ply" marker the trainer keys on — so we detect it here and
-    # re-emit it at the top of the combined file.  Mixing axes changes the
-    # meaning of the ply column (and hence the td_lambda decay), so refuse a
-    # mix, mirroring the trainer.
-    axes = {_corpus_is_game_ply(c) for c in inputs}
+
+    # Multi-iteration corpus window (arm A1).  Consolidating one iteration's own
+    # dump leaves ~45 Elo on the table: two arms with IDENTICAL row counts,
+    # epochs, optimizer steps and wall clock, differing only in how many
+    # distinct games the rows came from, scored +112.9 (500k games) and +148.7
+    # (2.5M games) against the classical anchor, and the diverse arm won the
+    # head-to-head by +45.4 +- 11.1.  So dilute the fresh dump with archived
+    # corpora from the --continue chain at a FIXED total row count — the window
+    # changes which games the rows come from, not how many.
+    # See docs/Offline_Learning_Investigation.md Part 2.
+    window = []
+    if args.corpus_window > 0:
+        if args.continue_tag:
+            window = chain_corpora(args.continue_tag, args.corpus_window,
+                                   args.gauntlet_anchors)
+            if not window:
+                log(f"--corpus-window {args.corpus_window}: no archived corpora "
+                    f"found on the {args.continue_tag} chain")
+        else:
+            log(f"--corpus-window {args.corpus_window} needs --continue to walk "
+                f"the chain — training on this run's corpus alone")
+
+    # Staleness filter.  Corpus labels distil their generator, so a corpus made
+    # by a much weaker net drags the student back through the (1-w) eval
+    # bootstrap term that carries ~70% of the target weight.
+    if window and args.corpus_window_max_stale > 0:
+        known = [e for _, _, e in window if e is not None]
+        if known:
+            best = max(known)
+            kept = []
+            for tag, path, elo in window:
+                if elo is not None and best - elo > args.corpus_window_max_stale:
+                    log(f"  window: dropping {tag} — generator {elo:+.1f} is "
+                        f"{best - elo:.1f} Elo below the freshest "
+                        f"({best:+.1f}), over --corpus-window-max-stale "
+                        f"{args.corpus_window_max_stale:.1f}")
+                else:
+                    kept.append((tag, path, elo))
+            window = kept
+
+    # Sources: this run's dump(s) + --corpus as one unit, then one per window
+    # corpus.  Row quotas are split evenly across sources (capped at each
+    # source's size) so the budget buys as many distinct games as possible.
+    # A window-only run (--skip-online --continue, no --corpus) is legitimate:
+    # it re-consolidates the chain's archived games without generating any.
+    sources = ([("this run", primary, None)] if primary else []) \
+              + [(t, [p], e) for t, p, e in window]
+    if not sources:
+        die("nothing to train on (no dumps, no --corpus, and no window corpora "
+            "— pass --corpus, or --continue with --corpus-window)")
+
+    axes = {_corpus_is_game_ply(c) for _, files, _ in sources for c in files}
     if len(axes) > 1:
         die("cannot mix game-ply-axis and legacy record-index corpora in one "
             "run — the ply column means different things; train them separately")
     game_ply_axis = axes.pop()
+
+    # Quotas are computed over the rows that will actually be TRAINED ON, so a
+    # row-type filter shrinks the corpus rather than silently shrinking the
+    # budget: with --bt-rows root over a natural corpus, filtering after
+    # sampling would have delivered ~45% of the requested rows.
+    row_kind = ROW_KIND[args.bt_rows]
+    log("counting corpus rows (cached as <corpus>.rows) ...")
+    sizes = [sum(corpus_row_counts(c)[row_kind] for c in files)
+             for _, files, _ in sources]
+    if row_kind:
+        log(f"--bt-rows {args.bt_rows}: budget and quotas count {args.bt_rows} "
+            f"rows only")
+        log(f"NOTE: {work.name}/corpus.tsv.gz will archive {args.bt_rows} rows "
+            f"only — the other row type is dropped at assembly and this run's "
+            f"raw dumps are pruned at end of run.  Use --bt-rows both (or "
+            f"--keep-work) to retain the full mix for later re-analysis.")
+    if args.corpus_rows > 0:
+        budget = args.corpus_rows
+    elif len(sources) > 1:
+        budget = sizes[0]      # auto: hold the total at this run's own dump size
+    else:
+        budget = sum(sizes)    # no window and no explicit budget -> no thinning
+    quota = share_quotas(sizes, budget)
+
+    log(f"corpus window: {len(sources)} source(s), budget {budget:,} rows")
+    for (tag, _, elo), size, want in zip(sources, sizes, quota):
+        gen = f"generator {elo:+.1f} Elo" if elo is not None else "generator n/a"
+        log(f"  {tag:<24} {want:>12,} of {size:>12,} rows "
+            f"({100.0 * want / max(size, 1):5.1f}%)  {gen}")
+
     corpus_path = work / "corpus.tsv"
-    # Dedup is unconditional: duplicate rows (identical in every field except
-    # gid) come from replayed games — worst case a frozen deterministic pair
-    # (one unique game per opening) — and they straddle the trainer's by-game
-    # train/val split, both overfitting and leaking validation.  Keys are
-    # 8-byte blake2b of the gid-stripped row stored as ints (~5 GB at 134M
-    # rows vs ~9 GB for full digests); a truncation collision costs one
-    # falsely-dropped row with probability ~5e-4 per 134M-row corpus.
-    log(f"assembling {len(inputs)} corpus file(s) -> {corpus_path.name} "
+    log(f"assembling -> {corpus_path.name} "
         f"(axis={'game-ply' if game_ply_axis else 'legacy record-index'}, "
         f"dedup) ...")
-    rows = 0
-    dropped = 0
-    seen = set()
-    with open(corpus_path, "w") as out:
-        if game_ply_axis:
-            out.write("# tdleaf-corpus axis=game-ply\n")
-        for src in inputs:
-            with open(src) as f:
-                for line in f:
-                    if line.startswith("#") or line.startswith("fen\t"):
-                        continue
-                    p = line.split("\t")
-                    # fen cp result ply depth gid endply — drop gid (5)
-                    key = int.from_bytes(hashlib.blake2b(
-                        "\t".join(p[:5] + p[6:]).encode(),
-                        digest_size=8).digest(), "little")
-                    if key in seen:
-                        dropped += 1
-                        continue
-                    seen.add(key)
-                    out.write(line)
-                    rows += 1
-    del seen
-    log(f"{rows:,} positions assembled ({dropped:,} duplicate rows dropped)")
+    rows, gid_next, dropped, per_source = write_corpus(
+        corpus_path, sources, sizes, quota, game_ply_axis, row_kind)
+    log(f"{rows:,} positions assembled from {gid_next:,} distinct games "
+        f"({dropped:,} duplicate rows dropped)")
 
     # ---- Phase 5: offline consolidation (single threaded process) ---------
     tdir = work / "train"
@@ -783,6 +1052,12 @@ def main():
            "--bt-threads", str(args.bt_threads),
            "--bt-lr", str(args.bt_lr), "--bt-lambda", str(args.bt_lambda),
            "--bt-K", str(args.bt_K), "--bt-batch", str(args.bt_batch),
+           # Exact row count -> the trainer reserves once instead of growing the
+           # record vector by doubling.  The doubling peak (old + new buffer
+           # live simultaneously) is ~1.5x the final size and is what actually
+           # caps corpus size on a 30 GB box: ~16 GB of transient just to reach
+           # 190M rows.  Assembly counted the rows, so hand them over.
+           "--bt-max", str(rows),
            "--bt-seed", "1000"]
     if args.bt_leaf_lambda is not None:
         cmd += ["--bt-leaf-lambda", str(args.bt_leaf_lambda)]
@@ -989,6 +1264,13 @@ def main():
         "bt_K": args.bt_K,
         "bt_td_lambda": args.bt_td_lambda,
         "bt_rows": args.bt_rows,
+        "corpus_rows": rows,
+        "corpus_games": gid_next,
+        "corpus_window": [
+            {"tag": tag, "rows_used": used, "rows_avail": size,
+             "generator_elo": elo}
+            for (tag, _, elo), size, used in zip(sources, sizes, per_source)
+        ],
         "gauntlet_anchors": args.gauntlet_anchors,
         "epoch_ladder": [
             {"epoch": ep, "W": W, "L": L, "D": D, "elo": elo, "err": err}

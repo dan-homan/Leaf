@@ -92,6 +92,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <functional>
+#include <unordered_map>
 
 // ---------------------------------------------------------------------------
 // Packed training record — 32 bytes.  Board is stored as an occupancy
@@ -197,7 +198,8 @@ static int    bt_rows_mode     = 2;
 static size_t bt_rows_filtered = 0;
 
 static bool bt_load_file(const char *path, std::vector<BTRecord> &out,
-                         uint32_t gid_base, uint32_t &gid_max, size_t max_records,
+                         std::unordered_map<uint32_t, uint32_t> &gid_map,
+                         uint32_t &gid_next, size_t max_records,
                          std::vector<uint16_t> &gid_N, bool &out_game_ply_axis)
 {
     FILE *f = fopen(path, "r");
@@ -249,8 +251,24 @@ static bool bt_load_file(const char *path, std::vector<BTRecord> &out,
         r.cp      = (int16_t)cp;
         r.result2 = result2;
         r.depth   = (uint8_t)((depth < 0) ? 0 : (depth > 255) ? 255 : depth);
-        r.gid     = gid_base + (uint32_t)gid;
-        if (r.gid > gid_max) gid_max = r.gid;
+        // Compact the gid.  Dump gids are (pid & 0xFFF) << 20 plus a counter
+        // (tdleaf.cpp), i.e. sparse and up to ~4.3e9 — indexing gid_N by the
+        // raw value cost GBs of padding on a single corpus (7.2 GB for a max
+        // gid of 3.6e9) and overflowed uint32_t once a few files' worth of
+        // per-file offsets accumulated.  Map each distinct raw gid to the next
+        // sequential id instead: gid_N becomes O(games), and the caller's
+        // per-file map reset keeps identical raw gids in different files
+        // distinct, exactly as the old gid_base offset did.
+        {
+            uint32_t raw = (uint32_t)gid;
+            auto it = gid_map.find(raw);
+            if (it == gid_map.end()) {
+                r.gid = gid_next++;
+                gid_map.emplace(raw, r.gid);
+            } else {
+                r.gid = it->second;
+            }
+        }
         r.ply     = (uint16_t)((ply < 0) ? 0 : (ply > 65535) ? 65535 : ply);
         // Per-game final ply: exact from the endply column when present, else
         // the max ply seen in the corpus (short by the quiet-filtered tail).
@@ -275,7 +293,8 @@ static bool bt_load_file(const char *path, std::vector<BTRecord> &out,
 // Returns d = sigmoid(white-POV score / K).
 // ---------------------------------------------------------------------------
 static float bt_eval_record(const BTRecord &r, float K, position &pos,
-                            NNUEAccumulator &acc, NNUEActivations *act_out)
+                            NNUEAccumulator &acc, NNUEActivations *act_out,
+                            float *score_out = nullptr)
 {
     bt_decode(r, pos);
     nnue_init_accumulator(acc, pos);
@@ -289,6 +308,7 @@ static float bt_eval_record(const BTRecord &r, float K, position &pos,
     int score_stm = nnue_evaluate_acc_raw(acc.acc, acc.psqt, (int)pos.wtm, pc);
     float score_w = pos.wtm ? (float)score_stm : -(float)score_stm;
     float d = 1.0f / (1.0f + expf(-score_w / K));
+    if (score_out) *score_out = score_w;
 
     if (act_out) {
         NNUEActivations &act = *act_out;
@@ -428,6 +448,7 @@ int nnue_batch_train(int argc, char *argv[])
     float leaf_lambda = -1.0f;   // < 0 → follow --bt-lambda
     float td_lambda   = TDLEAF_LAMBDA;   // result-decay per game-ply (default sqrt(0.98))
     bool  td_lambda_explicit = false;    // true if --bt-td-lambda was passed
+    bool  diag_only   = false;   // --bt-diag: read-only corpus/label diagnostic
 
     for (int i = 1; i < argc; i++) {
         auto next = [&](const char *flag) -> const char* {
@@ -450,6 +471,7 @@ int nnue_batch_train(int argc, char *argv[])
         else if ((v = next("--bt-loss-gamma"))) loss_gamma = (float)atof(v);
         else if ((v = next("--bt-leaf-lambda"))) leaf_lambda = (float)atof(v);
         else if ((v = next("--bt-td-lambda")))   { td_lambda = (float)atof(v); td_lambda_explicit = true; }
+        else if (strcmp(argv[i], "--bt-diag") == 0) diag_only = true;
         else if ((v = next("--bt-rows"))) {
             bt_rows_mode = (strcmp(v, "leaf") == 0) ? 0
                          : (strcmp(v, "root") == 0) ? 1
@@ -481,14 +503,19 @@ int nnue_batch_train(int argc, char *argv[])
         char buf[4096];
         strncpy(buf, files, sizeof(buf) - 1);
         buf[sizeof(buf) - 1] = '\0';
-        uint32_t gid_base = 0, gid_max = 0;
+        uint32_t gid_next = 0;
+        std::unordered_map<uint32_t, uint32_t> gid_map;
         for (char *tok = strtok(buf, ","); tok; tok = strtok(nullptr, ",")) {
             bool file_game_ply = false;
-            if (!bt_load_file(tok, recs, gid_base, gid_max, max_rec, gid_N, file_game_ply))
+            gid_map.clear();   // per-file namespace: the same raw gid in two
+                               // files is two different games
+            if (!bt_load_file(tok, recs, gid_map, gid_next, max_rec, gid_N,
+                              file_game_ply))
                 return 1;
             (file_game_ply ? n_game_ply : n_legacy)++;
-            gid_base = gid_max + 1;   // keep gids unique across files
         }
+        fprintf(stderr, "batch-train: %u distinct games (gid table %.1f MB)\n",
+                gid_next, gid_N.size() * sizeof(uint16_t) / 1048576.0);
     }
     if (recs.empty()) { fprintf(stderr, "batch-train: no records\n"); return 1; }
 
@@ -599,6 +626,124 @@ int nnue_batch_train(int argc, char *argv[])
                 se_blend / n, se_outcome / n, nll / n, val_idx.size());
         return se_blend / n;
     };
+
+    // ---- --bt-diag: read-only label/signal diagnostic --------------------
+    // Answers "how much is left to learn from this corpus?" without training.
+    // For every row it compares three predictors of the game outcome:
+    //   d      = the net's own static eval (as a probability)
+    //   p_lab  = the corpus cp label (root rows: the generator's SEARCH score;
+    //            leaf rows: the generator's STATIC eval)
+    //   result = the actual game outcome
+    // The bootstrap E <- search(E) has headroom only while the label predicts
+    // the outcome BETTER than the net does, i.e. dMSE = MSE_out(net) -
+    // MSE_out(label) > 0.  dMSE <= 0 means distilling those labels cannot make
+    // the net a better outcome predictor: that channel is saturated.
+    if (diag_only) {
+        struct DBin {
+            double n = 0, res = 0, res2 = 0, out_net = 0, out_lab = 0,
+                   cov = 0, dcp = 0, dcp2 = 0, d = 0, lab = 0, out = 0;
+            double h[8] = {0,0,0,0,0,0,0,0};   // |dcp| histogram, 10 cp bins
+        };
+        const int NB = 24;   // 0=all, 1..7=gap, 8..15=piece stacks, 16..23=|label-net| cp
+        std::vector<std::vector<DBin>> tbin(threads,
+                                            std::vector<DBin>(2 * NB));
+        pool.run([&](int tid) {
+            BTWorker &w = *workers[tid];
+            std::vector<DBin> &tb = tbin[tid];
+            size_t lo = (size_t)tid * recs.size() / threads;
+            size_t hi = (size_t)(tid + 1) * recs.size() / threads;
+            for (size_t i = lo; i < hi; i++) {
+                const BTRecord &r = recs[i];
+                float snet = 0.0f;
+                float dd = bt_eval_record(r, K, w.pos, w.acc, nullptr, &snet);
+                float pl = 1.0f / (1.0f + expf(-(float)r.cp / K));
+                double out = 0.5 * (double)r.result2;
+                double rl = (double)pl - (double)dd;   // label residual
+                double ro = out - (double)dd;          // outcome residual
+                double dcp = (double)r.cp - (double)snet;
+                int pc = __builtin_popcountll(r.occ);
+                if (pc < 1) pc = 1; else if (pc > 32) pc = 32;
+                int g = (int)gid_N[r.gid] - (int)r.ply;
+                if (g < 0) g = 0;
+                int gb = (g < 8) ? 0 : (g < 16) ? 1 : (g < 32) ? 2 : (g < 64) ? 3
+                       : (g < 128) ? 4 : (g < 256) ? 5 : 6;
+                int cls = (r.depth == 0) ? 0 : 1;
+                int hb0 = (int)(fabs(dcp) / 10.0);  if (hb0 > 7) hb0 = 7;
+                int idx[4] = { cls * NB, cls * NB + 1 + gb,
+                               cls * NB + 8 + (pc - 1) / 4,
+                               cls * NB + 16 + hb0 };
+                for (int k = 0; k < 4; k++) {
+                    DBin &b = tb[idx[k]];
+                    b.n++;   b.res += rl;   b.res2 += rl * rl;
+                    b.out_net += ro * ro;
+                    b.out_lab += (out - (double)pl) * (out - (double)pl);
+                    b.cov += rl * ro;
+                    b.dcp += dcp;  b.dcp2 += dcp * dcp;
+                    b.d += dd;     b.lab += pl;   b.out += out;
+                    int hb = (int)(fabs(dcp) / 10.0);
+                    b.h[hb > 7 ? 7 : hb]++;
+                }
+            }
+        });
+        std::vector<DBin> B(2 * NB);
+        for (int t = 0; t < threads; t++)
+            for (int k = 0; k < 2 * NB; k++) {
+                DBin &a = B[k]; const DBin &c = tbin[t][k];
+                a.n += c.n; a.res += c.res; a.res2 += c.res2;
+                a.out_net += c.out_net; a.out_lab += c.out_lab; a.cov += c.cov;
+                a.dcp += c.dcp; a.dcp2 += c.dcp2;
+                a.d += c.d; a.lab += c.lab; a.out += c.out;
+                for (int q = 0; q < 8; q++) a.h[q] += c.h[q];
+            }
+        auto row = [&](const char *name, const DBin &b) {
+            if (b.n < 1) return;
+            double n = b.n;
+            double mse_net = b.out_net / n, mse_lab = b.out_lab / n;
+            double var_rl  = b.res2 / n - (b.res / n) * (b.res / n);
+            double var_ro  = mse_net - (b.out / n - b.d / n) * (b.out / n - b.d / n);
+            double cov     = b.cov / n - (b.res / n) * (b.out / n - b.d / n);
+            double corr    = (var_rl > 1e-12 && var_ro > 1e-12)
+                           ? cov / sqrt(var_rl * var_ro) : 0.0;
+            fprintf(stderr,
+                    "  %-14s n=%10.0f  labres bias=%+.4f rms=%.4f  "
+                    "dcp bias=%+7.1f rms=%7.1f  MSEout net=%.5f lab=%.5f "
+                    "delta=%+.5f (%+6.2f%%)  corr=%+.3f\n",
+                    name, n, b.res / n, sqrt(b.res2 / n),
+                    b.dcp / n, sqrt(b.dcp2 / n), mse_net, mse_lab,
+                    mse_net - mse_lab,
+                    100.0 * (mse_net - mse_lab) / (mse_net > 0 ? mse_net : 1.0),
+                    corr);
+            fprintf(stderr, "  %-14s |label-net| cp histogram (10cp bins, %% of rows): "
+                            "0-10:%.1f 10-20:%.1f 20-30:%.1f 30-40:%.1f 40-50:%.1f "
+                            "50-60:%.1f 60-70:%.1f >70:%.1f\n", "",
+                    100*b.h[0]/n, 100*b.h[1]/n, 100*b.h[2]/n, 100*b.h[3]/n,
+                    100*b.h[4]/n, 100*b.h[5]/n, 100*b.h[6]/n, 100*b.h[7]/n);
+        };
+        const char *gname[7] = { "gap<8", "gap8-15", "gap16-31", "gap32-63",
+                                 "gap64-127", "gap128-255", "gap>=256" };
+        char nb[64];
+        for (int cls = 0; cls < 2; cls++) {
+            const char *cn = cls ? "ROOT (search labels)" : "LEAF (static labels)";
+            fprintf(stderr, "batch-train: diag — %s\n", cn);
+            row("  all", B[cls * NB]);
+            for (int g = 0; g < 7; g++) {
+                snprintf(nb, sizeof(nb), "  %s", gname[g]);
+                row(nb, B[cls * NB + 1 + g]);
+            }
+            for (int q = 0; q < 8; q++) {
+                snprintf(nb, sizeof(nb), "  pc%d-%d", q * 4 + 1, q * 4 + 4);
+                row(nb, B[cls * NB + 8 + q]);
+            }
+            for (int q = 0; q < 8; q++) {
+                if (q < 7) snprintf(nb, sizeof(nb), "  |dcp|%d-%d", q * 10, q * 10 + 10);
+                else       snprintf(nb, sizeof(nb), "  |dcp|>70");
+                row(nb, B[cls * NB + 16 + q]);
+            }
+        }
+        fprintf(stderr, "batch-train: diag complete (no training performed)\n");
+        for (int t = 0; t < threads; t++) { nnue_gradbuf_free(workers[t]->gb); delete workers[t]; }
+        return 0;
+    }
 
     fprintf(stderr, "batch-train: baseline (epoch 0)\n");
     val_loss();

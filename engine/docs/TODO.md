@@ -30,6 +30,100 @@ STM + game-ply λ^Δ), and **Phases D and E have since landed:**
   write — **also landed** (Phase 3, `docs/SIMPLIFICATION_PLAN.md`), validated
   byte-exact.  Nothing in this section is outstanding.
 
+### Offline-phase plateau — ranked experiment plan (2026-09-02)
+
+Evidence and measurements: `docs/Offline_Learning_Investigation.md` Part 1.  The
+offline phase is data-starved on both of its channels at once — the eval bootstrap
+is gated shut by `TDLEAF_DUMP_QUIET_CP = 60` (45% of root positions discarded,
+ranked by informativeness), and the outcome channel gets one 500k-game corpus per
+pass and overfits by epoch 2.  Arms below are ordered by expected value per unit
+of compute.  All of them are judged by **foreign-anchor gauntlet**
+(`Leaf_vclassic_eval`), never by validation MSE level; `--bt-diag` on a fixed
+held-out corpus is the cheap between-arm proxy.
+
+- [x] **A1 — Multi-corpus consolidation (offline only, no new games). DONE, +40 Elo.**
+      Row-matched arms (95,028,415 rows each, 2 epochs, same seed/LR/steps/wall
+      clock) differing only in game diversity: 500k games vs 2.5M.  Result
+      **+35.8 ± 16.7 / +37.4 ± 16.6 vs the foreign anchor** (ep1/ep2), **+45.4 ± 11.1
+      head-to-head**, and **+50.0 ± 11.1 over the net actually promoted** for that
+      iteration — for zero extra compute and zero new games.  Validation MSE ordered
+      the arms *backwards* and had no power to see it.  Full write-up:
+      `docs/Offline_Learning_Investigation.md` Part 2.
+
+- [x] **A1a — Fold A1 into `train.py`. DONE.**  `--corpus-window N` (default 4)
+      walks the `--continue` chain, pulls each ancestor's archived corpus, and
+      splits a fixed row budget (`--corpus-rows`, default = this run's own dump
+      size) evenly across the sources — so epoch cost is unchanged and only the
+      game diversity rises.  `--corpus-window-max-stale` filters on **generator**
+      Elo; every source's generator Elo is logged and recorded in the sidecar
+      (`corpus_window`, `corpus_rows`, `corpus_games`).  `--corpus-window 0`
+      restores pre-A1 behaviour.  The loader `gid` fix landed with it.
+
+- [ ] **A1b — Drop the stale corpus and re-run A1.**  `a1m` unknowingly included
+      `3.5e6g`, whose labels come from a **+34.2** generator while the other four
+      come from +103…+113 (the setup rationale used each iteration's own Elo, not
+      its generator's — corrected in Part 2.1).  Re-run with `4e6g`+`4.5e6g`+`5e6g`
+      +`5.5e6g` only, row-matched again.  Predicts a further gain; bounds how much
+      label staleness costs.  Cheap to build: the archived union assigns gids in
+      file order, 500k games each, so `3.5e6g` is exactly `gid <= 500000` — filter
+      it out of `union_d8d10.tsv` and re-run the Bresenham row-match in
+      `learn/offline_a1/build_a1m.sh`.
+
+- [ ] **A1c — Epoch count and ladder opponent.**  Epoch 1 beat epoch 2 in *both* A1
+      arms (+112.9/+105.3 and +148.7/+142.7), while the production family-opponent
+      epoch ladder picked epoch 2 (48.3 vs 56.4) — the family ladder inverted the
+      foreign anchor's ordering, not merely compressed it.  Re-examine whether the
+      epoch ladder should use a foreign anchor, and whether 1 epoch is the right
+      default on a diverse corpus.
+- [x] **Loader: compact `gid` at load. DONE.**  `bt_load_file` sized `gid_N` by raw
+      gid *value*, costing **7.2 GB** of padding on `4e6g` (max gid 3.6e9) and
+      overflowing `uint32_t` across ~4 files.  Now maps each distinct raw gid to a
+      sequential id (per-file map reset preserves the old cross-file namespacing):
+      gid table 1.4 GB → **1.0 MB** on a 500k-game corpus, verified
+      behaviour-identical (`--bt-diag` output bit-for-bit unchanged).
+
+- [ ] **G1 — Generation questions raised by Part 3 (revisit before the next
+      generation run).**  Root-only training won by +36 Elo, which puts three
+      generation-side decisions on the table: (a) stop dumping leaf rows at all
+      (they are 54% of dump I/O and disk for rows we no longer train on) — but
+      settle Part 3.5's blend confound first, since it is the one thing that
+      could rehabilitate them; (b) keep *more* root rows per game, since the
+      root arm already consumed 92% of available root rows and scaling further
+      needs more games, not more sampling; (c) **retain the generation PGN by
+      default** so the quiet gate can be re-cut after the fact — today the gate
+      is applied at dump time and is irreversible, which is exactly what blocks
+      A2 from being answered offline on data already in hand.
+
+- [ ] **A2 — Widen the corpus quiet gate (needs generation, cheapest decisive
+      test of the central finding).**  Regenerate a *small* corpus (~100k games,
+      d8) with `TDLEAF_DUMP_QUIET_CP=200` alongside a `=60` control from the same
+      seed and openings, then consolidate each and gauntlet.  `--bt-diag` on both
+      predicts the answer before any training: the 200 cp corpus should show a much
+      larger aggregate `ΔMSE_out` than the 60 cp one.
+- [ ] **A3 — Replace the eval-gap gate with a direct tactical gate.**  The gate
+      exists to exclude positions a static eval cannot represent, but
+      `|static − search|` is a proxy that is perfectly correlated with
+      informativeness.  Replace/supplement it with the standard direct tests —
+      root in check, best move is a capture or promotion or gives check — which
+      exclude tactics *without* excluding mis-evaluations.  (This is what
+      Stockfish-lineage data filtering does; it does not filter on eval gap at
+      all.)  Depends on A2 confirming the gate is the binding constraint.
+- [ ] **A4 — Drop or down-weight leaf rows.**  Leaf rows are 54% of every corpus
+      and every offline pass, and buy `ΔMSE_out = +0.41%` against root rows'
+      +2.08%.  `--bt-rows root` at 2× epochs costs the same wall clock.  Check
+      first whether leaf rows are still earning their keep as distribution
+      matching / magnitude anchor for the outcome term.
+- [ ] **A5 — Epoch/LR schedule on the enlarged corpus.**  `--bt-epochs 2
+      --bt-lr 0.25` flat has never been swept in this regime, and epoch 2 is
+      currently harmful (validation `MSE(outcome)` rises).  On a 3–5× larger
+      corpus (A1) the right answer probably moves; sweep epochs 1–4 with an LR
+      decay across epochs.
+- [ ] **A6 — Draw rate as a generation constraint.**  Depth 10 pushed self-play
+      draws from 41% to 52%, cutting outcome information ~25% and costing the
+      iteration 13 Elo.  Before raising depth again, treat draw rate as a hard
+      health gate (35–40%) and buy decisiveness elsewhere — more unbalanced
+      opening lines, or a wider book — rather than with depth.
+
 ### Open items
 
 - [ ] Iteration 3+: long d8 online generation from a consolidated net (needs

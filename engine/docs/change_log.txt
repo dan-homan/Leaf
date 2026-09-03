@@ -1,5 +1,191 @@
 Changes since 2017_12_24
 
+2026_09_03  -- Root rows only: --bt-rows now defaults to root (+36 Elo), and the
+               corpus budget counts the selected row type.
+
+               Three arms, each EXACTLY 190,000,000 rows / 1 epoch from the same
+               seed and hyperparameters, differing only in row type:
+
+                 root (search labels)  633/214/153  +155.1 +- 12.1 vs classic
+                 leaf (static labels)  597/253/150  +124.6 +- 11.7
+                 mix  (natural 45/55)  580/276/144  +109.1 +- 11.5
+
+               Paired head-to-head: root beats leaf by +35.6 +- 11.0 (3.2 sigma)
+               and beats the natural mix by +46 on the anchor (2.8 sigma).  root
+               is also the strongest net in the chain: +17.0 +- 11.0 over
+               a1m_ep1.  Part 1 predicted the direction from label quality alone
+               (root labels +2.08% better than the net at predicting the outcome,
+               leaf +0.41%), which is what makes 3.2 sigma credible.  So ~54% of
+               every offline pass has been spent on rows that are worse than
+               useless at the margin.
+
+               TRAP CLOSED.  --bt-rows filters at trainer LOAD, so flipping the
+               default alone would have silently cut every run's training set by
+               more than half (a 95M-row budget delivering ~43M root rows).  The
+               corpus window now computes sizes and quotas over the SELECTED row
+               type and assembly emits only those rows, so the budget always
+               means "rows actually trained on".  Verified in all three modes.
+               Consequence to know: the archived corpus.tsv.gz now holds root
+               rows only -- pass --bt-rows both to keep the full mix.  Logged
+               loudly at assembly time.
+
+               MEASUREMENT.  Validation MSE was wrong-signed for the THIRD time:
+               leaf had the best MSE delta (-1.40%) and the worst Elo, root the
+               worst delta (-1.18%) and the best Elo.  Standing rule now in
+               TRAINING.md: MSE is an optimizer-health smoke test only, never a
+               selection criterion for a net, an epoch, or an arm.
+
+               RETRACTION.  A mid-run note called mix-vs-a1m_ep2 a 2.0 sigma
+               anomaly, read off the difference of two independent anchor
+               matches.  The paired match says -12.9 +- 11.0 (1.2 sigma) --
+               unresolved, not anomalous; most of the gap was anchor noise.  The
+               cancellation hypothesis built on it is withdrawn, and the density
+               question (76 rows/game once vs 38 twice) is UNRESOLVED.  Read
+               net-vs-net differences from paired matches, not anchor deltas.
+
+               OPEN CONFOUND (Homan): the outcome/eval blend (K, td_lambda, the
+               lambda ceilings) was calibrated on the MIXTURE and has never been
+               retuned per row type, and --bt-leaf-lambda has always sat at
+               parity with the root ceiling.  It does not threaten the production
+               default -- root won at the blend production uses -- but it does
+               mean Part 3 is not proof that leaf positions are worthless in
+               principle.  Full reasoning in Offline_Learning_Investigation.md
+               Part 3.5.
+
+
+2026_09_02c -- A1a: multi-iteration corpus window is now the train.py default,
+               plus the gid loader fix it needed.
+
+               train.py --corpus-window N (default 4).  Under --continue it walks
+               the chain, pulls each ancestor's archived <tag>_work/corpus.tsv.gz,
+               and splits a fixed row budget (--corpus-rows, default = this run's
+               own dump size) evenly across the sources, capped at each source's
+               size with leftovers redistributed.  The window therefore changes
+               WHICH games the rows come from, not how many -- same epoch count,
+               same optimizer steps, same wall clock, ~+45 Elo (2026_09_02b).
+               --corpus-window 0 restores the previous behaviour.
+
+               --corpus-window-max-stale ELO drops window corpora whose GENERATOR
+               rates more than ELO below the freshest.  Note the generator of a
+               corpus is the PREVIOUS iteration's promoted net, not that
+               iteration's own -- the sidecar lookup does this correctly, and
+               every source's generator Elo is logged whether or not the filter
+               is on.  Sidecar gains corpus_rows / corpus_games / corpus_window.
+
+               CORRECTNESS: corpus assembly now renumbers gids per source.  Raw
+               dump gids are (pid & 0xFFF) << 20 plus a counter, so the same gid
+               recurs across iterations; concatenating archived corpora unchanged
+               would have fused two unrelated games into one endply /
+               validation-split unit.  Row counts are cached beside each archive
+               as corpus.tsv.gz.rows so only the first windowed run pays the
+               extra decompress.  A window-only run (--skip-online --continue
+               with no --corpus) is now legal: it re-consolidates the chain's
+               archived games without generating any.
+
+               nnue_batch_train.cpp: bt_load_file compacts gids at load.  It
+               sized gid_N by raw gid VALUE, so one corpus cost up to 7.2 GB of
+               padding (4e6g, max gid 3.6e9) and gid_base overflowed uint32_t
+               across ~4 files.  Each distinct raw gid now maps to the next
+               sequential id, with the caller's per-file map reset preserving the
+               old cross-file namespacing.  Measured 1.4 GB -> 1.0 MB on a
+               500k-game corpus with --bt-diag output bit-for-bit unchanged.
+               The trainer now reports its distinct-game count and table size.
+
+               train.py now also passes --bt-max <exact rows> to the trainer.
+               Without it the record vector grows by doubling, and the realloc
+               peak (old + new buffer live at once, ~1.5x final size) is what
+               actually caps corpus size on a 30 GB box -- ~16 GB of transient
+               just to reach 190M rows.  Assembly already counted the rows.
+
+               NOTE: train.py reuses an existing Leaf_vbt when its baked net
+               matches, so an existing binary will not pick up the loader fix --
+               pass --recompile once.  train.py's own gid renumbering means a
+               stale Leaf_vbt is still CORRECT, just not memory-lean.
+
+
+2026_09_02b -- Offline consolidation was starved of GAME DIVERSITY: +40 Elo for
+               free from corpora already on disk (arm A1).
+
+               Two row-matched offline arms from the same seed (the 5.5e6g
+               pre-consolidation state), 95,028,415 rows each, 2 epochs, same LR,
+               same optimizer steps, same wall clock.  The ONLY difference was how
+               many distinct games those rows came from:
+
+                 ctl  500k games  x ~190 rows  (m260720-5.5e6g corpus alone)
+                 a1m  2.5M games x  ~38 rows  (3.5e6g..5.5e6g, row-matched)
+
+               Result, 1000 games each vs the foreign anchor Leaf_vclassic_eval
+               (3+0.05, FRC):
+
+                 a1m_ep1  +148.7 +- 12.0     ctl_ep1  +112.9 +- 11.6
+                 a1m_ep2  +142.7 +- 11.9     ctl_ep2  +105.3 +- 11.5
+                 (production m260720-5.5e6g-final: +96.2 +- 11.4)
+
+               a1m - ctl = +35.8 +- 16.7 (ep1) and +37.4 +- 16.6 (ep2), two
+               independent replications.  Paired head-to-head: a1m_ep1 beats
+               ctl_ep1 by +45.4 +- 11.1 and beats the net actually promoted for
+               that iteration by +50.0 +- 11.1.  ctl_ep2 reproduces production
+               within noise, validating the pipeline.
+
+               MEASUREMENT WARNING.  Validation MSE(outcome) was not merely weak
+               here, it was WRONG-SIGNED: both arms flattened at epoch 2 by an
+               identical +0.000003, and a1m's MSE LEVEL was higher (0.082 vs
+               0.071) while playing 40 Elo stronger.  Rate by gauntlet.
+               Relatedly, epoch 1 beat epoch 2 in both arms, while production's
+               FAMILY-opponent epoch ladder picked epoch 2 -- a family ladder can
+               invert the ordering, not just compress it.
+
+               Corpus-union blocker found: bt_load_file sizes gid_N by raw gid
+               VALUE and dump gids are (pid & 0xFFF) << 20 + counter, so one
+               corpus can cost 7.2 GB of padding (4e6g, max gid 3.6e9) and
+               gid_base overflows uint32_t across ~4 files.  Worked around by
+               renumbering gids at corpus-build time; loader fix filed in TODO.
+
+               Artifacts: learn/offline_a1/ (both arms, corpus builders, gauntlet
+               and head-to-head PGNs).  Write-up: docs/Offline_Learning_Investigation.md
+               Part 2.  Follow-ups A1a-A1c in docs/TODO.md.
+
+2026_09_02  -- Offline-phase plateau investigation: --bt-diag, and the finding that
+               the corpus quiet gate is throwing away the signal.
+
+               NEW: --batch-train --bt-diag.  A read-only pass over a corpus that
+               answers "is there anything left in this data for this net?" without
+               training.  For every row it compares the net's own static eval, the
+               corpus cp label, and the actual game result as predictors of the
+               outcome, and reports dMSE_out = MSE_out(net) - MSE_out(label),
+               binned by row class (root/leaf), ply-gap from game end, piece count,
+               and |label - net| in 10 cp bins.  dMSE_out ~ 0 means the
+               E <- search(E) bootstrap is saturated for that channel.  Writes
+               nothing; the training path is untouched.
+
+               FINDING (docs/Offline_Learning_Investigation.md).  The m260720 chain
+               has netted ~0 Elo per iteration since 3.5e6g, and the depth-10
+               iteration regressed (-13.6, and 283/378/339 against its own parent).
+               Measured on the 5.5e6g corpus against the state that generated it:
+
+                 - Root rows (search labels) are only 2.08% better than the net at
+                   predicting the game outcome; leaf rows (static labels) 0.41% --
+                   yet leaf rows are 54% of every corpus and every offline pass.
+                 - A label's informative content is proportional to how far it is
+                   from the net: dMSE_out runs +0.04% for |label-net| < 10 cp up to
+                   +8.42% above 70 cp, monotonically, with residual correlation
+                   rising +0.02 -> +0.29 across the same range.
+                 - TDLEAF_DUMP_QUIET_CP (default 60) gates every dumped row on
+                   |static - search| <= 60 cp, and so discards 44.6% of root
+                   positions (44.1M kept of 79.6M plies over 500k games) ranked by
+                   exactly that quantity.  The gate is removing the only rows with
+                   anything to say.
+                 - The other channel is starving too: validation MSE(outcome) now
+                   RISES at epoch 2 (0.085656 -> 0.085676 at 5e6g), i.e. the second
+                   pass memorises 500k games' outcomes; and depth 10 pushed the
+                   self-play draw rate 41% -> 52%, cutting outcome information ~25%.
+
+               Ranked experiment plan in docs/TODO.md ("Offline-phase plateau").
+               The lead offline-only arm is consolidation over the union of the
+               archived d8+d10 corpora (642M positions / 3.5M games already on
+               disk) instead of one iteration's ~90M.
+
+
 2026_08_30c -- comp.pl: portable-by-default builds, cross-compilation support, and
                a compile-failure exit code.  Prep for the 1.0 multi-platform
                release (Mac arm64 / Linux x86-64 / Windows x86-64).

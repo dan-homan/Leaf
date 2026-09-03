@@ -865,6 +865,29 @@ session, trains on the given TSVs, writes per-epoch snapshots, and exits:
            [--bt-threads 8] [--bt-clip-every 64] [--bt-loss-gamma 1.0]
 ```
 
+#### Is there anything left to learn? — `--bt-diag`
+
+`--bt-diag` turns the trainer into a read-only diagnostic: it loads the corpus and
+the paired state exactly as a training run does, evaluates each row once, prints a
+decomposition, and exits without touching a weight.
+
+```sh
+./Leaf_vbt --batch-train corpus.tsv --bt-diag --bt-threads 16
+```
+
+For every row it compares three predictors of the game outcome — `d` (the net's own
+static eval as a probability), `p_lab` (the corpus `cp` label as a probability), and
+the actual `result` — and reports `ΔMSE_out = MSE_out(net) − MSE_out(label)`.  The
+bootstrap `E ← search(E)` has headroom only while the label predicts the outcome
+**better** than the net does; `ΔMSE_out ≈ 0` means distilling those labels cannot
+make the net a better outcome predictor and that channel is saturated.  Rows are
+broken out by class (root / leaf), by ply-gap from game end, by piece count (NNUE
+material stack), and by `|label − net|` in 10 cp bins.
+
+Use it to decide whether a corpus is worth consolidating *before* spending an epoch
+on it, and to compare corpora (or generation settings) against a fixed net.  See
+`docs/Offline_Learning_Investigation.md` for the analysis this was built for.
+
 > **Current defaults:** `--bt-K 220` cp with the default pure λ-return target —
 > `--bt-lambda` and `--bt-leaf-lambda` default to `1.0` and stay dormant scale knobs;
 > `--bt-td-lambda` (default `TDLEAF_LAMBDA` = 0.985) is the single knob of record for
@@ -1186,6 +1209,45 @@ Two consequences worth internalising before tuning anything online:
   = 8` is now measured as the optimum.  The one clean magnitude lever never tested
   in isolation is a uniform LR scale (recipe parked in `Online_Learning_Investigation.md`
   6.17).
+
+**Consolidation: train on root rows only — now the `train.py` default.**  Leaf rows
+(`depth == 0`, labelled with the generator's own static eval) are ~54% of every
+corpus and are worse than useless at the margin: at a fixed row budget, root-only
+beat leaf-only by **+35.6 ± 11.0 head-to-head** and beat the natural mix by **+46
+Elo** on the classical anchor.  `--bt-rows root` is the default; the budget and the
+corpus-window quotas count only the selected row type, so the filter shrinks the
+corpus rather than silently shrinking the training set.  Note the archived
+`corpus.tsv.gz` then holds root rows only — pass `--bt-rows both` to keep the full
+mix for later re-analysis.  Caveat worth knowing before over-reading this: the
+outcome/eval blend was calibrated on the *mixture* and has never been retuned per
+row type (`docs/Offline_Learning_Investigation.md` Part 3.5).
+
+**Consolidation: use a multi-iteration corpus — also the `train.py` default.**
+Consolidating one iteration's own ~90M-row dump measurably leaves Elo on the table.
+Row-matched arms (identical rows, epochs, optimizer steps and wall clock, differing
+only in how many distinct games the rows came from) put **500k games at +112.9 and
+2.5M games at +148.7** against the classical anchor — **+45 Elo head-to-head, for
+zero extra compute and zero new games**, since the archived
+`<tag>_work/corpus.tsv.gz` files are already on disk.  See
+`docs/Offline_Learning_Investigation.md` Part 2.
+
+`train.py --corpus-window N` (default **4**) implements this: under `--continue` it
+walks the chain, pulls each ancestor's archived corpus, and splits a fixed row
+budget (`--corpus-rows`, default = this run's own dump size) evenly across the
+sources — so the window changes *which* games the rows come from, not how many, and
+epoch cost is unchanged.  `--corpus-window 0` restores the pre-A1 behaviour.
+Assembly renumbers `gid`s per source, which is **required for correctness**, not
+just tidiness: raw dump gids are `(pid & 0xFFF) << 20` plus a counter, so the same
+gid recurs across iterations and a naive concatenation would fuse two unrelated
+games into one `endply` / validation-split unit.
+
+Two practical notes.  **Label staleness:** a corpus is labelled by its *generator* —
+the **previous** iteration's promoted net — so judge staleness by that Elo, not the
+iteration's own (getting this backwards is what silently put a 75-Elo-stale corpus
+into the A1 arm).  `--corpus-window-max-stale` filters on it; the generator Elo of
+every source is logged either way.  **Row counts are cached** next to each archive as
+`corpus.tsv.gz.rows`, so the first windowed run pays one extra decompress per
+archive and later runs do not.
 
 **Consolidation:** `--bt-K 220` with the default pure λ-return target is the current
 recipe: `--bt-lambda` and `--bt-leaf-lambda` default to `1.0` and stay dormant scale
