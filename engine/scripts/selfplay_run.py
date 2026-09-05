@@ -50,15 +50,21 @@ def main():
                     help="Training binary (in cwd) with --selfplay/--learn-stream")
     ap.add_argument("--epd", required=True, help="Opening book EPD")
     ap.add_argument("--actors", type=int, default=4)
-    ap.add_argument("--hash", type=int, default=16,
-                    help="Per-process hash size in MB (default 16).  The engine "
-                         "wipes its tables once per game, so an oversized table "
-                         "is pure per-game cost: at depth 8 the default 128 MB "
-                         "measured 25%% slower generation than 16 MB (14 actors, "
-                         "AMD 8940HX), for no change in outcome or termination "
-                         "mix over 600 games/arm.  A depth-8 search touches far "
-                         "fewer positions than 16 MB holds; raise this only if "
-                         "generating at much greater depth.")
+    ap.add_argument("--hash", type=int, default=128,
+                    help="Per-process hash size in MB (default 128).  16 MB is "
+                         "~25%% faster at depth 8 (the tables are wiped once per "
+                         "game, so an oversized table is pure per-game cost), "
+                         "and that is why it was briefly the default -- but a "
+                         "fixed-depth A/B measured Hash 128 at +8.9 +- 11.4 Elo "
+                         "over Hash 16 (same net and binary both sides, 2000 "
+                         "games): consistent with zero, but the point estimate "
+                         "favours the larger table and hash size does reach "
+                         "search quality through TT-driven move ordering and "
+                         "pruning.  Generated corpora currently measure worth "
+                         "ZERO (Online_Learning_Investigation.md 7.3), so the "
+                         "throughput is not worth the confound.  Revisit if "
+                         "generation becomes productive again; see "
+                         "docs/Generation_Throughput.md.")
     ap.add_argument("--depth", type=int, default=8)
     ap.add_argument("--games-per-actor", type=int, default=1000,
                     help="Actor respawn cadence = weight refresh interval")

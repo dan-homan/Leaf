@@ -94,8 +94,29 @@ Hash size sweep at 14 actors, depth 6, for the shape:
 
 ### Is 16 MB big enough?
 
-Yes for depth 8, and it costs nothing in game quality.  600 games per arm, same
-openings, patched binary:
+> **⚠️ RETRACTED (2026-09-05).  The measurement below cannot answer the question
+> it was asked.**  It compares *self-play* W/D/L and termination mix across hash
+> sizes — but in self-play both sides run the same net at the same hash, so a
+> uniform strength change cancels exactly and is invisible by construction.  It
+> shows only that 16 MB does not change the *character* of self-play games.
+>
+> Measured properly — same binary and net on both sides, **fixed depth 8** so the
+> smaller table's speed advantage cannot pay for a quality loss, `Hash=128` vs
+> `Hash=16` over 2000 games — **Hash 128 reads +8.9 ± 11.4 Elo** (W/L/D
+> 669/618/713).  That is 0.8σ, consistent with zero, but the point estimate
+> favours the larger table, and hash size genuinely reaches search quality at
+> fixed depth: TT scores feed move ordering, null-move, LMR and singular
+> extensions.
+>
+> **The default reverted to 128 MB.**  16 MB buys ~25% generation throughput,
+> but the corpora that generation produces currently measure worth *zero*
+> (`Online_Learning_Investigation.md` 7.3), so the throughput is not worth
+> leaving a confound in every comparison against the pre-`6e6g` chain.
+> `clear_hash()` below is unaffected and stays — it is bit-identical output.
+> Full account in `Online_Learning_Investigation.md` 7.5.
+
+The original (insufficient) evidence, kept for the record — 600 games per arm,
+same openings, patched binary:
 
 | | 128 MB | 16 MB |
 |---|---|---|
@@ -117,8 +138,9 @@ depth-8 search touches.  Raise `--hash` if generating at much greater depth.
 - `selfplay_new_game_reset()` and the UCI `ucinewgame` handler call
   `clear_hash()` instead of `set_hash_size()`.  Geometry never changes between
   games, so the realloc bought nothing.
-- `selfplay_run.py --hash` (default **16**) passes `hash <MB>` to actors and
-  learner; `train.py --hash` (default 16) forwards it.  `hash` must precede
+- `selfplay_run.py --hash` (default **128**, briefly 16 — see the retraction
+  above) passes `hash <MB>` to actors and learner; `train.py --hash` forwards
+  it.  `hash` must precede
   `--selfplay`/`--learn-stream` on the command line — `main()` dispatches to the
   driver as soon as it sees that flag and never returns to the argument loop.
 
@@ -167,9 +189,11 @@ the learner that is setting the rate.
   same scaling curve.
 - **Inherent:** all-core clock throttling.  Costs ~60% of ideal scaling at 16
   actors and applies to any driver, fastchess included.
-- **Fixed:** the per-game hash reallocation and the oversized default table,
-  together worth **+25% generation throughput at depth 8, 14 actors** — the
-  right order of magnitude for the reported 30–50% shortfall.
+- **Fixed:** the per-game hash reallocation.  The oversized-table half was also
+  worth +25% at depth 8 / 14 actors, but the table size was **reverted to 128 MB**
+  on 2026-09-05 after a fixed-depth A/B put 16 MB at −8.9 ± 11.4 Elo of search
+  quality (see the retraction in §3).  What remains is `clear_hash()`: ~+7% at
+  one actor, ~+3% at fourteen, bit-identical output.
 - **Understood but not currently binding:** the single-learner ceiling, which
   *is* a genuine structural difference from fastchess and would dominate at
   depth 6.

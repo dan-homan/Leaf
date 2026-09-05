@@ -1,5 +1,98 @@
 Changes since 2017_12_24
 
+2026_09_05 -- Part 7: the online/offline trade inverted, and the generation hash
+               reverts to 128 MB.
+
+               The m260720 chain plateaued from 3.5e6g on.  Extending Part 6.1's
+               decomposition (which stops at 3e6) across the four legs nobody had
+               differenced shows why: the online phase's cost has run away.
+
+                 leg     parent  post-online  online D  final  offline D   net
+                 4e6     +111.0     +47.9      -63.1   +112.9   +65.0     +1.9
+                 4.5e6   +112.9     +56.1      -56.8   +103.4   +47.3     -9.6
+                 5e6     +103.4     +63.6      -39.8   +109.8   +46.2     +6.5
+                 5.5e6   +109.8     +43.0      -66.9    +96.2   +53.2    -13.6
+                 6e6     +155.1      +4.2     -151.0   +149.7  +145.5     -5.4
+
+               Standing conclusion 3 said "reliably negative (-17 to -32)".  That
+               was measured through 3e6.  The drift went unseen because
+               --gauntlet-tdleaf stopped being passed after 3e6 (6e6g's
+               tdleaf_gauntlet is an empty list); its post-online net had to be
+               rebuilt afterwards from the surviving <tag>_pretrain.nnue.
+
+               Seven arms, all one epoch from the UNDAMAGED m260720-5.5e6gR seed,
+               2000 games each vs Leaf_vclassic_eval (two matches concurrent, so
+               identical load; the seed was re-rated twice in-batch and pooled at
+               +132.2 +- 10.4):
+
+                 rold190  190M archives only    +152.8    vs seed  +20.6 +- 18.7
+                 rall     190M archives + new   +150.7             +18.5 +- 18.0
+                 rold      38M archives          +143.3             +11.1 +- 18.2
+                 rearly    19M new, 1st half    +108.5             -23.7 +- 17.6
+                 rlate     19M new, 2nd half    +108.1             -24.1 +- 18.0
+                 rnew      38M new only         +106.0             -26.2 +- 17.6
+
+               rold190 - rall = +2.1 +- 21.3.  Swapping the 38M freshly generated
+               rows for 38M rows from the STALEST corpus on disk (the +34.2
+               generator that --corpus-window 4 deliberately excludes) changes
+               nothing: 500k fresh d8 games contribute ZERO at any weighting, and
+               -26 on their own.  Part 3.5's seedctl reproduces at d8.  The ~+20
+               that offline consolidation still delivers comes entirely from
+               re-consolidating archives.
+
+               Two hypotheses killed: generator decay (actors reload the decaying
+               learner state, so the corpus was labelled by a net falling +155 ->
+               +4 -- but rearly and rlate differ by 0.4 Elo, despite the label
+               drift being visible in val MSE) and inherited Adam state (the batch
+               trainer does share v/m/t_adam via nnue_apply_gradients, but
+               accumulated v DAMPS steps, so it predicts less damage, not more).
+
+               Validation MSE ordered all six arms exactly backwards -- every arm
+               whose val MSE fell lost Elo, every arm whose val MSE rose gained
+               it, 6 for 6.  It is a distillation-fidelity meter, not a strength
+               meter.  This undercuts Part 6.2, which leaned on "val MSE rose at
+               every epoch" as evidence a corpus was informationless.
+
+               The draw-rate canary is blind to uniform strength loss: 6e6g held
+               35.1% draws FLAT across all ten deciles through a -151 Elo online
+               phase.  A net that weakens uniformly still plays itself to the
+               same draw rate.
+
+               HASH REVERT (the confound D. Homan flagged).  6e6g is the first leg
+               ever generated at --hash 16; every earlier leg ran at 128.  The
+               2026_09_04 validation of 16 MB was structurally incapable of
+               detecting a quality loss -- it compared self-play W/D/L and
+               termination mix, and in self-play both sides share the net AND the
+               hash, so a uniform change cancels exactly (same blind spot as the
+               draw-rate canary).  Measured properly -- same binary and net both
+               sides, FIXED depth 8 so the smaller table's speed cannot pay for a
+               quality loss, Hash=128 vs Hash=16, 2000 games:
+
+                 Elo +8.86 +- 11.36   W/L/D 669/618/713
+
+               0.8 sigma, consistent with zero, but the point estimate favours the
+               larger table and hash size does reach search quality through
+               TT-driven move ordering and pruning.  Too small to explain -151,
+               and rold190 ~ rall shows the hash-16 rows are worth what stale
+               hash-128 rows are worth -- so the Part 7 findings stand.  Still,
+               throughput on corpora measured to be worth zero is worth zero, so
+               --hash defaults back to 128 in selfplay_run.py and train.py rather
+               than leaving a confound in every future comparison.  clear_hash()
+               is kept (bit-identical output, ~+3-7%).
+
+               Root/leaf pairing, for the re-targeting idea: (gid, ply) is the
+               exact join key -- both rows come from one TDRecord.  The gates are
+               what break pairing (root tests |root_static - root_search|, leaf
+               tests |leaf_static - propagated root search|).  On 80 surviving
+               6e6g trajectories replayed frozen: 99.5% of root rows paired at the
+               wide dump gate, 84.4% after the 60cp re-cut.
+
+               docs/Online_Learning_Investigation.md (Part 7 + standing
+               conclusions 1/3/6 amended, new conclusion 7),
+               docs/Generation_Throughput.md (retraction in section 3),
+               docs/TRAINING.md, docs/SCRIPT_USE.md, scripts/selfplay_run.py,
+               scripts/train.py.
+
 2026_09_03e -- train.py --bt-quiet-cp: wire up the other half of A2.
 
                Generation has dumped WIDE (--quiet-cp 1000) since 2026_09_03b on

@@ -565,9 +565,12 @@ def main():
     ap.add_argument("--games", type=int, default=400000)
     ap.add_argument("--depth", type=int, default=8)
     ap.add_argument("--concurrency", type=int, default=9)
-    ap.add_argument("--hash", type=int, default=16,
+    ap.add_argument("--hash", type=int, default=128,
                     help="Per-actor hash size in MB passed to generation "
-                         "(default 16; see selfplay_run.py --hash)")
+                         "(default 128; 16 is ~25%% faster but measured +8.9 +- "
+                         "11.4 Elo weaker at fixed depth -- see "
+                         "selfplay_run.py --hash and "
+                         "docs/Online_Learning_Investigation.md 7.5)")
     ap.add_argument("--openings", default="training_openings.epd")
     # Online generation is always the actor/learner split (scripts/selfplay_run.py):
     # concurrency-1 FROZEN actors play internal self-play and emit .tdg trajectories;

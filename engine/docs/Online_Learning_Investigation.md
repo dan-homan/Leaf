@@ -14,10 +14,19 @@ here is the only place that reflects all six parts at once.
 
 ---
 
-## TL;DR — standing conclusions (current, through Part 6)
+## TL;DR — standing conclusions (current, through Part 7)
 
-1. **Keep online learning ON during generation.**  Freeze-generate → consolidate
-   is closed at *both* depths: d6 in Part 4.3 (`seedctl-dedup`, flat at −3/−10
+1. **Keep online learning ON during generation — ⚠️ SUSPENDED by Part 7.**
+   The argument below rests on a learning generator's corpus being worth +52–85
+   where a frozen one is worth ~0.  Part 7.3 measures the learning corpus at
+   **zero**: 500k fresh d8 games, consolidated into the *undamaged* seed, are
+   worth the same as rows from the stalest archive on disk (`rold190` − `rall`
+   = +2.1 ± 21.3) and −26 on their own.  If both corpora are worth nothing, the
+   only difference left between the modes is that the learning one costs 151
+   Elo of damage.  This is NOT a return to Part 3.7's "freeze the generator" —
+   6.2 closed that too.  At d8 the loop currently has no productive mode; see
+   7.6.  The original argument, still correct on its own terms: freeze-generate
+   → consolidate is closed at *both* depths: d6 in Part 4.3 (`seedctl-dedup`, flat at −3/−10
    Elo) and d8 in Part 6.1–6.2 (the frozen `3e6` iteration used 1.7× the games of
    the one before it and returned **+7 against +53**, and its consolidation made
    validation MSE **rise at every epoch**).  A frozen generator labels positions
@@ -36,11 +45,15 @@ here is the only place that reflects all six parts at once.
    the online phase introduced (6.14.1).
 
 3. **Corollary, and it is a rule: do not optimise the online phase's own Elo.**
-   Online Δ is reliably negative (−17 to −32 in the current regime) while the
-   iteration still nets +24 to +53, and three separate arms have now shown online
-   Δ moving *opposite* to the iteration total.  The only figure of merit is the
-   **iteration total against a foreign anchor** — family matches compress real
-   gains by roughly 5× (Part 4.6).
+   The rule stands; **the numbers in it do not.**  "Reliably negative (−17 to
+   −32)" was measured through `3e6`.  Since `4e6g` the online Δ has run −40 to
+   −67 and at `6e6g` it was **−151**, while the iteration total fell to ~0
+   (Part 7.1).  The drift went unseen because Part 6.1's table stops at `3e6`
+   and `--gauntlet-tdleaf` stopped being passed after it — **pass it on every
+   leg.**  The only figure of merit is still the **iteration total against a
+   foreign anchor** — family matches compress real gains by roughly 5×
+   (Part 4.6).  Rate at 2000 games: two 2000-game measurements of the same
+   binary pair differed by 9.6 Elo (Part 7 methodology notes).
 
 4. **Direction quality is the axis, not displacement magnitude.**  Every
    update-rule and magnitude knob tested has been rejected on production A/B:
@@ -63,8 +76,20 @@ here is the only place that reflects all six parts at once.
    spiral, stale TD targets) kept nominal gradient telemetry throughout.  The two
    hard rules they bought are in `TRAINING.md`: play to natural termination, and
    keep TD targets on current weights (the learner's `--refresh-scores`).
+   **⚠️ Blind spot (7.2): the draw rate detects pathology, not decay.**  `6e6g`
+   held 35.1% draws flat across all ten deciles through a −151 Elo online phase
+   — a net that weakens *uniformly* still plays itself to the same draw rate.
+   Only a foreign-anchor rating of the post-online net catches that.
 
-7. **The one clean lever still untested is a uniform LR scale** — the only knob
+7. **Validation MSE ranks arms BACKWARDS — do not use it to choose one.**  Six
+   arms in Part 7.4: every arm whose val MSE fell lost Elo, every arm whose val
+   MSE rose gained it, 6 for 6.  It is measured on a held-out split of the same
+   corpus, so fitting it better means distilling that corpus's generator more
+   faithfully — progress only while the generator is ahead of the net.  This
+   directly undercuts Part 6.2, which leaned on "val MSE rose at every epoch"
+   as evidence a corpus was informationless.  Rate by gauntlet.
+
+8. **The one clean lever still untested is a uniform LR scale** — the only knob
    that moves displacement without also changing direction quality or step count.
    Recipe parked in 6.17, not yet run.
 
@@ -89,6 +114,7 @@ underneath the conclusion.
 | 4 | same | `TDLEAF_FREEZE`, the duplication landmine, book-diversity retired, depth as the lever |
 | 5 | transition | Internal self-play, the equivalence study, the actor/learner split + its two stability landmines |
 | 6 | `m260720`, actor/learner | Frozen generation closed at d8; online-as-hypothesis-generator; alpha / rbar / batch-size all closed; LR arm parked |
+| 7 | `m260720`, legs 4e6–6e6 | The trade inverted: online Δ now −151, the corpus it buys measures **zero**, val MSE ranks arms backwards, the draw-rate canary is blind to uniform decay |
 
 ---
 
@@ -2898,3 +2924,262 @@ rather than a shipped knob.
   net PSQT mean \|dw\| 319.83, L2 1.6999e5, grad norm 0.147, 37 500 steps,
   online Δ −31.6, offline Δ +84.6, total +53.0, draw 34.6%, seed val MSE
   0.006829.
+
+---
+
+# Part 7 — The trade inverted: online generation stopped paying for itself (2026-09-05)
+
+Part 6 closed with the loop netting +24 to +53 per iteration, online paying ~30
+Elo of displacement to buy +52–85 of offline gain.  Part 7 reopens the
+decomposition four legs later and finds every term of that trade has moved: the
+online cost is now **−151**, and the corpus it buys is worth **zero**.
+
+The entry point was not a planned experiment.  D. Homan asked why the `m260720`
+chain had plateaued; the offline work (`Offline_Learning_Investigation.md`) had
+found two wins from archived data, and the `6e6g` leg was the first to apply
+them to fresh generation.  It returned −5.4.
+
+## 7.1 The decomposition, extended — and why nobody saw it move
+
+Part 6.1's table stops at `3e6`.  The post-online (`tdleaf`) gauntlet was still
+being recorded in the sidecars for `4e6g`…`5.5e6g`, but it was never differenced
+against the previous leg's `final`, and after `3e6` the `--gauntlet-tdleaf` flag
+stopped being passed at all — `6e6g`'s `tdleaf_gauntlet` is an empty list.  Its
+post-online net had to be reconstructed after the fact by baking
+`<tag>_work/train/<tag>_pretrain.nnue` (which survives run pruning) and rating
+it separately.
+
+| leg | parent | post-online | **online Δ** | final | offline Δ | net |
+|---|---|---|---|---|---|---|
+| 3e6 | +16.7 | +11.8 | −4.9 | +34.2 | +22.3 | +17.5 |
+| 3.5e6 | +34.2 | +20.9 | −13.3 | +111.0 | +90.1 | +76.8 |
+| 4e6 | +111.0 | +47.9 | −63.1 | +112.9 | +65.0 | +1.9 |
+| 4.5e6 | +112.9 | +56.1 | −56.8 | +103.4 | +47.3 | −9.6 |
+| 5e6 | +103.4 | +63.6 | −39.8 | +109.8 | +46.2 | +6.5 |
+| 5.5e6 (d10) | +109.8 | +43.0 | −66.9 | +96.2 | +53.2 | −13.6 |
+| **6e6** | **+155.1** | **+4.2 ± 15** | **−151.0** | +149.7 | **+145.5** | **−5.4** |
+
+Standing conclusion 3 states the online Δ is "reliably negative (−17 to −32 in
+the current regime)".  It has been −40 to −67 since `4e6g` and is now −151.  The
+plateau interval and the interval over which that number drifted are the same
+interval.
+
+Two structural facts fall out.  **Post-online lands in a +43…+64 band for
+parents spanning +103 to +113** — a fixed point, which is what
+`E ← search_d8(E)` looks like once saturated.  And `6e6g` fell straight
+*through* that band to +4, which no fixed-point model explains; it entered 45
+Elo above anything before it, and its damage is ~50% worse than a proportional
+model predicts.  That residual is unexplained.
+
+The `5.5e6gR` row is bookkeeping, not a real online phase (`games_this_iter: 0`);
+its recorded post-online value is inherited from `5.5e6g`.  Read it as
+"re-consolidated from +43.0 to +155.1".
+
+## 7.2 The draw-rate canary is blind to uniform strength loss
+
+`6e6g`'s generation held **35.1% draws, flat across all ten deciles** (mean game
+length 150.0 plies), through a −151 Elo online phase.  Standing conclusion 6
+makes the draw rate the health canary; both collapses it was calibrated on were
+*decisiveness spirals*, where the net's relative behaviour changes.  A net that
+loses strength uniformly still plays itself to the same draw rate, so this
+failure mode is silent on that instrument.  The canary detects pathology, not
+decay.
+
+## 7.3 The repair-vs-signal arms: the corpus is worth zero
+
+Part 3.5's `seedctl` control asked whether the offline gain was repair of online
+self-damage or fresh signal, by consolidating the *undisplaced* seed on the same
+corpus.  Part 6.3 held that its conclusion did not survive a healthy online
+phase.  Re-run at d8 in the current regime, from the undamaged `m260720-5.5e6gR`
+seed, one epoch each (matching how 5.5e6gR was built), 2000 games per arm
+against `Leaf_vclassic_eval`:
+
+| arm | rows | corpus | Elo vs classic | vs pooled seed |
+|---|---|---|---|---|
+| `rold190` | 190M | archives only (incl. the stale 3.5e6g) | +152.8 ± 15.5 | **+20.6 ± 18.7** |
+| `rall` | 190M | archives + 38M new — the production corpus | +150.7 ± 14.7 | +18.5 ± 18.0 |
+| `rold` | 38M | archives, row-matched to `rnew` | +143.3 ± 14.9 | +11.1 ± 18.2 |
+| **seed** | — | `m260720-5.5e6gR` | **+132.2 ± 10.4** (pooled) | — |
+| `rearly` | 19M | new games, first half | +108.5 ± 14.2 | −23.7 ± 17.6 |
+| `rlate` | 19M | new games, second half | +108.1 ± 14.7 | −24.1 ± 18.0 |
+| `rnew` | 38M | new games only | +106.0 ± 14.2 | **−26.2 ± 17.6** |
+
+Three results:
+
+1. **There is no extractable signal in the new games.**  Training the undamaged
+   seed on them alone *loses* ~26 Elo, and three arms drawn from that corpus
+   (`rnew`, `rearly`, `rlate`) agree at −24 to −26.  This is `seedctl`
+   reproducing at d8 (it lost 48 at epoch 1).
+2. **`rold190` − `rall` = +2.1 ± 21.3.**  Substituting the 38M freshly generated
+   rows for 38M rows from the *stalest corpus on disk* — the +34.2 generator the
+   default `--corpus-window 4` deliberately excludes — changes nothing.  The new
+   games are worth neither more nor less than a corpus already written off as
+   too stale to use.  **They contribute nothing at any weighting.**
+3. **The archives still carry ~+20**, so consolidation is not purely repair.
+   The signal is in the archives, not in anything the online phase generated.
+
+### 7.3.1 Two hypotheses killed by the same arms
+
+**Generator decay.**  Actors respawn every 1000 games reloading the learner's
+state, and `--refresh-scores` re-labels at consume time, so `6e6g`'s corpus was
+labelled by a net decaying from +155 to +4 across the run.  The prediction was
+that early-run rows would help and late-run rows would hurt.  `rearly` and
+`rlate` differ by **0.4 Elo**.  The label drift is real and visible in objective
+space — the seed's baseline val MSE is 0.006802 on early rows against 0.007147
+on late — but it produces no differential Elo effect.  Rejected.
+
+**Adam state carried from the batch trainer.**  `nnue_batch_train.cpp` calls the
+same `nnue_apply_gradients`, so `v`/`m`/`t_adam` do round-trip between phases,
+and `t_adam` confirms the offline pass dominates step count (~371k steps per
+190M-row epoch against 62.5k for 500k online games at batch 8).  But accumulated
+`v` *damps* steps — that is what `scripts/reset_adam.py` exists to undo — so an
+inherited second moment predicts **less** online movement, not more.  Wrong
+sign; it cannot explain −151.  Withdrawn before testing.
+
+## 7.4 Validation MSE ordered all six arms exactly backwards
+
+| arm | baseline val MSE | after 1 epoch | direction | Elo vs seed |
+|---|---|---|---|---|
+| `rearly` | 0.006802 | 0.006457 | **fell** | −23.7 |
+| `rlate` | 0.007147 | 0.006700 | **fell** | −24.1 |
+| `rnew` | 0.006920 | 0.006529 | **fell** | −26.2 |
+| `rold` | 0.005735 | 0.005754 | **rose** | +11.1 |
+| `rall` | 0.006046 | 0.006056 | **rose** | +18.5 |
+| `rold190` | 0.006054 | 0.006074 | **rose** | +20.6 |
+
+Every arm whose validation MSE fell lost Elo; every arm whose validation MSE
+rose gained it.  Six for six, perfectly anti-correlated.
+
+This matters beyond bookkeeping.  Part 6.2 used "the frozen consolidation made
+validation MSE **rise** at every epoch" as its primary evidence that frozen
+generation was a no-op, and stated that the val-MSE half "is not a noisy
+measurement and is what the conclusion mainly leans on."  Rising validation MSE
+is here the signature of the three arms that *gained* the most.  The mechanism
+is Part 3.6's: val MSE is measured on a held-out split of the same corpus, so
+fitting it better means distilling its generator more faithfully — which is
+progress only while the generator is ahead of the net.  **Validation MSE is a
+distillation-fidelity meter, not a strength meter.**  It is now 6-for-6 at
+ordering arms backwards and should not be used to rank arms.
+
+## 7.5 The hash confound, raised and measured
+
+`6e6g` is the first leg ever generated at `--hash 16`; every leg in the −40…−67
+band ran at the 128 MB default.  D. Homan raised this: hash size can change
+search *quality* at fixed depth, because TT scores feed move ordering,
+null-move, LMR and singular extensions.
+
+The earlier validation of 16 MB (`Generation_Throughput.md` §3) was
+**structurally incapable** of detecting it — it compared self-play W/D/L and
+termination mix across hash sizes, and in self-play both sides run the same net
+at the same hash, so any uniform strength change cancels exactly.  Same blind
+spot as 7.2.
+
+Measured properly — same binary and net on both sides, **fixed depth 8** so the
+smaller table's speed advantage cannot pay for a quality loss, `Hash=128` vs
+`Hash=16` via UCI options, 2000 games:
+
+```
+Elo: +8.86 +/- 11.36   W/L/D 669/618/713   Ptnml [73, 213, 403, 212, 99]
+```
+
+0.8σ — indistinguishable from zero, point estimate favouring the larger table,
+95% interval (−13, +31).  A real effect is plausible but small, and it cannot
+carry a 151 Elo collapse.  `rold190 ≈ rall` independently shows the hash-16 rows
+are worth exactly what stale hash-128 rows are worth.
+
+**Consequence:** generation reverts to `--hash 128`.  16 MB buys ~25%
+throughput, but throughput on games measured to be worth zero is worth zero, and
+it leaves a confound in every future comparison against the pre-`6e6g` chain.
+`clear_hash()` is kept — it is bit-identical output (verified: 25 games play
+identically) and still nets ~+3% over the historical realloc path.
+
+## 7.6 What this does to the Part-6 picture
+
+Part 6.3 kept online learning on with this argument: a frozen generator labels
+positions with the seed's own evaluations, so consolidating that corpus is a
+no-op *by construction* (6.2 measured exactly that), while a learning generator
+moves off the fixed point and produces labels worth +52–85.
+
+**The second half of that premise is now false.**  7.3 measures the learning
+generator's corpus at **0**.  If both corpora are worth nothing, the only
+remaining difference between the modes is that the learning one costs 151 Elo of
+damage that the offline pass must then repair.  Standing conclusion 1 is not
+safe as written.
+
+This is not a return to Part 3.7's "retire online learning" — that recommended
+freeze-generate → consolidate as a *productive* loop, and 6.2 closed that at
+both depths.  The current position is stronger and bleaker: **at d8 the loop has
+no productive mode left.**  Generation of either kind produces corpora worth
+zero; the only positive term available is re-consolidating archives, worth ~+20
+once.
+
+The survivors are the levers that change what search can teach the net, not how
+the update is applied:
+
+- **Depth.**  3.6's mechanism is explicit — deeper search makes `search(E) > E`
+  again *by construction*, restoring headroom.  d8 is now saturated the way d6
+  was at `2e6`.  The one d10 leg (`5.5e6g`, −13.6) predates both the
+  corpus-window and root-row wins and was measured when the online cost was
+  already −67.
+- **Re-targeting existing corpora.**  D. Homan's proposal: keep the stored root
+  position but rescore its *paired leaf* with current weights and blend with the
+  outcome through the standard λ decay.  The leaf sits 8 ply down the PV, so
+  `eval_now(leaf) − eval_now(root)` still carries the search's verdict on current
+  weights — it is not a degenerate self-target.  Its approximation is PV
+  stability, which is directly measurable (re-search stored roots, check whether
+  the PV leaf is still the stored leaf) and should be measured before
+  implementing.
+
+The **LR arm (6.17) is weakened, not strengthened**, by Part 7.  It reduces
+online displacement, but with corpus value at zero the best case is a leg that
+nets ~0 instead of −5.
+
+### 7.6.1 Root/leaf pairing, for the re-targeting idea
+
+Both rows of a record are written from the same `TDRecord` with identical
+`dump_gid` and `game_ply`, so **`(gid, ply)` is the exact join key**.  The
+quiet gates are what break pairing: the root gate tests
+`|root_static − root_search|`, the leaf gate `|leaf_static − propagated root
+search|` — different quantities, so they accept different records.  Measured on
+80 surviving `6e6g` trajectories replayed frozen:
+
+| gate | root rows | leaf rows | paired | % of root | % of leaf |
+|---|---|---|---|---|---|
+| wide (1000 cp, as dumped) | 10,344 | 10,482 | 10,294 | **99.5%** | **98.2%** |
+| re-cut to 60 cp | 5,691 | 7,643 | 4,801 | 84.4% | 62.8% |
+
+(`m260720-5.5e6g`'s archive, 1/1000 game sample: 79.8% of root rows paired.)
+
+So the wide-dump default makes near-complete pairing available, and it survives
+to assembly — a leg that wants paired data needs `--bt-rows both` plus
+pair-aware sampling in `write_corpus`, which currently samples rows
+independently and breaks ~15% of pairs at the ~92% sampling density in use.
+
+## Methodology notes (Part 7)
+
+- Every arm ran one epoch from the same seed state
+  (`m260720-5.5e6gR_final.tdleaf.bin` over base `m260720.nnue`, content hash
+  0x0A3B39CB), `--bt-lr 0.25 --bt-lambda 1.0 --bt-K 220 --bt-batch 512
+  --bt-seed 1000 --bt-threads 8`.  Scripts in `learn/offline_repair/`.
+- Corpus slices were recovered from the archived `6e6g` `corpus.tsv.gz`, whose
+  source blocks are contiguous and in window order — verified by gid continuity
+  (line 37,999,997 is gid 499,998, the last new-game row; 37,999,998 is gid
+  499,999, the first archive row).  The raw per-run dumps were pruned at end of
+  run, so this was the only route.  `rold190` appends 38.0M root rows
+  Bresenham-spread from `m260720-3.5e6g`'s archive with gids renumbered above
+  the corpus maximum; it matches `rall` to within 4 rows.
+- **All arms rated at 2000 games with two matches running concurrently**, so
+  every arm saw identical machine load.  Absolute values are therefore *not*
+  comparable to the chain history, which was measured at 1000 games with a
+  single match — the seed reads +132 here against +155 there.  The seed was
+  re-rated twice inside this batch (+127.4, +137.0; pooled +132.2 ± 10.4) and
+  all deltas are taken against that pooled figure.  The 9.6 Elo spread between
+  two 2000-game measurements of the *same binary pair* is worth remembering
+  when reading the ±11 error bars in the chain table.
+- The hash A/B used `match.py --depth1 8 --depth2 8 --option1 Hash=128
+  --option2 Hash=16` with the same binary under two names, so the only
+  difference between the sides is the UCI option.
+- Generation throughput on this leg: 0.506 games/s/actor (7.09 aggregate, 14
+  actors) against 0.42/5.9 historically — the `clear_hash` + 16 MB change
+  delivered its +20%, which is what made the confound worth measuring rather
+  than simply reverting.

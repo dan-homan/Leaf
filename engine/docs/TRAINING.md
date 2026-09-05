@@ -1134,12 +1134,15 @@ final net +23±17 over its seed, foreign anchor +80 vs classic.
 Two things dominate wall-clock generation speed, both measured in
 `docs/Generation_Throughput.md`:
 
-1. **Hash size (`--hash`, default 16 MB).**  The engine wipes its hash tables
+1. **Hash size (`--hash`, default 128 MB).**  The engine wipes its hash tables
    once per game, so an oversized table is a per-game tax paid 500,000 times in
-   an iteration.  Dropping the old 128 MB default to 16 MB is worth **+25%
-   generation throughput at depth 8** with no measurable change in outcomes or
-   termination mix (600 games/arm).  Raise it only when generating at much
-   greater depth than 8.
+   an iteration, and 16 MB is worth **+25% generation throughput at depth 8**.
+   It was briefly the default — but a fixed-depth A/B then put Hash 128 at
+   **+8.9 ± 11.4 Elo** over Hash 16 (same net both sides, 2000 games): 0.8σ, yet
+   the point estimate favours the larger table and hash size does reach search
+   quality through TT-driven move ordering and pruning.  With generated corpora
+   currently measuring worth zero, the throughput does not justify the confound.
+   See `Online_Learning_Investigation.md` 7.5.
 2. **The learner is a single-threaded ceiling** at ~13–18 games/s, and its work
    per game is *depth-independent* (`--refresh-scores` rebuilds two accumulators
    per record; it never searches).  At depth 8 and 10 the actors supply well

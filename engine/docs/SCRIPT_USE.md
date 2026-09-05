@@ -103,7 +103,7 @@ pruning for one run. A failed run's `<tag>_work/` is never touched. See
 | `--games N`                                  | 400000                                                 | Games to generate                                            |
 | `--depth N`                                  | 8                                                      | Fixed search depth for generation                            |
 | `--concurrency N`                            | 9                                                      | Concurrent games                                             |
-| `--hash N`                                   | 16                                                     | Per-actor hash size (MB) for generation.  The engine wipes its tables once per game, so an oversized table is pure per-game cost — 128 MB measured 25% slower than 16 MB at depth 8 with no change in outcomes.  See `docs/Generation_Throughput.md` |
+| `--hash N`                                   | 128                                                    | Per-actor hash size (MB) for generation.  16 MB is ~25% faster at depth 8 but measured **+8.9 ± 11.4 Elo weaker at fixed depth** (`Online_Learning_Investigation.md` 7.5), so the default reverted to 128.  See `docs/Generation_Throughput.md` |
 | `--openings FILE`                            | `training_openings.epd`                                | Opening set (FRC)                                            |
 | `--games-per-actor N`                        | 1000                                                   | Actor respawn cadence / weight-refresh interval for the actor/learner split |
 | `--no-repeat`                                | deprecated no-op                                       | Kept for backward compatibility; the actor/learner split plays each opening once (striped across actors), so there is no fastchess pairing to suppress |
@@ -164,7 +164,7 @@ python3 selfplay_run.py --binary Leaf_vtrain_hl_a --epd training_openings.epd \
 | `--epd FILE` | required | Opening book |
 | `--actors N` | 4 | Frozen actor processes (TDLEAF_FREEZE forced) |
 | `--depth D` | 8 | Fixed search depth |
-| `--hash N` | 16 | Per-process hash size (MB), passed to actors and learner alike.  Raise only when generating at much greater depth than 8 — see `docs/Generation_Throughput.md` |
+| `--hash N` | 128 | Per-process hash size (MB), passed to actors and learner alike.  Briefly defaulted to 16 for throughput; reverted after a fixed-depth A/B — see `docs/Online_Learning_Investigation.md` 7.5 |
 | `--games-per-actor M` | 1000 | Actor respawn cadence = weight-refresh interval |
 | `--total-games N` | required | Learner stop budget |
 | `--traj-dir DIR` | `traj` | `.tdg` handoff dir (`STOP` sentinel stops early) |
