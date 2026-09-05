@@ -81,13 +81,16 @@ here is the only place that reflects all six parts at once.
    — a net that weakens *uniformly* still plays itself to the same draw rate.
    Only a foreign-anchor rating of the post-online net catches that.
 
-7. **Validation MSE ranks arms BACKWARDS — do not use it to choose one.**  Six
-   arms in Part 7.4: every arm whose val MSE fell lost Elo, every arm whose val
-   MSE rose gained it, 6 for 6.  It is measured on a held-out split of the same
-   corpus, so fitting it better means distilling that corpus's generator more
-   faithfully — progress only while the generator is ahead of the net.  This
-   directly undercuts Part 6.2, which leaned on "val MSE rose at every epoch"
-   as evidence a corpus was informationless.  Rate by gauntlet.
+7. **Validation MSE does not predict Elo — do not use it to rank arms.**  Ten
+   arms across Parts 7.3 and 7.7: val MSE rose on five that gained and on two
+   that lost 14–20, and fell on three that lost.  (It read as a clean 6-for-6
+   inversion before the epoch-2 arms; that was partly coincidence — see the
+   correction in 7.4.)  Where it *does* fall, Part 3.6's mechanism applies:
+   fitting a held-out split of the same corpus better means distilling that
+   corpus's generator more faithfully, which is progress only while the
+   generator is ahead of the net.  This undercuts Part 6.2, which leaned on
+   "val MSE rose at every epoch" as evidence a corpus was informationless.
+   Rate by gauntlet.
 
 8. **The one clean lever still untested is a uniform LR scale** — the only knob
    that moves displacement without also changing direction quality or step count.
@@ -3036,7 +3039,7 @@ and `t_adam` confirms the offline pass dominates step count (~371k steps per
 inherited second moment predicts **less** online movement, not more.  Wrong
 sign; it cannot explain −151.  Withdrawn before testing.
 
-## 7.4 Validation MSE ordered all six arms exactly backwards
+## 7.4 Validation MSE does not predict Elo
 
 | arm | baseline val MSE | after 1 epoch | direction | Elo vs seed |
 |---|---|---|---|---|
@@ -3047,19 +3050,30 @@ sign; it cannot explain −151.  Withdrawn before testing.
 | `rall` | 0.006046 | 0.006056 | **rose** | +18.5 |
 | `rold190` | 0.006054 | 0.006074 | **rose** | +20.6 |
 
-Every arm whose validation MSE fell lost Elo; every arm whose validation MSE
-rose gained it.  Six for six, perfectly anti-correlated.
+Across these six, every arm whose validation MSE fell lost Elo and every arm
+whose validation MSE rose gained it — six for six.
 
-This matters beyond bookkeeping.  Part 6.2 used "the frozen consolidation made
+> **Correction (2026-09-05, after 7.7).**  That perfect inversion did not
+> survive four more arms.  `p0` and `p2` (val rose, +20.4 and +17.9) extend it,
+> but the two epoch-2 arms `p2e2s` and `p2e2m` had val MSE **rise** while Elo
+> **fell** by 14 and 20.  Over all ten arms: rose→gained ×5, rose→lost ×2,
+> fell→lost ×3.  The inversion was partly coincidence — what is actually
+> established is weaker and simpler: **validation MSE does not predict Elo in
+> either direction, and must not be used to rank arms.**  The operational rule
+> is unchanged; the mechanism claimed below explains only the losing half.
+
+The reason the *falling* arms lose is Part 3.6's: val MSE is measured on a
+held-out split of the same corpus, so fitting it better means distilling that
+corpus's generator more faithfully — progress only while the generator is ahead
+of the net.  Validation MSE is closer to a distillation-fidelity meter than a
+strength meter.
+
+Either way this undercuts Part 6.2, which used "the frozen consolidation made
 validation MSE **rise** at every epoch" as its primary evidence that frozen
-generation was a no-op, and stated that the val-MSE half "is not a noisy
-measurement and is what the conclusion mainly leans on."  Rising validation MSE
-is here the signature of the three arms that *gained* the most.  The mechanism
-is Part 3.6's: val MSE is measured on a held-out split of the same corpus, so
-fitting it better means distilling its generator more faithfully — which is
-progress only while the generator is ahead of the net.  **Validation MSE is a
-distillation-fidelity meter, not a strength meter.**  It is now 6-for-6 at
-ordering arms backwards and should not be used to rank arms.
+generation was a no-op, and stated the val-MSE half "is not a noisy measurement
+and is what the conclusion mainly leans on."  Rising val MSE is the signature of
+both the biggest gainers here and the two biggest losers.  It carries no rank
+information at all.
 
 ## 7.5 The hash confound, raised and measured
 
@@ -3154,6 +3168,124 @@ So the wide-dump default makes near-complete pairing available, and it survives
 to assembly — a leg that wants paired data needs `--bt-rows both` plus
 pair-aware sampling in `write_corpus`, which currently samples rows
 independently and breaks ~15% of pairs at the ~92% sampling density in use.
+
+## 7.7 Retargeting the root label to a rescored PV leaf: null, twice (2026-09-05)
+
+D. Homan's proposal, prompted by 7.3's finding that corpus labels distil a
+generator the net has since passed: keep the stored ROOT position, but replace
+its stale search score with the CURRENT net's evaluation of the paired PV leaf,
+blended with the outcome through the usual λ decay.  The leaf sits ~8 ply down
+the PV, so `eval_now(leaf) − eval_now(root)` still carries the search's verdict
+— the target is not the degenerate self-target it first appears to be.  Its
+approximation is PV stability: it assumes the search would still end at the
+stored leaf.
+
+### 7.7.1 The paired corpus
+
+`(gid, ply)` is the exact join key — both rows are emitted from one `TDRecord`
+in one loop in `tdleaf.cpp`.  Within an archive the two blocks are in identical
+`(gid, ply)` order, which makes this a streaming **merge join**: no hash table,
+no sort, O(n).  Over the five pre-6e6g archives (6e6g excluded: root-only
+assembly, leaf rows pruned):
+
+| archive | paired | of root rows |
+|---|---|---|
+| 3.5e6g | 33,465,198 | 81.7% |
+| 4e6g | 33,254,411 | 81.2% |
+| 4.5e6g | 32,772,051 | 80.7% |
+| 5e6g | 32,695,152 | 80.4% |
+| 5.5e6g | 35,481,456 | 80.5% |
+| **total** | **167,668,268** | |
+
+The gates are what cost the other ~19%: root is gated on
+`|root_static − root_search|`, leaf on `|leaf_static − propagated root search|`
+— different quantities, so they accept different records.  At the wide dump gate
+pairing is 99.5% (7.6.1).
+
+On paired rows the stored root and leaf labels differ by only **22.4 cp mean
+(60 max — exactly the gate)**, so retargeting to the *stored* leaf label would
+be a near no-op.  All of the idea's value has to come from the rescore.
+
+### 7.7.2 `--bt-rescore`
+
+New read-only mode in `nnue_batch_train.cpp`: walks the loaded records on the
+existing threaded path and writes `bt_eval_record`'s `snet` (white-POV cp) one
+line per input row, in input order, so the output pastes line-for-line onto a
+parallel file.  Alignment is the entire contract, so it refuses to run under
+`--bt-rows` or `--bt-quiet-cp` (both drop rows at load) and asserts the loader
+kept every record.  It runs before the rng is seeded and before any index
+shuffle; `recs` is never reordered at load.
+
+### 7.7.3 Four arms
+
+All from the same undamaged `m260720-5.5e6gR` seed, same 167.7M paired rows,
+2000 games vs `Leaf_vclassic_eval` at the same concurrent load as every other
+Part 7 arm.  `p2e2*` continue from `p2`'s epoch-1 state.
+
+| arm | label | Elo vs classic | vs previous |
+|---|---|---|---|
+| `p0` | original root search score (control) | +152.6 ± 14.6 | +20.4 ± 17.9 vs seed |
+| `p2` | `eval_seed(leaf)` — retargeted | +150.1 ± 15.2 | **−2.5 ± 21.0 vs `p0`** |
+| `p2e2s` | epoch 2, labels unchanged | +136.0 ± 14.6 | **−14.1 ± 21.1 vs `p2`** |
+| `p2e2m` | epoch 2, labels re-rescored on `p2_ep1` | +130.0 ± 14.8 | **−6.0 ± 20.8 vs `p2e2s`** |
+
+**Retargeting is worth nothing** (−2.5 ± 21.0), and **refreshing the target
+between epochs is worth nothing** (−6.0 ± 20.8).
+
+The label-movement diagnostics called the second result in advance and explain
+both.  The seed→generator correction — the whole point of the exercise — moved
+labels by **31.8 cp** on average and bought zero.  The epoch-1→epoch-2 refresh
+moved them by only **14.0 cp**, less than half a correction already measured as
+worthless.  There was never enough movement for a moving target to correct.
+
+### 7.7.4 Two structural findings that outrank the null
+
+**One epoch is a ceiling, and it is flat against corpus composition.**  Four
+independent arms from this seed at 167–190M rows:
+
+| arm | corpus | Elo |
+|---|---|---|
+| `rold190` | 190M archives only | +152.8 |
+| `p0` | 167.7M paired subset | +152.6 |
+| `rall` | 190M archives + 500k new games | +150.7 |
+| `p2` | 167.7M paired subset, retargeted labels | +150.1 |
+
+A **2.7 Elo band** across corpora that differ in composition (with/without the
+new games, with/without the stalest archive), in coverage (full vs the 81%
+paired subset) and in labelling (search scores vs rescored leaf evals).  Against
+±15 error bars that is one value.  The offline pass converges to ~+151 from this
+seed on ~170M+ archive rows regardless of what it is fed — which is what
+saturation looks like from the offline side, and it is why label engineering has
+no purchase.
+
+**The productive epoch count is a function of how much repair is needed.**  Both
+epoch-2 arms *lost* 14–20 Elo against epoch 1, which appears to contradict
+6e6g's ladder (epoch 2 beat epoch 1 by +23.8, and `picked_epoch: 2`).  It does
+not: 6e6g's epoch 1 started from a net damaged to +4.2, so epoch 1 was
+incomplete repair and epoch 2 finished it.  These arms start undamaged, epoch 1
+reaches the ceiling, and epoch 2 has nothing left but to overfit.
+
+> **Operational consequence.**  `train.py --epochs 2` is calibrated for a
+> damaged start.  From an undamaged or lightly-damaged seed — any
+> `--skip-online` re-consolidation, or a leg whose online phase behaved — the
+> second epoch **costs** Elo.  The `--gauntlet-epochs` ladder picks the best
+> epoch and so protects the promoted net, but it pays for a wasted epoch to do
+> it.
+
+### 7.7.5 What remains of the idea
+
+The static single-epoch form is closed.  What was never tested is the version
+where the rescored leaf is obtained from a *shallow re-search* rather than a
+static eval — that keeps the `E ← search_d(E)` channel alive instead of merely
+re-expressing the existing labels on current weights, which is what 7.7 did and
+what saturation predicts is empty.  Its cost is a real search per row, so it is
+a different order of expense.
+
+The PV-stability approximation was never measured either (re-search stored
+roots, check whether the PV leaf is still the stored leaf).  It is worth doing
+before any further work in this direction, because it bounds how far any
+leaf-based retargeting can travel before the stored pair stops describing the
+search.
 
 ## Methodology notes (Part 7)
 

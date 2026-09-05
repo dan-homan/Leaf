@@ -866,6 +866,31 @@ session, trains on the given TSVs, writes per-epoch snapshots, and exits:
            [--bt-threads 8] [--bt-clip-every 64] [--bt-loss-gamma 1.0]
 ```
 
+#### Relabelling a corpus on current weights — `--bt-rescore`
+
+`--bt-rescore FILE` is a read-only pass that writes this net's evaluation of
+every corpus row — white-POV centipawns, one per line, **in input order** — and
+exits.  Because the output is line-aligned with the input it pastes straight
+onto a parallel file, which is what it was built for: joining a corpus's root
+rows to their PV leaves on `(gid, ply)` and replacing each root's stale search
+score with the current net's evaluation of its leaf.
+
+```sh
+./Leaf_vbt --batch-train pairs_leaf.tsv --bt-rescore leaf_cp.txt --bt-threads 8
+paste leaf_cp.txt pairs_root.tsv | awk -F'\t' 'BEGIN{OFS="\t"}
+  { c=$1; $1=""; sub(/^\t/,""); $2=c; print }' > retargeted.tsv
+```
+
+Alignment is the whole contract, so it refuses `--bt-rows` and `--bt-quiet-cp`
+(both drop rows at load) and asserts the loader kept every record.
+
+> **Result of the experiment it was built for: null.**  Retargeting bought
+> −2.5 ± 21.0 Elo, and refreshing the labels between epochs a further
+> −6.0 ± 20.8.  The seed→generator correction moved labels 31.8 cp for zero
+> gain; the epoch-to-epoch refresh moved them only 14.0 cp.  See
+> `Online_Learning_Investigation.md` 7.7 — the mode is kept because it is
+> general and cheap, not because that experiment worked.
+
 #### Is there anything left to learn? — `--bt-diag`
 
 `--bt-diag` turns the trainer into a read-only diagnostic: it loads the corpus and
@@ -1299,6 +1324,17 @@ Two consequences worth internalising before tuning anything online:
   = 8` is now measured as the optimum.  The one clean magnitude lever never tested
   in isolation is a uniform LR scale (recipe parked in `Online_Learning_Investigation.md`
   6.17).
+
+**Epochs: 2 is calibrated for a DAMAGED start.**  The productive epoch count
+tracks how much repair the offline pass has to do.  From a net damaged by its
+online phase (the normal production case — `6e6g` entered offline training at
++4.2 against classic) epoch 2 finishes what epoch 1 began, and the ladder picks
+it.  From an **undamaged or lightly-damaged** seed — any `--skip-online`
+re-consolidation, or a leg whose online phase behaved — epoch 1 reaches the
+ceiling and **epoch 2 costs 14–20 Elo** (`Online_Learning_Investigation.md`
+7.7.4).  `--gauntlet-epochs` protects the promoted net by picking the best
+epoch, but it pays for a wasted epoch to do it; pass `--epochs 1` when the seed
+is not damaged.
 
 **Consolidation: train on root rows only — now the `train.py` default.**  Leaf rows
 (`depth == 0`, labelled with the generator's own static eval) are ~54% of every

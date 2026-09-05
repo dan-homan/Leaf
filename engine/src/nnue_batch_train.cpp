@@ -471,6 +471,7 @@ int nnue_batch_train(int argc, char *argv[])
     float td_lambda   = TDLEAF_LAMBDA;   // result-decay per game-ply (default sqrt(0.98))
     bool  td_lambda_explicit = false;    // true if --bt-td-lambda was passed
     bool  diag_only   = false;   // --bt-diag: read-only corpus/label diagnostic
+    const char *rescore_out = nullptr;  // --bt-rescore: dump per-row net eval
 
     for (int i = 1; i < argc; i++) {
         auto next = [&](const char *flag) -> const char* {
@@ -495,6 +496,7 @@ int nnue_batch_train(int argc, char *argv[])
         else if ((v = next("--bt-td-lambda")))   { td_lambda = (float)atof(v); td_lambda_explicit = true; }
         else if ((v = next("--bt-quiet-cp"))) quiet_cp = atol(v);
         else if (strcmp(argv[i], "--bt-diag") == 0) diag_only = true;
+        else if ((v = next("--bt-rescore"))) rescore_out = v;
         else if ((v = next("--bt-rows"))) {
             bt_rows_mode = (strcmp(v, "leaf") == 0) ? 0
                          : (strcmp(v, "root") == 0) ? 1
@@ -784,6 +786,60 @@ int nnue_batch_train(int argc, char *argv[])
             }
         }
         fprintf(stderr, "batch-train: diag complete (no training performed)\n");
+        for (int t = 0; t < threads; t++) { nnue_gradbuf_free(workers[t]->gb); delete workers[t]; }
+        return 0;
+    }
+
+    // ---- --bt-rescore: write this net's eval of every row, in input order ---
+    //
+    // Read-only, one line per input row: the WHITE-POV centipawn score the
+    // CURRENT weights give that position.  Written in input order so the output
+    // pastes line-for-line onto a parallel file -- which is the point.  The
+    // retargeting experiment feeds it the PV-leaf rows of (root, leaf) pairs and
+    // pastes the result back onto the root rows, replacing the generator's
+    // stale search score with this net's evaluation of the same leaf.  The leaf
+    // sits 8 ply down the PV, so eval(leaf) - eval(root) still carries the
+    // search's verdict: the target is not degenerate.
+    //
+    // Alignment is the whole contract, so this refuses to run under any option
+    // that drops rows at load (--bt-rows, --bt-quiet-cp) and verifies that the
+    // loader kept every record.  Runs before the rng is seeded and before any
+    // index shuffle, and `recs` is never reordered at load.
+    if (rescore_out) {
+        if (bt_rows_mode != 2 || quiet_cp > 0) {
+            fprintf(stderr, "batch-train: --bt-rescore cannot be combined with "
+                            "--bt-rows or --bt-quiet-cp (they drop rows at load "
+                            "and break line alignment)\n");
+            return 1;
+        }
+        std::vector<float> sc(recs.size(), 0.0f);
+        pool.run([&](int tid) {
+            BTWorker &w = *workers[tid];
+            size_t lo = (size_t)tid * recs.size() / threads;
+            size_t hi = (size_t)(tid + 1) * recs.size() / threads;
+            for (size_t i = lo; i < hi; i++) {
+                float snet = 0.0f;
+                bt_eval_record(recs[i], K, w.pos, w.acc, nullptr, &snet);
+                sc[i] = snet;
+            }
+        });
+        FILE *rf = fopen(rescore_out, "w");
+        if (!rf) {
+            fprintf(stderr, "batch-train: cannot write %s\n", rescore_out);
+            return 1;
+        }
+        double sum = 0, sumd = 0;
+        for (size_t i = 0; i < recs.size(); i++) {
+            int v_cp = (int)lrintf(sc[i]);
+            fprintf(rf, "%d\n", v_cp);
+            sum += v_cp;
+            sumd += fabs((double)v_cp - (double)recs[i].cp);
+        }
+        fclose(rf);
+        fprintf(stderr, "batch-train: rescored %zu rows -> %s "
+                        "(mean %.1f cp, mean |new - stored| %.1f cp)\n",
+                recs.size(), rescore_out, sum / (double)recs.size(),
+                sumd / (double)recs.size());
         for (int t = 0; t < threads; t++) { nnue_gradbuf_free(workers[t]->gb); delete workers[t]; }
         return 0;
     }

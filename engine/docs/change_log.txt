@@ -1,5 +1,73 @@
 Changes since 2017_12_24
 
+2026_09_05b -- Part 7.7: --bt-rescore, and the retargeting idea measured null
+               twice.  Plus two structural findings that outrank the null.
+
+               D. Homan's proposal: keep the stored ROOT position but replace its
+               stale search score with the CURRENT net's evaluation of the paired
+               PV leaf.  The leaf is ~8 ply down the PV, so eval(leaf) -
+               eval(root) still carries the search's verdict -- not a degenerate
+               self-target.
+
+               New read-only mode --bt-rescore FILE (nnue_batch_train.cpp):
+               writes this net's white-POV cp for every corpus row, one line per
+               row, IN INPUT ORDER, then exits.  Line alignment is the whole
+               contract, so it refuses --bt-rows / --bt-quiet-cp (both drop rows
+               at load) and asserts the loader kept every record; it runs before
+               the rng is seeded and before any index shuffle.
+
+               Paired corpus: (gid, ply) is the exact join key -- both rows come
+               from one TDRecord in one loop.  Within an archive the blocks are
+               in identical (gid, ply) order, so this is a streaming MERGE join,
+               no hash table and no sort.  Five pre-6e6g archives gave 167,668,268
+               pairs (80.4-81.7% of root rows; the gates cost the rest, since root
+               and leaf are gated on different quantities).
+
+               Four arms, all from the undamaged m260720-5.5e6gR seed, same 167.7M
+               rows, 2000 games vs classic at matched load:
+
+                 p0     original search-score labels      +152.6   +20.4 vs seed
+                 p2     eval_seed(leaf) retargeted        +150.1    -2.5 vs p0
+                 p2e2s  epoch 2, labels unchanged         +136.0   -14.1 vs p2
+                 p2e2m  epoch 2, labels re-rescored       +130.0    -6.0 vs p2e2s
+
+               Retargeting: null.  Refreshing between epochs: null.  The label
+               diagnostics explain both -- the seed->generator correction moved
+               labels 31.8 cp for zero gain, and the epoch-to-epoch refresh moved
+               them only 14.0 cp, less than half a correction already measured
+               worthless.  (On paired rows the stored root and leaf labels differ
+               by just 22.4 cp, gate-bounded at 60, so retargeting to the STORED
+               leaf label would have been a near no-op by construction.)
+
+               ONE EPOCH IS A CEILING.  Four arms at 167-190M rows from this seed
+               land in a 2.7 Elo band -- rold190 +152.8, p0 +152.6, rall +150.7,
+               p2 +150.1 -- across corpora differing in composition (with/without
+               the new games, with/without the stalest archive), coverage (full vs
+               the 81% paired subset) and labelling (search scores vs rescored
+               leaf evals).  Against +-15 error bars that is one value.  The
+               offline pass converges to ~+151 regardless of what it is fed, which
+               is why label engineering has no purchase.
+
+               PRODUCTIVE EPOCH COUNT TRACKS REPAIR NEEDED.  Both epoch-2 arms
+               LOST 14-20 Elo, apparently contradicting 6e6g's ladder (ep2 beat
+               ep1 by +23.8, picked_epoch 2).  It does not: 6e6g's epoch 1 started
+               from a net damaged to +4.2, so ep1 was incomplete repair and ep2
+               finished it.  Undamaged, ep1 reaches the ceiling and ep2 overfits.
+               train.py --epochs 2 is calibrated for a damaged start; pass
+               --epochs 1 for any --skip-online re-consolidation.
+
+               CORRECTION to 2026_09_05.  Part 7.4 reported val MSE as a clean
+               6-for-6 inversion of Elo.  The four new arms break it: p2e2s and
+               p2e2m had val MSE RISE while Elo FELL 14 and 20.  Over ten arms:
+               rose->gained x5, rose->lost x2, fell->lost x3.  The inversion was
+               partly coincidence.  What stands is weaker and simpler -- val MSE
+               does not predict Elo in either direction and must not be used to
+               rank arms.  7.4 and standing conclusion 7 amended.
+
+               src/nnue_batch_train.cpp, docs/Online_Learning_Investigation.md
+               (7.7 + 7.4 correction + standing conclusion 7),
+               docs/TRAINING.md, docs/SCRIPT_USE.md.
+
 2026_09_05 -- Part 7: the online/offline trade inverted, and the generation hash
                reverts to 128 MB.
 
