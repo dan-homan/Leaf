@@ -1411,6 +1411,19 @@ Two consequences worth internalising before tuning anything online:
   in isolation is a uniform LR scale (recipe parked in `Online_Learning_Investigation.md`
   6.17).
 
+**The corpus window draws each prior leg's RAW DUMPS, not its assembled corpus.**
+Since 2026-09-06 every leg archives its own `<tag>.<pid>.{leaf,root}.tsv.gz`, and
+those are what the window uses: they hold only that leg's own games.  A leg's
+`corpus.tsv.gz` is the *assembled window*, so for any leg from `m260720-6e6g`
+onward it already contains four older corpora — windowing on it draws them
+twice.  Dedup removes the duplicate rows, but the Bresenham quotas are set
+*before* dedup so the budget under-delivers, and the re-weighting costs exactly
+the game diversity A1 measured at ~45 Elo.  Legs predating the change have no
+raw dumps and fall back to `corpus.tsv.gz` (which for them *is* their own dump,
+the window feature being newer); train.py logs a warning when that fallback
+happens alongside more than one other source, and `--corpus-window 1` is the
+safe choice in that case.
+
 **Epochs: 2 is calibrated for a DAMAGED start.**  The productive epoch count
 tracks how much repair the offline pass has to do.  From a net damaged by its
 online phase (the normal production case — `6e6g` entered offline training at

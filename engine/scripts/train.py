@@ -214,10 +214,36 @@ def final_anchor_elo(tag, anchors):
     return fg[0].get("elo") if fg else None
 
 
+def chain_corpus_files(work):
+    """The files to window on for one archived iteration, newest form first.
+
+    Prefer that iteration's RAW DUMPS over its assembled corpus.tsv.gz.  From
+    2026-09-06 the dumps are kept, and they are the right thing to window on:
+    they hold only THAT leg's own games, at the full dump gate, both row types.
+    corpus.tsv.gz is the assembled WINDOW — for any leg from m260720-6e6g on it
+    already contains four older corpora, so windowing on it double-counts them.
+    Concretely, `--continue m260720-6e6g --corpus-window 4` would have drawn
+    5.5e6g, 5e6g and 4.5e6g both directly AND inside 6e6g's assembly: dedup
+    removes the duplicate rows but the Bresenham quotas are computed before
+    dedup, so the budget under-delivers, and the re-weighting cuts the game
+    diversity that A1 measured as worth ~45 Elo.
+
+    Legs predating the keep-dumps change have no raw dumps and fall back to
+    corpus.tsv.gz, which for those legs IS their own dump (the corpus-window
+    feature postdates them)."""
+    dumps = sorted(work.glob("*.root.tsv.gz")) + sorted(work.glob("*.leaf.tsv.gz"))
+    if not dumps:
+        dumps = sorted(work.glob("*.root.tsv")) + sorted(work.glob("*.leaf.tsv"))
+    if dumps:
+        return dumps
+    corpus = work / "corpus.tsv.gz"
+    return [corpus] if corpus.is_file() else []
+
+
 def chain_corpora(continue_tag, window, anchors):
     """Walk parent_tag back from CONTINUE_TAG and return up to WINDOW entries
-    (tag, corpus_path, generator_elo) for chain iterations that still have an
-    archived corpus.
+    (tag, [corpus_files], generator_elo) for chain iterations that still have an
+    archived corpus.  See chain_corpus_files for which files, and why.
 
     A corpus is labelled by its GENERATOR — the net that played those games,
     which is that iteration's PARENT's promoted net, not its own.  (Getting
@@ -234,9 +260,9 @@ def chain_corpora(continue_tag, window, anchors):
                     parent = json.load(f).get("parent_tag")
             except (OSError, ValueError):
                 parent = None
-        corpus = LEARN_DIR / f"{tag}_work" / "corpus.tsv.gz"
-        if corpus.is_file():
-            out.append((tag, corpus, final_anchor_elo(parent, anchors)))
+        files = chain_corpus_files(LEARN_DIR / f"{tag}_work")
+        if files:
+            out.append((tag, files, final_anchor_elo(parent, anchors)))
         tag = parent
     return out
 
@@ -1016,7 +1042,7 @@ def main():
     # A window-only run (--skip-online --continue, no --corpus) is legitimate:
     # it re-consolidates the chain's archived games without generating any.
     sources = ([("this run", primary, None)] if primary else []) \
-              + [(t, [p], e) for t, p, e in window]
+              + [(t, list(f), e) for t, f, e in window]
     if not sources:
         die("nothing to train on (no dumps, no --corpus, and no window corpora "
             "— pass --corpus, or --continue with --corpus-window)")
@@ -1055,10 +1081,24 @@ def main():
     quota = share_quotas(sizes, budget)
 
     log(f"corpus window: {len(sources)} source(s), budget {budget:,} rows")
-    for (tag, _, elo), size, want in zip(sources, sizes, quota):
+    assembled = []
+    for (tag, files, elo), size, want in zip(sources, sizes, quota):
         gen = f"generator {elo:+.1f} Elo" if elo is not None else "generator n/a"
+        via = "" if not any(str(f).endswith("corpus.tsv.gz") for f in files) \
+              else "  [assembled corpus, not raw dumps]"
+        if via:
+            assembled.append(tag)
         log(f"  {tag:<24} {want:>12,} of {size:>12,} rows "
-            f"({100.0 * want / max(size, 1):5.1f}%)  {gen}")
+            f"({100.0 * want / max(size, 1):5.1f}%)  {gen}{via}")
+    # An assembled corpus.tsv.gz from a leg that used --corpus-window is itself a
+    # mixture of older legs, so drawing it AND those legs double-counts them: the
+    # duplicate rows are deduped, but the quotas are set before dedup (budget
+    # under-delivers) and the re-weighting costs the game diversity A1 valued at
+    # ~45 Elo.  Only legs predating the keep-dumps change hit this.
+    if assembled and len(sources) > 2:
+        log(f"WARNING: {', '.join(assembled)} contributed its ASSEMBLED corpus "
+            f"(no raw dumps archived), which may already contain other window "
+            f"sources — consider --corpus-window 1 to avoid double-counting")
 
     corpus_path = work / "corpus.tsv"
     log(f"assembling -> {corpus_path.name} "

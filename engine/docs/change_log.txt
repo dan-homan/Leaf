@@ -1,5 +1,52 @@
 Changes since 2017_12_24
 
+2026_09_06e -- chain_corpora prefers each leg's RAW DUMPS over its assembled
+               corpus, closing a window double-counting trap.
+
+               A leg's <tag>_work/corpus.tsv.gz is the ASSEMBLED window, not that
+               leg's own games.  For every leg from m260720-6e6g on it already
+               contains four older corpora, so windowing on it draws them twice.
+               Concretely, `--continue m260720-6e6g --corpus-window 4` would have
+               drawn 5.5e6g, 5e6g and 4.5e6g both directly and inside 6e6g's
+               assembly:
+
+                 this run         38,000,000 of  40,500,000  (93.8%)
+                 6e6g(assembly)   38,000,000 of 189,992,181  (20.0%)
+                 5.5e6g           38,000,000 of  44,063,450  (86.2%)  <- inside
+                 5e6g             38,000,000 of  40,686,989  (93.4%)  <- inside
+                 4.5e6g           38,000,000 of  40,629,059  (93.5%)  <- inside
+
+               Dedup removes the duplicate rows, but the Bresenham quotas are
+               computed BEFORE dedup so the budget under-delivers, and the
+               re-weighting costs the game diversity A1 measured at ~45 Elo.
+
+               chain_corpus_files() now returns the leg's raw
+               <tag>.<pid>.{root,leaf}.tsv[.gz] dumps when present -- kept since
+               2026_09_06b, and the right thing to window on since they hold only
+               that leg's own games at the full dump gate -- falling back to
+               corpus.tsv.gz for legs predating that change (for which the
+               fallback IS their own dump, the window feature being newer).
+               chain_corpora returns a file LIST per entry; the caller already
+               wrapped a single path in one.
+
+               Since the fallback is exactly the compounding case, train.py now
+               logs a WARNING when a source contributes its assembled corpus and
+               there is more than one other source, recommending
+               --corpus-window 1.
+
+               Verified end to end on a 3M-row assembly (a2gate dump + 6e6g
+               assembly): exact budget, 0 leaf rows under --bt-rows root, 0 rows
+               outside the 60 cp cut among those carrying a gate column, and
+               1,199,988 pre-2026_09_03 rows passing through ungated by design.
+
+               NOTE for the next leg: m260720-6e6g has no raw dumps (they were
+               pruned before 2026_09_06b), so it still falls back to its
+               assembly.  Use --corpus-window 1 when continuing from it.  From
+               the leg after that the preference applies and the default window
+               is safe again.
+
+               scripts/train.py, docs/TRAINING.md, docs/SCRIPT_USE.md.
+
 2026_09_06d -- Node budget: --depth becomes a FLOOR, and a corpus depth-column
                off-by-one fixed.
 
