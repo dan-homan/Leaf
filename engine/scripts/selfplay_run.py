@@ -66,6 +66,16 @@ def main():
                          "generation becomes productive again; see "
                          "docs/Generation_Throughput.md.")
     ap.add_argument("--depth", type=int, default=8)
+    ap.add_argument("--nodes", type=int, default=0,
+                    help="Node budget per move (0 = fixed depth, the default). "
+                         "With a budget, --depth becomes a ceiling and the "
+                         "search adapts: it extends on a failing-low root and "
+                         "halves on a singular reply, the same triggers a clock "
+                         "uses, but deterministic.  ~4000 nodes reproduces the "
+                         "mean achieved depth of --depth 8 on the m260720 net, "
+                         "at ~1.8x the wall clock -- fixed depth lets trivial "
+                         "positions finish cheaply, a node budget spends the "
+                         "full allowance on them (reaching d20-30) instead")
     ap.add_argument("--games-per-actor", type=int, default=1000,
                     help="Actor respawn cadence = weight refresh interval")
     ap.add_argument("--total-games", type=int, required=True,
@@ -137,6 +147,7 @@ def main():
         seed = args.seed + 1000 * generation[slot]
         cmd = [f"./{binary}", "hash", str(args.hash), "--selfplay",
                "--epd", args.epd,
+               *(["--nodes", str(args.nodes)] if args.nodes else []),
                "--epd-shuffle", str(seed),
                "--epd-offset", str(slot), "--epd-stride", str(args.actors),
                "--games", str(args.games_per_actor),

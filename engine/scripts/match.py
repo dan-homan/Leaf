@@ -346,6 +346,14 @@ def main():
                         help="Limit engine1 search to depth N (default: no limit)")
     parser.add_argument("--depth2", type=int, default=None, metavar="N",
                         help="Limit engine2 search to depth N (default: no limit)")
+    parser.add_argument("--nodes1", type=int, default=None, metavar="N",
+                        help="Limit engine1 to N nodes per move (`go nodes N`). "
+                             "Unlike a time control this is deterministic and "
+                             "load-independent, so matches can run at any "
+                             "concurrency and stay comparable; unlike fixed "
+                             "depth it spends effort where the position needs it")
+    parser.add_argument("--nodes2", type=int, default=None, metavar="N",
+                        help="Limit engine2 to N nodes per move")
     parser.add_argument("--ponder", action="store_true", default=False,
                         help="Enable pondering (default: off)")
     parser.add_argument("--wait", type=int, default=0, metavar="MS",
@@ -576,6 +584,10 @@ def main():
             eng1_spec.append(f"depth={args.depth1}")
         if args.depth2 is not None:
             eng2_spec.append(f"depth={args.depth2}")
+        if args.nodes1 is not None:
+            eng1_spec.append(f"nodes={args.nodes1}")
+        if args.nodes2 is not None:
+            eng2_spec.append(f"nodes={args.nodes2}")
         # Forward --option1/--option2 as option.KEY=VALUE on the engine spec
         # (same syntax in cutechess and fastchess; quoted keys support spaces,
         # e.g. "Skill Level").

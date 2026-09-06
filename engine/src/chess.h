@@ -397,6 +397,22 @@ struct tree_search {
   int limit;               // nominal time limit of search
   int max_limit;           // absolute time limit of search
   int time_double;         // number of times limit has doubled in search
+  // Node budget: the exact mirror of limit/max_limit, in nodes instead of
+  // centiseconds.  max_nodes is what the caller asked for (0 = no node limit,
+  // the default and the only mode before 2026-09-06); node_limit is the soft
+  // budget the extend/reduce logic moves, node_max the hard ceiling.  Counted
+  // on the MAIN thread only (the interrupt check runs there), so under lazy SMP
+  // the budget is per-main-thread rather than aggregate; actors run
+  // single-threaded, where it is exact and fully deterministic.
+  uint64_t max_nodes;      // requested node budget (0 = unlimited)
+  uint64_t node_limit;     // soft node budget (extend/reduce move this)
+  uint64_t node_max;       // absolute node ceiling
+  // How often the node budget was adapted, accumulated over the process (the
+  // tree_search outlives the run under --selfplay).  This is the knob-tuning
+  // telemetry: if neither fires, the budget is doing nothing a fixed depth
+  // would not have done.
+  uint64_t node_extend_count;
+  uint64_t node_reduce_count;
   int ponder;              // flag for pondering
   int last_ponder;         // flag for did we ponder last move?
   int ponder_time;         // record of time used on last pondering

@@ -284,6 +284,11 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
 
   last_ponder = 0;
   ponder_time = 0;
+  // Node budget, mirroring the time pair below: soft = what was asked for,
+  // hard ceiling 4x, so extend can double twice before hitting the wall (the
+  // time side runs limit = max_limit/4 for the same reason).
+  node_limit = max_nodes;
+  node_max   = max_nodes ? 4ULL * max_nodes : 0ULL;
   max_limit = int(MIN(8.0*time_limit, MAX(time_limit, gr->timeleft[p.wtm]/4.0)));
   if(!gr->mttc && !proto.interface_mode && !tsuite && !analysis_mode) {max_limit = int(gr->timeleft[p.wtm]);}
   max_limit = MIN(max_limit, max_search_time*100);
@@ -456,9 +461,25 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
       break;
     }
 
+    // Node budget: same test on the soft limit.  Checked after the iteration
+    // completes, so the result kept is always a finished depth.
+    if(max_nodes && tdata[0].node_count >= node_limit
+       && !ponder && !proto.uci_in_ponder && max_ply > 3) {
+      break;
+    }
+
     // Set search_cfg.check_inter integer for how often to check for
-    //  time elapsed
-    if(elapsed > 0 && limit > 0) {
+    //  time elapsed.
+    //
+    // Under a node budget this derivation is worse than useless: it scales the
+    // interval by limit/elapsed, and a node-limited search is given an
+    // effectively unlimited clock (selfplay passes MAXT = 1000 hours), so the
+    // interval saturates and the budget overshoots by orders of magnitude.
+    // Pin it to a small power-of-two mask instead — the check is a few
+    // comparisons, and 1023 nodes of granularity on a budget of 10^5+ is noise.
+    if(max_nodes) {
+      search_cfg.check_inter = 1023;
+    } else if(elapsed > 0 && limit > 0) {
       int min_interval = (limit*tdata[0].node_count)/(10*elapsed);
       for(search_cfg.check_inter = 128; search_cfg.check_inter < 65536; search_cfg.check_inter *=2) {
 	if(search_cfg.check_inter > min_interval) {
@@ -957,7 +978,22 @@ void search_node::root_pvs()
      //     if a move fails low three times
      //  -- only in the main thread (ID == 0)
      //-----------------------------------------
-     if(!tdata->ID && ts->limit < ts->max_limit/2 
+     // Node-budget arm: identical trigger (root failing low against the last
+     // completed iteration), identical response (double the soft budget, capped
+     // at half the ceiling).  Only the currency changes.  Worth having under
+     // fixed nodes for the same reason it exists under a clock: a fail-low root
+     // is where a fixed allowance most often buys a bad move, and that move
+     // corrupts every label downstream of it in the game -- the extended
+     // position's OWN row is usually filtered out by the quiet gate.
+     if(ts->max_nodes && !tdata->ID && ts->node_limit < ts->node_max/2
+	&& score <= ts->g_last-search_cfg.extend_time_score*(ts->time_double+1)
+	&& !ts->tsuite && !ts->ponder
+	&& tdata->node_count >= ts->node_limit/4) {
+       ts->node_limit = MIN(2ULL*ts->node_limit, ts->node_max/2);
+       ts->node_extend_count++;
+       if(proto.logging) proto.logfile << "Extending search to: " << ts->node_limit << " nodes\n";
+     }
+     if(!ts->max_nodes && !tdata->ID && ts->limit < ts->max_limit/2 
 	&& score <= ts->g_last-search_cfg.extend_time_score*(ts->time_double+1)
 	&& !ts->tsuite 
 	&& GetTime() - ts->start_time >= ts->limit/4) {
@@ -997,7 +1033,17 @@ void search_node::root_pvs()
    // possibly decrease time if appropriate, only in first thread
    //--------------------------------------------------------------
    if(first && singular && score > alpha) {
-     if(!tdata->ID && ts->limit >= ts->max_limit/16 
+     // Node-budget arm of the reduction.  This is the half that pays for itself
+     // in generation: singular replies (recaptures, forced moves) are common and
+     // currently get the full allowance each.
+     if(ts->max_nodes && !tdata->ID && ts->node_limit >= ts->node_max/16
+	&& !ts->tsuite && !ts->ponder
+	&& tdata->node_count >= ts->node_limit/4) {
+       ts->node_limit /= 2;
+       ts->node_reduce_count++;
+       if(proto.logging) proto.logfile << "Reducing search to: " << ts->node_limit << " nodes\n";
+     }
+     if(!ts->max_nodes && !tdata->ID && ts->limit >= ts->max_limit/16 
 	&& !ts->tsuite 
 	&& GetTime() - ts->start_time >= ts->limit/4) {
        if(!ts->ponder) { 

@@ -1,5 +1,79 @@
 Changes since 2017_12_24
 
+2026_09_06c -- Fixed-node search: `go nodes` (UCI standard), --nodes for
+               generation and matches, with the time-management extend/reduce
+               logic ported to node units.
+
+               Motivation (D. Homan): fixed depth spends the same effort on a
+               forced recapture and on a critical fail-low.  A clock adapts, but
+               is non-deterministic and unusable at the very fast controls
+               generation needs.  A node budget gives the clock's adaptivity with
+               none of its noise -- single-threaded it is exactly reproducible.
+
+               Most of the machinery already existed: node_count is incremented
+               at search and qsearch nodes, SEARCH_INTERRUPT_CHECK already fires
+               every check_inter nodes and returns -TIME_FLAG, and the ID loop
+               already keeps the last COMPLETED iteration on that abort.  A node
+               limit is structurally a time-out, so it reuses that path.
+
+               Added: ts.max_nodes / node_limit / node_max mirroring
+               limit/max_limit (soft budget N, hard ceiling 4N, matching the time
+               side's limit = max_limit/4); the abort test in the interrupt
+               macro; the ID-loop break on the soft budget; `go nodes <x>` in
+               uci.cpp (uci.cpp:405 had it marked "not yet implemented");
+               --nodes in the selfplay driver; --nodes passthrough in
+               selfplay_run.py and train.py (recorded in the sidecar);
+               --nodes1/--nodes2 in match.py.
+
+               EXTEND/REDUCE PORTED.  The triggers are already time-independent
+               in substance -- extend when the root fails low against the last
+               completed iteration, reduce when the root move is singular and
+               beats alpha -- so only the currency changes.  Both arms are gated
+               on max_nodes so the time path is byte-identical when no node
+               budget is set.  Counted and reported per run:
+                 "selfplay: node budget 4000/move -- 629 extends, 176 reductions
+                  over 8 games"
+               If neither fires, the budget is doing nothing fixed depth would
+               not have done.
+
+               ONE NON-OBVIOUS FIX.  search_cfg.check_inter is derived from the
+               CLOCK as (limit * node_count) / (10 * elapsed), and a node-limited
+               search is given an effectively unlimited clock (selfplay passes
+               MAXT = 1000 hours), so the interval saturates and the budget would
+               overshoot by orders of magnitude.  Pinned to 1023 when node-limited.
+
+               CALIBRATION (m260720 net, 10 games, hash 128, frozen):
+                 --depth 8       6.8 s  mean depth  7.99  range d8
+                 --nodes 4000   12.1 s  mean depth  8.30  range d0-d30
+                 --nodes 8000   20.7 s  mean depth 10.25  range d0-d30
+                 --nodes 16000  40.0 s  mean depth 12.32  range d0-d30
+
+               Worth understanding before picking a budget: ~4000 nodes matches
+               depth 8's MEAN achieved depth but costs 1.8x the wall clock,
+               because a node budget EQUALISES effort per move -- the opposite of
+               fixed depth, where a trivial position finishes at depth 8 in very
+               few nodes and is nearly free.  The extra time buys d20-30 searches
+               on simple positions (endgames, whose labels Part 3.3 found
+               cleanest) and somewhat shallower ones in complex middlegames.
+               Whether that reallocation improves the corpus is untested; it is
+               the same reallocation a clock makes.
+
+               The extend margin is search_cfg.extend_time_score, tuned for time
+               control; at 4000 nodes it fires on roughly half of all moves,
+               which may be too eager.  That is the first knob to tune.
+
+               Side benefit: match.py --nodes1/--nodes2 makes ratings
+               LOAD-INDEPENDENT, so matches can run at any concurrency and stay
+               comparable -- which the 3+0.05 gauntlets are not (7.8).
+
+               Fixed-depth generation is unchanged and is still the default
+               (--nodes 0): verified 1.75 games/s against 1.76 before the change.
+
+               src/chess.h, src/search.h, src/search.cpp, src/uci.cpp,
+               src/selfplay.cpp, src/tree_search_functions.cpp,
+               scripts/match.py, scripts/selfplay_run.py, scripts/train.py,
+               docs/TRAINING.md, docs/SCRIPT_USE.md.
+
 2026_09_06b -- Generation recipe defaults: keep the raw root+leaf dumps, and stop
                wiping the hash between games when weights are frozen.  +34%
                generation throughput at full table size.

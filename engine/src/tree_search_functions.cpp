@@ -31,6 +31,11 @@ tree_search::tree_search() {
   limit = 0;
   max_limit = 0;
   time_double = 0;
+  max_nodes = 0ULL;
+  node_limit = 0ULL;
+  node_max = 0ULL;
+  node_extend_count = 0ULL;
+  node_reduce_count = 0ULL;
   ponder = 0;
   last_ponder = 0;
   ponder_time = 0;

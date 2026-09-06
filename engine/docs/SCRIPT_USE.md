@@ -102,6 +102,7 @@ pruning for one run. A failed run's `<tag>_work/` is never touched. See
 | `--skip-online`                              | off                                                    | Consolidate-only; train on `--corpus` files                  |
 | `--games N`                                  | 400000                                                 | Games to generate                                            |
 | `--depth N`                                  | 8                                                      | Fixed search depth for generation                            |
+| `--nodes N`                                  | 0 (off)                                                | Node budget per move for generation; `--depth` becomes a ceiling.  Adapts effort like a clock (extends on a failing-low root, halves on a singular reply) but deterministic.  ~4000 ≈ the mean depth of `--depth 8` at ~1.8× the wall clock — see `docs/TRAINING.md` |
 | `--concurrency N`                            | 9                                                      | Concurrent games                                             |
 | `--hash N`                                   | 128                                                    | Per-actor hash size (MB) for generation.  16 MB is ~25% faster at depth 8 but measured **+8.9 ± 11.4 Elo weaker at fixed depth** (`Online_Learning_Investigation.md` 7.5), so the default reverted to 128.  See `docs/Generation_Throughput.md` |
 | `--openings FILE`                            | `training_openings.epd`                                | Opening set (FRC)                                            |
@@ -165,6 +166,7 @@ python3 selfplay_run.py --binary Leaf_vtrain_hl_a --epd training_openings.epd \
 | `--epd FILE` | required | Opening book |
 | `--actors N` | 4 | Frozen actor processes (TDLEAF_FREEZE forced) |
 | `--depth D` | 8 | Fixed search depth |
+| `--nodes N` | 0 (off) | Node budget per move; `--depth` becomes a ceiling.  Reports extends/reductions per run so you can see whether adaptation is firing |
 | `--hash N` | 128 | Per-process hash size (MB), passed to actors and learner alike.  Briefly defaulted to 16 for throughput; reverted after a fixed-depth A/B — see `docs/Online_Learning_Investigation.md` 7.5 |
 | `--games-per-actor M` | 1000 | Actor respawn cadence = weight-refresh interval |
 | `--total-games N` | required | Learner stop budget |
@@ -260,6 +262,7 @@ etc.) without manual `dir=` configuration.
 | `--ponder` | off | Enable pondering (cutechess only; fastchess doesn't expose it — a warning is printed if combined with `--driver=fastchess`) |
 | `--wait MS` | 0 | Milliseconds between games (a legacy throttle from the multi-writer era; not needed for gauntlets) |
 | `--depth1 N` / `--depth2 N` | — | Limit engine1/engine2 search to depth N |
+| `--nodes1 N` / `--nodes2 N` | none | Limit each engine to N nodes/move (`go nodes N`).  Deterministic and **load-independent**, so matches can run at any concurrency and stay comparable — unlike a time control (`Online_Learning_Investigation.md` 7.8) |
 | `--openings FILE` | — | Openings file: `.epd`, `.pgn`, or `.bin` (polyglot book; fastchess doesn't support `.bin`) |
 | `--no-repeat` | off | One game per round (`-rounds N`, no `-games 2 -repeat`): removes the driver's color-swapped duplicate pair per opening, at the cost of per-opening color balance; recommended for symmetric self-play.  Does **not** guarantee opening uniqueness by itself — fastchess cycles a shuffled book order, so openings recycle once total games exceed the book size. |
 | `--noswap` | off | Pass `-noswap` to the driver; engine1 always plays white.  Off by default (correct for training). |

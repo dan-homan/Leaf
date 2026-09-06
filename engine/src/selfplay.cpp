@@ -41,6 +41,7 @@ struct SelfplayConfig {
     const char *epd_path;
     int      games;        // 0 = one pass over this process's EPD slice
     int      depth;
+    uint64_t nodes;         // --nodes: node budget per move (0 = fixed depth)
     int      max_ply;      // draw adjudication cap (game plies)
     int      epd_offset;
     int      epd_stride;
@@ -256,7 +257,13 @@ static SelfplayTerm selfplay_play_game(const SelfplayEpdLine &op, const Selfplay
     game.mttc = 0;
     game.ts.max_search_depth = cfg.depth;
     game.ts.analysis_mode = 0;
-    // Fixed-depth search: give it effectively unlimited clock, depth stops ID.
+    // --nodes: budget in nodes instead of depth.  Fixed depth spends the same
+    // effort on a forced recapture and on a critical fail-low; a node budget
+    // with the extend/reduce logic reproduces what a clock gives without the
+    // timing noise, and stays deterministic single-threaded.  max_search_depth
+    // stays as the ceiling so the ID loop still terminates.
+    game.ts.max_nodes = cfg.nodes;
+    // Fixed-depth (or fixed-node) search: unlimited clock, depth/nodes stop ID.
     game.timeleft[0] = game.timeleft[1] = (float)MAXT;
 
     // An opening that is already mate/stalemate produces no game.
@@ -349,6 +356,7 @@ int selfplay_main(int argc, char *argv[])
     cfg.epd_path   = nullptr;
     cfg.games      = 0;
     cfg.depth      = 8;
+    cfg.nodes      = 0ULL;   // 0 = fixed depth (the historical mode)
     cfg.max_ply    = 500;
     cfg.epd_offset = 0;
     cfg.epd_stride = 1;
@@ -365,6 +373,7 @@ int selfplay_main(int argc, char *argv[])
         if (!strcmp(argv[ai], "--epd")        && ai + 1 < argc) cfg.epd_path   = argv[++ai];
         else if (!strcmp(argv[ai], "--games") && ai + 1 < argc) cfg.games      = atoi(argv[++ai]);
         else if (!strcmp(argv[ai], "--depth") && ai + 1 < argc) cfg.depth      = atoi(argv[++ai]);
+        else if (!strcmp(argv[ai], "--nodes") && ai + 1 < argc) cfg.nodes      = strtoull(argv[++ai], nullptr, 10);
         else if (!strcmp(argv[ai], "--max-ply") && ai + 1 < argc) cfg.max_ply  = atoi(argv[++ai]);
         else if (!strcmp(argv[ai], "--epd-offset") && ai + 1 < argc) cfg.epd_offset = atoi(argv[++ai]);
         else if (!strcmp(argv[ai], "--epd-stride") && ai + 1 < argc) cfg.epd_stride = atoi(argv[++ai]);
@@ -421,8 +430,12 @@ int selfplay_main(int argc, char *argv[])
     int total_games = cfg.games > 0 ? cfg.games : slice_count;
 
     proto.post = 0;   // no per-iteration search output
-    fprintf(stderr, "selfplay: %d games, depth %d, %zu openings (slice %d: offset %d stride %d)%s%s\n",
-            total_games, cfg.depth, openings.size(), slice_count,
+    char budget[64];
+    if (cfg.nodes) snprintf(budget, sizeof(budget), "%llu nodes/move (depth<=%d)",
+                            (unsigned long long)cfg.nodes, cfg.depth);
+    else           snprintf(budget, sizeof(budget), "depth %d", cfg.depth);
+    fprintf(stderr, "selfplay: %d games, %s, %zu openings (slice %d: offset %d stride %d)%s%s\n",
+            total_games, budget, openings.size(), slice_count,
             cfg.epd_offset, cfg.epd_stride,
             tdleaf_frozen() ? ", weights FROZEN" : "",
             getenv("TDLEAF_DUMP_TSV") ? ", dumping TSV" : "");
@@ -498,6 +511,12 @@ int selfplay_main(int argc, char *argv[])
     tdleaf_flush_batch(cfg.tdleaf_out);
 #endif
 
+    if (cfg.nodes)
+        fprintf(stderr, "selfplay: node budget %llu/move — %llu extends, "
+                        "%llu reductions over %d games\n",
+                (unsigned long long)cfg.nodes,
+                (unsigned long long)game.ts.node_extend_count,
+                (unsigned long long)game.ts.node_reduce_count, st.played);
     fprintf(stderr,
             "selfplay: done — %d played (+%d =%d -%d white POV), %d skipped\n"
             "selfplay: terminations: mate %d, stalemate %d, 50-move %d, 3-rep %d, "

@@ -1154,6 +1154,60 @@ invisible to grad-norm/clip monitors.
 `material_260708-d8t-3al3` iteration: draws steady 35–40% across 188k games,
 final net +23±17 over its seed, foreign anchor +80 vs classic.
 
+### Fixed-node generation — `--nodes`
+
+Fixed depth spends the same effort on a forced recapture and on a critical
+fail-low; a clock does not, which is why timed play adapts well — but a clock is
+non-deterministic and unusable at the very fast controls generation needs.
+`--nodes N` budgets each move in **nodes**, which gives the clock's adaptivity
+with none of its noise: single-threaded, it is exactly reproducible.
+
+`--depth` becomes a ceiling.  The soft budget is `N`, the hard ceiling `4N`
+(mirroring the time side's `limit = max_limit/4`), and the same two triggers the
+clock uses move it:
+
+- **extend** — the root fails low against the last completed iteration: double
+  the budget, capped at half the ceiling, up to 3 times
+- **reduce** — the root move is singular and beats alpha: halve the budget
+
+Both are reported per run: `selfplay: node budget 4000/move — 629 extends, 176
+reductions over 8 games`.  If neither fires, the budget is doing nothing a fixed
+depth would not have done.
+
+**Calibration, m260720 net, 10 games, hash 128, frozen:**
+
+| mode | wall | mean achieved depth | depth range |
+|---|---|---|---|
+| `--depth 8` | 6.8 s | 7.99 | d8 (constant) |
+| `--nodes 4000` | 12.1 s | 8.30 | **d0–d30** |
+| `--nodes 8000` | 20.7 s | 10.25 | d0–d30 |
+| `--nodes 16000` | 40.0 s | 12.32 | d0–d30 |
+
+> **The cost is not what it looks like, and it is worth understanding before
+> picking a budget.**  ~4000 nodes matches `--depth 8`'s *mean* achieved depth
+> but takes **1.8× the wall clock**.  The reason is that a node budget
+> *equalises* effort per move, which is the opposite of what fixed depth does:
+> under fixed depth a trivial position finishes at depth 8 in very few nodes and
+> is nearly free, while under a node budget it spends the full allowance and
+> reaches d20–d30.  So the extra time buys much deeper searches on *simple*
+> positions (endgames especially — Part 3.3 found those labels the cleanest) and
+> somewhat *shallower* ones in complex middlegames.  Whether that reallocation
+> improves the corpus is untested; it is the same reallocation a clock makes.
+
+Note the extend trigger uses `search_cfg.extend_time_score`, a margin tuned for
+time control.  At a 4000-node budget it fires on roughly half of all moves,
+which may be too eager — that margin is the first thing to tune if the depth
+distribution looks wrong.
+
+`--nodes` also interacts with the TT carryover below: with the hash no longer
+cleared between games, nodes-to-reach-depth falls as the table warms, so the
+achieved depth drifts *upward* over a run.  Log the depth distribution.
+
+**UCI:** `go nodes <x>` is implemented (it is standard UCI), so `match.py
+--nodes1/--nodes2` rates at fixed nodes.  That makes ratings **load-independent**
+— matches can run at any concurrency and stay comparable, which the 3+0.05
+gauntlets are not (`Online_Learning_Investigation.md` 7.8).
+
 ### Generation throughput
 
 Two things dominate wall-clock generation speed, both measured in

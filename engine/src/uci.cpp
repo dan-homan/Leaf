@@ -24,6 +24,7 @@ static int uci_go_binc      = 0;
 static int uci_go_movestogo = 0;
 static int uci_go_movetime  = -1;
 static int uci_go_depth     = 0;
+static unsigned long long uci_go_nodes = 0ULL;   // `go nodes <x>` (UCI standard)
 static int uci_go_infinite  = 0;
 static int uci_chess960     = 0;   // UCI_Chess960 option
 
@@ -389,7 +390,7 @@ static void uci_dispatch_go(const std::string &line)
     uci_go_wtime     = -1; uci_go_btime    = -1;
     uci_go_winc      = 0;  uci_go_binc     = 0;
     uci_go_movestogo = 0;  uci_go_movetime = -1;
-    uci_go_depth     = 0;  uci_go_infinite = 0;
+    uci_go_depth     = 0;  uci_go_infinite = 0;  uci_go_nodes = 0ULL;
     int ponder_flag_go = 0;
 
     while (iss >> tok) {
@@ -400,9 +401,10 @@ static void uci_dispatch_go(const std::string &line)
         else if (tok == "movestogo") { iss >> uci_go_movestogo; }
         else if (tok == "movetime")  { iss >> uci_go_movetime; }
         else if (tok == "depth")     { iss >> uci_go_depth; }
+        else if (tok == "nodes")     { iss >> uci_go_nodes; }
         else if (tok == "infinite")  { uci_go_infinite = 1; }
         else if (tok == "ponder")    { ponder_flag_go = 1; }
-        // "nodes", "searchmoves" not yet implemented
+        // "searchmoves" not yet implemented
     }
 
     int stm = game.pos.wtm;
@@ -430,6 +432,9 @@ static void uci_dispatch_go(const std::string &line)
         game.ts.analysis_mode    = uci_go_infinite ? 1 : 0;
         game.ts.max_search_depth = (uci_go_depth > 0) ? uci_go_depth : MAXD;
         game.ts.max_search_time  = MAXT;
+        // `go nodes <x>`: budget the search in nodes rather than centiseconds.
+        // Deterministic (single-threaded) and load-independent, unlike a clock.
+        game.ts.max_nodes        = uci_go_nodes;
 
         // Set clock state from UCI go parameters
         if (uci_go_wtime >= 0) game.timeleft[1] = uci_go_wtime / 10.0f;
@@ -441,7 +446,7 @@ static void uci_dispatch_go(const std::string &line)
         if (uci_go_movetime > 0) {
             time_limit = uci_go_movetime / 10;
             game.mttc  = 1; // treat as one move remaining
-        } else if (uci_go_infinite || uci_go_depth > 0) {
+        } else if (uci_go_infinite || uci_go_depth > 0 || uci_go_nodes > 0) {
             time_limit = MAXT;
         } else {
             // Mirror make_move() GUI time computation

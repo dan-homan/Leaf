@@ -604,6 +604,9 @@ def main():
                     help="Skip generation; train on --corpus files only")
     ap.add_argument("--games", type=int, default=400000)
     ap.add_argument("--depth", type=int, default=8)
+    ap.add_argument("--nodes", type=int, default=0,
+                    help="Node budget per move for generation (0 = fixed depth). "
+                         "--depth becomes a ceiling; see selfplay_run.py --nodes")
     ap.add_argument("--concurrency", type=int, default=9)
     ap.add_argument("--hash", type=int, default=128,
                     help="Per-actor hash size in MB passed to generation "
@@ -926,6 +929,7 @@ def main():
             "--actors", n_actors,
             "--hash", args.hash,
             "--depth", args.depth,
+            "--nodes", args.nodes,
             "--games-per-actor", args.games_per_actor,
             "--total-games", args.games,
             "--traj-dir", traj_dir,
@@ -1346,6 +1350,7 @@ def main():
         "cumulative_games": cumulative_games,
         "gen_mode": ("skip-online" if args.skip_online else "actor-learner"),
         "depth": args.depth,
+        "nodes": args.nodes,
         "epochs": args.epochs,
         "picked_epoch": pick_ep,
         "bt_lr": args.bt_lr,
