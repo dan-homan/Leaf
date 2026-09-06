@@ -1,5 +1,68 @@
 Changes since 2017_12_24
 
+2026_09_06 -- Part 7.8: a units mismatch and an outlier.  The 6e6g leg GAINED
+               ~+15, not -5.4, and pgn_score's error model is fixed.
+
+               Two problems, found while putting 6e6g-final on the Part 7
+               measurement scale at D. Homan's request.
+
+               UNITS.  scripts/train.py's pgn_score -- which produced every
+               number in every sidecar, hence the whole chain history --
+               reported a ONE-SIGMA error from a BINOMIAL model.  fastchess's
+               own "Elo: x +/- y" line -- which produced every arm number in
+               7.3/7.5/7.7 -- is a 95% CONFIDENCE INTERVAL from a PENTANOMIAL
+               model.  Confirmed exactly: pentanomial 1 sigma x 1.96 reproduces
+               fastchess to 0.01 Elo on three separate 1000-game matches
+               (10.74->21.05 vs 21.06; 10.42->20.42 vs 20.43; 8.38->16.42 vs
+               16.42).  Part 7 mixed the two freely.  Every consequence cuts
+               toward the arms being MORE significant than reported:
+                 - rnew at -26.2 +- 17.6 is a 95% interval, so the new games
+                   being worse than the archives IS significant at 95%.
+                 - the hash A/B at +8.9 +- 11.4 is 1.5 sigma, not the "0.8
+                   sigma" stated; conclusion (not significant at 95%) unchanged.
+                 - 7.7.4's epoch-2 arms (-14.1 +- 21.1, -20.2 +- 21.2) are 95%
+                   intervals, so NEITHER is individually significant.  The
+                   epoch-count finding rests on both arms losing, not on either.
+               pgn_score now computes the pentanomial one sigma ([Round] is the
+               pair key; match.py plays each opening twice with colours
+               reversed), with a trinomial per-game fallback for unpaired PGNs.
+               It still returns one sigma so existing sidecars stay comparable.
+               The old binomial figure was ~10% CONSERVATIVE at one sigma
+               (11.72 vs 10.74) -- pairing reduces variance -- so the chain's
+               +-11-12 bars were roughly right; the error was mixing conventions.
+
+               OUTLIER.  m260720-5.5e6gR's +155.1 does not replicate: rerun under
+               its own protocol (1000 games, 3+0.05, -c 8, single match) it
+               returned +126.6.  All four measurements pool to +134.4 +- 4.5.
+               6e6g-final is stable across three measurements and both protocols
+               (+149.7, +152.2, +150.5) and pools to +150.8 +- 5.5.
+
+               There is NO protocol/concurrency offset.  An earlier reading held
+               that two concurrent matches compressed the scale ~23 Elo, inferred
+               from 5.5e6gR alone; 6e6g-final reads +152.2 single-match and
+               +150.5 concurrent.  That extrapolation is withdrawn (it had
+               predicted ~+127 for 6e6g-final against an actual +150.5).
+
+               CONSEQUENCE.  Part 7.1's 6e6 row is corrected: the leg gained
+               +16.4 +- 7.0 (2.3 sigma) by pooled anchors and +13.8 +- 6.7 (2.1
+               sigma) by pooled paired head-to-head -- two independent
+               estimators, the second needing no anchor at all.  The "-5.4" was
+               an artifact of the one outlying anchor match.
+
+               This STRENGTHENS Part 7's central finding.  The claim was never
+               that the leg went backwards; it was that generation contributes
+               nothing.  Offline consolidation alone from the same seed returns
+               ~+20; the full leg -- 500k games, 24 hours, 151 Elo of damage and
+               its repair -- returns ~+15, now in matched units.
+
+               Also corrected: no individual leg delta in the 7.1 chain table was
+               ever significant (~+-17 at one sigma per delta).  The plateau is
+               real as a five-leg trend; the legs are not individually resolved.
+
+               scripts/train.py (pgn_score), docs/Online_Learning_Investigation.md
+               (7.8 new; 7.1 table, Part 7 intro, 7.6, methodology notes and
+               standing conclusion 3 corrected).
+
 2026_09_05b -- Part 7.7: --bt-rescore, and the retargeting idea measured null
                twice.  Plus two structural findings that outrank the null.
 

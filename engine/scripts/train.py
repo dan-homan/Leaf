@@ -440,27 +440,58 @@ def piece_value_canary(binary, cwd, label):
 
 
 def pgn_score(pgn_path, name_substr):
-    """W/L/D and Elo for the engine whose name contains name_substr."""
+    """W/L/D and Elo for the engine whose name contains name_substr.
+
+    The error is the **PENTANOMIAL one sigma**.  match.py plays each opening
+    twice with colours reversed and `[Round]` is the pair key, so games arrive
+    in correlated pairs; the per-game binomial variance this used to assume is
+    simply the wrong model for that design.  Pairing cuts the variance, so the
+    old figure ran ~10% conservative (1000-game sample: 11.72 binomial against
+    10.74 pentanomial).
+
+    ⚠️ **UNITS.**  This returns ONE SIGMA.  fastchess's own `Elo: x +/- y` line
+    is a **95% confidence interval** over the same pentanomial model — 1.96x
+    this number, verified to 0.01 Elo on three separate 1000-game matches.  The
+    two must never be mixed in one table: doing so is what made a set of
+    Part 7 arms look far less significant than they were, and made the chain
+    history look more precise than it was by comparison.
+    """
     W = L = D = 0
+    rounds = {}
     text = Path(pgn_path).read_text(errors="replace")
-    for w, b, r in re.findall(
-            r'\[White "([^"]+)"\]\s*\[Black "([^"]+)"\]\s*\[Result "([^"]+)"\]', text):
+    for rnd, w, b, r in re.findall(
+            r'\[Round "([^"]+)"\][\s\S]*?\[White "([^"]+)"\]\s*'
+            r'\[Black "([^"]+)"\]\s*\[Result "([^"]+)"\]', text):
         is_white = name_substr in w
         if r == "1/2-1/2":
-            D += 1
+            pt = 0.5; D += 1
         elif (r == "1-0") == is_white:
-            W += 1
+            pt = 1.0; W += 1
         elif r in ("1-0", "0-1"):
-            L += 1
+            pt = 0.0; L += 1
+        else:
+            continue
+        rounds.setdefault(rnd, []).append(pt)
     n = W + L + D
     if n == 0:
         return 0, 0, 0, float("nan"), float("nan")
     s = (W + 0.5 * D) / n
-    if 0 < s < 1:
-        elo = -400 * math.log10(1 / s - 1)
-        err = 400 / math.log(10) * math.sqrt(s * (1 - s) / n) / (s * (1 - s))
+    if not 0 < s < 1:
+        return W, L, D, (float("inf") if s == 1 else float("-inf")), float("nan")
+    elo = -400 * math.log10(1 / s - 1)
+
+    pairs = [sum(v) for v in rounds.values() if len(v) == 2]
+    if len(pairs) > 1 and 2 * len(pairs) >= 0.9 * n:
+        # Pentanomial: variance of the PAIR score, over pairs.
+        m = sum(pairs) / len(pairs)
+        var = sum((x - m) ** 2 for x in pairs) / (len(pairs) - 1)
+        se_s = math.sqrt(var / len(pairs)) / 2.0
     else:
-        elo, err = float("inf") if s == 1 else float("-inf"), float("nan")
+        # Unpaired (or mostly unpaired) PGN: trinomial per-game variance.  Still
+        # correct for W/D/L outcomes, unlike the binomial s(1-s) it replaces.
+        ex2 = (W * 1.0 + D * 0.25) / n
+        se_s = math.sqrt(max(ex2 - s * s, 0.0) / n)
+    err = 400 / math.log(10) * se_s / (s * (1 - s))
     return W, L, D, elo, err
 
 

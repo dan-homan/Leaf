@@ -52,8 +52,11 @@ here is the only place that reflects all six parts at once.
    and `--gauntlet-tdleaf` stopped being passed after it — **pass it on every
    leg.**  The only figure of merit is still the **iteration total against a
    foreign anchor** — family matches compress real gains by roughly 5×
-   (Part 4.6).  Rate at 2000 games: two 2000-game measurements of the same
-   binary pair differed by 9.6 Elo (Part 7 methodology notes).
+   (Part 4.6).  Rate at 2000 games: repeat measurements of the same binary pair
+   differ by ~10 Elo, and one anchor match in the chain history
+   (`5.5e6gR`'s +155.1) proved an outlier that inverted a leg's apparent
+   sign (7.8.2).  **Mind the ± convention:** `pgn_score` reports one sigma,
+   fastchess's own line reports a 95% interval — a factor of 1.96 (7.8.1).
 
 4. **Direction quality is the axis, not displacement magnitude.**  Every
    update-rule and magnitude knob tested has been rejected on production A/B:
@@ -2940,7 +2943,9 @@ online cost is now **−151**, and the corpus it buys is worth **zero**.
 The entry point was not a planned experiment.  D. Homan asked why the `m260720`
 chain had plateaued; the offline work (`Offline_Learning_Investigation.md`) had
 found two wins from archived data, and the `6e6g` leg was the first to apply
-them to fresh generation.  It returned −5.4.
+them to fresh generation.  It appeared to return −5.4; on remeasurement (7.8)
+it returned **+16.4 ± 7.0** — all of which is attributable to the offline pass,
+since offline alone from the same seed returns ~+20.
 
 ## 7.1 The decomposition, extended — and why nobody saw it move
 
@@ -2960,7 +2965,7 @@ it separately.
 | 4.5e6 | +112.9 | +56.1 | −56.8 | +103.4 | +47.3 | −9.6 |
 | 5e6 | +103.4 | +63.6 | −39.8 | +109.8 | +46.2 | +6.5 |
 | 5.5e6 (d10) | +109.8 | +43.0 | −66.9 | +96.2 | +53.2 | −13.6 |
-| **6e6** | **+155.1** | **+4.2 ± 15** | **−151.0** | +149.7 | **+145.5** | **−5.4** |
+| **6e6** | **+134.4** ‡ | **+4.2** | **−130.2** | +150.8 ‡ | **+146.6** | **+16.4 ± 7.0** ‡ |
 
 Standing conclusion 3 states the online Δ is "reliably negative (−17 to −32 in
 the current regime)".  It has been −40 to −67 since `4e6g` and is now −151.  The
@@ -2975,8 +2980,22 @@ Elo above anything before it, and its damage is ~50% worse than a proportional
 model predicts.  That residual is unexplained.
 
 The `5.5e6gR` row is bookkeeping, not a real online phase (`games_this_iter: 0`);
-its recorded post-online value is inherited from `5.5e6g`.  Read it as
-"re-consolidated from +43.0 to +155.1".
+its recorded post-online value is inherited from `5.5e6g`.
+
+> ‡ **Corrected 2026-09-06 (see 7.8).**  The 6e6 row originally read parent
+> +155.1, final +149.7, net **−5.4**, and that net was quoted as a headline of
+> Part 7.  It was an artifact of a single outlying anchor match: `5.5e6gR`'s
+> +155.1 does not replicate under its own protocol (+126.6 on a rerun), and
+> pooling all four measurements of that binary gives **+134.4 ± 4.5**.  Pooling
+> the three measurements of `6e6g-final` gives **+150.8 ± 5.5**.  The leg
+> therefore **gained +16.4 ± 7.0 (2.3σ)**, confirmed independently by the
+> pooled paired head-to-head, **+13.8 ± 6.7 (2.1σ)**.
+>
+> Every other row in this table rests on single 1000-game anchor matches whose
+> per-leg deltas carry ~±17 at one sigma, so **no individual leg delta in this
+> table was ever significant**.  The plateau is real as a five-leg trend; the
+> legs are not individually resolved.  This does not touch the online Δ column,
+> which remains overwhelming (−130 for 6e6 even on the corrected parent).
 
 ## 7.2 The draw-rate canary is blind to uniform strength loss
 
@@ -3108,6 +3127,11 @@ it leaves a confound in every future comparison against the pre-`6e6g` chain.
 identically) and still nets ~+3% over the historical realloc path.
 
 ## 7.6 What this does to the Part-6 picture
+
+> **Read with 7.8.**  The leg totals below were computed before the measurement
+> corrections; the 6e6 leg gained ~+15, not −5.4.  The argument is unaffected —
+> it turns on generation contributing *nothing* over offline-alone (+15 against
+> ~+20), not on the leg being negative.
 
 Part 6.3 kept online learning on with this argument: a frozen generator labels
 positions with the seed's own evaluations, so consolidating that corpus is a
@@ -3287,6 +3311,99 @@ before any further work in this direction, because it bounds how far any
 leaf-based retargeting can travel before the stored pair stops describing the
 search.
 
+## 7.8 Measurement: a units mismatch, an outlier, and what survives (2026-09-06)
+
+Everything in Part 7 is an Elo difference, so it is only as good as the error
+model.  Two problems were found on the same day, and they pull in opposite
+directions.
+
+### 7.8.1 The two "±" in this investigation were different quantities
+
+`scripts/train.py`'s `pgn_score` — which produced every number in every sidecar,
+and therefore the whole chain history — reported a **one-sigma** error from a
+**binomial** model, `sqrt(s(1−s)/n)`.  fastchess's own `Elo: x +/- y` line —
+which produced every arm number in 7.3, 7.5 and 7.7 — is a **95% confidence
+interval** from a **pentanomial** model.
+
+The relationship was confirmed exactly.  Computing the pentanomial one sigma
+from the same PGNs and multiplying by 1.96:
+
+| match | pentanomial 1σ | ×1.96 | fastchess prints |
+|---|---|---|---|
+| `5.5e6gR` vs classic | 10.74 | 21.05 | 21.06 |
+| `6e6g` vs classic | 10.42 | 20.42 | 20.43 |
+| `6e6g` vs `5.5e6gR` | 8.38 | 16.42 | 16.42 |
+
+So Part 7's arm tables are 95% intervals and the chain history is one sigma —
+**a factor of 1.96 apart, mixed freely in the same discussion.**  Consequences,
+all of which cut *toward* the arms being more significant than reported:
+
+- **7.3's `rnew` at −26.2 ± 17.6** is a 95% interval, so the new games being
+  worse than the archives **is** significant at 95%, not the ~1.5σ hedge given.
+- **7.5's hash A/B at +8.9 ± 11.4** is a 95% interval, so it is 1.5σ, not the
+  "0.8σ" stated.  The conclusion is unchanged — not significant at 95% — but it
+  is less close to zero than it was made to sound.
+- **7.7.4's epoch-2 arms, −14.1 ± 21.1 and −20.2 ± 21.2**, are 95% intervals,
+  so **neither is individually significant at 95%.**  Both arms losing is
+  suggestive and the mechanism is coherent, but that finding is weaker than
+  7.7.4 states and rests on the pair, not on either arm.
+
+`pgn_score` now computes the **pentanomial one sigma** (`[Round]` is the pair
+key; match.py plays each opening twice with colours reversed), with a trinomial
+per-game fallback for unpaired PGNs.  It still returns one sigma, so existing
+sidecars stay comparable; the docstring states the convention and the 1.96
+relationship explicitly.  Note the old binomial figure was ~10% *conservative*
+at one sigma (11.72 against 10.74 on a 1000-game sample) — pairing reduces
+variance — so the chain history's ±11–12 bars were roughly right as one sigma.
+The error was never the model; it was mixing the two conventions.
+
+### 7.8.2 `5.5e6gR`'s +155.1 does not replicate
+
+Re-run under its own protocol (1000 games, 3+0.05, `-c 8`, single match) it
+returned **+126.6**.  All four measurements of that binary:
+
+| protocol | Elo | 1σ |
+|---|---|---|
+| 1000g `-c 8` (original, sidecar) | +155.1 | 12.1 |
+| 1000g `-c 8` (replication) | +126.6 | 10.7 |
+| 2000g, two concurrent | +127.4 | 7.6 |
+| 2000g, two concurrent | +137.0 | 7.5 |
+| **pooled** | **+134.4** | **4.5** |
+
+Against `6e6g-final`, which is stable across three measurements and both
+protocols: +149.7, +152.2, +150.5 → **+150.8 ± 5.5**.
+
+**There is no protocol/concurrency offset.**  An earlier reading of Part 7 held
+that running two matches concurrently compressed the scale by ~23 Elo, inferred
+from `5.5e6gR` reading +155.1 on one protocol and +132.2 on the other.
+`6e6g-final` reads +152.2 single-match and +150.5 concurrent — identical.  The
+apparent offset was that one outlier, and any extrapolation built on it (there
+was one, applied to `6e6g-final`, predicting ~+127 against an actual +150.5) is
+withdrawn.
+
+### 7.8.3 What this changes, and what it does not
+
+The 6e6 leg **gained ~+15**, not −5.4:
+
+| estimator | leg total |
+|---|---|
+| pooled anchors (150.8 − 134.4) | **+16.4 ± 7.0** (2.3σ) |
+| pooled paired head-to-head | **+13.8 ± 6.7** (2.1σ) |
+
+Two independent estimators agree, and the paired one needs no anchor at all.
+
+**This strengthens Part 7's central finding rather than weakening it.**  The
+claim was never that the leg was negative — it was that *generation contributes
+nothing*.  Offline consolidation alone, from the same seed with no games
+generated, returns **~+20** (7.3, 7.7).  The full leg — 500k games, 24 hours of
+generation, 151 Elo of online damage and its repair — returns **~+15**.  The
+generation phase accounts for none of the gain, and the two figures now come
+from measurements in matched units.
+
+What does *not* survive: any statement of the form "the leg went backwards",
+and the framing that the loop nets ~0 per iteration.  It nets what the offline
+pass extracts, which at this maturity is ~+20 and falling.
+
 ## Methodology notes (Part 7)
 
 - Every arm ran one epoch from the same seed state
@@ -3301,9 +3418,12 @@ search.
   Bresenham-spread from `m260720-3.5e6g`'s archive with gids renumbered above
   the corpus maximum; it matches `rall` to within 4 rows.
 - **All arms rated at 2000 games with two matches running concurrently**, so
-  every arm saw identical machine load.  Absolute values are therefore *not*
-  comparable to the chain history, which was measured at 1000 games with a
-  single match — the seed reads +132 here against +155 there.  The seed was
+  every arm saw identical machine load.  The seed reads +132 here against +155
+  in the chain history; that gap was originally read as a protocol/concurrency
+  offset, and **7.8.2 shows it is not** — `6e6g-final` reads +152.2 single-match
+  and +150.5 concurrent, while `5.5e6gR`'s +155.1 simply fails to replicate
+  (+126.6 on a rerun of its own protocol).  Values across the two protocols are
+  comparable; what is not comparable is the ± convention (7.8.1).  The seed was
   re-rated twice inside this batch (+127.4, +137.0; pooled +132.2 ± 10.4) and
   all deltas are taken against that pooled figure.  The 9.6 Elo spread between
   two 2000-game measurements of the *same binary pair* is worth remembering
