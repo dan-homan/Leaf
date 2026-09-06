@@ -430,11 +430,21 @@ static void uci_dispatch_go(const std::string &line)
     } else {
         // Normal search
         game.ts.analysis_mode    = uci_go_infinite ? 1 : 0;
-        game.ts.max_search_depth = (uci_go_depth > 0) ? uci_go_depth : MAXD;
         game.ts.max_search_time  = MAXT;
         // `go nodes <x>`: budget the search in nodes rather than centiseconds.
         // Deterministic (single-threaded) and load-independent, unlike a clock.
         game.ts.max_nodes        = uci_go_nodes;
+        // `go depth D nodes N` together: D is the FLOOR and N the budget on top,
+        // matching --selfplay so a match mirrors generation.  Plain UCI leaves
+        // the both-given case undefined (engines usually stop at whichever hits
+        // first, which here would just be N).  Either alone is standard.
+        if (uci_go_nodes > 0 && uci_go_depth > 0) {
+            game.ts.min_search_depth = uci_go_depth;
+            game.ts.max_search_depth = MAXD;
+        } else {
+            game.ts.min_search_depth = 0;
+            game.ts.max_search_depth = (uci_go_depth > 0) ? uci_go_depth : MAXD;
+        }
 
         // Set clock state from UCI go parameters
         if (uci_go_wtime >= 0) game.timeleft[1] = uci_go_wtime / 10.0f;

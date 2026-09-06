@@ -255,7 +255,11 @@ static SelfplayTerm selfplay_play_game(const SelfplayEpdLine &op, const Selfplay
     game.book = 0;                       // never probe the opening book
     game.over = 0;
     game.mttc = 0;
-    game.ts.max_search_depth = cfg.depth;
+    // --depth is the guaranteed depth in BOTH modes: without --nodes it is the
+    // fixed depth, with --nodes it is the FLOOR and the budget buys whatever
+    // extra the position affords.  One reading either way: "at least this deep".
+    game.ts.max_search_depth  = cfg.nodes ? MAXD : cfg.depth;
+    game.ts.min_search_depth  = cfg.nodes ? cfg.depth : 0;
     game.ts.analysis_mode = 0;
     // --nodes: budget in nodes instead of depth.  Fixed depth spends the same
     // effort on a forced recapture and on a critical fail-low; a node budget
@@ -431,8 +435,8 @@ int selfplay_main(int argc, char *argv[])
 
     proto.post = 0;   // no per-iteration search output
     char budget[64];
-    if (cfg.nodes) snprintf(budget, sizeof(budget), "%llu nodes/move (depth<=%d)",
-                            (unsigned long long)cfg.nodes, cfg.depth);
+    if (cfg.nodes) snprintf(budget, sizeof(budget), "depth>=%d then up to %llu nodes/move",
+                            cfg.depth, (unsigned long long)cfg.nodes);
     else           snprintf(budget, sizeof(budget), "depth %d", cfg.depth);
     fprintf(stderr, "selfplay: %d games, %s, %zu openings (slice %d: offset %d stride %d)%s%s\n",
             total_games, budget, openings.size(), slice_count,

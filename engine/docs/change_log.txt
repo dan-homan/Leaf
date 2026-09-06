@@ -1,5 +1,65 @@
 Changes since 2017_12_24
 
+2026_09_06d -- Node budget: --depth becomes a FLOOR, and a corpus depth-column
+               off-by-one fixed.
+
+               D. Homan spotted why raw fixed-node search misallocates: a clock
+               is tuned to a fixed budget and front-loads it, spending more early
+               where decisions decide the game.  A constant node budget spends
+               the same everywhere -- and measurement showed worse than that.
+               Branching falls as pieces come off, so a constant budget buys
+               monotonically MORE depth as the game goes on: at 4000 nodes,
+               d7.3 at ply 0-19 rising to d9.2 at ply 120-139, i.e. BELOW the
+               depth-8 baseline it was calibrated against exactly where a mistake
+               costs the whole game, and deepest in the endgame.  That is the
+               inverse of a clock's profile.  (A clock only partly fixes this:
+               constant time per move is roughly constant nodes per move, so
+               depth rises under a clock too; the front-load offsets without
+               reversing it, and at 3+0.05 it is only ~1.5x.)
+
+               Fix: ts.min_search_depth, a depth FLOOR the node budget cannot cut
+               short -- neither the ID-loop break nor the interrupt-macro abort
+               fires until the floor iteration has completed.  --depth sets it,
+               so --depth means "the guaranteed depth" in both modes: the fixed
+               depth without --nodes, the floor with it.  Same reading either way.
+               `go depth D nodes N` together takes the same meaning (plain UCI
+               leaves the both-given case undefined; either alone is standard).
+
+               m260720, 10 games, hash 128, frozen:
+                 --depth 8                 6.6 s  mean d7.99  min d8   8.0 -> 8.0
+                 --depth 8 --nodes 4000   12.2 s  mean d8.87  min d8   8.3 -> 9.6
+                 --depth 8 --nodes 8000   20.0 s  mean d11.29 min d8   8.8 -> 13.7
+               (last column = mean depth at ply 0-19 -> ply 120-139)
+
+               Depth histograms start at exactly d8 and run to d15/d16, so a
+               node-budgeted run is never shallower than the fixed-depth run it
+               replaces, anywhere -- which also keeps such a leg comparable with
+               the fixed-depth chain history.  Cost is 1.85x the wall clock at
+               4000 nodes: a node budget EQUALISES effort per move, the opposite
+               of fixed depth, where a trivial position finishes at depth 8 in
+               very few nodes and is nearly free.
+
+               BUG FIXED while verifying the floor.  28% of rows reported d7
+               under a floor of 8.  The search was correct; the REPORTING was
+               not.  tdleaf_record_ply stores game.ts.last_depth as the corpus
+               `depth` column, but last_depth = max_ply was assigned BELOW the
+               ID-loop break checks, so any break -- which a node budget takes on
+               nearly every move -- left it one iteration short.  It is now set
+               beside best_depth inside the completed-iteration block, where it
+               means what the column claims.  Nothing else reads last_depth: its
+               old use as a start_depth hint is dead code, overridden by the
+               forced start_depth = 1.
+
+               This also affected TIME-CONTROL generation historically (a clock
+               breaks out on a completed iteration too), so pre-actor/learner
+               corpora under-report root depth by one.  No training impact: the
+               depth column is only ever read as depth==0 vs depth>0 (leaf vs
+               root), and --bt-leaf-lambda keys on the same distinction.
+
+               src/chess.h, src/search.h, src/search.cpp, src/uci.cpp,
+               src/selfplay.cpp, src/tree_search_functions.cpp,
+               docs/TRAINING.md, docs/SCRIPT_USE.md.
+
 2026_09_06c -- Fixed-node search: `go nodes` (UCI standard), --nodes for
                generation and matches, with the time-management extend/reduce
                logic ported to node units.

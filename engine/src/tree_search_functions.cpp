@@ -36,6 +36,7 @@ tree_search::tree_search() {
   node_max = 0ULL;
   node_extend_count = 0ULL;
   node_reduce_count = 0ULL;
+  min_search_depth = 0;
   ponder = 0;
   last_ponder = 0;
   ponder_time = 0;

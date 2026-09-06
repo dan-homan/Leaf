@@ -449,6 +449,16 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
       if(proto.post && !proto.interface_mode) search_display(g);
       log_search(g);
       best_depth = max_ply;
+      // last_depth is what tdleaf_record_ply stores as the corpus `depth`
+      // column, so it must mean "deepest COMPLETED iteration" and be set here,
+      // not below the break checks.  Below, it is skipped whenever the loop
+      // breaks out -- which a node budget does on nearly every move, and a
+      // clock does whenever time runs out on a completed iteration -- leaving
+      // the recorded depth one short.  It measured 28% of rows reporting d7
+      // under a floor of 8, with the search itself correct.  Nothing else reads
+      // last_depth: its old use as a start_depth hint is dead, overridden by
+      // the forced start_depth = 1 above.
+      last_depth = max_ply;
     }
 
     // check total time used in this search
@@ -464,7 +474,8 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
     // Node budget: same test on the soft limit.  Checked after the iteration
     // completes, so the result kept is always a finished depth.
     if(max_nodes && tdata[0].node_count >= node_limit
-       && !ponder && !proto.uci_in_ponder && max_ply > 3) {
+       && !ponder && !proto.uci_in_ponder && max_ply > 3
+       && (int)max_ply >= min_search_depth) {
       break;
     }
 
@@ -496,7 +507,6 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
     for (int _i = 0; _i < id_score_count - 1; _i++)
         id_scores[_i] = id_scores[_i + 1];
     id_scores[id_score_count - 1] = g;
-    last_depth = max_ply;
     last_best_move = tdata[0].pc[0][0].t;
 
     // keep track of how many iterations we've had the

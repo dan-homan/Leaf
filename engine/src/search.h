@@ -29,6 +29,7 @@
      /* Node budget: same abort, same units as the soft/hard time pair.  The  */ \
      /* hard ceiling is MIN(2*node_limit, node_max), exactly mirroring time.  */ \
      if (ts->max_nodes && !ts->ponder && !proto.uci_in_ponder		\
+         && (int)ts->max_ply > ts->min_search_depth			\
          && tdata->node_count >= MIN(2*ts->node_limit, ts->node_max)) {	\
        return -TIME_FLAG;			 \
      }						 \

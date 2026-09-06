@@ -413,6 +413,15 @@ struct tree_search {
   // would not have done.
   uint64_t node_extend_count;
   uint64_t node_reduce_count;
+  // Depth FLOOR under a node budget (0 = none).  A constant node budget buys
+  // monotonically more depth as pieces come off -- branching falls -- so it
+  // searches SHALLOWEST in the opening, where a mistake costs the whole game,
+  // and deepest in the endgame.  Measured at 4000 nodes: d7.3 at ply 0-19
+  // against d9.2 at ply 120-139, i.e. below the depth-8 baseline exactly where
+  // it matters most.  The floor pins the shallow end: the budget can never cut
+  // an iteration short of it, so a node-budgeted search is never shallower than
+  // the fixed-depth run it replaces, anywhere.
+  int min_search_depth;
   int ponder;              // flag for pondering
   int last_ponder;         // flag for did we ponder last move?
   int ponder_time;         // record of time used on last pondering

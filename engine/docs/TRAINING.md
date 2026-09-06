@@ -1162,9 +1162,10 @@ non-deterministic and unusable at the very fast controls generation needs.
 `--nodes N` budgets each move in **nodes**, which gives the clock's adaptivity
 with none of its noise: single-threaded, it is exactly reproducible.
 
-`--depth` becomes a ceiling.  The soft budget is `N`, the hard ceiling `4N`
-(mirroring the time side's `limit = max_limit/4`), and the same two triggers the
-clock uses move it:
+**`--depth` is the guaranteed depth in both modes** — the fixed depth without
+`--nodes`, the **floor** with it.  One reading either way: *at least this deep*.
+The soft budget is `N`, the hard ceiling `4N` (mirroring the time side's
+`limit = max_limit/4`), and the same two triggers the clock uses move it:
 
 - **extend** — the root fails low against the last completed iteration: double
   the budget, capped at half the ceiling, up to 3 times
@@ -1174,25 +1175,39 @@ Both are reported per run: `selfplay: node budget 4000/move — 629 extends, 176
 reductions over 8 games`.  If neither fires, the budget is doing nothing a fixed
 depth would not have done.
 
-**Calibration, m260720 net, 10 games, hash 128, frozen:**
+**Why the floor exists.**  A constant node budget buys monotonically *more*
+depth as the game goes on, because branching falls as pieces come off.  Without
+a floor it searches **shallowest in the opening** — where a mistake costs the
+whole game — and deepest in the endgame, the inverse of what a clock produces.
+Measured at 4000 nodes with no floor:
 
-| mode | wall | mean achieved depth | depth range |
-|---|---|---|---|
-| `--depth 8` | 6.8 s | 7.99 | d8 (constant) |
-| `--nodes 4000` | 12.1 s | 8.30 | **d0–d30** |
-| `--nodes 8000` | 20.7 s | 10.25 | d0–d30 |
-| `--nodes 16000` | 40.0 s | 12.32 | d0–d30 |
+| ply | 0–19 | 20–39 | 40–59 | 60–79 | 80–99 | 100–119 | 120–139 |
+|---|---|---|---|---|---|---|---|
+| mean depth | **7.3** | 7.5 | 7.8 | 8.5 | 8.5 | 8.9 | **9.2** |
 
-> **The cost is not what it looks like, and it is worth understanding before
-> picking a budget.**  ~4000 nodes matches `--depth 8`'s *mean* achieved depth
-> but takes **1.8× the wall clock**.  The reason is that a node budget
-> *equalises* effort per move, which is the opposite of what fixed depth does:
-> under fixed depth a trivial position finishes at depth 8 in very few nodes and
-> is nearly free, while under a node budget it spends the full allowance and
-> reaches d20–d30.  So the extra time buys much deeper searches on *simple*
-> positions (endgames especially — Part 3.3 found those labels the cleanest) and
-> somewhat *shallower* ones in complex middlegames.  Whether that reallocation
-> improves the corpus is untested; it is the same reallocation a clock makes.
+— i.e. *below* the depth-8 baseline it was calibrated against, exactly where it
+matters most.  A clock only partly fixes this: constant time per move is roughly
+constant nodes per move, so depth rises under a clock too; the front-loaded
+opening budget offsets it without reversing it (and at 3+0.05 that front-load is
+only ~1.5×).
+
+**Calibration, m260720 net, 10 games, hash 128, frozen, floor = `--depth 8`:**
+
+| mode | wall | mean depth | min | by ply: 0–19 → 120–139 |
+|---|---|---|---|---|
+| `--depth 8` | 6.6 s | 7.99 | d8 | 8.0 → 8.0 |
+| `--depth 8 --nodes 4000` | 12.2 s | 8.87 | **d8** | 8.3 → 9.6 |
+| `--depth 8 --nodes 8000` | 20.0 s | 11.29 | **d8** | 8.8 → 13.7 |
+
+The floor holds exactly (observed depth histograms start at d8 and run to d15 /
+d16), so **a node-budgeted run is never shallower than the fixed-depth run it
+replaces, anywhere** — the opening keeps its depth 8 and the endgame goes deeper
+for whatever the budget affords.  That also keeps a fixed-node leg comparable to
+the whole fixed-depth chain history, which is worth a great deal on its own.
+
+The cost is real: `--nodes 4000` runs **1.85× the wall clock** of `--depth 8`.
+A node budget *equalises* effort per move, the opposite of fixed depth, where a
+trivial position finishes at depth 8 in very few nodes and is nearly free.
 
 Note the extend trigger uses `search_cfg.extend_time_score`, a margin tuned for
 time control.  At a 4000-node budget it fires on roughly half of all moves,
