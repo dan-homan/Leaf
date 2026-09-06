@@ -1,5 +1,61 @@
 Changes since 2017_12_24
 
+2026_09_06b -- Generation recipe defaults: keep the raw root+leaf dumps, and stop
+               wiping the hash between games when weights are frozen.  +34%
+               generation throughput at full table size.
+
+               Three rules from D. Homan for the generation recipe.  Two were
+               already the default; two changes were needed.
+
+               (1) ALWAYS KEEP ROOT+LEAF PAIRS.  The engine already dumps both
+               files, but prune_work_dir deleted them at end of run as
+               "superseded by corpus.tsv.gz".  They are not: the assembled corpus
+               holds only the row type --bt-rows selected (root, by default) at
+               the width --bt-quiet-cp cut, while the raw dumps hold BOTH row
+               types at the full dump gate -- every (root, leaf) pair and every
+               row outside the training cut.  That deletion is what made 6e6g's
+               leaf rows unrecoverable and forced the retargeting experiment to
+               rebuild pairs from five older archives (7.7.1).  The dumps are now
+               gzip'd in place and kept: ~+5 GB per leg for a corpus that cannot
+               be regenerated without replaying the games.  Training is unchanged
+               -- still root-only, the measured +35.6 Elo win.
+
+               (2) FULL DUMP GATE, NOT 60 cp.  Already the default: --quiet-cp is
+               1000 since 2026_09_03b, with the training-time cut at
+               --bt-quiet-cp 60.  No change.  (Note the separate |cp| <= 1500
+               TDLEAF_DUMP_MAX_CP clamp, which train.py does not set and which
+               was left alone.)
+
+               (3) HASH 128 MB, NO CLEARING.  --hash 128 was already restored on
+               2026_09_05.  selfplay_new_game_reset() now skips clear_hash()
+               when tdleaf_frozen(): probes match on the full 64-bit Zobrist key,
+               so an entry surviving from an earlier game is a genuinely
+               identical position, and a frozen actor evaluates it with the same
+               weights all run -- cross-game reuse is free search.
+
+                 depth 8, 14 actors, hash 128:  6.02 games/s (no wipe)
+                                                4.49 games/s (wipe)   = +34%
+                 for reference, wipe + 16 MB:   6.22 games/s
+
+               So the full-size table now matches what shrinking to 16 MB bought,
+               which retires the search-quality question in 7.5 for generation.
+
+               The freeze guard is load-bearing, not defensive dressing: the
+               score hash caches NNUE EVALUATIONS and the TT stores search
+               scores, both weight-dependent.  A --selfplay process that learns
+               between games would probe entries computed by an older net --
+               exactly the label-vintage error --refresh-scores exists to remove.
+               train.py's actors always run TDLEAF_FREEZE=1 and take the fast
+               path; a standalone learning run still clears.  Verified: frozen
+               1.70 games/s, learning 1.37, prior always-clear build 1.42, with
+               an unchanged termination mix.
+
+               ucinewgame still clears -- that is the match/GUI path, and
+               changing it would shift rating comparability for no gain.
+
+               src/selfplay.cpp, scripts/train.py (prune_work_dir),
+               docs/TRAINING.md, docs/Generation_Throughput.md.
+
 2026_09_06 -- Part 7.8: a units mismatch and an outlier.  The 6e6g leg GAINED
                ~+15, not -5.4, and pgn_score's error model is fixed.
 

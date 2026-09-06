@@ -1159,15 +1159,22 @@ final net +23±17 over its seed, foreign anchor +80 vs classic.
 Two things dominate wall-clock generation speed, both measured in
 `docs/Generation_Throughput.md`:
 
-1. **Hash size (`--hash`, default 128 MB).**  The engine wipes its hash tables
-   once per game, so an oversized table is a per-game tax paid 500,000 times in
-   an iteration, and 16 MB is worth **+25% generation throughput at depth 8**.
-   It was briefly the default — but a fixed-depth A/B then put Hash 128 at
-   **+8.9 ± 11.4 Elo** over Hash 16 (same net both sides, 2000 games): 0.8σ, yet
-   the point estimate favours the larger table and hash size does reach search
-   quality through TT-driven move ordering and pruning.  With generated corpora
-   currently measuring worth zero, the throughput does not justify the confound.
-   See `Online_Learning_Investigation.md` 7.5.
+1. **Hash size (`--hash`, default 128 MB) and the per-game wipe.**  Under frozen
+   weights the hash tables are **no longer cleared between games** — probes match
+   on the full 64-bit Zobrist key, so an entry surviving from an earlier game is
+   a genuinely identical position and its score is still valid.  That is worth
+   **+34% at depth 8 / 14 actors** (6.02 against 4.49 games/s) and lands within
+   3% of what a 16 MB table gave, at full table size.
+   Shrinking the table to 16 MB is the alternative route to the same throughput,
+   but a fixed-depth A/B put Hash 128 at **+8.9 ± 11.4 Elo** (a 95% interval, so
+   1.5σ) over Hash 16, and hash size does reach search quality through TT-driven
+   move ordering and pruning — so 128 MB plus no wipe gets the speed without the
+   question.  See `Online_Learning_Investigation.md` 7.5.
+   **The wipe is skipped only when weights are frozen** (`tdleaf_frozen()`), which
+   train.py's actors always are.  A process that *learns* between games still
+   clears: the score hash caches NNUE evaluations and the TT stores search
+   scores, both weight-dependent, so reuse across a weight update would inject
+   exactly the label-vintage error `--refresh-scores` exists to remove.
 2. **The learner is a single-threaded ceiling** at ~13–18 games/s, and its work
    per game is *depth-independent* (`--refresh-scores` rebuilds two accumulators
    per record; it never searches).  At depth 8 and 10 the actors supply well
@@ -1274,13 +1281,23 @@ All artifacts are named by `--tag` and land in `learn/` and `<tag>_work/`:
 run. What it keeps and what gets pruned at end-of-run (unless `--keep-work` is passed,
 which disables all pruning for that run):
 
-- **Kept:** `corpus.tsv` (gzip'd), the online-generation PGN (gzip'd) and the
-  final-gauntlet PGN(s), and `train/train.log` (with the epoch-ladder and gauntlet
-  result tables appended after training finishes).
-- **Pruned (single-use or regenerable):** the raw per-shard dump files (superseded by
-  `corpus.tsv.gz`), non-winning epoch `.nnue` files (regenerable via `Leaf_vbt
-  --write-nnue`), epoch-ladder PGNs (their Elo is already captured in the
-  log/sidecar), and epoch rating binaries.
+- **Kept:** `corpus.tsv` (gzip'd), **the raw per-shard `.leaf.tsv` / `.root.tsv`
+  dumps (gzip'd)**, the online-generation PGN (gzip'd) and the final-gauntlet
+  PGN(s), and `train/train.log` (with the epoch-ladder and gauntlet result tables
+  appended after training finishes).
+- **Pruned (single-use or regenerable):** non-winning epoch `.nnue` files
+  (regenerable via `Leaf_vbt --write-nnue`), epoch-ladder PGNs (their Elo is
+  already captured in the log/sidecar), and epoch rating binaries.
+
+> **The raw dumps are kept, and are not redundant with `corpus.tsv.gz`.**  They
+> were pruned as "superseded by the corpus" until 2026-09-06.  They are not: the
+> assembled corpus holds only the row type `--bt-rows` selected (root, by
+> default) at the width `--bt-quiet-cp` cut, while the raw dumps hold **both row
+> types at the full dump gate** — every `(root, leaf)` pair and every row outside
+> the training cut.  Deleting them is irreversible without replaying the games,
+> and it is what made `m260720-6e6g`'s leaf rows unrecoverable and forced the
+> retargeting experiment to rebuild pairs from five older archives instead
+> (`Online_Learning_Investigation.md` 7.7.1).  Costs roughly +5 GB per leg.
 
 `--keep-epoch-states` additionally keeps **every** epoch's `.tdleaf.bin` in
 `<tag>_work/train/` (default: only the promoted epoch's state survives; its

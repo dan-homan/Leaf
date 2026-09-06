@@ -95,14 +95,26 @@ static bool selfplay_load_epd(const char *path, std::vector<SelfplayEpdLine> &ou
 // previous game WOULD be probed without this), h_id/depth trackers, and
 // history/reply tables.
 //
-// clear_hash(), not set_hash_size(): the geometry never changes between games,
+// The hash tables are NOT wiped when the weights are frozen.  Probes match on
+// the full 64-bit Zobrist key, so an entry surviving from an earlier game is a
+// genuinely identical position and its score is still valid -- a frozen actor
+// evaluates with the same weights all run, so cross-game reuse is free search.
+//
+// It is only safe *because* the weights are frozen.  The score hash caches NNUE
+// evaluations and the TT stores search scores; both are weight-dependent, so a
+// process that LEARNS between games would be probing entries from an older net
+// -- exactly the label-vintage error the refresh machinery exists to remove.
+// train.py's actors always run TDLEAF_FREEZE=1, so the recipe takes the fast
+// path; a standalone learning --selfplay run still clears.
+//
+// (clear_hash(), not set_hash_size(): the geometry never changes between games,
 // so the old free/aligned_alloc round trip bought nothing and cost a full
 // page-fault-in of the table every game -- ~20% of game time at depth 6 with
-// the default 128 MB hash, paid 500,000 times in a single training iteration.
+// the default 128 MB hash, paid 500,000 times in a single training iteration.)
 // ---------------------------------------------------------------------------
 static void selfplay_new_game_reset()
 {
-    clear_hash();
+    if (!tdleaf_frozen()) clear_hash();
     game.ts.last_ponder = 0;
     game.ts.last_depth  = 1;
     game.ts.singular_response.t = NOMOVE;

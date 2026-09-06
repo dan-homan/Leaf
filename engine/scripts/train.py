@@ -528,14 +528,23 @@ def gzip_and_remove(path):
 def prune_work_dir(work, tdir, epoch_bin_dir, tag, pick_ep, keep_epoch_states):
     """End-of-run pruning inside <tag>_work/ on a successful run.  The work
     dir itself is never deleted — it's the permanent per-run archive — but
-    genuinely single-use/regenerable contents are pruned: raw per-shard
-    dumps (superseded by corpus.tsv.gz), epoch-ladder PGNs (their Elo is
-    already captured in the log/sidecar), non-winning epoch .nnue files
-    (regenerable via Leaf_vbt --write-nnue), and per-epoch .tdleaf.bin
-    unless --keep-epoch-states.  corpus.tsv and the online-generation PGN
-    are gzip'd in place, not deleted."""
+    genuinely single-use/regenerable contents are pruned: epoch-ladder PGNs
+    (their Elo is already captured in the log/sidecar), non-winning epoch
+    .nnue files (regenerable via Leaf_vbt --write-nnue), and per-epoch
+    .tdleaf.bin unless --keep-epoch-states.  corpus.tsv, the online-generation
+    PGN and the raw per-shard dumps are gzip'd in place, not deleted.
+
+    The raw dumps used to be deleted here as "superseded by corpus.tsv.gz".
+    They are not: the assembled corpus holds the row type --bt-rows selected
+    (root, by default) at the width --bt-quiet-cp cut, while the raw dumps hold
+    BOTH row types at the full dump gate.  Deleting them threw away every
+    (root, leaf) pair and every row outside the training cut — which is exactly
+    what made 6e6g's leaf rows unrecoverable and forced the retargeting
+    experiment to reconstruct pairs from five older archives instead
+    (Online_Learning_Investigation.md 7.7.1).  Roughly +5 GB per leg, against a
+    corpus that cannot be regenerated without replaying the games."""
     for dump in work.glob(f"{tag}.*.tsv"):
-        dump.unlink()
+        gzip_and_remove(dump)
 
     corpus = work / "corpus.tsv"
     if corpus.is_file():

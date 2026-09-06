@@ -130,6 +130,18 @@ appeared to show a mate→repetition drift; it did not survive n=600.)  16 MB is
 0.75 × 16 MB / 64 B ≈ 196k buckets ≈ 786k entries, comfortably more than a
 depth-8 search touches.  Raise `--hash` if generating at much greater depth.
 
+> **Superseded in part (2026-09-06): the per-game wipe is now skipped entirely
+> under frozen weights.**  `clear_hash()` below replaced a per-game *realloc*
+> with a per-game *in-place wipe*; the wipe itself is now skipped when
+> `tdleaf_frozen()` — probes match on the full 64-bit Zobrist key, so an entry
+> from an earlier game is the same position evaluated by the same (frozen)
+> weights.  Measured at depth 8, 14 actors, 128 MB: **6.02 games/s against 4.49
+> with the wipe, +34%**, and within 3% of what shrinking to 16 MB achieved —
+> so the table stays at full size and the search-quality question in §3 is moot
+> for generation.  A process that LEARNS between games still clears (the score
+> hash caches weight-dependent NNUE evaluations).  `clear_hash()` remains, and
+> is still what `ucinewgame` calls.
+
 ### What changed
 
 - `clear_hash()` (new, `hash.cpp`) wipes the tables in place.  `open_hash()`
