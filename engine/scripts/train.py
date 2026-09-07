@@ -267,12 +267,43 @@ def chain_corpora(continue_tag, window, anchors):
     return out
 
 
-def share_quotas(sizes, total):
-    """Split TOTAL rows as evenly as possible across sources, capped at each
-    source's own size, redistributing whatever a small source cannot take."""
+def share_quotas(sizes, total, mode="source"):
+    """Split TOTAL rows across sources, capped at each source's own size,
+    redistributing whatever a small source cannot take.
+
+    mode="source": as evenly as possible — every ITERATION contributes equally.
+    mode="game":   proportional to available rows — every GAME contributes
+                   equally, since rows-per-game is near-constant across legs.
+
+    Which to want is a real trade, not an oversight.  Even-per-source protects
+    the multi-generation mixture when one leg dwarfs the others (a single
+    2M-game leg would take ~83% of the budget under "game", losing the diversity
+    A1 measured at +45 Elo); proportional stops a SMALL, older leg from
+    outweighing a large fresh one per game, which matters because corpus labels
+    distil their generator (7.3).
+
+    Note what the choice does NOT affect: the number of distinct games.  The
+    Bresenham sampler in write_corpus spreads within each source, so any quota
+    above ~1 row/game touches every game either way — m260720-6e6g's sidecar
+    records corpus_games = 2,499,993 for a 5 x 500k window.  What it controls is
+    rows PER game, i.e. how much weight each generator vintage carries."""
     quota = [0] * len(sizes)
     active = [i for i in range(len(sizes)) if sizes[i] > 0]
     remaining = min(total, sum(sizes))
+    if mode == "game":
+        pool = sum(sizes)
+        if pool > 0:
+            for i in active:
+                quota[i] = min(sizes[i], remaining * sizes[i] // pool)
+            remaining -= sum(quota)
+            # hand the rounding remainder to whoever still has room
+            for i in active:
+                if remaining <= 0:
+                    break
+                take = min(remaining, sizes[i] - quota[i])
+                quota[i] += take
+                remaining -= take
+        return quota
     while active and remaining > 0:
         share = max(1, remaining // len(active))
         for i in list(active):
@@ -842,6 +873,20 @@ def main():
                          "and trains on this run's corpus alone (the pre-A1 "
                          "behaviour).  Needs --continue to find the chain. "
                          "Default: 4")
+    ap.add_argument("--corpus-weight", choices=["source", "game"], default="source",
+                    help="How the row budget is split across corpus sources. "
+                         "'source' (default) gives every ITERATION an equal share; "
+                         "'game' splits proportionally to available rows so every "
+                         "GAME carries equal weight.  Identical whenever the legs "
+                         "are the same size (the whole m260720 chain), but they "
+                         "diverge sharply otherwise: a 300k-game leg windowed "
+                         "with two 100k-game legs gives the FRESH games 30 "
+                         "rows/game against 91 for the stale ones under 'source'. "
+                         "Neither is universally right — 'source' protects the "
+                         "multi-generation mixture when one leg dwarfs the rest, "
+                         "'game' stops a small stale leg outweighing a large "
+                         "fresh one.  Does not change how many distinct games "
+                         "reach the corpus, only their relative weight")
     ap.add_argument("--corpus-rows", type=int, default=0, metavar="N",
                     help="Total row budget for the assembled corpus, split "
                          "evenly across this run's dump and each window corpus. "
@@ -1256,10 +1301,11 @@ def main():
         budget = sizes[0]      # auto: hold the total at this run's own dump size
     else:
         budget = sum(sizes)    # no window and no explicit budget -> no thinning
-    quota = share_quotas(sizes, budget)
+    quota = share_quotas(sizes, budget, args.corpus_weight)
 
     log(f"corpus window: {len(sources)} source(s), budget {budget:,} rows")
     assembled = []
+    densities = []
     for (tag, files, elo), size, want in zip(sources, sizes, quota):
         gen = f"generator {elo:+.1f} Elo" if elo is not None else "generator n/a"
         via = "" if not any(str(f).endswith("corpus.tsv.gz") for f in files) \
@@ -1268,6 +1314,20 @@ def main():
             assembled.append(tag)
         log(f"  {tag:<24} {want:>12,} of {size:>12,} rows "
             f"({100.0 * want / max(size, 1):5.1f}%)  {gen}{via}")
+        densities.append((tag, want / max(size, 1)))
+    # The sampling density IS the per-game weight, since rows-per-game is near
+    # constant across legs.  A wide spread means some generator vintages carry
+    # several times the weight of others per game -- which under the default
+    # 'source' split lands on the FRESHEST leg when it is the largest.
+    if len(densities) > 1:
+        lo = min(d for _, d in densities)
+        hi = max(d for _, d in densities)
+        if lo > 0 and hi / lo >= 1.5:
+            worst = min(densities, key=lambda x: x[1])[0]
+            best = max(densities, key=lambda x: x[1])[0]
+            log(f"NOTE: --corpus-weight {args.corpus_weight} gives {best} "
+                f"{hi / lo:.1f}x the per-game weight of {worst}.  Use "
+                f"--corpus-weight game to weight every game equally instead")
     # An assembled corpus.tsv.gz from a leg that used --corpus-window is itself a
     # mixture of older legs, so drawing it AND those legs double-counts them: the
     # duplicate rows are deduped, but the quotas are set before dedup (budget
@@ -1579,6 +1639,7 @@ def main():
         "bt_quiet_cp": args.bt_quiet_cp,
         "bt_rescore": args.bt_rescore,
         "corpus_rows": rows,
+        "corpus_weight": args.corpus_weight,
         "corpus_games": gid_next,
         "corpus_window": [
             {"tag": tag, "rows_used": used, "rows_avail": size,

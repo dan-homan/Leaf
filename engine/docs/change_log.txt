@@ -1,5 +1,51 @@
 Changes since 2017_12_24
 
+2026_09_07b -- --corpus-weight: the row budget no longer has to split evenly
+               across sources.  Found by D. Homan on the first chain with
+               unequal leg sizes.
+
+               share_quotas splits TOTAL as evenly as possible across sources,
+               and the comment justified that as buying "as many distinct games
+               as possible".  That rationale is wrong: the split does not affect
+               the distinct-game count at all.  The Bresenham sampler in
+               write_corpus spreads within each source, so any quota above ~1
+               row/game touches every game -- m260720-6e6g's sidecar records
+               corpus_games = 2,499,993 for a 5 x 500k window, i.e. every game of
+               every source.  What the split controls is rows PER game, which is
+               how much weight each generator vintage carries.
+
+               On the m260720 chain every leg was 500k games, so even and
+               proportional coincided and the choice never mattered.  On the
+               first chain with unequal legs it inverts the weighting:
+
+                 --corpus-weight source (default, unchanged):
+                   5e5g (300k games)  9,091,320 rows  25.8%   30.3 rows/game
+                   2e5g (100k games)  9,091,320 rows  79.9%   90.9 rows/game
+                   1e5g (100k games)  9,091,319 rows  74.0%   90.9 rows/game
+
+               The FRESHEST games -- from the strongest generator -- carry one
+               third the per-game weight of the stalest, which is backwards given
+               that corpus labels distil their generator (7.3).
+
+                 --corpus-weight game:
+                   5e5g  16,311,982 rows  46.4%   54.4 rows/game
+                   2e5g   5,271,068 rows  46.4%   52.7 rows/game
+                   1e5g   5,690,909 rows  46.4%   56.9 rows/game
+
+               Default left at 'source': neither rule is universally right.
+               Even-per-source protects the multi-generation mixture when one leg
+               dwarfs the others (a single 2M-game leg would take ~83% of the
+               budget under 'game', losing the diversity A1 measured at +45);
+               'game' stops a small stale leg outweighing a large fresh one.
+               Keeping the default also leaves runs already in flight unchanged.
+
+               train.py now logs a NOTE whenever the per-game weights across
+               sources differ by >= 1.5x, naming the heaviest and lightest, so
+               the situation cannot pass unnoticed again.  Recorded in the
+               sidecar as corpus_weight.
+
+               scripts/train.py, docs/TRAINING.md, docs/SCRIPT_USE.md.
+
 2026_09_07 -- train.py --bt-rescore: leaf retargeting as a first-class offline
                knob, with a blend fraction.
 

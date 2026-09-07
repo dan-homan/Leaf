@@ -1463,6 +1463,26 @@ the window feature being newer); train.py logs a warning when that fallback
 happens alongside more than one other source, and `--corpus-window 1` is the
 safe choice in that case.
 
+**Corpus weighting when legs differ in size — `--corpus-weight`.**  The row
+budget splits *evenly across sources* by default, which means every **iteration**
+contributes equally.  While every leg was 500k games that was also proportional,
+so the choice never mattered; with unequal legs it bites.  A 300k-game leg
+windowed with two 100k-game legs ends up at **30 rows/game for the fresh games
+against 91 for the stale ones** — the freshest generator down-weighted 3:1,
+which is backwards given that corpus labels distil their generator (7.3).
+`--corpus-weight game` splits proportionally instead, levelling it to ~54/53/57.
+
+Neither rule is universally right: even-per-source protects the multi-generation
+mixture when one leg dwarfs the rest (a single 2M-game leg would take ~83% of the
+budget under `game`, losing the diversity A1 measured at +45), while `game` stops
+a small stale leg outweighing a large fresh one.  train.py logs a NOTE whenever
+the per-game weights differ by ≥1.5×.
+
+Note what neither setting changes: **the number of distinct games**.  The
+Bresenham sampler spreads within each source, so any quota above ~1 row/game
+touches every game — `m260720-6e6g`'s sidecar records `corpus_games = 2,499,993`
+for a 5 × 500k window.  The split controls rows *per* game, not which games.
+
 **Epochs: 2 is calibrated for a DAMAGED start.**  The productive epoch count
 tracks how much repair the offline pass has to do.  From a net damaged by its
 online phase (the normal production case — `6e6g` entered offline training at
