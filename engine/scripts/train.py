@@ -374,6 +374,120 @@ def write_corpus(corpus_path, sources, sizes, quota, game_ply_axis, row_kind=0,
     return rows, gid_next, dropped, per_source
 
 
+def _split_rows(files, root_out, leaf_out):
+    """Stream SOURCE files into separate root/leaf files, preserving order.
+
+    Handles both shapes a source can take: the raw dumps, already separate
+    (<tag>.<pid>.root.tsv[.gz] and .leaf.tsv[.gz]), and a single assembled
+    corpus.tsv.gz holding both types interleaved by block.  Returns
+    (n_root, n_leaf, game_ply_axis)."""
+    nr = nl = 0
+    axis = False
+    with open(root_out, "w") as ro, open(leaf_out, "w") as lo:
+        for f in files:
+            with open_corpus(f) as fh:
+                for line in fh:
+                    if line.startswith("#"):
+                        if "axis=game-ply" in line:
+                            axis = True
+                        continue
+                    if line.startswith("fen\t"):
+                        continue
+                    col = line.split("\t", 6)
+                    if len(col) < 6:
+                        continue
+                    if col[4] == "0":
+                        lo.write(line); nl += 1
+                    else:
+                        ro.write(line); nr += 1
+    return nr, nl, axis
+
+
+def _merge_join(root_in, leaf_in, pairs_root, pairs_leaf):
+    """Line-align each root row with its PV leaf on (gid, ply).
+
+    Both rows of a record are written from one TDRecord in one loop in
+    tdleaf.cpp with identical dump_gid and game_ply, and within a source the two
+    streams are in the same (gid, ply) order — so this is a streaming merge, no
+    hash table and no sort.  The quiet gates are what break pairing: root is
+    gated on |root_static - root_search| and leaf on |leaf_static - propagated
+    root search|, different quantities, so they accept different records.  At
+    the wide dump gate ~99% pair; at a 60 cp dump ~81%.  Returns the pair count."""
+    n = 0
+    with open(root_in) as rf, open(leaf_in) as lf, \
+         open(pairs_root, "w") as ro, open(pairs_leaf, "w") as lo:
+        ln = lf.readline()
+        lc = ln.split("\t") if ln else None
+        for rline in rf:
+            rc = rline.split("\t")
+            while lc and (int(lc[5]) < int(rc[5]) or
+                          (int(lc[5]) == int(rc[5]) and int(lc[3]) < int(rc[3]))):
+                ln = lf.readline()
+                lc = ln.split("\t") if ln else None
+            if lc and int(lc[5]) == int(rc[5]) and int(lc[3]) == int(rc[3]):
+                ro.write(rline); lo.write(ln); n += 1
+                ln = lf.readline()
+                lc = ln.split("\t") if ln else None
+    return n
+
+
+def retarget_source(label, files, rt_dir, frac):
+    """Rebuild a source's root rows with labels taken from their PV leaf,
+    re-evaluated on the CURRENT weights (D. Homan's retargeting proposal).
+
+    The stored root label is the generator's search score, which goes stale as
+    the net moves past the generator.  The PV leaf sits ~8 ply down, so
+    eval_now(leaf) - eval_now(root) still carries the search's verdict: this is
+    not a degenerate self-target.  FRAC blends, cp' = (1-f)*cp + f*eval_now(leaf);
+    f = 1 is the full retarget measured in Online_Learning_Investigation.md 7.7.
+
+    Runs BEFORE corpus assembly and writes a real root-row file, so the quotas,
+    dedup and gid renumbering downstream are untouched — and, unlike a
+    post-assembly filter, the row budget cannot silently under-deliver.
+
+    Returns the retargeted file, or None if the source has no leaf rows to pair
+    against (a root-only archive)."""
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", label)
+    root_in  = rt_dir / f"{safe}.root.tsv"
+    leaf_in  = rt_dir / f"{safe}.leaf.tsv"
+    nr, nl, axis = _split_rows(files, root_in, leaf_in)
+    if nr == 0 or nl == 0:
+        root_in.unlink(missing_ok=True); leaf_in.unlink(missing_ok=True)
+        return None
+    pr = rt_dir / f"{safe}.pairs_root.tsv"
+    pl = rt_dir / f"{safe}.pairs_leaf.tsv"
+    npair = _merge_join(root_in, leaf_in, pr, pl)
+    root_in.unlink(missing_ok=True); leaf_in.unlink(missing_ok=True)
+    if npair == 0:
+        return None
+    log(f"  retarget {label}: {npair:,} of {nr:,} root rows paired "
+        f"({100.0 * npair / nr:.1f}%)")
+
+    cp_out = rt_dir / f"{safe}.leaf_cp.txt"
+    sh(["./Leaf_vbt", "--batch-train", str(pl.resolve()),
+        "--bt-rescore", str(cp_out.resolve()),
+        "--bt-threads", 8, "--bt-max", npair + 1000], cwd=rt_dir)
+    with open(cp_out) as f:
+        ncp = sum(1 for _ in f)
+    if ncp != npair:
+        die(f"retarget {label}: rescore returned {ncp} rows for {npair} pairs — "
+            f"line alignment broken, refusing to build a scrambled corpus")
+
+    out = rt_dir / f"{safe}.retargeted.tsv"
+    with open(pr) as rf, open(cp_out) as cf, open(out, "w") as of:
+        if axis:
+            of.write("# tdleaf-corpus axis=game-ply\n")
+        for rline, cline in zip(rf, cf):
+            col = rline.rstrip("\n").split("\t")
+            new = int(cline)
+            col[1] = str(new if frac >= 1.0
+                         else int(round((1.0 - frac) * int(col[1]) + frac * new)))
+            of.write("\t".join(col) + "\n")
+    for p in (pr, pl, cp_out):
+        p.unlink(missing_ok=True)
+    return out
+
+
 def _corpus_is_game_ply(path):
     """True if a corpus TSV carries the '# tdleaf-corpus axis=game-ply' marker
     (Phase C dumps, ply column = game-ply).  Absence means legacy record-index
@@ -572,6 +686,18 @@ def prune_work_dir(work, tdir, epoch_bin_dir, tag, pick_ep, keep_epoch_states):
     for dump in work.glob(f"{tag}.*.tsv"):
         gzip_and_remove(dump)
 
+    # Retarget intermediates: fully regenerable from the dumps plus the seed
+    # state, and ~15 GB for a 190M-row window.  The retargeted corpus itself is
+    # already folded into corpus.tsv.gz.
+    rt_dir = work / "retarget"
+    if rt_dir.is_dir():
+        for p in rt_dir.iterdir():
+            p.unlink()
+        try:
+            rt_dir.rmdir()
+        except OSError:
+            pass
+
     corpus = work / "corpus.tsv"
     if corpus.is_file():
         gzip_and_remove(corpus)
@@ -686,6 +812,21 @@ def main():
                          "disables the re-cut and trains on the dump as-is.  "
                          "Corpora dumped before 2026-09-03 have no gate column "
                          "and pass through — they were gated at dump time")
+    ap.add_argument("--bt-rescore", nargs="?", type=float, const=1.0, default=None,
+                    metavar="FRAC",
+                    help="Retarget every root label to its PV leaf, re-evaluated "
+                         "on the weights training will START from, before corpus "
+                         "assembly.  The stored label is the generator's search "
+                         "score and goes stale as the net passes the generator; "
+                         "the leaf sits ~8 ply down the PV, so eval_now(leaf) - "
+                         "eval_now(root) still carries the search's verdict.  "
+                         "Bare flag = full retarget; FRAC blends "
+                         "cp' = (1-f)*cp + f*eval_now(leaf).  Requires "
+                         "--bt-rows root, and every source must carry leaf rows "
+                         "(raw dumps do; a root-only archive does not).  "
+                         "MEASURED NULL on a mature chain: -2.5 +- 21.0 Elo "
+                         "(Online_Learning_Investigation.md 7.7), where the "
+                         "bootstrap was saturated — untested below saturation")
     ap.add_argument("--skip-train", action="store_true",
                     help="Skip offline training (generate-only)")
     ap.add_argument("--corpus", action="append", default=[],
@@ -806,6 +947,18 @@ def main():
                          "stays uncompressed) — <tag>_work/ is never deleted "
                          "either way, this only controls pruning aggressiveness")
     args = ap.parse_args()
+
+    # Validate before anything has side effects — promoting --state to the live
+    # state happens further down, and a run that dies after that has already
+    # overwritten it.
+    if args.bt_rescore is not None:
+        if args.bt_rows != "root":
+            die(f"--bt-rescore needs --bt-rows root (got {args.bt_rows}): it "
+                f"rewrites ROOT labels from their paired leaf, so training on "
+                f"leaf rows that kept their own labels alongside is incoherent")
+        if not 0.0 < args.bt_rescore <= 1.0:
+            die(f"--bt-rescore {args.bt_rescore} out of range: expected "
+                f"0 < FRAC <= 1 (bare flag = 1.0 = full retarget)")
 
     if args.no_repeat:
         log("note: --no-repeat is now always on — the flag is a no-op")
@@ -1046,6 +1199,31 @@ def main():
     if not sources:
         die("nothing to train on (no dumps, no --corpus, and no window corpora "
             "— pass --corpus, or --continue with --corpus-window)")
+
+    # ---- Phase 3.5: retarget root labels to their rescored PV leaves -------
+    if args.bt_rescore is not None:
+        rt_dir = work / "retarget"
+        rt_dir.mkdir(exist_ok=True)
+        shutil.copy2(bt_bin, rt_dir / "Leaf_vbt")
+        shutil.copy2(net_path, rt_dir / args.net)
+        shutil.copy2(live_td, rt_dir / f"{netbase}.tdleaf.bin")
+        log(f"--bt-rescore {args.bt_rescore:g}: relabelling root rows from their "
+            f"PV leaf on the seed weights ({live_td.name})")
+        retargeted, unpairable = [], []
+        for tag, files, elo in sources:
+            out = retarget_source(tag, files, rt_dir, args.bt_rescore)
+            if out is None:
+                unpairable.append(tag)
+            else:
+                retargeted.append((tag, [out], elo))
+        # A corpus where some labels are retargeted and some are not answers no
+        # question at all, so refuse rather than warn.
+        if unpairable:
+            die(f"--bt-rescore: no leaf rows in {', '.join(unpairable)} — that "
+                f"source is a root-only archive and cannot be paired.  Retarget "
+                f"needs every source paired; lower --corpus-window to exclude "
+                f"it, or drop --bt-rescore")
+        sources = retargeted
 
     axes = {_corpus_is_game_ply(c) for _, files, _ in sources for c in files}
     if len(axes) > 1:
@@ -1399,6 +1577,7 @@ def main():
         "bt_td_lambda": args.bt_td_lambda,
         "bt_rows": args.bt_rows,
         "bt_quiet_cp": args.bt_quiet_cp,
+        "bt_rescore": args.bt_rescore,
         "corpus_rows": rows,
         "corpus_games": gid_next,
         "corpus_window": [

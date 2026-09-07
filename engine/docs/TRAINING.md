@@ -891,6 +891,45 @@ Alignment is the whole contract, so it refuses `--bt-rows` and `--bt-quiet-cp`
 > `Online_Learning_Investigation.md` 7.7 — the mode is kept because it is
 > general and cheap, not because that experiment worked.
 
+#### Retargeting root labels — `train.py --bt-rescore`
+
+`--bt-rescore` folds the whole retargeting pipeline into a normal run: for every
+corpus source it merge-joins root rows to their PV leaf on `(gid, ply)`,
+re-evaluates each leaf with `--bt-rescore` on the **seed state** (the weights
+training is about to start from), and writes a root-row file whose `cp` column
+is the leaf's fresh evaluation.  Assembly then proceeds unchanged.
+
+```sh
+python3 train.py --tag <tag> --continue <prev> --bt-rescore        # full retarget
+python3 train.py --tag <tag> --continue <prev> --bt-rescore 0.5    # half-way blend
+```
+
+It runs **before** assembly deliberately: the retargeted file *is* the source, so
+row counting, Bresenham quotas, dedup and gid renumbering are untouched, and the
+row budget cannot silently under-deliver the way a post-assembly filter would.
+
+Constraints, both enforced at argument-parse time so a bad invocation cannot
+promote `--state` over the live state before failing:
+
+- **`--bt-rows root` is required.**  Rewriting root labels while also training on
+  leaf rows that kept their own labels is not a coherent objective.
+- **Every source must carry leaf rows.**  Raw dumps do; a root-only archive does
+  not, and the run dies naming the source rather than building a corpus where
+  some labels are retargeted and some are not.
+
+Pairing loss is small at the current wide dump gate — ~98–99% of root rows pair
+— because the gates are what break pairing, not the data (root is gated on
+`|root_static − root_search|`, leaf on `|leaf_static − propagated root search|`).
+Cost is ~12 minutes on a 190M-row window: ~5 min to join, ~7 min to rescore.
+
+> **Measured null on the mature `m260720` chain: −2.5 ± 21.0 Elo**, and
+> refreshing the labels between epochs a further −6.0 ± 20.8
+> (`Online_Learning_Investigation.md` 7.7).  The seed→generator correction moved
+> labels 31.8 cp on average and bought nothing, because the bootstrap was
+> saturated — there was no information in the correction the net did not already
+> have.  It is worth retrying only *below* saturation, e.g. early in a fresh
+> chain, where the static eval is still far from search.
+
 #### Is there anything left to learn? — `--bt-diag`
 
 `--bt-diag` turns the trainer into a read-only diagnostic: it loads the corpus and

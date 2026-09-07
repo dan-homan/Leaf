@@ -1,5 +1,63 @@
 Changes since 2017_12_24
 
+2026_09_07 -- train.py --bt-rescore: leaf retargeting as a first-class offline
+               knob, with a blend fraction.
+
+               The engine side (--bt-rescore in nnue_batch_train.cpp) landed with
+               Part 7.7; driving it took four manual steps -- merge-join, rescore,
+               paste, train.  Now it is one flag alongside the other offline
+               parameters:
+
+                 --bt-rescore        full retarget (FRAC = 1.0)
+                 --bt-rescore 0.5    blend, cp' = (1-f)*cp + f*eval_now(leaf)
+
+               New Phase 3.5, between state promotion and corpus assembly.  Per
+               source: split root/leaf rows (handles both the separate raw dumps
+               and a single mixed corpus.tsv.gz), streaming merge-join on
+               (gid, ply), Leaf_vbt --bt-rescore on the paired leaves using the
+               SEED state, then paste column 2.  Helpers _split_rows,
+               _merge_join, retarget_source.
+
+               Running before assembly is the design point: the retargeted file
+               IS the source, so corpus_row_counts, the Bresenham quotas, dedup
+               and gid renumbering are all untouched -- and the row budget cannot
+               silently under-deliver the way a post-assembly filter would (the
+               trap --bt-rows and --bt-quiet-cp each had to be built around).
+
+               The rescore vintage needs no parameter: at that point live_td is
+               already the promoted seed, i.e. exactly the weights training will
+               start from.
+
+               Two constraints, both validated at PARSE time so a bad invocation
+               cannot promote --state over the live state before failing:
+                 - --bt-rows root required (rewriting root labels while training
+                   on leaf rows that kept their own is incoherent);
+                 - every source must carry leaf rows -- a root-only archive dies
+                   naming the source rather than producing a corpus where some
+                   labels are retargeted and some are not.
+               0 < FRAC <= 1 is range-checked too.
+
+               Verified on 200k real rows: 98.4% of root rows paired; the
+               rescore's line-alignment assertion holds; non-cp columns identical
+               across FRAC values (0 of 196,873 differ); FRAC=0.5 lands exactly
+               between the stored and retargeted label on 20,000/20,000 checked
+               rows; the axis=game-ply marker propagates; a root-only source
+               returns None and triggers the die path.
+
+               Cost ~12 min on a 190M-row window (~5 min join, ~7 min rescore)
+               against a 2h+ consolidation.  Intermediates (~15 GB) are pruned at
+               end of run -- regenerable from the dumps plus the seed state.
+
+               Recorded in the sidecar as bt_rescore.
+
+               REMINDER, in the flag's own help text: this measured NULL on the
+               mature m260720 chain (-2.5 +- 21.0 Elo, 7.7), where the bootstrap
+               was saturated and the 31.8 cp correction carried no information
+               the net lacked.  Worth retrying below saturation, e.g. early in a
+               fresh chain.
+
+               scripts/train.py, docs/TRAINING.md, docs/SCRIPT_USE.md.
+
 2026_09_06e -- chain_corpora prefers each leg's RAW DUMPS over its assembled
                corpus, closing a window double-counting trap.
 
