@@ -1333,10 +1333,29 @@ def main():
     # duplicate rows are deduped, but the quotas are set before dedup (budget
     # under-delivers) and the re-weighting costs the game diversity A1 valued at
     # ~45 Elo.  Only legs predating the keep-dumps change hit this.
-    if assembled and len(sources) > 2:
-        log(f"WARNING: {', '.join(assembled)} contributed its ASSEMBLED corpus "
-            f"(no raw dumps archived), which may already contain other window "
-            f"sources — consider --corpus-window 1 to avoid double-counting")
+    #
+    # Warn only on an ACTUAL overlap: read each assembly's own sidecar and check
+    # whether any other source in this window is inside it.  An assembly of
+    # strictly older legs alongside newer raw dumps is exactly the configuration
+    # that maximises distinct games with no duplication, and must not be flagged
+    # — a warning that cries wolf is one people learn to ignore.
+    live = {t for t, _, _ in sources}
+    for tag in assembled:
+        try:
+            with open(LEARN_DIR / f"{tag}_final.json") as f:
+                inner = {w.get("tag") for w in (json.load(f).get("corpus_window") or [])}
+        except (OSError, ValueError):
+            inner = set()
+        # "this run" in a sidecar names THAT leg's own games, not the current
+        # run's — same label, different games, so it is never an overlap.
+        inner.discard("this run")
+        dup = sorted((inner & live) - {tag, "this run"})
+        if dup:
+            log(f"WARNING: {tag} contributed its ASSEMBLED corpus, which already "
+                f"contains {', '.join(dup)} — those games are drawn twice.  Dedup "
+                f"removes the duplicate rows but the quotas are set before dedup, "
+                f"so the budget under-delivers.  Lower --corpus-window to exclude "
+                f"them")
 
     corpus_path = work / "corpus.tsv"
     log(f"assembling -> {corpus_path.name} "
