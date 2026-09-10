@@ -3517,9 +3517,17 @@ one is a global and a flag:
 ```sh
 python3 train.py --tag m260720-7.5e6g-lr25 --continue m260720-7e6g \
     --games 100000 --depth 8 --nodes 4000 --concurrency 15 --lr-scale 0.25 \
-    --corpus-window 2 --corpus-rows 190000000 --epochs 1 \
+    --corpus-window 3 --corpus-rows 190000000 --epochs 1 \
     --gauntlet-epochs --gauntlet-anchors Leaf_vclassic_eval --gauntlet-tdleaf
 ```
+
+Window **3**, not 2: at 100k games the fresh block is only ~8M rows, so window
+2 (this run + `7e6g` + `6.5e6g` raw dumps) tops out near 88M and would silently
+shrink the offline phase relative to the `7e6g` baseline.  Window 3 pulls the
+`6e6g` assembly back in and restores 190M with a composition close to the
+baseline's — ~8M fresh, 40.3M `7e6g`, 40.4M `6.5e6g`, ~101M `6e6g` — which is
+what keeps the offline phase roughly constant so the arm isolates the online
+change.  No tag appears twice, so the double-count check stays quiet.
 
 `--lr-scale` multiplies every online Adam/RMSProp step uniformly (all six
 categories), is recorded in the sidecar as `lr_scale`, is **not** inherited
