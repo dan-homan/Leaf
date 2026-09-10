@@ -266,6 +266,13 @@ void tdleaf_rebuild_record(struct TDRecord &r, bool refresh_score);
 // capture root_pos/root_static (shipped in the .tdg format).
 extern bool tdleaf_capture_root;
 
+// Uniform multiplier on every online Adam/RMSProp step (all weight categories),
+// mirroring the offline trainer's --bt-lr.  Set by the learner's --lr-scale;
+// 1.0 reproduces the historical online behaviour exactly.  Scaling this toward
+// 0 does NOT converge on "no generation" — actors stay frozen between refreshes
+// either way — it converges on generating from a net that stops drifting.
+extern float tdleaf_lr_scale;
+
 // Startup guardrail + config banner (call once at main() entry in TDLEAF
 // builds).  Hard-errors on any TDLEAF_* env var outside the known allowlist;
 // then logs the effective online-training constants.

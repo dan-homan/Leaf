@@ -1262,6 +1262,32 @@ achieved depth drifts *upward* over a run.  Log the depth distribution.
 — matches can run at any concurrency and stay comparable, which the 3+0.05
 gauntlets are not (`Online_Learning_Investigation.md` 7.8).
 
+### Online learning rate — `--lr-scale`
+
+The effective step at both ends of the hybrid loop is
+`lr_scale x warmup_factor x SECTION_LR0`.  The two phases share the
+`TDLEAF_ADAM_*_LR0` constants and differ **only** in `lr_scale`:
+
+| phase | flag | default |
+|---|---|---|
+| offline (`--batch-train`) | `--bt-lr` | 0.25 |
+| online (generation) | `--lr-scale` | **1.0** |
+
+`train.py --lr-scale K` and `selfplay_run.py --lr-scale K` set the online one;
+it reaches the learner (the sole `.tdleaf.bin` writer), never the frozen
+actors, and is range-checked to `0 <= K <= 4`.  At the default 1.0 no flag is
+passed and the call is bit-identical to previous behaviour.  It is recorded in
+the run sidecar as `lr_scale` and is deliberately **not** inherited through
+`--continue`.
+
+Because actors are frozen and refreshed from the learner, `K = 0` is *not*
+"generation without learning off to the side" — it is generation from a net
+that never drifts, i.e. a fixed-net corpus dump.  The reason to reach for this
+knob is the equilibrium documented in `Online_Learning_Investigation.md` 7.9:
+the online phase reliably costs ~−126 Elo and the offline phase reliably
+recovers ~+139, so the loop's yield is the small difference between two large
+stable numbers, and `K` is the only cheap handle on the first of them.
+
 ### Generation throughput
 
 Two things dominate wall-clock generation speed, both measured in

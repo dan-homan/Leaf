@@ -634,9 +634,21 @@ int learner_main(int argc, char *argv[])
             cfg.publish_every = atoi(argv[++ai]);
         else if (!strcmp(argv[ai], "--delete"))         cfg.delete_consumed = true;
         else if (!strcmp(argv[ai], "--refresh-scores")) cfg.refresh_scores  = true;
+        else if (!strcmp(argv[ai], "--lr-scale") && ai + 1 < argc)
+            tdleaf_lr_scale = (float)atof(argv[++ai]);
     }
 
     if (!cfg.dir) { fprintf(stderr, "learner: --learn-stream <dir> is required\n"); return 1; }
+    // Guard the sign and a sane ceiling: a negative scale would ascend the loss,
+    // and anything above ~4 blows past the step clip on every category.
+    if (!(tdleaf_lr_scale >= 0.0f) || tdleaf_lr_scale > 4.0f) {
+        fprintf(stderr, "learner: --lr-scale %g out of range (expected 0..4)\n",
+                (double)tdleaf_lr_scale);
+        return 1;
+    }
+    if (tdleaf_lr_scale != 1.0f)
+        fprintf(stderr, "learner: online LR scaled by %.4g (all categories)\n",
+                (double)tdleaf_lr_scale);
     if (!nnue_available) { fprintf(stderr, "learner: requires a loaded NNUE network\n"); return 1; }
     struct stat sb;
     if (stat(cfg.dir, &sb) != 0 || !S_ISDIR(sb.st_mode)) {

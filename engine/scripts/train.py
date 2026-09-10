@@ -790,6 +790,11 @@ def main():
     ap.add_argument("--nodes", type=int, default=0,
                     help="Node budget per move for generation (0 = fixed depth). "
                          "--depth becomes a ceiling; see selfplay_run.py --nodes")
+    ap.add_argument("--lr-scale", type=float, default=1.0,
+                    help="Uniform multiplier on every online TDLeaf step during "
+                         "generation (default 1.0 = unchanged).  The offline "
+                         "phase is unaffected -- that is --bt-lr.  See "
+                         "docs/Online_Learning_Investigation.md 7.9")
     ap.add_argument("--concurrency", type=int, default=9)
     ap.add_argument("--hash", type=int, default=128,
                     help="Per-actor hash size in MB passed to generation "
@@ -1159,6 +1164,7 @@ def main():
             "--traj-dir", traj_dir,
             "--tdleaf-out", f"{netbase}.tdleaf.bin",
             "--delete-consumed", "--refresh-scores",
+            "--lr-scale", args.lr_scale,
             "--seed", seed],
            cwd=LEARN_DIR, env=env)
 
@@ -1648,6 +1654,7 @@ def main():
         "gen_mode": ("skip-online" if args.skip_online else "actor-learner"),
         "depth": args.depth,
         "nodes": args.nodes,
+        "lr_scale": args.lr_scale,
         "epochs": args.epochs,
         "picked_epoch": pick_ep,
         "bt_lr": args.bt_lr,

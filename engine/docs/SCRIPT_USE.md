@@ -103,6 +103,7 @@ pruning for one run. A failed run's `<tag>_work/` is never touched. See
 | `--games N`                                  | 400000                                                 | Games to generate                                            |
 | `--depth N`                                  | 8                                                      | Fixed search depth for generation                            |
 | `--nodes N`                                  | 0 (off)                                                | Node budget per move for generation.  `--depth` becomes the **floor**, so the search is never shallower than the fixed-depth run it replaces.  Adapts effort like a clock (extends on a failing-low root, halves on a singular reply) but deterministic.  `--depth 8 --nodes 4000` → mean d8.87, min d8, at ~1.85× the wall clock — see `docs/TRAINING.md` |
+| `--lr-scale K`                               | 1.0                                                    | Uniform multiplier on every **online** TDLeaf step during generation (all six weight categories).  The offline phase is unaffected — that is `--bt-lr`.  Recorded in the sidecar as `lr_scale`; **not** inherited through `--continue`.  `K=0` does not mean "no generation": actors are frozen either way, so it means generating from a net that stops drifting (`Online_Learning_Investigation.md` 7.9.5) |
 | `--concurrency N`                            | 9                                                      | Concurrent games                                             |
 | `--hash N`                                   | 128                                                    | Per-actor hash size (MB) for generation.  16 MB is ~25% faster at depth 8 but measured **+8.9 ± 11.4 Elo weaker at fixed depth** (`Online_Learning_Investigation.md` 7.5), so the default reverted to 128.  See `docs/Generation_Throughput.md` |
 | `--openings FILE`                            | `training_openings.epd`                                | Opening set (FRC)                                            |
@@ -177,6 +178,7 @@ python3 selfplay_run.py --binary Leaf_vtrain_hl_a --epd training_openings.epd \
 | `--publish PATH` / `--publish-every G` | off / 512 | Bake a `.nnue` every G games |
 | `--seed N` / `--delete-consumed` | 1 / archive | Shuffle seed base / delete instead of archive |
 | `--refresh-scores` | off (**always pass it for online runs**) | Learner re-evaluates leaf statics with current weights at consume time. Without it, trajectory scores lag the learner by a refresh cycle and online TD drifts toward extreme decisiveness (d8t-3al2: 37%→12% draws by 40k games) |
+| `--lr-scale K` | 1.0 | Multiplier on every online Adam/RMSProp step, mirroring `--bt-lr` offline.  Range-checked to `0 <= K <= 4`.  At 1.0 no flag reaches the learner and the step is bit-identical to previous behaviour |
 | `--adjudicate` | off | Enable actor resign/draw adjudication. Leave OFF for online learning — adjudication + learning is a runaway spiral (d8t-3al: 97% resignations, 27-ply games, dead net) |
 
 The learner inherits the parent env (e.g. set `TDLEAF_DUMP_TSV` to have the

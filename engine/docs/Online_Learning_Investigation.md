@@ -2791,6 +2791,13 @@ how to keep the offline phase out of it.
 
 ## 6.17 The LR arm — parked recipe (written 2026-08-16, not yet run)
 
+> **Superseded by 7.9.5 (2026-09-10).**  The constants-edit-plus-compensating-
+> `--bt-lr` recipe below is no longer needed: `--lr-scale` now exposes the
+> online `lr_scale` directly on `train.py` / `selfplay_run.py`, with no
+> recompile and no coupling to the offline phase.  The reasoning in 6.17.1 is
+> still the correct explanation of *why* the phases separate; only the
+> mechanics changed.  Use the 7.9.5 command.
+
 D. Homan raised the obvious objection to 6.16.5: the `TDLEAF_ADAM_*_LR0`
 constants are shared with the offline batch trainer, so moving them moves both
 phases and the arm confounds the thing it is meant to isolate.  Correct — but
@@ -3404,8 +3411,158 @@ What does *not* survive: any statement of the form "the leg went backwards",
 and the framing that the loop nets ~0 per iteration.  It nets what the offline
 pass extracts, which at this maturity is ~+20 and falling.
 
+## 7.9 The `7e6g` replication: the loop reaches equilibrium (2026-09-10)
+
+`6.5e6g` returned +19.1 ± 7.9 paired and +37.5 ± 16.4 on the anchor — the
+first leg in a while that looked like progress.  Its improvement *over* `6e6g`
+was only +19.8 ± 14.1 (1.4σ), so `7e6g` was run as a replication at the same
+parameters: 500k games, depth 8 floor / 4000 nodes, hash 128 with no per-game
+clear, `--bt-rows root`, `--bt-quiet-cp 60`, 190M rows, 2 epochs.
+
+The one deliberate difference: `--corpus-window 2` instead of 1.  This is not a
+recipe change, it is a correction for one — `aabd4f8` made `chain_corpora`
+window on each leg's **raw dumps** rather than its assembled corpus, so window 1
+would now have supplied ~1.0M distinct games where `6.5e6g`'s window 1 supplied
+3.0M.  Window 2 restores the game count (3,499,990) and, if anything, makes the
+corpus *fresher*: 21.2% this run, 21.2% `6.5e6g` raw, 57.5% `6e6g` assembly,
+against `6.5e6g`'s 21% fresh + 79% five-leg blend.
+
+### 7.9.1 It did not replicate
+
+| | `6e6g` | `6.5e6g` | `7e6g` |
+|---|---|---|---|
+| leg total, paired vs prev final | +20.2 ± 11.0 | +19.1 ± 7.9 | **+6.6 ± 8.2** |
+| final vs `Leaf_vclassic_eval` | +149.7 ± 12.0 | +187.2 ± 11.1 | **+180.8 ± 11.2** |
+
+(±1σ pentanomial throughout, per 7.8.1.)
+
++6.6 ± 8.2 is 0.8σ; the anchor reads −6.4 ± 15.8.  Both are consistent with
+zero.  The two legs differ by −12.5 ± 11.3 (1.1σ), so this is *not* a
+significant decline either — the honest reading is that both measurements are
+draws from a recipe worth roughly +13 ± 7 per leg, and `6.5e6g`'s +19.1 was the
+high end of that rather than a new plateau.
+
+The anchor and paired routes disagree about the online cost (−115 vs −131,
+below).  Discount the anchor: the swing is driven entirely by `6.5e6g-final`'s
++187.2, which has the shape of the `5.5e6gR` +155.1 outlier documented in
+7.8.2.  Move it down ~10 Elo and the anchor leg total becomes ~+4, matching the
+paired +6.6.  The head-to-head needs no transitivity and is the estimator to
+quote.
+
+### 7.9.2 Both components replicate; only their difference moved
+
+Decomposed against a common reference (the previous leg's final net):
+
+| | `6.5e6g` | `7e6g` | Δ |
+|---|---|---|---|
+| online cost (tdleaf − prev final) | −122.2 ± 8.8 | −130.9 ± 9.1 | −8.7 ± 12.7 |
+| offline recovery (final − tdleaf) | +141.4 ± 11.8 | +137.5 ± 12.2 | −3.8 ± 17.0 |
+| **net** | **+19.1 ± 7.9** | **+6.6 ± 8.2** | −12.5 ± 11.3 |
+
+This is the cleanest statement of the problem the investigation has produced.
+Neither component moved.  The online phase costs ~−126 and the offline phase
+recovers ~+139, both reproducible to well inside their error bars, and the leg
+total is the small difference of two large stable numbers.  At that ratio the
+per-leg yield is ~7% of the offline pass's own work, and the error bar on a
+1000-game gauntlet cannot resolve it.
+
+**The chain is at equilibrium at ~+180 vs classic.**  Further 500k legs at
+these parameters will return +0 to +15 each for ~46 hours of machine time
+(41h generation, 4.7h consolidation and gauntlets), which is indistinguishable
+from noise leg to leg and only detectable by stacking several legs.
+
+This is exactly what `--bt-diag` predicted on the `6.5e6g` corpus (Part 7.8
+methodology notes): ΔMSE_out ≈ 0 *inside* the 60 cp gate (−1.04%, −0.44%,
++1.16%), with the +13.83% headline living entirely in the out-of-gate tail.
+The corpus has nothing left to teach where the trainer is looking.  Equilibrium
+is the Elo-space shadow of that measurement, and the two now agree.
+
+### 7.9.3 The second epoch has become consistently harmful
+
+Validation MSE(blend) across all three legs:
+
+| leg | epoch 0 | epoch 1 | epoch 2 | Elo-picked |
+|---|---|---|---|---|
+| `6e6g` | 0.006935 | **0.006033** | 0.006071 | 2 |
+| `6.5e6g` | 0.007012 | **0.005954** | 0.006010 | 1 |
+| `7e6g` | 0.007065 | **0.005916** | 0.005954 | 1 |
+
+Epoch 2 raises val MSE in every leg.  The gauntlet agreed in the last two
+(`7e6g`: +148.4 ± 10.3 for epoch 1 vs +129.3 ± 10.5 for epoch 2, a 1.3σ
+preference); `6e6g` picking epoch 2 was noise against an already-worse val.
+Note that this does *not* contradict 7.4 — val MSE still fails to rank *nets
+from different recipes*; what it does here is rank two checkpoints on the same
+trajectory, where it is merely detecting overfitting, and the Elo ladder
+concurs.  `--epochs 1` is the default worth adopting; it saves ~1.2h/leg.
+
+### 7.9.4 Generation health is not the explanation
+
+502,000 games recorded, 35.8% draws, 50.02% white score — dead centre of the
+healthy d8 band and indistinguishable from `6e6g` (35.9%) and `6.5e6g` (36.0%).
+Terminations are unremarkable (62% mate, 26% 3-rep, 4.5% 50-move, 0.5%
+max-ply, zero resign/draw-adjudication).  Nothing collapsed.  Consistent with
+7.2 — the draw-rate canary is blind to uniform strength loss, and this leg is
+another instance of it staying green through a −131 Elo online excursion.
+
+### 7.9.5 `--lr-scale`: the 6.17 arm without the recompile
+
+6.17 parked the LR arm behind a constants edit in `src/tdleaf.h` plus a
+compensating `--bt-lr`, because the `TDLEAF_ADAM_*_LR0` constants are shared
+between the phases.  That is no longer necessary.  The online call sites in
+`tdleaf.cpp` were passing the *default* `lr_scale = 1.0` to
+`nnue_apply_gradients(float lr_scale = 1.0f)`, while the batch trainer had been
+passing `--bt-lr` through the same parameter all along.  Exposing the online
+one is a global and a flag:
+
+```sh
+python3 train.py --tag m260720-7.5e6g-lr25 --continue m260720-7e6g \
+    --games 100000 --depth 8 --nodes 4000 --concurrency 15 --lr-scale 0.25 \
+    --corpus-window 2 --corpus-rows 190000000 --epochs 1 \
+    --gauntlet-epochs --gauntlet-anchors Leaf_vclassic_eval --gauntlet-tdleaf
+```
+
+`--lr-scale` multiplies every online Adam/RMSProp step uniformly (all six
+categories), is recorded in the sidecar as `lr_scale`, is **not** inherited
+through `--continue` (it is an experiment knob, explicit per run), and is
+guarded to `0 <= k <= 4`.  At the default 1.0 no flag reaches the learner and
+`nnue_apply_gradients(1.0f)` is the same call as before, so historical
+behaviour is bit-identical.  The offline phase is untouched — that remains
+`--bt-lr`.
+
+**What it can show.**  The loop's yield is `recovery − cost`.  If the online
+phase's contribution is play variability rather than weight improvement
+(standing conclusion 1), scaling `k` down should cut the −126 faster than it
+cuts the +139, and the yield rises.
+
+**What it cannot show, and the trap to avoid.**  `k → 0` does not converge on
+"no generation".  Actors are frozen (`TDLEAF_FREEZE=1`) and refreshed from the
+learner either way; what `k → 0` converges on is *generating from a net that
+never drifts* — which is the arm already run in 7.3 (offline consolidation from
+the undamaged `5.5e6gR` seed, ~+151 ceiling).  So the endpoints are both known
+and the whole question is the shape in between.  There is no guarantee it is
+monotone: the same drift that costs 126 Elo may be what puts non-redundant
+positions in the corpus, in which case cost and recovery fall together and
+every `k` is a wash.  That is a real possible outcome and it would be the
+strongest evidence yet for abandoning the online phase entirely.
+
+Run it at **100k games**, not 500k.  Cost and recovery are both ~10× the leg
+total, so they are measurable at a fifth of the games while the leg total
+is not measurable at 500k anyway.  Two arms (`k = 0.25`, `k = 0.5`) cost about
+one day together and bracket the interesting region.
+
 ## Methodology notes (Part 7)
 
+- 7.9's per-leg figures come from the run sidecars
+  (`learn/m260720-*_final.json`, keys `final_gauntlet` / `tdleaf_gauntlet` /
+  `epoch_ladder`); the val-MSE ladder from `<tag>_work/train/train.log`; the
+  draw rates by aggregating the per-actor `done — N played (+W =D -L)` lines
+  across all 14 `<tag>_work/traj/actor_*.log`.  All gauntlet matches were
+  1000 games at 1+0.01, the standard chain protocol.
+- The `7e6g` "online cost" and "offline recovery" rows are both measured
+  against the *same* reference binary (`Leaf_vm260720-6.5e6g-final`), so their
+  sum is the leg total by construction and only two of the three numbers are
+  independent.  The quoted ± on the recovery row is the quadrature sum of the
+  other two and is therefore the widest of the three.
 - Every arm ran one epoch from the same seed state
   (`m260720-5.5e6gR_final.tdleaf.bin` over base `m260720.nnue`, content hash
   0x0A3B39CB), `--bt-lr 0.25 --bt-lambda 1.0 --bt-K 220 --bt-batch 512

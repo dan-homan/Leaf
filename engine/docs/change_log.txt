@@ -1,5 +1,58 @@
 Changes since 2017_12_24
 
+2026_09_10a -- --lr-scale: the online TDLeaf learning rate becomes a runtime
+               flag, and the 7e6g leg reaches equilibrium.
+
+               The 7e6g replication returned +6.6 +- 8.2 paired against
+               6.5e6g-final (0.8 sigma), failing to reproduce 6.5e6g's
+               +19.1 +- 7.9.  Decomposed, neither component moved: the online
+               phase costs -122.2 -> -130.9 and the offline phase recovers
+               +141.4 -> +137.5, both well inside their error bars.  The leg
+               total is the difference of two large stable numbers, and it has
+               closed.  This is the Elo-space shadow of the --bt-diag result on
+               the same chain (dMSE_out ~ 0 inside the 60 cp gate).  Written up
+               as Online_Learning_Investigation.md 7.9.
+
+               Also from that leg: epoch 2 now raises validation MSE in all
+               three legs (6e6g, 6.5e6g, 7e6g) and lost the Elo ladder in the
+               last two, so --epochs 1 is the recipe going forward.  Generation
+               health was normal throughout (35.8% draws, 50.02% white score) --
+               another instance of the 7.2 finding that the draw-rate canary is
+               blind to uniform strength loss.
+
+               The LR arm parked in 6.17 needed a constants edit in tdleaf.h
+               plus a compensating --bt-lr, because the TDLEAF_ADAM_*_LR0
+               constants are shared between the phases.  That turned out to be
+               unnecessary: the phases already differ only in the lr_scale
+               argument to nnue_apply_gradients(), which the batch trainer had
+               been passing all along (--bt-lr) while the online call sites in
+               tdleaf.cpp took the 1.0 default.  Exposing the online one:
+
+                 - tdleaf.h/.cpp: new global tdleaf_lr_scale (default 1.0f),
+                   passed at both nnue_apply_gradients() call sites.
+                 - selfplay.cpp: --lr-scale on the learner, range-checked to
+                   0 <= K <= 4 (a negative scale would ascend the loss; above
+                   ~4 every category saturates the step clip) and logged when
+                   it differs from 1.0.  Parsed before the polling loop starts.
+                 - selfplay_run.py / train.py: --lr-scale passthrough; recorded
+                   in the run sidecar as lr_scale.  NOT inherited through
+                   --continue -- it is an experiment knob, explicit per run.
+
+               At the default 1.0 no flag is passed to the learner and the call
+               is nnue_apply_gradients(1.0f), which is what it always was, so
+               existing behaviour is bit-identical.  The banner in
+               tdleaf_check_env() deliberately does NOT report it: that runs at
+               main() entry, before the learner parses its argv, so it would
+               always print 1.0.  The learner logs the effective value instead.
+
+               Note that K -> 0 does not converge on "no generation".  Actors
+               are frozen (TDLEAF_FREEZE=1) and refreshed from the learner
+               either way, so K -> 0 converges on generating from a net that
+               stops drifting -- the arm already run in 7.3.  Both endpoints are
+               known; the question is the shape in between, and it may well be
+               flat.  Recipe in 7.9.5: 100k games, not 500k, since cost and
+               recovery are both ~10x the leg total.
+
 2026_09_07b -- --corpus-weight: the row budget no longer has to split evenly
                across sources.  Found by D. Homan on the first chain with
                unequal leg sizes.

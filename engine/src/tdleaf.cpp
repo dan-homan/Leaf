@@ -624,6 +624,9 @@ static void tdleaf_dump_game(const TDGameRecord &rec, float result)
 // ---------------------------------------------------------------------------
 static int td_batch_pending = 0;  // games accumulated since last apply
 
+// Uniform online step multiplier (see tdleaf.h).  Default 1.0 = unchanged.
+float tdleaf_lr_scale = 1.0f;
+
 // ---------------------------------------------------------------------------
 // tdleaf_update_after_game — live pass: accumulate; apply every BATCH_SIZE games
 // ---------------------------------------------------------------------------
@@ -649,7 +652,7 @@ void tdleaf_update_after_game(TDGameRecord &rec, float result, const char *save_
 
     if (td_batch_pending >= TDLEAF_BATCH_SIZE) {
         nnue_clip_gradients(TDLEAF_GRAD_CLIP_NORM);
-        nnue_apply_gradients();
+        nnue_apply_gradients(tdleaf_lr_scale);
         nnue_requantize_fc();
 
         if (save_path && save_path[0]) {
@@ -769,7 +772,7 @@ void tdleaf_flush_batch(const char *save_path)
     if (td_batch_pending <= 0) return;
 
     nnue_clip_gradients(TDLEAF_GRAD_CLIP_NORM);
-    nnue_apply_gradients();
+    nnue_apply_gradients(tdleaf_lr_scale);
     nnue_requantize_fc();
 
     if (save_path && save_path[0]) {
