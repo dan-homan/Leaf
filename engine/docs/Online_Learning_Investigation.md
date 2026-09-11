@@ -3553,6 +3553,24 @@ positions in the corpus, in which case cost and recovery fall together and
 every `k` is a wash.  That is a real possible outcome and it would be the
 strongest evidence yet for abandoning the online phase entirely.
 
+> **Design correction (2026-09-10, D. Homan).**  The paragraph below justifies
+> 100k games on *statistical* grounds, and that part stands — but it then let
+> the `7e6g` 500k leg be used as the arm's baseline, which is invalid.  The
+> online cost is not a fixed quantity: it **accumulates over games**.  A 100k
+> arm at `k = 0.25` differs from `7e6g` in two ways at once (5x fewer games,
+> 4x smaller steps), so nothing in the comparison is attributable to the LR.
+> The first arm's epoch ladder came back at **+32 ± 10** against `7e6g`'s
+> **+148 ± 10**, and that gap is uninterpretable for exactly this reason:
+> displacement going as `sqrt(steps) x stepsize` predicts ~17 and as
+> `sqrt(steps x stepsize)` predicts ~33, so "the LR did nothing and this is
+> entirely the game count" is not excluded by it.
+>
+> **Any arm must be compared against a control at the same game count.**  The
+> queued `k = 0.5` arm was therefore replaced with `k = 1.0` at 100k
+> (`m260720-7.5e6g-lr100`), which is the matched-games baseline the chain does
+> not otherwise contain.  Arms at matched games are comparable to each other;
+> none of them is comparable to a 500k chain leg.
+
 Run it at **100k games**, not 500k.  Cost and recovery are both ~10× the leg
 total, so they are measurable at a fifth of the games while the leg total
 is not measurable at 500k anyway.  Two arms (`k = 0.25`, `k = 0.5`) cost about
