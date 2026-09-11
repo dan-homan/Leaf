@@ -92,6 +92,14 @@ def main():
                     help="Base opening-shuffle seed")
     ap.add_argument("--delete-consumed", action="store_true",
                     help="Learner deletes consumed .tdg (default: archive to done/)")
+    ap.add_argument("--opt-reset", action="store_true",
+                    help="Learner discards the Adam moments inherited from the "
+                         "offline batch trainer and restarts bias correction "
+                         "from this session's step count (7.10)")
+    ap.add_argument("--grad-norm", action="store_true",
+                    help="Normalise the accumulated gradient by positions in the "
+                         "step (mean, not batch sum), so the scale no longer "
+                         "depends on batch size (7.10)")
     ap.add_argument("--lr-scale", type=float, default=1.0,
                     help="Uniform multiplier on every online Adam/RMSProp step "
                          "(default 1.0 = unchanged), mirroring --bt-lr offline. "
@@ -137,6 +145,10 @@ def main():
         learner_cmd += ["--refresh-scores"]
     if args.lr_scale != 1.0:
         learner_cmd += ["--lr-scale", str(args.lr_scale)]
+    if args.opt_reset:
+        learner_cmd += ["--opt-reset"]
+    if args.grad_norm:
+        learner_cmd += ["--grad-norm"]
 
     learner_log = open(traj / "learner.log", "a")
     learner = subprocess.Popen(learner_cmd, stdout=learner_log,

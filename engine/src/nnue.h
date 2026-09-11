@@ -263,6 +263,23 @@ void nnue_clip_gradient_stats_report();
 // effective knob.
 void nnue_apply_gradients(float lr_scale = 1.0f);
 
+// Discard the persisted Adam moments (m, v) and restart bias correction from
+// this session's own step count.  Weights and per-weight counts are kept.  Call
+// at the start of a session whose objective differs from the one that last wrote
+// the .tdleaf.bin -- the online TDLeaf learner and the offline batch trainer are
+// different objectives sharing one moment store.  See 7.10.
+void nnue_reset_optimizer_state();
+
+// Multiply every accumulated gradient by s.  Call AFTER nnue_clip_gradients (so
+// the clip threshold and telemetry keep their historical summed meaning) and
+// before nnue_apply_gradients, with s = 1/samples, to make the gradient a
+// per-sample MEAN rather than a batch-size-dependent SUM.
+void nnue_scale_gradients(float s);
+
+// When true, the online and offline paths normalise the accumulated gradient by
+// the number of positions in the step.  Default false = historical behaviour.
+extern bool nnue_grad_normalize;
+
 // Parallel apply for the offline batch trainer: the FC-stack and FT/PSQT-row
 // Adam (the per-batch bottleneck) are split across nthreads via the
 // caller-supplied `run`, which must execute its argument fn(tid) for tid in

@@ -173,6 +173,28 @@ static inline float clip_adam_step(float step, float &max_track, uint64_t &clip_
 // the freshly-zeroed v, preventing 31×-oversized FT steps on the first batch.
 static uint32_t  t_ft_session = 0;
 
+// Session-local step counter for ALL categories, and the flag that says the
+// persisted Adam moments were discarded at session start (--opt-reset).
+//
+// Why this exists: m/v are shared between the ONLINE TDLeaf objective and the
+// OFFLINE batch trainer, and the two run at very different accumulated-gradient
+// scales (measured 0.039 offline vs 0.168 online — partly a 512-vs-1203
+// positions-per-step difference, partly a real per-sample difference).  Adam is
+// scale-invariant only in steady state; across a phase boundary the stale v
+// makes the first ~1/(1-beta2) = 1000 steps oversized by the scale ratio.  At 8
+// games/step that is ~8000 games of oversized updates, and the damage it does
+// scales with the LR and not with run length — exactly the front-loaded,
+// LR-proportional loss measured in Online_Learning_Investigation.md 7.10.
+//
+// TDLEAF_ADAM_WARMUP does not cover this: it is keyed on the PERSISTED t_adam
+// (~5.2M by now), so warmup_factor has been hard 1.0 since the first session
+// ever run.  FT weights were already protected by t_ft_session; nothing else was.
+static uint32_t  t_session = 0;
+static bool      opt_cold  = false;
+
+// See nnue.h.  Set from --grad-norm (learner) / --bt-grad-norm (batch trainer).
+bool nnue_grad_normalize = false;
+
 // Full per-weight Adam step (bias-corrected), returns the LR-scaled update dw.
 // Shared by FC weights/biases, FC2, PSQT, and FT biases — only the LR and the
 // telemetry accumulators differ.  Was three identical `do_step*` lambdas inside
@@ -183,6 +205,11 @@ static inline float nnue_adam_step(float g, float &m, float &v, uint32_t cnt,
 {
     m = TDLEAF_ADAM_BETA1 * m + (1.0f - TDLEAF_ADAM_BETA1) * g;
     v = TDLEAF_ADAM_BETA2 * v + (1.0f - TDLEAF_ADAM_BETA2) * g * g;
+    // After --opt-reset the moments are freshly zeroed, so bias correction must
+    // track THIS session's step count, not the persisted per-weight count --
+    // otherwise bc2 ~ 1 against a near-zero v and the first step is ~3x
+    // oversized.  Same reasoning as the cold-row FT path above.
+    if (opt_cold && cnt > t_session) cnt = t_session;
     uint32_t eff_t = cnt + 1;
     // Skip the first-moment bias correction only once it is genuinely
     // negligible.  With BETA1 = 0.9 the correction factor 1/(1-B1^t) is still
@@ -991,6 +1018,81 @@ void nnue_clip_gradient_stats_report()
 }
 
 // ---------------------------------------------------------------------------
+// nnue_reset_optimizer_state — discard the persisted Adam moments and restart
+// bias correction from this session's own step count.
+//
+// Call at the start of a training session whose objective differs from the one
+// that last wrote the .tdleaf.bin (i.e. the online learner, or the offline batch
+// trainer).  Weights and per-weight counts are untouched -- only m, v and the
+// bias-correction clock.  v re-estimates E[g^2] within ~1/(1-beta2) steps and,
+// because eff_t is capped to t_session, every step from the first is the
+// intended magnitude rather than the scale ratio between the two objectives.
+// ---------------------------------------------------------------------------
+void nnue_reset_optimizer_state()
+{
+    memset(v_l0_w, 0, sizeof(v_l0_w)); memset(m_l0_w, 0, sizeof(m_l0_w));
+    memset(v_l0_b, 0, sizeof(v_l0_b)); memset(m_l0_b, 0, sizeof(m_l0_b));
+    memset(v_l1_w, 0, sizeof(v_l1_w)); memset(m_l1_w, 0, sizeof(m_l1_w));
+    memset(v_l1_b, 0, sizeof(v_l1_b)); memset(m_l1_b, 0, sizeof(m_l1_b));
+    memset(v_l2_w, 0, sizeof(v_l2_w)); memset(m_l2_w, 0, sizeof(m_l2_w));
+    memset(v_l2_b, 0, sizeof(v_l2_b)); memset(m_l2_b, 0, sizeof(m_l2_b));
+    memset(v_ft_bias, 0, sizeof(v_ft_bias));
+    memset(m_ft_bias, 0, sizeof(m_ft_bias));
+
+    const size_t psqt_sz = (size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS;
+    if (v_psqt_w) memset(v_psqt_w, 0, psqt_sz * sizeof(float));
+    if (m_psqt_w) memset(m_psqt_w, 0, psqt_sz * sizeof(float));
+
+    // FT weight v is already zeroed at startup; clearing ft_v_warmed routes
+    // every row through the existing cold-row bc2 rather than the warm one.
+    if (ft_v_warmed) memset(ft_v_warmed, 0, NNUE_FT_INPUTS * sizeof(bool));
+
+    t_session    = 0;
+    t_ft_session = 0;
+    opt_cold     = true;
+
+    fprintf(stderr, "TDLeaf: optimizer moments reset for this session "
+                    "(weights and counts kept; bias correction restarts)\n");
+}
+
+// ---------------------------------------------------------------------------
+// nnue_scale_gradients — multiply every accumulated gradient by s.
+//
+// Used to turn the SUMMED gradient into a per-sample MEAN before the Adam step,
+// so that the accumulated scale no longer depends on how many positions the
+// caller happened to batch (512 offline vs ~1203 online).  Called AFTER
+// nnue_clip_gradients so the clip threshold and its telemetry keep their
+// historical (summed) meaning and remain comparable with past logs.
+// ---------------------------------------------------------------------------
+void nnue_scale_gradients(float s)
+{
+    if (s == 1.0f) return;
+    for (int st = 0; st < NNUE_LAYER_STACKS; st++) {
+        for (int i = 0; i < NNUE_L0_SIZE * NNUE_L0_INPUT; i++) grad_l0_w[st][i] *= s;
+        for (int i = 0; i < NNUE_L0_SIZE; i++)                 grad_l0_b[st][i] *= s;
+        for (int i = 0; i < NNUE_L1_SIZE * NNUE_L1_PADDED; i++) grad_l1_w[st][i] *= s;
+        for (int i = 0; i < NNUE_L1_SIZE; i++)                 grad_l1_b[st][i] *= s;
+        for (int i = 0; i < NNUE_L2_PADDED; i++)               grad_l2_w[st][i] *= s;
+        grad_l2_b[st] *= s;
+    }
+    for (int i = 0; i < NNUE_HALF_DIMS; i++) grad_ft_bias[i] *= s;
+    if (ft_dirty && grad_ft_w) {
+        for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
+            if (!ft_dirty[fi]) continue;
+            float *gw = grad_ft_w + (size_t)fi * NNUE_HALF_DIMS;
+            for (int d = 0; d < NNUE_HALF_DIMS; d++) gw[d] *= s;
+        }
+    }
+    if (ft_dirty && grad_psqt_w) {
+        for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
+            if (!ft_dirty[fi]) continue;
+            float *gp = grad_psqt_w + (size_t)fi * NNUE_PSQT_BKTS;
+            for (int k = 0; k < NNUE_PSQT_BKTS; k++) gp[k] *= s;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // nnue_clip_gradients — compute global L2 norm of all gradient arrays and
 // scale all gradients by max_norm/norm if the norm exceeds max_norm.
 // Returns the pre-clip norm.  If max_norm <= 0, does nothing (returns 0).
@@ -1143,6 +1245,7 @@ void nnue_apply_gradients(float lr_scale)
 {
     t_adam++;
     t_ft_session++;
+    t_session++;
 
     // FT RMSProp bias-correction — two bc2 values to handle mixed warmed/fresh rows.
     //
@@ -1374,6 +1477,7 @@ static NNUEApplyParams nnue_apply_compute_params(float lr_scale)
 {
     t_adam++;
     t_ft_session++;
+    t_session++;
     const uint32_t ft_t       = std::min(t_adam, t_ft_session);
     const float warmup_factor = (TDLEAF_ADAM_WARMUP > 0 && t_adam <= (uint32_t)TDLEAF_ADAM_WARMUP)
         ? (float)t_adam / (float)TDLEAF_ADAM_WARMUP : 1.0f;

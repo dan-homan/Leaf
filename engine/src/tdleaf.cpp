@@ -278,6 +278,8 @@ static bool tdleaf_frozen()
 // tdleaf_accumulate_game — steps 1-3: compute d[], e[], accumulate gradients.
 // Does NOT apply or save.  Called by tdleaf_update_after_game.
 // ---------------------------------------------------------------------------
+static uint32_t td_grad_samples = 0;  // POSITIONS accumulated since last apply
+
 static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
 {
     int T = rec.n_plies;
@@ -385,6 +387,7 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
                                                        - rec.plies[t].pos.plist[stm_p ^ 1][pt][0]);
 
             nnue_accumulate_gradients(act, grad_scale);
+            td_grad_samples++;
         }
     }
 }
@@ -652,6 +655,9 @@ void tdleaf_update_after_game(TDGameRecord &rec, float result, const char *save_
 
     if (td_batch_pending >= TDLEAF_BATCH_SIZE) {
         nnue_clip_gradients(TDLEAF_GRAD_CLIP_NORM);
+        if (nnue_grad_normalize && td_grad_samples)
+            nnue_scale_gradients(1.0f / (float)td_grad_samples);
+        td_grad_samples = 0;
         nnue_apply_gradients(tdleaf_lr_scale);
         nnue_requantize_fc();
 
@@ -772,6 +778,9 @@ void tdleaf_flush_batch(const char *save_path)
     if (td_batch_pending <= 0) return;
 
     nnue_clip_gradients(TDLEAF_GRAD_CLIP_NORM);
+    if (nnue_grad_normalize && td_grad_samples)
+        nnue_scale_gradients(1.0f / (float)td_grad_samples);
+    td_grad_samples = 0;
     nnue_apply_gradients(tdleaf_lr_scale);
     nnue_requantize_fc();
 

@@ -1,5 +1,50 @@
 Changes since 2017_12_24
 
+2026_09_11a -- --opt-reset / --grad-norm: the Adam moments are shared between two
+               different objectives, and nothing resets them at the boundary.
+
+               Chasing the front-loaded online loss (7.10).  Measured gradient
+               L2 norms at the phase boundary: offline batch-train sits at 0.039,
+               the online learner's first steps at 0.168 -- a 4.3x jump.  Part of
+               that is just batch size (512 positions offline vs 8 games x 150.4
+               plies = 1203 online, and NEITHER path normalises), the rest a real
+               per-sample difference.  Adam's v is shared and persisted, so it
+               carries the offline scale into the online phase; steps are
+               oversized until v re-estimates, which takes ~1/(1-beta2) = 1000
+               steps = ~8000 games at 8 games/step.  That matches the observed
+               saturation of every proxy by 14-28k games.
+
+               TDLEAF_ADAM_WARMUP does not cover this: it is keyed on the
+               PERSISTED t_adam (~5.2M), so warmup_factor has been hard 1.0 since
+               the first session ever run.  FT weights were already protected by
+               the session-local t_ft_session; FC0/FC1/FC2, the biases and PSQT
+               were not.
+
+                 nnue_reset_optimizer_state()  zeroes m/v (weights and per-weight
+                   counts kept) and restarts bias correction from a session-local
+                   t_session, capped into the shared nnue_adam_step so one edit
+                   covers the serial and parallel apply paths.
+                 nnue_scale_gradients(s)       turns the summed gradient into a
+                   per-sample mean; called AFTER nnue_clip_gradients so the clip
+                   threshold and its telemetry keep their historical meaning.
+                 --opt-reset / --grad-norm     on the learner;
+                 --bt-opt-reset / --bt-grad-norm on the batch trainer;
+                   passthrough in selfplay_run.py and train.py, recorded in the
+                   sidecar.  ALL DEFAULT OFF.
+
+               Verified: with every flag off, a 24-game learner run against the
+               pre-change binary produces a bit-identical .tdleaf.bin, so the
+               historical path is untouched and the A/B's control arm is the old
+               behaviour exactly.
+
+               NOT yet verified: that any of this reduces the online loss.  A
+               24-game micro-test cannot show a transient that plays out over
+               ~1000 Adam steps, and two attempts to measure it that way were
+               invalid -- the learner loads state from the compiled-in
+               NNUE_TDLEAF_BIN, not from --tdleaf-out, so both runs had picked up
+               an already-online-calibrated v and had no stale-v condition to fix.
+               The 30k-game A/B is the actual test.
+
 2026_09_10a -- --lr-scale: the online TDLeaf learning rate becomes a runtime
                flag, and the 7e6g leg reaches equilibrium.
 

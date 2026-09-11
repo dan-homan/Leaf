@@ -790,6 +790,13 @@ def main():
     ap.add_argument("--nodes", type=int, default=0,
                     help="Node budget per move for generation (0 = fixed depth). "
                          "--depth becomes a ceiling; see selfplay_run.py --nodes")
+    ap.add_argument("--opt-reset", action="store_true",
+                    help="Online phase discards the Adam moments left by the "
+                         "offline trainer (different objective, different "
+                         "gradient scale).  See 7.10")
+    ap.add_argument("--grad-norm", action="store_true",
+                    help="Normalise gradients per position in BOTH phases so the "
+                         "accumulated scale is batch-size independent.  See 7.10")
     ap.add_argument("--lr-scale", type=float, default=1.0,
                     help="Uniform multiplier on every online TDLeaf step during "
                          "generation (default 1.0 = unchanged).  The offline "
@@ -1165,6 +1172,8 @@ def main():
             "--tdleaf-out", f"{netbase}.tdleaf.bin",
             "--delete-consumed", "--refresh-scores",
             "--lr-scale", args.lr_scale,
+            *(["--opt-reset"] if args.opt_reset else []),
+            *(["--grad-norm"] if args.grad_norm else []),
             "--seed", seed],
            cwd=LEARN_DIR, env=env)
 
@@ -1655,6 +1664,8 @@ def main():
         "depth": args.depth,
         "nodes": args.nodes,
         "lr_scale": args.lr_scale,
+        "opt_reset": args.opt_reset,
+        "grad_norm": args.grad_norm,
         "epochs": args.epochs,
         "picked_epoch": pick_ep,
         "bt_lr": args.bt_lr,

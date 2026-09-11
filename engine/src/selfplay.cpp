@@ -613,6 +613,7 @@ static bool learner_process_file(const char *path, TDGameRecord *grec,
 
 int learner_main(int argc, char *argv[])
 {
+    bool opt_reset = false;
     LearnerConfig cfg;
     cfg.dir             = nullptr;
     cfg.total_games     = 0;
@@ -636,6 +637,8 @@ int learner_main(int argc, char *argv[])
         else if (!strcmp(argv[ai], "--refresh-scores")) cfg.refresh_scores  = true;
         else if (!strcmp(argv[ai], "--lr-scale") && ai + 1 < argc)
             tdleaf_lr_scale = (float)atof(argv[++ai]);
+        else if (!strcmp(argv[ai], "--opt-reset"))  opt_reset  = true;
+        else if (!strcmp(argv[ai], "--grad-norm"))  nnue_grad_normalize = true;
     }
 
     if (!cfg.dir) { fprintf(stderr, "learner: --learn-stream <dir> is required\n"); return 1; }
@@ -649,6 +652,12 @@ int learner_main(int argc, char *argv[])
     if (tdleaf_lr_scale != 1.0f)
         fprintf(stderr, "learner: online LR scaled by %.4g (all categories)\n",
                 (double)tdleaf_lr_scale);
+    // Must run AFTER the .tdleaf.bin has been loaded (weights + moments come in
+    // together at NNUE init), and before the first trajectory is consumed.
+    if (opt_reset) nnue_reset_optimizer_state();
+    if (nnue_grad_normalize)
+        fprintf(stderr, "learner: gradients normalised per position "
+                        "(mean, not batch sum)\n");
     if (!nnue_available) { fprintf(stderr, "learner: requires a loaded NNUE network\n"); return 1; }
     struct stat sb;
     if (stat(cfg.dir, &sb) != 0 || !S_ISDIR(sb.st_mode)) {

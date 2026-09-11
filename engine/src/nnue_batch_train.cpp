@@ -460,6 +460,7 @@ int nnue_batch_train(int argc, char *argv[])
     float lambda   = 1.0f;   // full lambda-return; td_lambda decay is the knob of record
     float K        = 220.0f;
     float lr_scale = 0.25f;
+    bool  bt_opt_reset = false;   // --bt-opt-reset: discard inherited Adam moments
     int   batch    = 512;
     float val_frac = 0.05f;
     unsigned seed  = 42;
@@ -484,6 +485,8 @@ int nnue_batch_train(int argc, char *argv[])
         else if ((v = next("--bt-epochs")))  epochs   = atoi(v);
         else if ((v = next("--bt-lambda")))  lambda   = (float)atof(v);
         else if ((v = next("--bt-K")))       K        = (float)atof(v);
+        else if (!strcmp(argv[i], "--bt-opt-reset")) bt_opt_reset = true;
+        else if (!strcmp(argv[i], "--bt-grad-norm")) nnue_grad_normalize = true;
         else if ((v = next("--bt-lr")))      lr_scale = (float)atof(v);
         else if ((v = next("--bt-batch")))   batch    = atoi(v);
         else if ((v = next("--bt-val")))     val_frac = (float)atof(v);
@@ -845,6 +848,11 @@ int nnue_batch_train(int argc, char *argv[])
     }
 
     fprintf(stderr, "batch-train: baseline (epoch 0)\n");
+    if (bt_opt_reset) nnue_reset_optimizer_state();
+    if (nnue_grad_normalize)
+        fprintf(stderr, "batch-train: gradients normalised per position "
+                        "(mean, not batch sum)\n");
+
     val_loss();
 
     std::mt19937 rng(seed);
@@ -928,6 +936,8 @@ int nnue_batch_train(int argc, char *argv[])
             nnue_clip_gradients(0.0f);
         }
         batch_no++;
+        if (nnue_grad_normalize && cur > 0)
+            nnue_scale_gradients(1.0f / (float)cur);
         if (threads == 1)
             nnue_apply_gradients(lr_scale);
         else
