@@ -138,7 +138,19 @@ static const float TDLEAF_ADAM_PSQT_LR0    = 13.0f;   // PSQT (int32; sized to r
 // Dense Piece Values & the Gauge Machinery" and "PSQT Freezing" for why both fail.
 static const float TDLEAF_ADAM_BETA1    = 0.9f;    // first-moment decay  (FC + FT bias + PSQT)
 static const float TDLEAF_ADAM_BETA2    = 0.999f;  // second-moment decay (all layers)
-static const float TDLEAF_ADAM_EPS      = 1e-8f;   // numerical floor
+static const float TDLEAF_ADAM_EPS      = 1e-12f;  // numerical floor.  Lowered
+                                        // from 1e-8 (2026-09-12): at 1e-8 it
+                                        // was not negligible against real
+                                        // sqrt(v_hat) and silently gated the
+                                        // low-gradient tail out of Adam's
+                                        // normalisation, making the optimizer
+                                        // sensitive to the accumulated gradient
+                                        // SCALE (7.10.7).  Do NOT push this much
+                                        // lower: the build is -ffast-math, so
+                                        // flush-to-zero makes v == 0 reachable,
+                                        // and then m_hat/(0 + EPS) saturates
+                                        // TDLEAF_ADAM_STEP_CLIP -- a full-size
+                                        // step from a meaningless gradient.
 // AdamW decoupled weight decay: w -= λ × lr × w after each Adam step.
 // Applied to FC weights and FT weights only (not biases, not PSQT).
 // Set to 0.0 to disable.

@@ -1,5 +1,30 @@
 Changes since 2017_12_24
 
+2026_09_12b -- TDLEAF_ADAM_EPS 1e-8 -> 1e-12.
+
+               At 1e-8 the epsilon in m_hat/(sqrt(v_hat) + EPS) is not
+               negligible against real sqrt(v_hat), so Adam was NOT scale
+               invariant: it silently gated the low-gradient tail out of the
+               normalisation, which is why --grad-norm (a pure change of
+               accumulated-gradient scale) had any effect at all.  1e-12 puts
+               it ~1e4 below any real sqrt(v_hat).
+
+               Do NOT push it much lower.  The build is -ffast-math, so
+               flush-to-zero makes v == 0 reachable rather than denormal, and
+               then m_hat/(0 + EPS) saturates TDLEAF_ADAM_STEP_CLIP = 30 -- a
+               full-size update driven by a numerically meaningless gradient.
+               Smaller epsilon AMPLIFIES the weights it currently suppresses.
+
+               This changes the default path.  Measured over 3 Adam applies the
+               shift is small and confined to a few outliers (PSQT max|dw| 38.9
+               with med|dw| 0.00, FC unchanged), but it is not nil, so figures
+               from before this commit are not exactly comparable.
+
+               NOTE for anyone rebuilding: train.py runs binaries from learn/
+               and comp.pl writes to run/.  train.py copies run/->learn/ itself,
+               but a MANUAL rebuild must copy too, or the old binary keeps
+               running with no warning (hit while verifying this change).
+
 2026_09_12a -- CORRECTION: the stale-Adam-moment mechanism from 2026_09_11a is
                refuted.  --opt-reset does nothing for online damage.
 
