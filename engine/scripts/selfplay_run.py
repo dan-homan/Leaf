@@ -88,6 +88,10 @@ def main():
     ap.add_argument("--publish", default=None,
                     help="Optionally bake a .nnue here every --publish-every games")
     ap.add_argument("--publish-every", type=int, default=512)
+    ap.add_argument("--publish-stamped", action="store_true",
+                    help="Keep every bake as <base>-<games>g.nnue instead of "
+                         "overwriting one file -- gives a rateable ladder of the "
+                         "online trajectory (7.10)")
     ap.add_argument("--seed", type=int, default=1,
                     help="Base opening-shuffle seed")
     ap.add_argument("--delete-consumed", action="store_true",
@@ -139,6 +143,8 @@ def main():
     if args.publish:
         learner_cmd += ["--publish", args.publish,
                         "--publish-every", str(args.publish_every)]
+        if args.publish_stamped:
+            learner_cmd += ["--publish-stamped"]
     if args.delete_consumed:
         learner_cmd += ["--delete"]
     if args.refresh_scores:

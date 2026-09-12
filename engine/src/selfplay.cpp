@@ -545,17 +545,36 @@ struct LearnerConfig {
     bool  delete_consumed;  // default: archive consumed files to <dir>/done/
     const char *publish;    // optional: bake current weights to this .nnue
     int   publish_every;    // games between bakes
+    bool  publish_stamp;    // name each bake <base>-<games>g.nnue and keep it
     bool  refresh_scores;   // Flavor A: re-eval leaf statics with current weights
 };
 
-static void learner_publish(const char *path)
+// Bake the learner's current weights to a .nnue.
+//
+// stamp=false (default): always the same path, overwritten each time -- a
+// "latest weights" file.  stamp=true (--publish-stamped): "<base>-<games>g.nnue"
+// so each bake is kept, giving a rateable ladder of the online trajectory.  The
+// checkpoint ladder is the only way to tell a handoff overshoot (drop then
+// partial recovery) from equilibration (monotone approach); endpoint
+// measurements cannot distinguish them.  See Online_Learning_Investigation 7.10.
+static void learner_publish(const char *path, long games, bool stamp)
 {
+    char stamped[FILENAME_MAX];
+    const char *out = path;
+    if (stamp) {
+        size_t n = strlen(path);
+        const char *ext = (n > 5 && !strcmp(path + n - 5, ".nnue")) ? path + n - 5 : nullptr;
+        if (ext) snprintf(stamped, sizeof(stamped), "%.*s-%ldg.nnue",
+                          (int)(n - 5), path, games);
+        else     snprintf(stamped, sizeof(stamped), "%s-%ldg.nnue", path, games);
+        out = stamped;
+    }
     char tmp[FILENAME_MAX];
-    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
-    if (nnue_write_nnue(tmp) && rename(tmp, path) == 0)
-        fprintf(stderr, "learner: published %s\n", path);
+    snprintf(tmp, sizeof(tmp), "%s.tmp", out);
+    if (nnue_write_nnue(tmp) && rename(tmp, out) == 0)
+        fprintf(stderr, "learner: published %s\n", out);
     else
-        fprintf(stderr, "learner: failed to publish %s\n", path);
+        fprintf(stderr, "learner: failed to publish %s\n", out);
 }
 
 // Process one .tdg file: validate, rebuild records, run the online update.
@@ -620,6 +639,7 @@ int learner_main(int argc, char *argv[])
     cfg.delete_consumed = false;
     cfg.publish         = nullptr;
     cfg.publish_every   = 512;
+    cfg.publish_stamp   = false;
     cfg.refresh_scores  = false;
     snprintf(cfg.tdleaf_out, sizeof(cfg.tdleaf_out), "%s%s",
              engine_cfg.exec_path, NNUE_TDLEAF_BIN);
@@ -633,6 +653,7 @@ int learner_main(int argc, char *argv[])
         else if (!strcmp(argv[ai], "--publish") && ai + 1 < argc) cfg.publish = argv[++ai];
         else if (!strcmp(argv[ai], "--publish-every") && ai + 1 < argc)
             cfg.publish_every = atoi(argv[++ai]);
+        else if (!strcmp(argv[ai], "--publish-stamped")) cfg.publish_stamp = true;
         else if (!strcmp(argv[ai], "--delete"))         cfg.delete_consumed = true;
         else if (!strcmp(argv[ai], "--refresh-scores")) cfg.refresh_scores  = true;
         else if (!strcmp(argv[ai], "--lr-scale") && ai + 1 < argc)
@@ -724,7 +745,7 @@ int learner_main(int argc, char *argv[])
                 if (consumed % 100 == 0)
                     fprintf(stderr, "learner: %ld games consumed\n", consumed);
                 if (cfg.publish && since_publish >= cfg.publish_every) {
-                    learner_publish(cfg.publish);
+                    learner_publish(cfg.publish, consumed, cfg.publish_stamp);
                     since_publish = 0;
                 }
                 if (cfg.total_games && consumed >= cfg.total_games) { stopping = true; break; }
@@ -736,7 +757,7 @@ int learner_main(int argc, char *argv[])
     }
 
     tdleaf_flush_batch(cfg.tdleaf_out);
-    if (cfg.publish) learner_publish(cfg.publish);
+    if (cfg.publish) learner_publish(cfg.publish, consumed, cfg.publish_stamp);
     fprintf(stderr, "learner: done — %ld games consumed, %ld rejected\n",
             consumed, rejected);
     delete grec;

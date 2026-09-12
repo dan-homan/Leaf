@@ -790,6 +790,12 @@ def main():
     ap.add_argument("--nodes", type=int, default=0,
                     help="Node budget per move for generation (0 = fixed depth). "
                          "--depth becomes a ceiling; see selfplay_run.py --nodes")
+    ap.add_argument("--ladder", type=int, default=0, metavar="N",
+                    help="During generation, bake a stamped .nnue every N games "
+                         "into <tag>_work/ as <tag>-ladder-<games>g.nnue.  Gives "
+                         "a rateable trajectory of the online phase, which is "
+                         "the only way to tell a handoff overshoot from "
+                         "equilibration (7.10)")
     ap.add_argument("--opt-reset", action="store_true",
                     help="Online phase discards the Adam moments left by the "
                          "offline trainer (different objective, different "
@@ -1172,6 +1178,9 @@ def main():
             "--tdleaf-out", f"{netbase}.tdleaf.bin",
             "--delete-consumed", "--refresh-scores",
             "--lr-scale", args.lr_scale,
+            *(["--publish", str(work / f"{args.tag}-ladder.nnue"),
+               "--publish-every", str(args.ladder), "--publish-stamped"]
+              if args.ladder else []),
             *(["--opt-reset"] if args.opt_reset else []),
             *(["--grad-norm"] if args.grad_norm else []),
             "--seed", seed],
