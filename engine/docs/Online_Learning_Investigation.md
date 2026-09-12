@@ -16,6 +16,22 @@ here is the only place that reflects all six parts at once.
 
 ## TL;DR — standing conclusions (current, through Part 7)
 
+0. **⚠️ Most of the online phase's measured cost was an optimizer bug, and the
+   conclusions below were drawn while paying it.**  The Adam second moment is
+   shared and persisted between two objectives — online TDLeaf and offline
+   `--batch-train` — which run at accumulated-gradient norms of 0.168 and 0.039.
+   Nothing reset it at the boundary (`TDLEAF_ADAM_WARMUP` is keyed on the
+   *persisted* `t_adam`, so it has been a no-op since the first session ever
+   run), so the first ~1000 Adam steps of every online phase were oversized by
+   the scale ratio.  That is ~8000 games, which is why the damage was complete
+   by 30k games and why it scaled with the learning rate and not with run
+   length.  `--opt-reset --grad-norm` cuts the online cost from **−123.4 ± 9.3
+   to −32.4 ± 8.6 (7.2σ)** — Part 7.10.  Every leg from `1e5g` to `7e6g`, and
+   every arm in Parts 6 and 7, ran with the bug.  Whether fixing it changes the
+   loop's *yield* is not yet known: cost and recovery have moved together at
+   every setting measured, so the plateau may survive.  Read 1–7 below with
+   this in mind.
+
 1. **Keep online learning ON during generation — ⚠️ SUSPENDED by Part 7.**
    The argument below rests on a learning generator's corpus being worth +52–85
    where a frozen one is worth ~0.  Part 7.3 measures the learning corpus at
@@ -3576,8 +3592,174 @@ total, so they are measurable at a fifth of the games while the leg total
 is not measurable at 500k anyway.  Two arms (`k = 0.25`, `k = 0.5`) cost about
 one day together and bracket the interesting region.
 
+## 7.10 The front-loaded online loss is an Adam phase-boundary artifact (2026-09-11)
+
+D. Homan, reading 7.9's `lr25` result: *"My hypothesis is that most of the ~150
+Elo loss that we saw in the last 7e6g tdleaf leg happened in the early games of
+the 500k run."*  That turned out to be right, and chasing why led to a bug that
+accounts for three quarters of the loss.
+
+### 7.10.1 The loss is complete within 30k games
+
+The actors are frozen and respawned every 1000 games each, so each generation is
+a 14,000-game sample of the net as it stood at that moment — a 36-point time
+series that was already on disk for every leg ever run.  For `7e6g`:
+
+| | gen 1 | gen 3 | gens 4–36 |
+|---|---|---|---|
+| draw rate | 37.8% | 35.6% | 35.6% ± 0.5, no trend |
+| MSE(outcome) | 0.0723 | 0.0735 | 0.0735 ± 0.0008, no trend |
+| mean \|cp\| | 244 | 260 | 258 ± 4, no trend |
+| mean game length | 90.9 ply | 86.2 | 87.0 ± 1, no trend |
+
+Generation 1's actors *are* the starting net, so the entire character change
+happens within one or two refresh cycles and then nothing moves for 470,000
+games.  This also rules out diffusion: a random walk away from an optimum grows
+as √t and would keep drifting.  It steps once and plateaus.
+
+Elo confirms it directly.  Holding η = 1.0 and varying only run length, the
+online cost (tdleaf net vs the leg's own starting net):
+
+| games | online cost |
+|---|---|
+| 30,000 | −123.4 ± 9.3 |
+| 100,000 | −125.4 ± 9.6 |
+| 500,000 | −130.9 ± 9.1 |
+
+Flat across a 17× range.  **96% of a 500k leg's online damage is present at
+30k games.**
+
+### 7.10.2 …and it scales with the learning rate, not the games
+
+At matched 100k games, η = 0.25 gave −34.2 ± 8.6 against η = 1.0's
+−125.4 ± 9.6 — a ratio of 0.27 against an η ratio of 0.25.  The epoch ladder
+agreed (+32 vs +122, ratio 0.26), and so did the draw-rate *shift* from the
+common starting net (−1.2 pp vs −2.2 pp, ratio 0.55 ≈ √0.25, the exponent you
+expect if Elo loss goes as displacement² while displacement goes as √η).
+
+Four candidate readings were on the table: a local maximum that must be
+traversed; a narrow ascending path that the step size cannot follow; relaxation
+to a systematically displaced fixed point; and a stochastic noise ball whose
+radius is set by η.  The step-size-independent-attractor version was refuted by
+the 100k control (predicted −34, measured −125.4, a 9σ miss).  Everything else
+pointed at the noise ball — and, as it turned out, at something more specific.
+
+### 7.10.3 The mechanism
+
+`nnue_apply_gradients` is shared by two different objectives — the online
+TDLeaf learner and the offline `--batch-train` — and so is the Adam moment
+store, which is persisted in the `.tdleaf.bin`.  Measured accumulated-gradient
+L2 norms at the boundary:
+
+| phase | gradient norm | positions per Adam step |
+|---|---|---|
+| offline batch-train | 0.039 (0.028–0.069) | 512 (`--bt-batch`) |
+| online TDLeaf, first steps | 0.168 (0.092–0.313) | 8 games × 150.4 ply = 1203 |
+
+A 4.31× jump.  **Neither path normalises by sample count**, so 2.35× of that is
+purely the batch-size difference and the remaining 1.8–2.8× is a real
+per-sample difference between the objectives.  For the transient it does not
+matter which: Adam sees the accumulated vector, and `v` arrives calibrated to
+`E[g²] ≈ 0.039²` in a regime where `g ≈ 0.168`.  Every step is oversized by the
+scale ratio until `v` re-estimates, which takes `1/(1−β₂) = 1000` steps — at 8
+games per step, **~8,000 games**, with full equilibration by ~24,000.  That is
+the 14–28k window the proxies show.
+
+Nothing covers it.  `TDLEAF_ADAM_WARMUP = 50` is keyed on the **persisted**
+`t_adam` (~5.2M by this point), so `warmup_factor` has been hard 1.0 since the
+first session ever run.  The codebase already knows this failure mode — the
+session-local `t_ft_session` exists precisely to stop oversized FT steps after a
+restart — but that protection covers FT weights only.  FC0/FC1/FC2, the biases
+and PSQT had none.
+
+### 7.10.4 The A/B
+
+Two 30k-game online-only arms from `m260720-7e6g_final`, identical but for the
+flags.  30k is enough because of 7.10.1; the corpus was deliberately tiny (3M
+rows) because the `-tdleaf` net is baked *before* consolidation, so the offline
+pass cannot influence the number.
+
+| arm | flags | tdleaf vs `7e6g-final` | tdleaf vs `classic_eval` |
+|---|---|---|---|
+| A | none | −123.4 ± 9.3 | +81.4 ± 10.2 |
+| B | `--opt-reset --grad-norm` | **−32.4 ± 8.6** | **+160.6 ± 11.3** |
+
+**+91.0 ± 12.7, or 7.2σ**, with the foreign anchor agreeing independently
+(+79.2).  Roughly three quarters of the front-loaded online loss was an
+optimizer artifact: not exploration, not a local maximum, not a necessary
+traverse.  Arm A ran the pre-change code path bit-for-bit (verified: with the
+flags off, a 24-game learner run is byte-identical to a binary built from the
+parent commit).
+
+### 7.10.5 What this retro-explains, and what is left
+
+`lr25`'s −34.2 at η = 0.25 is almost exactly the artifact at quarter strength
+(0.25 × 123.4 = **30.9**), and arm B's artifact-free residual at full η is
+**−32.4**.  The L ∝ η scaling that five separate observables agreed on in 7.9
+was the *artifact* scaling with the learning rate, not the learning.  It is also
+why the two LR arms produced statistically identical final nets
+(−0.7 ± 8.3, 7.10.6): both were paying an optimizer tax that consolidation
+reverses either way, so the size of the excursion never reached the outcome.
+
+Three things this does **not** establish:
+
+- **Which fix did the work.**  The flags were tested together.  `--opt-reset`
+  should dominate — a cold `v` re-learns whatever scale `--grad-norm` sets —
+  but that is a guess until a single-flag arm runs.
+- **Whether the residual −32.4 is real.**  It may be genuine online
+  displacement, or a smaller remaining artifact.
+- **Whether the loop gets better.**  Cost and recovery have moved together at
+  every setting measured (−131/+137, −34/+24), so a full leg could still net
+  ~+7 with both halves merely scaled down.  What is different here is that this
+  is the first intervention to move consolidation's *starting point* by 91 Elo
+  rather than rescaling both halves of the loop.
+
+### 7.10.6 Two direct matches against a common opponent do not subtract
+
+Worth recording separately, because it invalidated a conclusion mid-analysis.
+Asked which LR arm produced the better final net:
+
+| route | verdict |
+|---|---|
+| paired (both vs `7e6g-final`, differenced) | `lr100` better by 24.3 ± 11.8 |
+| anchor (both vs `classic_eval`, differenced) | `lr25` better by 10.4 ± 16.3 |
+| **direct match, 1000 games** | **0.7 ± 8.3** |
+
+Both indirect routes were wrong, in opposite directions, the paired one by
+2.1σ — and paired is the route 7.9.1 argued was the reliable one.  A *single*
+direct match against the previous leg's net is sound, and that is what every
+leg total in this document is.  **Differencing two such matches is not**: the
+non-transitivity between family and foreign opponents does not cancel.  When
+two arms need comparing, play them against each other; at 1000 games it costs
+23 minutes.
+
 ## Methodology notes (Part 7)
 
+- 7.10's per-generation series are aggregated from the `done — N played
+  (+W =D -L)` lines across all 14 `<tag>_work/traj/actor_*.log`, indexed by
+  generation (each actor respawns every `--games-per-actor`, so index i is the
+  same wall-clock slice for every actor).  MSE(outcome), mean |cp| and mean ply
+  are a 10% row sample of the leg's root dump, binned by row index — the
+  learner writes the dump in trajectory-consumption order, so row index is time
+  order.
+- The 7.10.4 arms used `--corpus-window 0 --corpus-rows 3000000`, which makes
+  the consolidation deliberately useless.  That is intentional: `train.py` bakes
+  the `-tdleaf` net *before* `--batch-train` runs, so the online cost is
+  independent of the offline pass, and shrinking it turned a 4h arm into a 2.5h
+  one.  The `-final` rows from those two arms (−82.1 and −14.3) carry no
+  information about leg quality and must not be read as such.
+- Gradient norms in 7.10.3 are the `TDLeaf clip stats` telemetry, which reports
+  the L2 norm of the **accumulated** gradient at the moment of the Adam step —
+  a sum over the batch, not a per-sample mean, in both paths.  `--grad-norm`
+  deliberately scales *after* `nnue_clip_gradients` so this telemetry and the
+  clip threshold keep their historical meaning and stay comparable with the
+  logs quoted here.
+- Two earlier attempts to demonstrate the mechanism in a 24-game micro-test were
+  invalid and are not reported above: the learner loads its state from the
+  compiled-in `NNUE_TDLEAF_BIN`, **not** from `--tdleaf-out`, so both runs had
+  silently picked up an already-online-calibrated `v` and had no stale-`v`
+  condition to fix.  A transient that plays out over ~1000 Adam steps cannot be
+  seen in 3 applies regardless; scale was always going to be the only test.
 - 7.9's per-leg figures come from the run sidecars
   (`learn/m260720-*_final.json`, keys `final_gauntlet` / `tdleaf_gauntlet` /
   `epoch_ladder`); the val-MSE ladder from `<tag>_work/train/train.log`; the
