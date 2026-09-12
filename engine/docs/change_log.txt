@@ -1,5 +1,44 @@
 Changes since 2017_12_24
 
+2026_09_12a -- CORRECTION: the stale-Adam-moment mechanism from 2026_09_11a is
+               refuted.  --opt-reset does nothing for online damage.
+
+               The 2026_09_11a A/B tested --opt-reset and --grad-norm together
+               and attributed the 91 Elo to stale second moments.  A third arm
+               isolating --opt-reset (optfix-C, same 30k games, same seed, same
+               corpus) returns -129.3 +- 9.9 against the control's -123.4 +- 9.3
+               -- no effect at all.  All 91 Elo came from --grad-norm.
+
+               And --grad-norm is not the principled normalisation it looks
+               like.  With v cold in BOTH runs -- so the persisted moments
+               cannot be the variable -- it still shrinks the step (fc0_bias
+               med|dw| 2.00 -> 0.00 over 3 applies).  The cause is
+               TDLEAF_ADAM_EPS = 1e-8 in m_hat/(sqrt(v_hat) + EPS): dividing
+               gradients by ~1200 drops sqrt(v_hat) toward the floor, so
+               low-gradient weights stop getting full-size normalised steps.
+               Functionally that is a learning-rate cut, and 7.9 already showed
+               a learning-rate cut leaves the final net unchanged (lr25 vs
+               lr100 head-to-head, -0.7 +- 8.3).
+
+               No code is reverted: both flags still default OFF, the historical
+               path is still bit-identical with them off, and the observations
+               behind 2026_09_11a stand (the gradient norms really do differ
+               4.31x across the phase boundary, and TDLEAF_ADAM_WARMUP really
+               has been a no-op since the first session ever run because it is
+               keyed on the persisted t_adam).  What is withdrawn is the causal
+               claim, not the measurements.
+
+               One unexplained lead worth following: at online damage
+               indistinguishable from the control, --opt-reset improved the
+               FINAL net by +36.0 +- 12.6 (2.9 sigma), doubling the offline
+               recovery (+83.2 against +41.3).  Whatever it does, it acts on the
+               optimizer state handed forward into --batch-train rather than on
+               generation.  Provisional: 3M-row consolidation, unshared corpora
+               between arms, single measurement.
+
+               Docs: 7.10 retitled and given a correction banner, new 7.10.7
+               with the attribution arm, standing conclusion 0 rewritten.
+
 2026_09_11a -- --opt-reset / --grad-norm: the Adam moments are shared between two
                different objectives, and nothing resets them at the boundary.
 

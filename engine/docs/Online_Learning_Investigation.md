@@ -16,21 +16,23 @@ here is the only place that reflects all six parts at once.
 
 ## TL;DR — standing conclusions (current, through Part 7)
 
-0. **⚠️ Most of the online phase's measured cost was an optimizer bug, and the
-   conclusions below were drawn while paying it.**  The Adam second moment is
+0. **⚠️ The online phase's cost is front-loaded and its cause is NOT known.**
+   Retracted claim: an earlier version of this entry said the cost "was an
+   optimizer bug".  It is not — see the correction banner on 7.10.  The Adam second moment is
    shared and persisted between two objectives — online TDLeaf and offline
    `--batch-train` — which run at accumulated-gradient norms of 0.168 and 0.039.
    Nothing reset it at the boundary (`TDLEAF_ADAM_WARMUP` is keyed on the
    *persisted* `t_adam`, so it has been a no-op since the first session ever
-   run), so the first ~1000 Adam steps of every online phase were oversized by
-   the scale ratio.  That is ~8000 games, which is why the damage was complete
-   by 30k games and why it scaled with the learning rate and not with run
-   length.  `--opt-reset --grad-norm` cuts the online cost from **−123.4 ± 9.3
-   to −32.4 ± 8.6 (7.2σ)** — Part 7.10.  Every leg from `1e5g` to `7e6g`, and
-   every arm in Parts 6 and 7, ran with the bug.  Whether fixing it changes the
-   loop's *yield* is not yet known: cost and recovery have moved together at
-   every setting measured, so the plateau may survive.  Read 1–7 below with
-   this in mind.
+   run).  Resetting them (`--opt-reset`) changes the online cost not at all
+   (−129.3 ± 9.9 against −123.4 ± 9.3), so that is not the mechanism.  What IS
+   established (7.10.1–2): the cost is complete within 30,000 games — flat at
+   −123/−125/−131 across 30k/100k/500k — and scales with the learning rate
+   rather than with run length.  `--grad-norm` cuts it to −32.4 ± 8.6, but
+   through the `TDLEAF_ADAM_EPS` floor, which makes it a learning-rate cut in
+   disguise; 7.9 showed a learning-rate cut leaves the final net unchanged
+   (`lr25` vs `lr100`, −0.7 ± 8.3).  One unexplained lead: at matched damage
+   `--opt-reset` improved the *final* net by +36.0 ± 12.6 (7.10.7), acting on
+   the handoff into consolidation rather than on generation.
 
 1. **Keep online learning ON during generation — ⚠️ SUSPENDED by Part 7.**
    The argument below rests on a learning generator's corpus being worth +52–85
@@ -3592,7 +3594,32 @@ total, so they are measurable at a fifth of the games while the leg total
 is not measurable at 500k anyway.  Two arms (`k = 0.25`, `k = 0.5`) cost about
 one day together and bracket the interesting region.
 
-## 7.10 The front-loaded online loss is an Adam phase-boundary artifact (2026-09-11)
+## 7.10 The front-loaded online loss (2026-09-11, corrected 2026-09-12)
+
+> **⚠️ CORRECTION (2026-09-12).**  The original title of this section was "…is
+> an Adam phase-boundary artifact" and 7.10.3–7.10.5 below argued that stale
+> Adam second moments caused the loss.  **That mechanism is refuted.**  The A/B
+> tested `--opt-reset` and `--grad-norm` together; a third arm isolating
+> `--opt-reset` (7.10.7) shows the reset does **nothing** for online damage
+> (−129.3 ± 9.9 against the control's −123.4 ± 9.3).  All 91 Elo came from
+> `--grad-norm`, and it works through a numerical accident rather than a fix:
+> `TDLEAF_ADAM_EPS = 1e-8` sits in `m_hat / (sqrt(v_hat) + EPS)`, so dividing
+> gradients by ~1200 pushes `sqrt(v_hat)` toward the floor and low-gradient
+> weights stop receiving full-size normalised steps.  Functionally that is a
+> learning-rate cut, and 7.9 already measured what a learning-rate cut buys:
+> nothing (`lr25` and `lr100` finals identical at −0.7 ± 8.3).
+>
+> **What survives:** 7.10.1 (the loss is complete by 30k games), 7.10.2 (it
+> scales with η, not games) and 7.10.6 (differencing two matches against a
+> common opponent does not work) are measurements and stand unchanged.
+> 7.10.3's *observations* stand — the gradient norms really do differ 4.31×
+> across the boundary, and `TDLEAF_ADAM_WARMUP` really has been a no-op since
+> the first session ever run — but its causal claim does not.
+>
+> **What is new and unexplained:** at matched online damage, `--opt-reset`
+> improved the *final* net by **+36.0 ± 12.6 (2.9σ)**, doubling the offline
+> recovery (+83.2 against +41.3).  See 7.10.7.  Whatever the reset does, it
+> acts on the handoff *into* consolidation, not on the online phase.
 
 D. Homan, reading 7.9's `lr25` result: *"My hypothesis is that most of the ~150
 Elo loss that we saw in the last 7e6g tdleaf leg happened in the early games of
@@ -3732,6 +3759,44 @@ leg total in this document is.  **Differencing two such matches is not**: the
 non-transitivity between family and foreign opponents does not cancel.  When
 two arms need comparing, play them against each other; at 1000 games it costs
 23 minutes.
+
+### 7.10.7 The attribution arm, and what it overturned
+
+`optfix-C`: `--opt-reset` alone, otherwise byte-identical to A and B — same
+30k games, same seed state, same 3M-row corpus, same gauntlet.
+
+| arm | `--opt-reset` | `--grad-norm` | tdleaf vs `7e6g-final` | final vs `7e6g-final` | recovery |
+|---|---|---|---|---|---|
+| A | – | – | −123.4 ± 9.3 | −82.1 ± 9.1 | +41.3 |
+| C | ✓ | – | −129.3 ± 9.9 | −46.1 ± 8.7 | +83.2 |
+| B | ✓ | ✓ | −32.4 ± 8.6 | −14.3 ± 8.5 | +18.2 |
+
+Two results, pulling in different directions.
+
+**`--opt-reset` does not reduce online damage** (C − A = −5.9 ± 13.6).  The
+stale-`v` mechanism predicted it would, and it does not.  Confirmed
+independently: with `v` cold in *both* runs — so the persisted moments cannot be
+the variable — `--grad-norm` still shrinks the step (fc0_bias med|dw| 2.00 → 0.00,
+fc2_bias 3.00 → 1.00 over 3 applies).  Adam is not scale-invariant at this
+gradient magnitude because of the epsilon floor, which is the whole of
+`--grad-norm`'s effect.
+
+**`--opt-reset` does improve the final net, by +36.0 ± 12.6 (2.9σ)**, at online
+damage indistinguishable from the control.  The offline recovery doubles.  This
+was not predicted by anything and is the one genuinely new result of the arm.
+Treat it as provisional: a 3M-row consolidation is far too weak to repair a
+−125 excursion, each arm consolidated *its own* 30k games so the corpora are not
+shared, and 2.9σ on a single undersized measurement is a candidate, not a
+finding.  A plausible reading is that what the reset changes is the optimizer
+state handed *forward* to `--batch-train`, not anything about generation — but
+that is a hypothesis with one data point behind it.
+
+**The B > C > A ordering of final nets tracks online damage exactly**, which is
+what you see when consolidation is too weak to repair.  `lr25` vs `lr100` is the
+control for this: with a real 190M corpus, damage of −34 and −125 produced
+final nets that were identical.  So B's apparent advantage here is most likely
+an artifact of the undersized corpus and should not be expected to survive a
+full leg.
 
 ## Methodology notes (Part 7)
 
