@@ -1,5 +1,67 @@
 Changes since 2017_12_24
 
+2026_09_13d -- Recalibrate the fc0_w learning rate from THIS net's statistics;
+               split FC1 weights onto their own constant.
+
+               TDLEAF_ADAM_LR0 0.005 -> 0.0014, new TDLEAF_ADAM_FC1_LR0 held
+               at 0.005.  The "0.001 x median" rule came from Stockfish-v15
+               net statistics and was never checked against Leaf's own net.
+
+               Measure the FP32 shadows, not the exported .nnue: .tdleaf.bin
+               stores them at TDLEAF_SCALE = 128, and the .nnue medians used
+               in 7.11.5 are integer-rounded (fc0_w "3.0" is really 2.53) and
+               include structural padding.  Re-measured over touched weights,
+               the LR/median spread is 19.3x, not 11x, and the aggregate sits
+               1.8x hotter than the rule it was meant to follow.
+
+               The sections split into TWO KINDS across the whole m260720
+               chain, and only one kind obeys a magnitude rule:
+
+                 STATIONARY -- scale set at init, never moves:
+                   fc0_w   RMS 3.881 (fresh init) -> 3.863 (7e6 games)
+                   ft_w    RMS 44.01 -> 40.01   (-9%, AdamW)
+                   psqt_w  RMS 3.581e4 -> 3.629e4
+                 SCALE-FINDING -- start at or near ZERO, so the LR is a growth
+                 rate and there is no magnitude to calibrate against:
+                   fc2_w   1.923 -> 15.52 by 1e5 games -> 35.70
+                   fc0_b / fc1_b / fc2_b / ft_b   0 -> 1422 / 896 / 1191 / 26.4
+                 (all five bias sections init to EXACTLY zero -- He init plus
+                 an explicit memset for the FT bias.)
+
+               Among the stationary sections ft_w and psqt_w already agree on
+               a common ratio to 6% (LR/RMS 0.00034 and 0.00036).  fc0_w sat
+               at 0.00129 -- 3.7x hot -- and is also by far the largest
+               contributor to online weight displacement: 13.5% of its own RMS
+               over 30k games against ft_w's 1.18% and psqt_w's 0.54%.
+               0.0014 = 0.00035 x 3.88 puts all three on one ratio.
+
+               fc1_w is deliberately NOT recalibrated: it is not stationary
+               (RMS 3.00 -> 6.65), so it has no fixed magnitude to calibrate
+               against, and holding it fixed isolates fc0_w as the single
+               changed variable in the lrfc0 30k ladder arm.
+
+               Two consequences for the planned from-scratch restart:
+
+                 - the bias sections' fixed absolute LR is a SELF-ANNEALING
+                   schedule (fc0_b ran at 27x the rule at 1e5 games and 1.7x
+                   now, purely because the weights grew into the constant).
+                   Sizing them off MATURE magnitudes would start a fresh net
+                   with a bias LR that cannot move a section sitting at zero.
+                 - 7.11.5 checked drift on the WEIGHTS and found them flat,
+                   which is right; it never checked the BIASES, which grew
+                   monotonically 3-16x across the chain and are still rising
+                   at 7e6 games (fc2_b +28% in the final leg alone).
+
+               Tooling:
+                 - train.py --seed overrides the crc32(tag) generation seed so
+                   an arm can be SEED-PAIRED with a previous one.  Arm-to-arm
+                   seed variance is ~26 Elo (7.11.9) and swamps most effects
+                   being measured.  Recorded in the run sidecar.
+                 - the TDLeaf startup banner reports FC0 and FC1 separately.
+
+               Serial and parallel apply paths patched symmetrically to keep
+               the bit-identity documented at nnue_apply_gradients_parallel.
+
 2026_09_13c -- Part 7.11: the online damage is an EQUILIBRIUM set by step size.
                Four optimizer mechanisms proposed, four rejected.
 
