@@ -1,5 +1,53 @@
 Changes since 2017_12_24
 
+2026_09_13a -- Uniform session warmup for --opt-reset: TDLEAF_ADAM_WARMUP 50 -> 1000,
+               keyed on the session clock, applied to every category.
+
+               --opt-reset zeroed m/v and relied on bias correction for the first
+               step.  That fixes the EXPECTED step magnitude but not its variance:
+               with v built from one sample the per-weight normalisation is noise
+               for the first few dozen steps.  A ramp is what damps that, and
+               there was none -- TDLEAF_ADAM_WARMUP has been keyed on the
+               PERSISTED t_adam (~5.2M) and dead since the first session ever run.
+               So the moment hypothesis was tested with half the mechanism absent
+               (D. Homan's observation).
+
+                 nnue_warm_t()   returns t_session when the moments were reset,
+                                 else t_adam -- so the ramp runs on this session's
+                                 clock after --opt-reset and keeps its historical
+                                 meaning otherwise.  Patched into BOTH the serial
+                                 and parallel apply paths.
+                 WARMUP = 1000   = 1/(1-beta2), the time constant for Adam's second
+                                 moment, so the ramp lasts exactly as long as v
+                                 needs to become usable.  At batch 8 that is 8000
+                                 games, leaving 22k of a 30k arm at full step size.
+                 ft_session_factor is forced to 1.0 when the moments were reset --
+                                 the uniform ramp already covers FT weights and
+                                 applying both would double-ramp them.
+
+               The .nnue section diff over the 30k ladder is what motivated the
+               "same warmup everywhere" requirement.  Cumulative RMS displacement
+               as a fraction of each section's own RMS weight, 30k/1k ratio,
+               against the 5.48 a constant-rate random walk would give:
+
+                 ft_bias 1.34   fc1_w 1.35   fc0_w 1.40   fc1_bias 1.60
+                 fc0_bias 1.76  fc2_w 2.30   fc2_bias 2.44
+                 ft_w 2.57      psqt_w 3.18
+
+               fc0_w moves 9.6% of its own RMS in the first 1000 games -- 72% of
+               its entire 30k displacement in 3% of the games.  Note ft_w (2.57)
+               against ft_bias (1.34): same transformer, same data, and the only
+               difference is that ft_session_factor ramps the weights and not the
+               biases.  The section with a session ramp is the one WITHOUT the
+               early spike, which is the best evidence available that a ramp
+               suppresses it.
+
+               Verified: with no flags the binary is bit-identical to one built
+               from the parent commit; with --opt-reset the first-batch
+               displacement drops (fc0_bias/fc2_bias med|dw| 2.00/2.50 -> 0.00).
+               A TDLEAF_LOG_STEP_CLIPS=1 build is also bit-identical on the
+               default path, so the step telemetry is inert.
+
 2026_09_12b -- TDLEAF_ADAM_EPS 1e-8 -> 1e-12.
 
                At 1e-8 the epsilon in m_hat/(sqrt(v_hat) + EPS) is not

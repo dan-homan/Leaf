@@ -155,7 +155,15 @@ static const float TDLEAF_ADAM_EPS      = 1e-12f;  // numerical floor.  Lowered
 // Applied to FC weights and FT weights only (not biases, not PSQT).
 // Set to 0.0 to disable.
 static const float TDLEAF_WEIGHT_DECAY  = 1e-4f; //1e-4f;   // decoupled weight decay coefficient
-static const int   TDLEAF_ADAM_WARMUP        = 50;  // linear LR warmup over first N Adam steps (0 = disabled)
+static const int   TDLEAF_ADAM_WARMUP        = 1000; // linear LR warmup over first N Adam
+                                        // steps, ALL categories.  1000 = 1/(1-beta2), the
+                                        // time constant for Adam's second moment, so the
+                                        // ramp lasts exactly as long as it takes v to
+                                        // become a usable per-weight estimate.  At batch 8
+                                        // that is 8000 games.  Sized from the 30k ladder,
+                                        // which put the online damage complete by ~5000
+                                        // games / ~600 steps.  Keyed on the SESSION clock
+                                        // after --opt-reset, else on persisted t_adam.
                                                      // Keyed on t_adam (persisted) so only fires in first session.
 static const int   TDLEAF_FT_SESSION_WARMUP  = 100; // per-session FT LR ramp over first N Adam steps.
                                                      // Applied every restart via t_ft_session (not persisted).

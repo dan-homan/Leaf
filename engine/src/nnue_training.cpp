@@ -195,6 +195,12 @@ static bool      opt_cold  = false;
 // See nnue.h.  Set from --grad-norm (learner) / --bt-grad-norm (batch trainer).
 bool nnue_grad_normalize = false;
 
+// Warmup step count: after --opt-reset the moments are cold and Adam needs
+// ~1/(1-beta2) steps to build a usable per-weight v, so the ramp must run on
+// THIS session's clock.  Otherwise keep the historical meaning (persisted
+// t_adam, i.e. fires only on a brand-new net).
+static inline uint32_t nnue_warm_t() { return opt_cold ? t_session : t_adam; }
+
 // Full per-weight Adam step (bias-corrected), returns the LR-scaled update dw.
 // Shared by FC weights/biases, FC2, PSQT, and FT biases — only the LR and the
 // telemetry accumulators differ.  Was three identical `do_step*` lambdas inside
@@ -1261,20 +1267,22 @@ void nnue_apply_gradients(float lr_scale)
     const float    ft_bc2_cold  = 1.0f - powf(TDLEAF_ADAM_BETA2, (float)ft_t);
     const float    ft_bc2_warm  = 1.0f - powf(TDLEAF_ADAM_BETA2, (float)t_adam);
 
-    // Linear LR warmup: ramp from 0 to full over the first WARMUP Adam steps.
-    // Keyed on t_adam (persisted), so this only fires during the very first session.
-    const float warmup_factor = (TDLEAF_ADAM_WARMUP > 0 && t_adam <= (uint32_t)TDLEAF_ADAM_WARMUP)
-        ? (float)t_adam / (float)TDLEAF_ADAM_WARMUP
+    // Linear LR warmup over the first TDLEAF_ADAM_WARMUP Adam steps.  Applied to
+    // EVERY category (FC weights and biases, FT weights and biases, PSQT) so no
+    // section is released at full rate while the others are still ramping.
+    const uint32_t warm_t = nnue_warm_t();
+    const float warmup_factor = (TDLEAF_ADAM_WARMUP > 0 && warm_t <= (uint32_t)TDLEAF_ADAM_WARMUP)
+        ? (float)warm_t / (float)TDLEAF_ADAM_WARMUP
         : 1.0f;
 
-    // Per-session FT LR warmup: ramp FT LR from 0→full over the first
-    // TDLEAF_FT_SESSION_WARMUP Adam steps of each session.  Damps FT weight
-    // updates during the v_ft_w accumulation phase at every restart, regardless
-    // of whether v was loaded from disk.  Keyed on t_ft_session (not persisted).
-    const float ft_session_factor =
-        (TDLEAF_FT_SESSION_WARMUP > 0 && t_ft_session <= (uint32_t)TDLEAF_FT_SESSION_WARMUP)
+    // Legacy per-session FT-weight ramp.  Superseded by the uniform warmup above
+    // whenever the moments were reset -- applying both would double-ramp FT and
+    // break the "same warmup everywhere" property.  Kept for the non-reset path
+    // so default behaviour is unchanged.
+    const float ft_session_factor = opt_cold ? 1.0f :
+        ((TDLEAF_FT_SESSION_WARMUP > 0 && t_ft_session <= (uint32_t)TDLEAF_FT_SESSION_WARMUP)
         ? (float)t_ft_session / (float)TDLEAF_FT_SESSION_WARMUP
-        : 1.0f;
+        : 1.0f);
 
     // Effective LRs.  lr_scale applied uniformly to all categories; the online
     // path passes 1.0, the offline batch trainer passes its --bt-lr.
@@ -1479,11 +1487,12 @@ static NNUEApplyParams nnue_apply_compute_params(float lr_scale)
     t_ft_session++;
     t_session++;
     const uint32_t ft_t       = std::min(t_adam, t_ft_session);
-    const float warmup_factor = (TDLEAF_ADAM_WARMUP > 0 && t_adam <= (uint32_t)TDLEAF_ADAM_WARMUP)
-        ? (float)t_adam / (float)TDLEAF_ADAM_WARMUP : 1.0f;
-    const float ft_session_factor =
-        (TDLEAF_FT_SESSION_WARMUP > 0 && t_ft_session <= (uint32_t)TDLEAF_FT_SESSION_WARMUP)
-        ? (float)t_ft_session / (float)TDLEAF_FT_SESSION_WARMUP : 1.0f;
+    const uint32_t warm_t = nnue_warm_t();
+    const float warmup_factor = (TDLEAF_ADAM_WARMUP > 0 && warm_t <= (uint32_t)TDLEAF_ADAM_WARMUP)
+        ? (float)warm_t / (float)TDLEAF_ADAM_WARMUP : 1.0f;
+    const float ft_session_factor = opt_cold ? 1.0f :
+        ((TDLEAF_FT_SESSION_WARMUP > 0 && t_ft_session <= (uint32_t)TDLEAF_FT_SESSION_WARMUP)
+        ? (float)t_ft_session / (float)TDLEAF_FT_SESSION_WARMUP : 1.0f);
     NNUEApplyParams p;
     p.fc_lr       = lr_scale * warmup_factor * TDLEAF_ADAM_LR0;
     p.fc2_lr      = lr_scale * warmup_factor * TDLEAF_ADAM_FC2_LR0;
