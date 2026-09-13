@@ -796,6 +796,12 @@ def main():
                          "a rateable trajectory of the online phase, which is "
                          "the only way to tell a handoff overshoot from "
                          "equilibration (7.10)")
+    ap.add_argument("--seed", type=int, default=None, metavar="N",
+                    help="Override the generation seed (default: crc32 of --tag). "
+                         "Pass a previous arm's seed to SEED-PAIR against it: "
+                         "arm-to-arm variance from the seed alone is ~26 Elo "
+                         "(7.11.9), which swamps most effects being measured. "
+                         "Not inherited through --continue.")
     ap.add_argument("--opt-reset", action="store_true",
                     help="Online phase discards the Adam moments left by the "
                          "offline trainer (different objective, different "
@@ -1158,7 +1164,8 @@ def main():
         if b"--learn-stream" not in blob:
             die("Leaf_vtrain_hl_a predates the --learn-stream driver — "
                 "rerun with --recompile")
-        seed = zlib.crc32(args.tag.encode()) & 0x7FFFFFFF
+        seed = (args.seed if args.seed is not None
+                else zlib.crc32(args.tag.encode()) & 0x7FFFFFFF)
         n_actors = max(1, int(args.concurrency) - 1)
         traj_dir = work / "traj"
         traj_dir.mkdir(exist_ok=True)
@@ -1673,6 +1680,8 @@ def main():
         "depth": args.depth,
         "nodes": args.nodes,
         "lr_scale": args.lr_scale,
+        "seed": (args.seed if args.seed is not None
+                 else zlib.crc32(args.tag.encode()) & 0x7FFFFFFF),
         "opt_reset": args.opt_reset,
         "grad_norm": args.grad_norm,
         "epochs": args.epochs,

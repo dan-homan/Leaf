@@ -270,7 +270,7 @@ static inline float nnue_adam_step(float g, float &m, float &v, uint32_t cnt,
 // passed to the per-stack / per-row helpers (below) so the batch trainer can
 // parallelize apply across the 8 FC stacks and the FT row space.
 struct NNUEApplyParams {
-    float fc_lr, fc2_lr, fc_bias_lr, ft_lr, ft_bias_lr, psqt_lr;
+    float fc_lr, fc1_lr, fc2_lr, fc_bias_lr, ft_lr, ft_bias_lr, psqt_lr;
     float ft_bc2_cold, ft_bc2_warm;
 };
 
@@ -1330,12 +1330,14 @@ void nnue_apply_gradients(float lr_scale)
     // Effective LRs.  lr_scale applied uniformly to all categories; the online
     // path passes 1.0, the offline batch trainer passes its --bt-lr.
     // FC LRs are split four ways:
-    //   fc_lr      — FC0/FC1 weights (int8 scale ~5)
+    //   fc_lr      — FC0 weights (int8 RMS ~3.9)
+    //   fc1_lr     — FC1 weights (int8 RMS ~3.0 at init, ~6.7 at 7e6 games)
     //   fc2_lr     — FC2 weights (int8 scale ~68; final 32→1 layer)
     //   fc_bias_lr — FC0/FC1/FC2 biases (int32 scale ~1500)
     // The split lets each section move at roughly the same fractional rate
     // per Adam step despite very different weight magnitudes.
     const float fc_lr      = lr_scale * warmup_factor * TDLEAF_ADAM_LR0;
+    const float fc1_lr     = lr_scale * warmup_factor * TDLEAF_ADAM_FC1_LR0;
     const float fc2_lr     = lr_scale * warmup_factor * TDLEAF_ADAM_FC2_LR0;
     const float fc_bias_lr = lr_scale * warmup_factor * TDLEAF_ADAM_FC_BIAS_LR0;
     const float ft_lr      = lr_scale * warmup_factor * ft_session_factor * TDLEAF_ADAM_FT_LR0;
@@ -1387,11 +1389,11 @@ void nnue_apply_gradients(float lr_scale)
                 l0_biases_cnt[s][i]++;
             }
         }
-        // FC1 weights — fc_lr (int8 scale ~9)
+        // FC1 weights — fc1_lr (int8 scale ~9)
         for (int i = 0; i < NNUE_L1_SIZE * NNUE_L1_PADDED; i++) {
             if (grad_l1_w[s][i] != 0.0f) {
-                float dw = do_step(grad_l1_w[s][i], m_l1_w[s][i], v_l1_w[s][i], l1_weights_cnt[s][i], fc_lr);
-                float wd = TDLEAF_WEIGHT_DECAY * fc_lr * l1_weights_f32[s][i];
+                float dw = do_step(grad_l1_w[s][i], m_l1_w[s][i], v_l1_w[s][i], l1_weights_cnt[s][i], fc1_lr);
+                float wd = TDLEAF_WEIGHT_DECAY * fc1_lr * l1_weights_f32[s][i];
                 l1_weights_f32[s][i] -= dw + wd;
                 // Clamp float shadow to int8 range (same reason as FC0).
                 if (l1_weights_f32[s][i] >  127.0f) l1_weights_f32[s][i] =  127.0f;
@@ -1549,6 +1551,7 @@ static NNUEApplyParams nnue_apply_compute_params(float lr_scale)
         ? (float)t_ft_session / (float)TDLEAF_FT_SESSION_WARMUP : 1.0f);
     NNUEApplyParams p;
     p.fc_lr       = lr_scale * warmup_factor * TDLEAF_ADAM_LR0;
+    p.fc1_lr      = lr_scale * warmup_factor * TDLEAF_ADAM_FC1_LR0;
     p.fc2_lr      = lr_scale * warmup_factor * TDLEAF_ADAM_FC2_LR0;
     p.fc_bias_lr  = lr_scale * warmup_factor * TDLEAF_ADAM_FC_BIAS_LR0;
     p.ft_lr       = lr_scale * warmup_factor * ft_session_factor * TDLEAF_ADAM_FT_LR0;
@@ -1580,8 +1583,8 @@ static void nnue_apply_fc_stack(int s, const NNUEApplyParams &p,
         }
     for (int i = 0; i < NNUE_L1_SIZE * NNUE_L1_PADDED; i++)
         if (grad_l1_w[s][i] != 0.0f) {
-            float dw = nnue_adam_step(grad_l1_w[s][i], m_l1_w[s][i], v_l1_w[s][i], l1_weights_cnt[s][i], p.fc_lr, smax, sclip);
-            float wd = TDLEAF_WEIGHT_DECAY * p.fc_lr * l1_weights_f32[s][i];
+            float dw = nnue_adam_step(grad_l1_w[s][i], m_l1_w[s][i], v_l1_w[s][i], l1_weights_cnt[s][i], p.fc1_lr, smax, sclip);
+            float wd = TDLEAF_WEIGHT_DECAY * p.fc1_lr * l1_weights_f32[s][i];
             l1_weights_f32[s][i] -= dw + wd;
             if (l1_weights_f32[s][i] >  127.0f) l1_weights_f32[s][i] =  127.0f;
             if (l1_weights_f32[s][i] < -127.0f) l1_weights_f32[s][i] = -127.0f;

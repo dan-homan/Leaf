@@ -116,7 +116,22 @@ static const float TDLEAF_ADAM_STEP_CLIP = 30.0f;
 // structure) is learnable; the 8 PSQT buckets are what let it encode e.g. "pawn
 // worth more in deep endgame".  No gradient mean-centering or post-Adam dw
 // centering is applied.
-static const float TDLEAF_ADAM_LR0         = 0.005f;  // FC0/FC1 weights (int8, median ~5)
+// FC0 weights.  Recalibrated 2026-09-13 from 0.005 to 0.0014.  The old value
+// came from Stockfish-net statistics (assumed median ~5).  Measured on this
+// net's own FP32 shadows, fc0_w is STATIONARY across the whole m260720 chain
+// (RMS 3.881 at fresh init, 3.863 at 7e6 games) -- so a magnitude rule is
+// well defined here, and 0.005 put fc0_w at LR/RMS = 0.00129 against ft_w's
+// 0.00034 and psqt_w's 0.00036, the two other stationary sections, which agree
+// with each other to 6%.  fc0_w was therefore 3.7x hot AND the largest single
+// contributor to online weight displacement (13.5% of its own RMS over 30k
+// games, against ft_w 1.18% and psqt_w 0.54%).  0.0014 = 0.00035 x 3.88 puts
+// all three stationary sections on one ratio.  See Online_Learning_Investigation 7.11.
+static const float TDLEAF_ADAM_LR0         = 0.0014f; // FC0 weights (int8, RMS ~3.88)
+// FC1 weights kept at the historical 0.005 deliberately: fc1_w is NOT
+// stationary (RMS 3.00 at init -> 6.65 at 7e6 games), so it has no fixed
+// magnitude to calibrate against, and holding it fixed isolates fc0_w as the
+// single changed variable in the 30k ladder arm.
+static const float TDLEAF_ADAM_FC1_LR0     = 0.005f;  // FC1 weights (int8, RMS 3.0 -> 6.7)
 static const float TDLEAF_ADAM_FC2_LR0     = 0.07f;   // FC2 weights (int8, median ~68 — final 32→1 layer)
 static const float TDLEAF_ADAM_FC_BIAS_LR0 = 1.5f;    // FC biases (int32, median ~1500 across stacks)
 static const float TDLEAF_ADAM_FT_LR0      = 0.015f;  // FT weights (int16, median ~16)

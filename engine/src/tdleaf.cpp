@@ -68,11 +68,11 @@ void tdleaf_check_env()
     fprintf(stderr,
             "TDLeaf config: K=%.0f lambda=%.4f batch=%d grad_clip=%.2f wd=%.1e "
             "score_clip=%.1fxP id_var_sigma2=%.0f\n"
-            "TDLeaf LR0: FC=%.4g FC2=%.4g FC_bias=%.4g FT=%.4g FT_bias=%.4g PSQT=%.4g\n",
+            "TDLeaf LR0: FC0=%.4g FC1=%.4g FC2=%.4g FC_bias=%.4g FT=%.4g FT_bias=%.4g PSQT=%.4g\n",
             (double)TDLEAF_K, (double)TDLEAF_LAMBDA, TDLEAF_BATCH_SIZE,
             (double)TDLEAF_GRAD_CLIP_NORM, (double)TDLEAF_WEIGHT_DECAY,
             (double)TDLEAF_SCORE_CLIP_PAWNS, (double)TDLEAF_ID_VAR_SIGMA2,
-            (double)TDLEAF_ADAM_LR0, (double)TDLEAF_ADAM_FC2_LR0,
+            (double)TDLEAF_ADAM_LR0, (double)TDLEAF_ADAM_FC1_LR0, (double)TDLEAF_ADAM_FC2_LR0,
             (double)TDLEAF_ADAM_FC_BIAS_LR0, (double)TDLEAF_ADAM_FT_LR0,
             (double)TDLEAF_ADAM_FT_BIAS_LR0, (double)TDLEAF_ADAM_PSQT_LR0);
 }
