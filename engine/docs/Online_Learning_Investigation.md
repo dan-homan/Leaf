@@ -16,23 +16,31 @@ here is the only place that reflects all six parts at once.
 
 ## TL;DR — standing conclusions (current, through Part 7)
 
-0. **⚠️ The online phase's cost is front-loaded and its cause is NOT known.**
-   Retracted claim: an earlier version of this entry said the cost "was an
-   optimizer bug".  It is not — see the correction banner on 7.10.  The Adam second moment is
+0. **The online phase's cost is an EQUILIBRIUM set by the step size, not a
+   transient and not a bug.**  It scales with the learning rate (4× the LR gives
+   4× the damage), is flat across a 17× range of run length, and is reached by
+   the same value along different paths — a 1000-step LR ramp settles at the
+   same place, just later.  That is a stationary SGD noise ball: `E|Δw|² ∝
+   η·Σ/κ`, so Elo loss ∝ η and constant in time once equilibrated (√t growth is
+   only the pre-equilibrium transient).  **Four optimizer mechanisms were
+   proposed and all four are null** — stale moments, gradient normalisation,
+   missing session warmup, FT bias correction — see Part 7.11 before proposing a
+   fifth.  Crucially the damage is fully repaired: on a real 190M corpus, an arm
+   carrying −123 of online damage consolidates to **+9.4 ± 8.4 against the chain
+   head** (7.11.7).  The untested lever is Σ, the gradient-noise covariance —
+   online batches are 8 games of sequential, highly correlated positions where
+   the offline trainer shuffles globally (7.11.8).  The Adam second moment is
    shared and persisted between two objectives — online TDLeaf and offline
    `--batch-train` — which run at accumulated-gradient norms of 0.168 and 0.039.
    Nothing reset it at the boundary (`TDLEAF_ADAM_WARMUP` is keyed on the
    *persisted* `t_adam`, so it has been a no-op since the first session ever
-   run).  Resetting them (`--opt-reset`) changes the online cost not at all
-   (−129.3 ± 9.9 against −123.4 ± 9.3), so that is not the mechanism.  What IS
-   established (7.10.1–2): the cost is complete within 30,000 games — flat at
-   −123/−125/−131 across 30k/100k/500k — and scales with the learning rate
-   rather than with run length.  `--grad-norm` cuts it to −32.4 ± 8.6, but
-   through the `TDLEAF_ADAM_EPS` floor, which makes it a learning-rate cut in
-   disguise; 7.9 showed a learning-rate cut leaves the final net unchanged
-   (`lr25` vs `lr100`, −0.7 ± 8.3).  One unexplained lead: at matched damage
-   `--opt-reset` improved the *final* net by +36.0 ± 12.6 (7.10.7), acting on
-   the handoff into consolidation rather than on generation.
+   run) — but resetting them changes nothing, and neither does warming them up.
+   Two further cautions for anyone reading the leg tables below.  **Arm-to-arm
+   variance is ~26 Elo** (two identical 30k configurations read −149.7 and
+   −123.4), so single-arm comparisons quoted at ±10 are under-powered by about
+   2×.  And the online phase runs at **4× the offline learning rate**
+   (`lr_scale` 1.0 against `--bt-lr` 0.25 on the same LR0 constants), which is
+   the most likely reason the equilibrium sits where it does.
 
 1. **Keep online learning ON during generation — ⚠️ SUSPENDED by Part 7.**
    The argument below rests on a learning generator's corpus being worth +52–85
@@ -3797,6 +3805,253 @@ control for this: with a real 190M corpus, damage of −34 and −125 produced
 final nets that were identical.  So B's apparent advantage here is most likely
 an artifact of the undersized corpus and should not be expected to survive a
 full leg.
+
+## 7.11 The online damage is an equilibrium, not a transient (2026-09-11 → 13)
+
+Part 7.10 asked why the online phase's Elo cost is complete within ~30k games
+and scales with the learning rate rather than with run length.  Four candidate
+mechanisms were proposed and all four are now rejected.  What replaces them is
+simpler, and it came from D. Homan reading the arms back against each other.
+
+**Read this section before proposing another optimizer fix.**  Three of the four
+rejected mechanisms were written up as findings before the next measurement
+killed them, and two of those write-ups were mine.
+
+### 7.11.1 Four mechanisms, four nulls
+
+| # | hypothesis | test | result |
+|---|---|---|---|
+| 1 | stale Adam moments carried across the offline→online boundary | `--opt-reset` (zero m/v, session-local bias correction) | **null**: −129.3 ± 9.9 against the control's −123.4 ± 9.3 |
+| 2 | gradient scale mismatch (0.039 offline vs 0.168 online, neither path normalising) | `--grad-norm` | cuts damage 91 Elo — but via the `TDLEAF_ADAM_EPS` floor, making it a learning-rate cut in disguise.  A third of it vanished when eps went 1e-8 → 1e-12 |
+| 3 | no session warmup, so a cold `v` gives correct *expected* first steps but wild per-weight variance | uniform 1000-step ramp on every category | **delays only**: −131.3 ± 9.3 at 30k against the control's −149.7 ± 10.2, +18.3 ± 13.8 (1.3σ) |
+| 4 | FT weight bias correction uses a global counter where per-weight is needed | mean-step telemetry | **real defect, negligible size**: mean FT step 0.25–0.35, clip rate ~3e-7 |
+
+Mechanism 1 was additionally tested on the *final* net with the corpus confound
+removed (7.11.7) and is null there too.
+
+### 7.11.2 D. Homan's reading, which is the one that fits
+
+Verbatim, because the framing is the contribution:
+
+> The learning rate test was decisive.  We shrank the LR by a factor of 4 and
+> the damage shrank by a factor of 4 — even though there were plenty of later
+> games for that damage to continue to build.  **Step size matters, not total
+> damage.**  What is interesting is that putting in LR slowdown across the board
+> but ramping to full LR (the 1000 step warm up) settled at the same damage as
+> the full LR, just settled there later.
+
+And the five facts to carry forward:
+
+1. the final TDLeaf LR is **4× the LR the net came in with** (online `lr_scale`
+   1.0 against the offline `--bt-lr` 0.25, both multiplying the same
+   `TDLEAF_ADAM_*_LR0` constants)
+2. TDLeaf updates arrive in batches **highly correlated by a small number of
+   games** (8 games ≈ 1200 sequential positions, against the offline trainer's
+   512 from a global shuffle over 3.5M games)
+3. the damage does **not** scale as √steps, as a naive noise ball might suggest
+4. the per-section LRs are **not known to be well calibrated** — loss in one
+   part of the net could be partly compensated by another, masking motion
+5. offline learning over large numbers of games **repairs the damage**
+
+### 7.11.3 Why this is a noise ball, and why (3) is consistent with one
+
+The apparent tension in (3) dissolves once the distinction is made between free
+diffusion and a stationary distribution:
+
+- **Free diffusion** (no restoring force) grows as √t without bound.
+- **A noise ball** — SGD around a minimum — has a restoring force, so
+  `E|Δw|² → η·Σ / (2κ)` and then *stops growing*.  Elo loss, quadratic in
+  displacement near the optimum, is then **∝ η and flat in time**.
+
+Flat-in-time and proportional-to-η is exactly the measurement.  √t growth is
+only the pre-equilibrium transient, which at these step sizes is over within a
+few hundred applies.
+
+This also explains the one observation that looked contradictory.  The `.nnue`
+section diffs show weights **still moving** at 30k while Elo is flat — fc0_w
+goes 9.56% → 13.36% of its own RMS between 1k and 30k games.  Continued
+diffusion along Elo-neutral directions with the Elo-relevant component
+equilibrated accounts for both, and is D. Homan's point (4) in its general form.
+
+The three arms pin the equilibrium from different directions:
+
+| arm | η | games | online cost |
+|---|---|---|---|
+| `lr25` | 0.25 | 100k | −34.2 ± 8.6 |
+| `lr100` | 1.0 | 100k | −125.4 ± 9.6 |
+| `7e6g` | 1.0 | 500k | −130.9 ± 9.1 |
+| `optfix-A` | 1.0 | 30k | −123.4 ± 9.3 |
+| `ladder-ctl` | 1.0 | 30k | −149.7 ± 10.2 |
+| `warm-reset` | 1.0 (ramped) | 30k | −131.3 ± 9.3 |
+
+Ratio 0.27 against an η ratio of 0.25; 17× range of run length at fixed η with
+no trend; and a ramped arm reaching the same place by a different path.
+
+### 7.11.4 The checkpoint ladder
+
+`--publish-stamped` / `train.py --ladder N` bake a `.nnue` every N games, giving
+a rateable trajectory.  Two 30k arms, seven or eight points each, every point a
+1000-game match against `Leaf_vm260720-7e6g-final`:
+
+| games | `ladder-ctl` (no flags) | `warm-reset` (`--opt-reset` + 1000-step ramp) |
+|---|---|---|
+| 1,000 | −106.8 ± 9.8 | −1.4 ± 8.6 |
+| 2,000 | −159.8 ± 9.9 | −7.6 ± 8.6 |
+| 3,000 | −163.2 ± 10.1 | −15.3 ± 8.5 |
+| 5,000 | −142.7 ± 9.5 | −33.8 ± 8.6 |
+| 8,000 | — | −87.3 ± 9.3 *(ramp ends)* |
+| 10,000 | −140.6 ± 9.2 | −73.7 ± 8.9 |
+| 20,000 | −121.1 ± 9.7 | −92.1 ± 9.2 |
+| 30,000 | −149.7 ± 10.2 | −131.3 ± 9.3 |
+
+The control's curve is non-monotone — a dip to ~−161 around 2–3k, partial
+recovery, then scatter.  **Do not read structure into it beyond the initial
+descent.**  A χ² against a constant gives 25.6 on 6 dof (p < 0.001), so the
+points are not all one value, but the only feature that survives is the drop
+between 1k and 2–3k (53.0 ± 13.9).  I reported a "trough → 20k recovery, 3.4σ"
+mid-series and the 30k point reversed it.
+
+The `warm-reset` gap closes monotonically once the ramp ends — 152 → 148 → 109
+→ 67 → 29 → **18.3 ± 13.8** — i.e. to nothing.  Pooling 10k+20k+30k gives
++38.1 ± 7.7 (5.0σ) and **that statistic is invalid**: the points are a decaying
+transient, not independent samples of a stationary difference, and pooling a
+decaying quantity manufactures significance.
+
+### 7.11.5 Per-section LR calibration: an 11× spread, present from the start
+
+`tdleaf.h` states the design rule as ~0.001 × median(|w|) per section.  Measured
+against `m260720-7e6g_final.nnue`:
+
+| section | LR0 | assumed median | actual median | LR/median | vs intent | 30k displacement |
+|---|---|---|---|---|---|---|
+| ft_w | 0.015 | 16 | 26.0 | 0.00058 | 0.6× | 1.18% |
+| psqt_w | 13.0 | 13319 | 23129 | 0.00056 | 0.6× | 0.57% |
+| ft_bias | 0.02 | 51 | 19.0 | 0.00105 | 1.1× | 3.65% |
+| fc0_w | 0.005 | 5 | 3.0 | 0.00167 | 1.7× | **13.36%** |
+| fc1_w | 0.005 | 5 | 3.0 | 0.00167 | 1.7× | 4.41% |
+| fc0_bias | 1.5 | 1500 | 896.0 | 0.00167 | 1.7× | 2.70% |
+| fc2_bias | 1.5 | 1500 | 520.0 | 0.00288 | 2.9× | 1.09% |
+| fc1_bias | 1.5 | 1500 | 489.5 | 0.00306 | 3.1× | 2.67% |
+| **fc2_w** | 0.07 | **68** | **11.0** | 0.00636 | **6.4×** | 5.46% |
+
+Three things to note.  The spread is **11×**.  The three FC bias sections share
+one constant across a 1.8× spread of actual magnitudes.  And fc0_w — only 1.7×
+over intent — is nonetheless the largest mover by a factor of two, so
+displacement is not a simple function of LR/median.
+
+**A tempting explanation, tested and dead.**  AdamW decay applies to FC and FT
+weights but not PSQT or the biases, so one might expect the FC weights to shrink
+under decay while their fixed LRs stay put, giving a *rising* effective LR — and
+that would have explained standing conclusion 3's drift of the online cost from
+−17…−32 through `3e6` to −151 by `6e6g`.  Measuring the chain's own checkpoints
+kills it:
+
+| net | fc0_w | fc1_w | fc2_w (LR/med) | ft_w | psqt_w |
+|---|---|---|---|---|---|
+| 1e5g | 3.0 | 2.0 | 5.0 (0.0140) | 30.0 | 23066 |
+| 3e6g | 3.0 | 3.0 | 7.0 (0.0100) | 28.0 | 23104 |
+| 7e6g | 3.0 | 3.0 | 11.0 (0.0064) | 26.0 | 23129 |
+
+Medians are flat and fc2_w **grew**, so its effective LR *fell* 2.2×.  Nothing
+shrank.  The 11× spread is an original miscalibration, present at the first
+checkpoint, not something that developed — so it cannot explain a growing
+damage.  And that premise is itself weak: standing conclusion 3 records that
+`--gauntlet-tdleaf` stopped being passed after `3e6`, so the early and late
+figures were not measured the same way.  **Treat "the online damage grew across
+the chain" as unestablished.**
+
+### 7.11.6 The FT bias-correction defect, and how I mis-sized it
+
+FT weights were the only category whose bias correction was not per-weight: `v`
+was divided by a `bc2` from a **global** session counter while each FT row
+updates only when its feature is active, so a weight's first `v` update was
+corrected as though it were its t-th.  On the warm path (`bc2` ≈ 1) that pins
+the step at `TDLEAF_ADAM_STEP_CLIP`.  The save path already guards the row-level
+case; the residual is per-dimension, since a row is saved when *any* dim has
+`v ≠ 0`.  Fixed in 28448f2 with a session-local `uint16` per-weight sample count
+seeded from the restored `v` per dim.
+
+**The size of it, stated correctly.**  I first reported "FT mean step 4.6 →
+28.2, systematically oversized".  That was the mean of the per-apply
+**maximum** — an extreme value over ~1.2M FT weight updates per apply — read as
+if it were a typical step.  Adding mean-step telemetry gives the real number:
+
+```
+n_ft=1426458  meanFT=0.352  max|step| FC=3.05 FT=28.19 FTB=0.70 PSQT=4.49
+n_ft=1201892  meanFT=0.259  max|step| FC=2.84 FT=22.73 ...
+```
+
+**Typical FT step 0.25–0.35 — not oversized.**  FC's smaller maximum reflects
+its 131k weights against FT's 23M, not better behaviour.  The clip rate said the
+same at the time: 3,183 clips over ~1e10 updates is ~3e-7.  The fix removes a
+rare tail (clips 4 → 0 in a 24-game harness) and is correct hygiene; it is not
+an explanation for anything.
+
+### 7.11.7 The corpus confound, and what the loop is actually worth
+
+`--opt-reset` appeared to improve the *final* net by +36.0 ± 12.6 (2.9σ) in the
+optfix arms.  It does not.  Each of those arms consolidated **its own** 30k
+games on a deliberately tiny 3M-row corpus, so corpus content and optimizer
+state were fully confounded.  Repeating it with both arms consolidating the
+**identical** 189,999,998-row file and comparing by direct match:
+
+**`sc-reset-final` vs `sc-ctl-final` = −5.9 ± 8.4**, 95% CI [−22.4, +10.5].
+
+The +36 lies outside that interval.  The likeliest reading is the starved
+regime: a better-conditioned optimizer state helps most when consolidation
+cannot finish the job, and with a real corpus it finishes either way.
+
+That comparison also produced the most encouraging number of the week.  On the
+real corpus the control arm went from **−123 of online damage to +9.4 ± 8.4
+against the chain head**, from 30,000 games.  The 3M-corpus arms, which read
+−82.1 and −46.1, were measuring nothing but a starved consolidation.  **No
+`-final` figure from the optfix A/B/C/B2 series carries information about net
+quality**; their `-tdleaf` figures are unaffected and remain valid.
+
+### 7.11.8 Where this points: measure Σ, not η
+
+For a noise ball, `E|Δw|² ∝ η·Σ / κ`.  Two levers:
+
+- **η** — thoroughly tested.  Damage scales with it exactly.  But it cuts signal
+  and noise together, and the final net is unchanged: `lr25` and `lr100` produced
+  nets that were **identical head-to-head at −0.7 ± 8.3**.
+- **Σ**, the gradient-noise covariance — **untested**, and D. Homan's point (2).
+  An online batch is 8 games ≈ 1200 sequential, highly correlated positions; the
+  offline trainer's 512 come from a global shuffle across 3.5M games.  The
+  effective sample size behind an online step is a small fraction of 1200.
+  Decorrelating shrinks the ball **at fixed η — reducing damage without reducing
+  signal**, which is precisely what lowering η cannot do.
+
+6.16.3 did test batch size (16 clearly worse than 8, 4 unresolved) but measured
+*leg total* under the epsilon confound, and a larger *correlated* batch is not
+the same intervention as a decorrelated one.
+
+**A practical consequence.**  Damage equilibrates fast and is path-independent —
+the strongest thing this week established.  The trough is reached by 2–3k games
+and 30k/100k/500k all read the same.  So **equilibrium damage can be measured
+with ~5,000-game runs plus one 1000-game rating: about 50 minutes per arm**,
+against the four hours a 30k arm costs.  That turns a batch-correlation sweep
+from a multi-day exercise into an afternoon.  Measure damage only; take
+survivors to a full leg with a real corpus.
+
+### 7.11.9 Measurement hygiene established along the way
+
+- **Arm-to-arm variance is ~26 Elo.**  `ladder-ctl` and `optfix-A` are the same
+  30k configuration with different seeds and read −149.7 ± 10.2 and −123.4 ± 9.3
+  — 26.3 ± 13.8 apart.  Any single-arm comparison quoted at ±10 is under-powered
+  by roughly a factor of two.  This is the most under-appreciated number in the
+  investigation.
+- **Two direct matches against a common opponent do not subtract** (7.10.6).
+  Play the arms against each other; at 1000 games it costs 23 minutes.
+- **Never pool a decaying series** (7.11.4).
+- **The learner loads state from the compiled-in `NNUE_TDLEAF_BIN`, not from
+  `--tdleaf-out`.**  Two attempts to demonstrate a mechanism in a micro-test were
+  invalid because both had silently picked up an already-online-calibrated `v`.
+- **`train.py` runs binaries from `learn/` while `comp.pl` writes to `run/`.**
+  `train.py` copies them itself; a manual rebuild must copy too, or the old
+  binary keeps running with no warning.
+- **A transient playing out over ~1000 Adam steps cannot be seen in a 24-game
+  harness** (3 applies).  Scale was always going to be the only test.
 
 ## Methodology notes (Part 7)
 

@@ -1,5 +1,54 @@
 Changes since 2017_12_24
 
+2026_09_13c -- Part 7.11: the online damage is an EQUILIBRIUM set by step size.
+               Four optimizer mechanisms proposed, four rejected.
+
+               Written up so it can be read cold.  The framing is D. Homan's:
+               the LR test was decisive -- 4x smaller step size gave 4x smaller
+               damage with plenty of later games for it to keep building, and
+               the 1000-step ramp settled at the SAME damage as full LR, just
+               later.  Step size matters; accumulated damage does not.
+
+               That is a stationary SGD noise ball: E|dw|^2 ~ eta*Sigma/kappa,
+               so Elo loss is proportional to eta and FLAT in time once
+               equilibrated.  The absence of sqrt(steps) growth is consistent
+               with a ball, not against it -- sqrt(t) is free diffusion, which
+               a restoring force stops.  It also reconciles the .nnue diffs
+               (weights still moving at 30k while Elo is flat): continued
+               diffusion along Elo-neutral directions.
+
+               Rejected: stale Adam moments (--opt-reset, null on damage AND on
+               the final net with a shared corpus); gradient normalisation
+               (works via the eps floor, i.e. an LR cut in disguise); missing
+               uniform session warmup (delays by the ramp length, +18.3 +- 13.8
+               at 30k); FT bias correction (real, fixed in 28448f2, but mean
+               step 0.25 and ~3e-7 clip rate).
+
+               Also recorded, and both are corrections to earlier claims of
+               mine: the +36.0 --opt-reset recovery effect was a corpus
+               confound and dies at -5.9 +- 8.4 on a shared 190M corpus; and
+               the "FT steps 4.6 -> 28.2" figure was the mean of per-apply
+               MAXIMA misread as a typical step.
+
+               New in the record and worth more than any of the above:
+
+                 - on a real 190M corpus an arm carrying -123 of online damage
+                   consolidates to +9.4 +- 8.4 against the chain head, from
+                   30,000 games.  The loop works; the damage is fully repaired.
+                 - ARM-TO-ARM VARIANCE IS ~26 ELO (two identical 30k configs
+                   read -149.7 and -123.4).  Most comparisons in Parts 6 and 7
+                   are quoted at +-10 and are under-powered by about 2x.
+                 - equilibrium damage can be measured with ~5k-game runs plus
+                   one rating -- about 50 minutes per arm, not four hours.
+                 - the untested lever is Sigma, the gradient-noise covariance:
+                   online batches are 8 games of sequential, highly correlated
+                   positions where the offline trainer shuffles globally.
+                   Decorrelating shrinks the ball at fixed eta, which is what
+                   lowering eta cannot do.
+
+               Standing conclusion 0 rewritten from "cause not known" to the
+               equilibrium statement.
+
 2026_09_13b -- FT weight bias correction becomes per-weight; step telemetry gains
                the MEAN step (which corrected a bad diagnosis of mine).
 
