@@ -1,5 +1,55 @@
 Changes since 2017_12_24
 
+2026_09_13b -- FT weight bias correction becomes per-weight; step telemetry gains
+               the MEAN step (which corrected a bad diagnosis of mine).
+
+               FT weights are the only category whose Adam/RMSProp bias
+               correction was not per-weight.  FC, FC2, the biases and PSQT all
+               pass their own count into nnue_adam_step (eff_t = cnt+1); FT
+               divided v by a bc2 built from a GLOBAL session counter, while each
+               FT row only updates when its feature is active.  A weight's FIRST
+               v update was therefore corrected as if it were its t-th, giving a
+               step sqrt(bc2/(1-beta2)) too large -- 31.6x (pinned at
+               TDLEAF_ADAM_STEP_CLIP) on the warm path where bc2 == 1.
+
+               The save path already guards the ROW-level version of this ("only
+               rows with at least one non-zero v dimension are saved", ~2168) but
+               a saved row can still contain dims with v == 0, and those hit
+               exactly the same case.  That per-dimension residual is what this
+               fixes.
+
+                 ft_w_vsamples[]  uint16 saturating, 46 MB, session-local, NOT
+                                  persisted: how many times THIS weight's v has
+                                  been updated since v was last zeroed.  Seeded at
+                                  load from the restored v PER DIM (v != 0 ->
+                                  persisted cnt, else 0), so the row-level warmed
+                                  flag is no longer used for bias correction.
+                 bc2_table[]      1 - beta2^t for t < 8192, so the per-weight
+                                  correction is a table load rather than a powf in
+                                  the innermost loop.
+                 NOT ft_weights_cnt -- that array doubles as the save filter (a row
+                                  is written iff some cnt != 0), so reusing it
+                                  would silently drop previously-trained FT rows
+                                  from the .tdleaf.bin.
+
+               Both the serial and parallel apply paths are patched.  FT BIAS is
+               unchanged: it was already correct via ft_bias_cnt[d].
+
+               IMPORTANT -- this is a small fix, not the one being hunted.  The
+               telemetry now also reports meanFT over all FT weight updates, and
+               it reads 0.25-0.35 across ~1.2M updates per apply.  FT steps are
+               NOT systematically oversized.  An earlier note in this log and in
+               7.10 quoted "FT mean step 4.6 -> 28.2" -- that was the mean of the
+               per-apply MAXIMUM, an extreme value over 1.2M samples, and reading
+               it as a typical step was an error.  The clip rate says the same:
+               3,183 clips over ~10^10 weight updates is ~3e-7.  What this fix
+               buys is the removal of that rare tail (clips 4 -> 0 in a 24-game
+               harness), not any change to the bulk of FT learning.
+
+               Behaviour on the default path DOES change (the tail no longer
+               clips), so figures from before this commit are not exactly
+               comparable.
+
 2026_09_13a -- Uniform session warmup for --opt-reset: TDLEAF_ADAM_WARMUP 50 -> 1000,
                keyed on the session clock, applied to every category.
 

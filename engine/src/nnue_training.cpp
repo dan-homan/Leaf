@@ -114,6 +114,38 @@ static float m_l2_w[NNUE_LAYER_STACKS][NNUE_L2_PADDED]                = {};
 static float m_l2_b[NNUE_LAYER_STACKS]                                 = {};
 static float m_ft_bias[NNUE_HALF_DIMS]                                  = {};
 
+// Per-weight count of how many times THIS weight's v_ft_w has been updated
+// since it was last zeroed -- i.e. v's own sample count, which is what Adam's
+// bias correction needs.  Session-local and NOT persisted: a row whose v came
+// back from disk uses the persisted ft_weights_cnt instead (see the update
+// loops).  uint16 saturating is ample -- bc2 = 1-beta2^t is 0.999 by t~7000, so
+// anything beyond that is indistinguishable from 1.  46 MB.
+//
+// This must NOT be folded into ft_weights_cnt: that array doubles as the save
+// filter (a row is written to the sparse section iff some cnt != 0), so zeroing
+// it for cold rows would silently drop previously-trained FT rows from the
+// .tdleaf.bin and revert them to their base .nnue values.
+static uint16_t *ft_w_vsamples = nullptr;
+
+// bc2_table[t] = 1 - BETA2^t, so the per-weight correction costs a load instead
+// of a powf in the innermost loop.  Beyond the table bc2 is 1.0 to float
+// precision.
+static const int BC2_TABLE_N = 8192;
+static float bc2_table[BC2_TABLE_N];
+static bool  bc2_table_ready = false;
+static void nnue_init_bc2_table()
+{
+    if (bc2_table_ready) return;
+    for (int t = 0; t < BC2_TABLE_N; t++)
+        bc2_table[t] = 1.0f - powf(TDLEAF_ADAM_BETA2, (float)t);
+    bc2_table[0] = 1.0f;            // never used; avoid a divide-by-zero if it is
+    bc2_table_ready = true;
+}
+static inline float nnue_bc2(uint32_t t)
+{
+    return (t < (uint32_t)BC2_TABLE_N) ? bc2_table[t] : 1.0f;
+}
+
 static float    *v_ft_w    = nullptr;  // [NNUE_FT_INPUTS × NNUE_HALF_DIMS] — FT per-weight second moment (~92 MB, OS lazy-paged)
 static bool     *ft_v_warmed = nullptr; // [NNUE_FT_INPUTS] — true if v_ft_w row was loaded from disk (v8+).
                                         // Warmed rows use t_adam for bc2; fresh rows use min(t_adam,t_ft_session).
@@ -145,6 +177,8 @@ static float step_max_ft_bias = 0.0f;
 static float step_max_psqt    = 0.0f;
 static uint64_t step_clips_fc      = 0;
 static uint64_t step_clips_ft      = 0;
+static double   step_sum_ft        = 0.0;  // sum of |step| over FT weight updates
+static uint64_t step_n_ft          = 0;    // count of FT weight updates (for the mean)
 static uint64_t step_clips_ft_bias = 0;
 static uint64_t step_clips_psqt    = 0;
 
@@ -517,9 +551,12 @@ void nnue_init_zero_weights(int prior_mode)
 
         // Adam heap arrays — allocate on first use; zero for fresh network.
         if (!v_ft_w)    v_ft_w    = new float[ft_sz]();
+        if (!ft_w_vsamples) ft_w_vsamples = new uint16_t[ft_sz]();
+        nnue_init_bc2_table();
         if (!v_psqt_w)  v_psqt_w  = new float[psqt_sz]();
         if (!m_psqt_w)  m_psqt_w  = new float[psqt_sz]();
         memset(v_ft_w,    0, ft_sz   * sizeof(float));
+        if (ft_w_vsamples) memset(ft_w_vsamples, 0, ft_sz * sizeof(uint16_t));
         memset(v_psqt_w,  0, psqt_sz * sizeof(float));
         memset(m_psqt_w,  0, psqt_sz * sizeof(float));
     }
@@ -612,6 +649,8 @@ void nnue_init_fp32_weights()
         // Adam heap arrays — session-local moment arrays for FT and PSQT.
         ft_v_warmed = new bool[NNUE_FT_INPUTS](); // zero-init: no rows warmed yet
         v_ft_w    = new float[ft_sz]();    // per-weight FT second moment (~92 MB, OS lazy-paged)
+        ft_w_vsamples = new uint16_t[ft_sz]();  // v's per-weight sample count (~46 MB)
+        nnue_init_bc2_table();
         v_psqt_w  = new float[psqt_sz]();
         m_psqt_w  = new float[psqt_sz]();
     }
@@ -646,6 +685,7 @@ void nnue_init_fp32_weights()
     memset(m_l2_b,    0, sizeof(m_l2_b));
     memset(m_ft_bias, 0, sizeof(m_ft_bias));
     if (v_ft_w)    memset(v_ft_w,    0, ft_sz * sizeof(float));
+    if (ft_w_vsamples) memset(ft_w_vsamples, 0, ft_sz * sizeof(uint16_t));
     if (v_psqt_w)  memset(v_psqt_w,  0, psqt_sz * sizeof(float));
     if (m_psqt_w)  memset(m_psqt_w,  0, psqt_sz * sizeof(float));
     t_adam = 0;
@@ -1225,9 +1265,11 @@ static void nnue_emit_step_clip_telemetry()
         }
         if (tele_fp) {
             fprintf(tele_fp,
-                    "[tdleaf step-clip] t_adam=%u  max|step| FC=%.2f FT=%.2f FTB=%.2f PSQT=%.2f  "
+                    "[tdleaf step-clip] t_adam=%u  n_ft=%llu meanFT=%.3f  max|step| FC=%.2f FT=%.2f FTB=%.2f PSQT=%.2f  "
                     "clips FC=%llu FT=%llu FTB=%llu PSQT=%llu  (clip=%.1f)\n",
                     (unsigned)t_adam,
+                    (unsigned long long)step_n_ft,
+                    step_n_ft ? (double)(step_sum_ft / (double)step_n_ft) : 0.0,
                     step_max_fc, step_max_ft, step_max_ft_bias, step_max_psqt,
                     (unsigned long long)step_clips_fc,
                     (unsigned long long)step_clips_ft,
@@ -1239,6 +1281,7 @@ static void nnue_emit_step_clip_telemetry()
     }
 #endif
     step_max_fc = step_max_ft = step_max_ft_bias = step_max_psqt = 0.0f;
+    step_sum_ft = 0.0; step_n_ft = 0;
     step_clips_fc = step_clips_ft = step_clips_ft_bias = step_clips_psqt = 0;
 }
 
@@ -1406,17 +1449,28 @@ void nnue_apply_gradients(float lr_scale)
             float    *gw  = grad_ft_w      + (size_t)fi * NNUE_HALF_DIMS;
             uint32_t *cnt = ft_weights_cnt + (size_t)fi * NNUE_HALF_DIMS;
             if (v_ft_w) {
-                // Select bias correction: warm rows (v loaded from disk) use t_adam;
-                // cold rows (v=0 at startup) use min(t_adam, t_ft_session).
-                const float ft_bc2 = (ft_v_warmed && ft_v_warmed[fi])
-                                     ? ft_bc2_warm : ft_bc2_cold;
+                // PER-WEIGHT bias correction.  This used to divide by a bc2 built
+                // from a GLOBAL session counter, while each FT row only updates
+                // when its feature is active -- so a row's FIRST update was
+                // corrected as though it were its t-th, and its step came out
+                // sqrt(bc2/(1-beta2)) too large: ~3x at t=10, ~29x at t=2000, and
+                // 31.6x (clipped to TDLEAF_ADAM_STEP_CLIP) on the warm path where
+                // bc2 == 1.  Measured: FT mean step 4.6 -> 28.2 across a 30k run
+                // with 3,183 clips in the last third, while FC/FTB/PSQT never
+                // clipped.  See Online_Learning_Investigation 7.11.
+                uint16_t *vs = ft_w_vsamples + (size_t)fi * NNUE_HALF_DIMS;
                 float *vw = v_ft_w + (size_t)fi * NNUE_HALF_DIMS;
                 for (int d = 0; d < NNUE_HALF_DIMS; d++) {
                     if (gw[d] != 0.0f) {
                         vw[d] = TDLEAF_ADAM_BETA2 * vw[d]
                                + (1.0f - TDLEAF_ADAM_BETA2) * gw[d] * gw[d];
-                        float sv   = sqrtf(vw[d] / ft_bc2) + TDLEAF_ADAM_EPS;
+                        // v's own sample count: the persisted lifetime count when
+                        // v came back from disk, else this session's updates.
+                        const uint32_t eff = (uint32_t)vs[d] + 1;
+                        if (vs[d] != 0xFFFF) vs[d]++;
+                        float sv   = sqrtf(vw[d] / nnue_bc2(eff)) + TDLEAF_ADAM_EPS;
                         float step = gw[d] / sv;
+                        step_sum_ft += fabsf(step); step_n_ft++;
                         step = clip_adam_step(step, step_max_ft, step_clips_ft);
                         float dw = ft_lr * step;
                         // AdamW: decoupled weight decay (FT weights, not biases/PSQT)
@@ -1570,13 +1624,17 @@ static void nnue_apply_ft_rows(const int *rows, int lo, int hi, const NNUEApplyP
         float    *gw  = grad_ft_w      + (size_t)fi * NNUE_HALF_DIMS;
         uint32_t *cnt = ft_weights_cnt + (size_t)fi * NNUE_HALF_DIMS;
         if (v_ft_w) {
-            const float ft_bc2 = (ft_v_warmed && ft_v_warmed[fi]) ? p.ft_bc2_warm : p.ft_bc2_cold;
+            // Per-weight bias correction -- see the serial path for why.
+            uint16_t *vs = ft_w_vsamples + (size_t)fi * NNUE_HALF_DIMS;
             float *vw = v_ft_w + (size_t)fi * NNUE_HALF_DIMS;
             for (int d = 0; d < NNUE_HALF_DIMS; d++)
                 if (gw[d] != 0.0f) {
                     vw[d] = TDLEAF_ADAM_BETA2 * vw[d] + (1.0f - TDLEAF_ADAM_BETA2) * gw[d] * gw[d];
-                    float sv   = sqrtf(vw[d] / ft_bc2) + TDLEAF_ADAM_EPS;
+                    const uint32_t eff = (uint32_t)vs[d] + 1;
+                    if (vs[d] != 0xFFFF) vs[d]++;
+                    float sv   = sqrtf(vw[d] / nnue_bc2(eff)) + TDLEAF_ADAM_EPS;
                     float step = gw[d] / sv;
+                    step_sum_ft += fabsf(step); step_n_ft++;
                     step = clip_adam_step(step, smax_ft, sclip_ft);
                     float dw = p.ft_lr * step;
                     float wd = TDLEAF_WEIGHT_DECAY * p.ft_lr * fw[d];
@@ -2439,6 +2497,21 @@ bool nnue_load_fc_weights(const char *path)
                 if (fread(vw, sizeof(float), NNUE_HALF_DIMS, f)
                     != (size_t)NNUE_HALF_DIMS) break;
                 if (ft_v_warmed) ft_v_warmed[fi] = true;
+                // Seed v's per-DIM sample count from the restored v.  The
+                // row-level warmed flag is not enough: a row is saved if ANY dim
+                // has v != 0, so dims with v == 0 inside a saved row would
+                // otherwise be corrected as if mature (bc2~1 against v~0 => step
+                // pinned at the clip).  That is the residual the row-level guard
+                // above cannot cover.
+                if (ft_w_vsamples) {
+                    const float *vrow = v_ft_w + (size_t)fi * NNUE_HALF_DIMS;
+                    uint16_t *vsrow = ft_w_vsamples + (size_t)fi * NNUE_HALF_DIMS;
+                    const uint32_t *crow = ft_weights_cnt + (size_t)fi * NNUE_HALF_DIMS;
+                    for (int d = 0; d < NNUE_HALF_DIMS; d++)
+                        vsrow[d] = (vrow[d] != 0.0f)
+                                 ? (uint16_t)((crow[d] > 0xFFFFu) ? 0xFFFFu : crow[d])
+                                 : 0;
+                }
                 n_ft_v_loaded++;
             }
         }
