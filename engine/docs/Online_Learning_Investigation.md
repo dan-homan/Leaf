@@ -16,7 +16,20 @@ here is the only place that reflects all six parts at once.
 
 ## TL;DR — standing conclusions (current, through Part 7)
 
-0. **The online phase's cost is an EQUILIBRIUM set by the step size, not a
+0. **⚠️ SUPERSEDED BY 7.13 — the online phase's cost is a HANDOFF cost.**  30k
+   online games started from an *online* endpoint instead of an offline-trained
+   one read **+11.1 ± 9.1** against `lrfc0`'s **−129.8 ± 9.6** from the same
+   binary, seed and protocol: **+140.9 ± 13.2, 10.7σ.**  The damage is a
+   one-time excursion out of the offline optimum, paid once per offline→online
+   transition regardless of leg length (which is why 30k / 100k / 500k all read
+   the same — one handoff each).  The net still diffuses at 77–87% of normal
+   afterwards and costs nothing, and that later motion is **orthogonal** to the
+   damaging direction (cos −0.05).  **Minimise handoffs, not steps.**  Read 7.13
+   before using any "online cost" figure below — they are all handoff costs.
+   The equilibrium description that follows remains correct about the excursion
+   itself and is kept for that reason.
+
+   **The online phase's cost is an EQUILIBRIUM set by the step size, not a
    transient and not a bug.**  It scales with the learning rate (4× the LR gives
    4× the damage), is flat across a 17× range of run length, and is reached by
    the same value along different paths — a 1000-step LR ramp settles at the
@@ -4298,6 +4311,194 @@ arm is not a pure LR intervention.
 - Per-section statistics were taken from the `.tdleaf.bin` FP32 shadows via
   `merge_tdleaf.TDLeafFile` (remember the ÷128), and displacement from the
   `.nnue` pairs via `merge_tdleaf.NNUEFile`.
+
+## 7.13 The damage is a HANDOFF, not a cost of online play (2026-09-13/14)
+
+D. Homan: *"I wonder if we only get the damage when starting from an offline
+trained net.  In other words, would we get the same kind of rapid, early stage
+damage if we just started from the previous tdleaf learning round?"*
+
+**Yes to the first, no to the second, and the effect is 141 Elo.**  This is the
+largest single result in the investigation and it reframes every "online cost"
+number in Parts 6 and 7.
+
+### 7.13.1 First: what the LR arms actually did
+
+Prompted by *"why did it stop at one quarter the damage if a gradient was
+present?"*  Displacement of the `lr25` and `lr100` online endpoints from their
+common start (`7e6g_final`), 100k games each, independent seeds:
+
+| | mean over sections |
+|---|---|
+| cos(d_lr25, d_lr100) | **0.467** |
+| cos for two independent runs at the SAME η (30k arms) | 0.473 |
+| \|d_lr25\| / \|d_lr100\| | **0.520** |
+| η ratio | 0.250 |
+| predicted if displacement ∝ η | 0.250 |
+| predicted if displacement ∝ √η (stationary distribution) | 0.500 |
+| predicted if η-independent (relaxation to a fixed point) | 1.000 |
+| measured Elo damage ratio (−34.2 / −125.4) | 0.273 |
+| 0.520² | **0.270** |
+
+Three numbers close a loop: **displacement ∝ √η, Elo ∝ displacement², so damage
+∝ η.**  And the direction is η-invariant — 0.467 against a 0.473 ceiling, i.e.
+cutting the LR fourfold did not rotate the displacement measurably.
+
+So `lr25` did not stop a quarter of the way along a gradient.  It travelled
+**half** the distance, to a **smaller equilibrium**.  A relaxation toward a
+fixed point would have given ratio 1.0 and is excluded by a factor of two.
+**There is no destination; η sets a radius.**
+
+### 7.13.2 The direction is systematic, which noise alone cannot explain
+
+Cosine between displacement vectors, two 30k online runs from the same start
+with independent seeds (`optfix-A` 998103783, `ladder-ctl` 77881733):
+
+| section | cos | | section | cos |
+|---|---|---|---|---|
+| fc2_b | 0.836 | | fc0_w | 0.361 |
+| fc2_w | 0.705 | | ft_b | 0.253 |
+| fc1_b | 0.670 | | ft_w | 0.206 |
+| fc1_w | 0.624 | | psqt_w | 0.040 |
+| fc0_b | 0.561 | | **mean** | **0.473** |
+
+Isotropic noise in 21.6M dimensions gives cos ≈ 0.0002.  Quantisation noise in
+the two nets is independent and can only *reduce* this, so 0.473 is a lower
+bound.  Nor is anisotropy alone enough: independent **zero-mean** draws give
+E[cos] = 0 whatever the covariance, because signs are random.  Nine sections
+positive out of nine, across four separate pairings, requires a genuine mean
+component — of roughly the same magnitude as the random part (|μ| ≈ 0.94|ξ|).
+
+Note where it lives: **the FC block** (0.36–0.84), not FT weights (0.21) and
+emphatically not PSQT (0.04).
+
+### 7.13.3 The `onon` arm: the damage vanishes
+
+30k online games started from an **online** endpoint (`lrfc0`'s own 30k state)
+instead of an offline-trained one.  Same binary, same seed (77881733), same
+games, same ladder protocol, rated against its own starting net.  The only
+change is whether the start came out of an offline pass.
+
+| games | `lrfc0` (from offline net) | `onon` (from online net) |
+|---|---|---|
+| 1,000 | −91.7 ± 9.2 | +24.4 ± 8.5 |
+| 2,000 | −177.7 ± 10.2 | −1.4 ± 8.4 |
+| 3,000 | −150.1 ± 10.2 | +14.3 ± 8.8 |
+| 5,000 | −148.8 ± 9.6 | −4.9 ± 9.1 |
+| 10,000 | −128.9 ± 9.6 | +7.3 ± 8.9 |
+| 20,000 | −120.3 ± 9.9 | +25.1 ± 9.5 |
+| **30,000** | **−129.8 ± 9.6** | **+11.1 ± 9.1** |
+
+**+140.9 ± 13.2 at 30k, or 10.7σ.**  Not reduced — absent, and marginally
+positive (ladder mean +10.8).  Draw rates agree independently: 288–376 against
+`lrfc0`'s 235–259.  The post-generation piece-value canary did not move at all
+(P=119 N=382 B=407 R=611 Q=1203, identical to its starting state).
+
+**The ~−130 is not a cost of online learning.  It is a one-time cost of the
+offline→online handoff, paid per transition regardless of leg length** — which
+is also why 7.10.1's 30k / 100k / 500k legs all read the same: one handoff each.
+
+### 7.13.4 The net still moves — and moves orthogonally
+
+This is what makes the result interpretable rather than merely surprising.
+Displacement over the same 30k games, same binary:
+
+| section | `lrfc0` (from offline) | `onon` (from online) | ratio |
+|---|---|---|---|
+| fc0_w | 8.63% | 7.50% | 0.87 |
+| ft_w | 1.184% | 1.014% | 0.86 |
+| ft_b | 3.675% | 3.117% | 0.85 |
+| psqt_w | 0.565% | 0.438% | 0.78 |
+| fc1_w | 4.729% | 3.629% | 0.77 |
+| fc2_w | 5.742% | 3.930% | 0.68 |
+| fc1_b | 3.379% | 2.264% | 0.67 |
+| fc2_b | 1.799% | 0.956% | 0.53 |
+| fc0_b | 5.809% | 2.858% | 0.49 |
+
+The weights keep diffusing at 77–87% of normal **and cost nothing**.  So the
+ball is Elo-flat, and `W_off` sits on a peak outside it.  This retro-explains
+7.11.3's puzzle (weights still moving at 30k while Elo is flat) — that is the
+Elo-neutral diffusion, seen directly.
+
+Directions confirm it.  With `dA`, `dB` the two damaged runs from `W_off` and
+`dC` the undamaged continuation:
+
+| | cos(dA,dB) | cos(dC,dA) | cos(dC,dB) |
+|---|---|---|---|
+| **mean** | **+0.485** | **−0.048** | **+0.154** |
+
+**The systematic direction exists only from `W_off`.**  Once the net is in the
+ball, subsequent motion is orthogonal to it (and mildly retracing: fc0_w −0.32,
+ft_b −0.28, ft_w −0.24).  The drift is anchored to the offline optimum, is
+traversed once, and is not revisited.
+
+### 7.13.5 It is NOT the additive eval constants
+
+The obvious candidate, given the FC localisation, is the per-material-bucket
+constant: `fc2_bias[stack]` and the FC0 passthrough `fc0_bias[stack][15]` both
+add **directly** to the score (`cp = fc2_bias × 100/5776`, and the passthrough
+× 9600/8128 on top).  A per-bucket constant does *not* cancel in search the way
+a global one does — it biases material transitions — so it is a plausible
+strength channel.  Measured, in centipawns, as the total direct constant per
+stack shifted from `W_off`:
+
+| arm | max−min shift across the 8 stacks | Elo |
+|---|---|---|
+| lrfc0-30k (damaged) | 2.4 cp | −129.8 |
+| optfix-A-30k (damaged) | 2.5 cp | −123.4 |
+| **onon-30k (undamaged)** | **3.7 cp** | **+11.1** |
+
+**The undamaged arm moves these constants MORE than the damaged ones.**  The
+additive-constant channel is excluded.  (For scale, the previous leg's full
+500k online endpoint shifted them by 11.7 cp.)
+
+### 7.13.6 Where this leaves the mechanism
+
+What is established: the damage is a one-time excursion along a direction
+specific to the offline-trained starting point; its length scales as √η; it
+lives in the FC block, not FT or PSQT; it is not carried by the additive eval
+constants; and everything the net does afterwards is orthogonal to it and free.
+
+What is **not** established is why the FC block has a preferred direction out of
+`W_off`.  Two readings, not mutually exclusive:
+
+- **Different targets.**  The two modes fit the FC head on different
+  populations.  Offline uses `--bt-rows root --bt-quiet-cp 60`, i.e. root
+  positions gated to |cp| ≤ 60, globally shuffled, with labels frozen from when
+  the games were played.  Online fits PV *leaf* positions, ungated, in game
+  order, bootstrapped on *current* weights via `--refresh-scores`.  Those are
+  different input distributions and different label constructions for the same
+  8-bucket head.  7.9.2's `--bt-diag` is consistent: ΔMSE ≈ 0 *inside* the gate
+  with the whole +13.83% in the out-of-gate tail — the offline pass only fits
+  where it looks.
+- **Same target, different variance.**  The FC head is ~140k parameters
+  estimated offline from 512 globally-shuffled rows per step drawn from 3.5M
+  games, and online from 8 games ≈ 1200 autocorrelated positions.  The online
+  estimator is badly rank-deficient, so its error has a dominant eigendirection
+  fixed by the architecture and the data structure rather than by the seed —
+  which would produce a reproducible direction *without* any difference in
+  target.  This is Σ (7.11.8) localised to the FC block.
+
+The √η scaling favours the second: a genuine fixed target difference would give
+an η-independent displacement, and it does not.  But the first is not excluded,
+because the gate is a real and large difference between the two objectives.
+
+**Distinguishing them, cheaply.**  Run one offline consolidation with the quiet
+gate widened or removed (`--bt-quiet-cp` large) and re-measure the handoff
+damage on a 5k arm (7.11.8's protocol, ~50 min).  If the damage shrinks, the
+gate is creating a target difference.  If it does not, the cause is estimator
+variance and the lever is batch decorrelation.
+
+**Practical consequences, independent of which is right.**
+
+1. **Minimise handoffs, not steps.**  The cost is per transition.  Longer online
+   legs per consolidation are strictly cheaper, and the LR is not the lever it
+   appeared to be.
+2. **Every "online cost" figure in Parts 6 and 7 is a handoff cost**, not a cost
+   of generating a corpus.  Standing conclusion 3's rule — do not optimise the
+   online phase's own Elo — is *reinforced*: that number measures the handoff.
+3. The `-tdleaf` vs `-final` decomposition (7.9.2) is measuring the peak height,
+   not the online phase's productivity.
 
 ## Methodology notes (Part 7)
 

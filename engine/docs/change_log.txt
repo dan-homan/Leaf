@@ -1,5 +1,65 @@
 Changes since 2017_12_24
 
+2026_09_14a -- Part 7.13: the online "damage" is a HANDOFF cost, not a cost of
+               online learning.  +140.9 +- 13.2 (10.7 sigma).
+
+               D. Homan's hypothesis: do we only get the damage when starting
+               from an OFFLINE-TRAINED net?  Tested with the onon arm -- 30k
+               online games started from an ONLINE endpoint (lrfc0's own 30k
+               state) instead of <prev>_final.  Same binary, same seed, same
+               games, same ladder, rated against its own starting net.
+
+                 lrfc0 (from offline net), 30k:  -129.8 +- 9.6
+                 onon  (from online net),  30k:  +11.1 +- 9.1
+
+               The damage is not reduced, it is ABSENT (ladder mean +10.8, draw
+               rates 288-376 vs 235-259).  So the cost is paid once per
+               offline->online transition, regardless of leg length -- which is
+               also why 7.10.1's 30k/100k/500k legs all read the same.
+
+               MINIMISE HANDOFFS, NOT STEPS.  Every "online cost" number in
+               Parts 6 and 7 is a handoff cost.
+
+               The net still MOVES -- 77-87% of normal displacement in the
+               weight sections -- and costs nothing, so the ball is Elo-flat
+               and the offline net sits on a peak outside it.  That is 7.11.3's
+               unexplained observation (weights moving at 30k while Elo is flat)
+               seen directly.  Directions confirm: two damaged runs from the
+               offline net agree at cos +0.485, but the undamaged continuation
+               is ORTHOGONAL to that direction (cos -0.048).  The drift is
+               anchored to the offline optimum and is traversed once.
+
+               Also settled, from D. Homan's question about the LR arms ("why
+               did it stop at one quarter the damage if a gradient was
+               present?"):
+
+                 cos(d_lr25, d_lr100)      0.467  (ceiling for independent
+                                                   runs at same eta: 0.473)
+                 |d_lr25| / |d_lr100|      0.520  (sqrt(0.25) = 0.500)
+                 Elo damage ratio          0.273  (0.520^2 = 0.270)
+
+               Displacement ~ sqrt(eta), Elo ~ displacement^2, damage ~ eta.
+               lr25 did not stop a quarter of the way along a gradient -- it
+               went HALF the distance to a SMALLER equilibrium.  Relaxation to
+               a fixed point (ratio 1.0) is excluded by a factor of two.  There
+               is no destination; eta sets a radius.
+
+               Localisation: the systematic direction lives in the FC block
+               (cos 0.36-0.84), not FT weights (0.21) and not PSQT (0.04).  But
+               it is NOT the additive per-bucket eval constants -- fc2_bias and
+               the FC0 passthrough fc0_bias[15] both add directly to the score,
+               and the UNDAMAGED arm shifts them MORE (3.7 cp across the 8
+               stacks) than the damaged ones (2.4, 2.5 cp).  Channel excluded.
+
+               Mechanism still open, two readings in 7.13.6: different targets
+               (offline fits root rows gated to |cp| <= 60, globally shuffled,
+               on frozen labels; online fits PV leaves, ungated, in game order,
+               bootstrapped on current weights) vs same target with different
+               estimator variance (140k FC params from 8 correlated games, i.e.
+               Sigma localised to the FC block).  The sqrt(eta) scaling favours
+               the second.  Cheap discriminator: widen --bt-quiet-cp and
+               re-measure handoff damage on a 5k arm.
+
 2026_09_13e -- Part 7.12: the fc0_w LR arm is NULL.  Section-level displacement
                magnitude is not what sets the online damage.
 
