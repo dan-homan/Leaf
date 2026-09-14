@@ -22,10 +22,15 @@ here is the only place that reflects all six parts at once.
    the same value along different paths — a 1000-step LR ramp settles at the
    same place, just later.  That is a stationary SGD noise ball: `E|Δw|² ∝
    η·Σ/κ`, so Elo loss ∝ η and constant in time once equilibrated (√t growth is
-   only the pre-equilibrium transient).  **Four optimizer mechanisms were
-   proposed and all four are null** — stale moments, gradient normalisation,
-   missing session warmup, FT bias correction — see Part 7.11 before proposing a
-   fifth.  Crucially the damage is fully repaired: on a real 190M corpus, an arm
+   only the pre-equilibrium transient).  **Five optimizer mechanisms were
+   proposed and all five are null** — stale moments, gradient normalisation,
+   missing session warmup, FT bias correction (7.11), and per-section LR
+   miscalibration (7.12) — see Parts 7.11 and 7.12 before proposing a sixth.
+   7.12 is the one that most constrains the search: the single largest mover in
+   the net, `fc0_w`, had its LR cut 3.6× in a seed-paired arm, its displacement
+   fell 1.65× as predicted, and the seven-point ladder came back flat (χ² 6.68
+   on 7 dof, p = 0.46).  **Section-level displacement magnitude is not what sets
+   the damage.**  Crucially the damage is fully repaired: on a real 190M corpus, an arm
    carrying −123 of online damage consolidates to **+9.4 ± 8.4 against the chain
    head** (7.11.7).  The untested lever is Σ, the gradient-noise covariance —
    online batches are 8 games of sequential, highly correlated positions where
@@ -3825,6 +3830,7 @@ killed them, and two of those write-ups were mine.
 | 2 | gradient scale mismatch (0.039 offline vs 0.168 online, neither path normalising) | `--grad-norm` | cuts damage 91 Elo — but via the `TDLEAF_ADAM_EPS` floor, making it a learning-rate cut in disguise.  A third of it vanished when eps went 1e-8 → 1e-12 |
 | 3 | no session warmup, so a cold `v` gives correct *expected* first steps but wild per-weight variance | uniform 1000-step ramp on every category | **delays only**: −131.3 ± 9.3 at 30k against the control's −149.7 ± 10.2, +18.3 ± 13.8 (1.3σ) |
 | 4 | FT weight bias correction uses a global counter where per-weight is needed | mean-step telemetry | **real defect, negligible size**: mean FT step 0.25–0.35, clip rate ~3e-7 |
+| 5 | per-section LR miscalibration — `fc0_w` 3.7× hot against the other stationary sections, and the largest mover in the net | `TDLEAF_ADAM_LR0` 0.005 → 0.0014, seed-paired 30k ladder | **null**: χ² 6.68 on 7 dof, p = 0.46 across the ladder; displacement fell 1.65× as designed and bought nothing.  Added 2026-09-13, see 7.12 |
 
 Mechanism 1 was additionally tested on the *final* net with the corpus confound
 removed (7.11.7) and is null there too.
@@ -4026,6 +4032,14 @@ For a noise ball, `E|Δw|² ∝ η·Σ / κ`.  Two levers:
 *leg total* under the epsilon confound, and a larger *correlated* batch is not
 the same intervention as a decorrelated one.
 
+**Strengthened by 7.12, by elimination.**  The obvious alternative to Σ was that
+the ball is simply too big in some particular direction — that one badly
+calibrated section carries the damage.  7.12 tested that on the best candidate
+available (`fc0_w`: 3.7× hot against a ratio the other two stationary sections
+agree on to 6%, *and* the largest mover in the net by a factor of two) and got a
+null.  η is exhausted, per-section magnitude is now exhausted, and Σ is what is
+left.
+
 **A practical consequence.**  Damage equilibrates fast and is path-independent —
 the strongest thing this week established.  The trough is reached by 2–3k games
 and 30k/100k/500k all read the same.  So **equilibrium damage can be measured
@@ -4052,6 +4066,238 @@ survivors to a full leg with a real corpus.
   binary keeps running with no warning.
 - **A transient playing out over ~1000 Adam steps cannot be seen in a 24-game
   harness** (3 applies).  Scale was always going to be the only test.
+
+## 7.12 The fc0_w LR arm: the largest mover is not the damage (2026-09-13)
+
+D. Homan, opening the question: *"the 0.001 × median for the current LR was
+based simply on the statistics of the stockfish v15 net… nothing said that was
+the right answer for this net, merely a place to start."*  Re-measuring produced
+a sharper miscalibration than 7.11.5 had reported, a two-way split of the
+sections that changes what an LR rule can even mean, and — when the one clearly
+miscalibrated section was corrected — a null.
+
+**The null is the fifth in the 7.11.1 table and the most constraining of them**,
+because `fc0_w` was the strongest candidate the investigation had left.
+
+### 7.12.1 7.11.5 measured the wrong surface
+
+The LRs act on the **FP32 shadow weights**, not on the exported `.nnue`.  Two
+corrections follow, and both matter:
+
+- `.tdleaf.bin` stores the shadows at **`TDLEAF_SCALE` = 128** (so sub-integer
+  drift survives a session).  Divide by 128 to get engine units.
+- `.nnue` values are integer-rounded and include structural padding — `fc0_w`'s
+  "median 3.0" is really 2.53, and `fc1_w` is 30 inputs padded to 32.  Measure
+  over **touched** weights (`cnt > 0`), which drops the padding naturally.
+
+Redone on `m260720-7e6g_final`, median \|w\| over touched weights, engine units:
+
+| section | median \|w\| | LR0 | LR0/median | vs the 0.001 rule |
+|---|---|---|---|---|
+| psqt_w | 23,640 | 13.0 | 0.00055 | 0.55× |
+| ft_w | 24.86 | 0.015 | 0.00060 | 0.60× |
+| ft_b | 19.20 | 0.02 | 0.00104 | 1.04× |
+| fc0_b | 895.9 | 1.5 | 0.00167 | 1.67× |
+| fc1_w | 2.683 | 0.005 | 0.00186 | 1.86× |
+| fc0_w | 2.529 | 0.005 | 0.00198 | 1.98× |
+| fc2_b | 519.9 | 1.5 | 0.00289 | 2.89× |
+| fc1_b | 489.6 | 1.5 | 0.00306 | 3.06× |
+| **fc2_w** | **6.597** | **0.07** | **0.01061** | **10.61×** |
+
+The spread is **19.3×**, not 7.11.5's 11×, and the geometric mean is 0.00180 —
+the set as a whole runs 1.8× hotter than the rule it was meant to follow.
+
+### 7.12.2 Two kinds of section, and only one of them obeys a magnitude rule
+
+Tracing the `m260720` chain from **its own fresh init** (`m260720.nnue`, built
+with `--init-nnue-classical`) rather than from an arbitrary checkpoint.  RMS per
+section, quantised units:
+
+| section | n | init | 1e5g | 1e6g | 3e6g | 5e6g | 7e6g |
+|---|---|---|---|---|---|---|---|
+| fc0_w | 131k | 3.881 | 3.894 | 3.835 | 3.864 | 3.947 | 3.863 |
+| ft_w | 23M | 44.01 | 43.94 | 43.17 | 42.05 | 40.99 | 40.01 |
+| psqt_w | 180k | 3.581e4 | 3.574e4 | 3.563e4 | 3.588e4 | 3.617e4 | 3.629e4 |
+| fc1_w | 8k | 3.004 | 3.056 | 3.327 | 3.934 | 5.093 | 6.654 |
+| fc2_w | 256 | 1.923 | **15.52** | 26.87 | 28.98 | 36.84 | 35.70 |
+| fc0_b | 128 | **0** | 203.2 | 627.4 | 994.9 | 1180 | 1422 |
+| fc1_b | 256 | **0** | 235.0 | 499.1 | 655.0 | 771.0 | 895.9 |
+| fc2_b | 8 | **0** | 153.2 | 244.3 | 331.6 | 639.9 | 1191 |
+| ft_b | 1k | **0** | 5.071 | 12.42 | 18.07 | 22.32 | 26.41 |
+
+**All five bias sections initialise to exactly zero** — He init for the FC
+biases, plus an explicit `memset` for the FT bias.  So `0.001 × median` is
+*undefined* at init for five of the nine sections, and wrong for a sixth.
+
+- **Stationary** — `fc0_w`, `ft_w`, `psqt_w`.  Scale set by the init constants
+  and never moves across 7M games.  21.6M of 21.6M parameters, i.e. 99.99%.  A
+  magnitude rule is well defined and stable here, and this is where the noise
+  ball lives.  `INIT_FC0_W_STD = 4`, `INIT_FT_W_STD = 44` and the classical PSQT
+  prior are all well chosen.
+- **Scale-finding** — `fc2_w` and the five bias sections, 1,672 parameters
+  between them.  They start at or near zero and spend the run finding their own
+  scale.  The LR here is a **growth rate**, not a fraction of a weight.
+
+Three consequences.
+
+**`fc2_w`'s "10.6× over intent" is not a miscalibration.**  It starts at RMS
+1.92 and has to reach ~36; `LR0 = 0.07` is what gets it there inside the first
+100k games.  Sizing it off the *converged* magnitude would make a fresh run's
+scale-finding ~9× slower.  The same trap is worse for the biases: sizing them
+off `fc0_b ≈ 1400` would start a fresh net with a bias LR that cannot move a
+section sitting at zero.
+
+**The fixed absolute LR on a growing section is a self-annealing schedule** that
+nobody had to write.  `fc0_b` ran at LR/magnitude = ∞ at init, 1.5/203 = 0.0074
+at 1e5g, and 0.00167 now — a 4.4× automatic anneal.  Same for `fc2_w`: 0.0045 at
+1e5g → 0.00196 now.
+
+**7.11.5 checked drift on the weights and missed the biases.**  Its conclusion
+was right for what it measured — weight medians are flat and `fc2_w` *grew*, so
+no section's effective LR rose.  But it never looked at the bias sections, and
+that is where all the motion is: `fc0_b` ×15.9, `fc2_b` ×8.9, `ft_b` ×6.4,
+`fc1_b` ×3.3, monotone across the whole chain and **still rising at 7M games**
+(`fc2_b` +28% in the final leg alone — a leg whose total was +6.6 ± 8.2, i.e. no
+measurable improvement).  These are precisely the constant-capable channels
+`TRAINING.md` flags for outcome-imbalance absorption.  This is unexplained and
+is **not** claimed here to be pathological — self-play is supposed to be immune —
+but bias RMS per leg is a nearly free canary and, unlike the draw rate (7.2), it
+is not blind to uniform decay.  Worth carrying into the restart.
+
+### 7.12.3 The one clean target, and the arm
+
+Among the stationary sections, `ft_w` (LR/RMS 0.00034) and `psqt_w` (0.00036)
+already agree on a common ratio to within 6%.  `fc0_w` sat at **0.00129 — 3.7×
+hot** — and is also the largest mover in the entire net by a factor of two:
+13.5% of its own RMS over 30k games, against `ft_w`'s 1.18% and `psqt_w`'s
+0.54%.  One section, miscalibrated on the only axis where calibration is
+well defined, and carrying the most displacement.  That is as clean as a
+candidate gets.
+
+`TDLEAF_ADAM_LR0` **0.005 → 0.0014** (= 0.00035 × RMS 3.88, putting all three
+stationary sections on one ratio).  `fc1_w` was split onto its own
+`TDLEAF_ADAM_FC1_LR0` and **held at 0.005**, so `fc0_w` is the single changed
+variable — `fc1_w` is not stationary (RMS 3.00 → 6.65) and has no fixed
+magnitude to calibrate against anyway.  Serial and parallel apply paths patched
+symmetrically to preserve the bit-identity documented at
+`nnue_apply_gradients_parallel`.  Commit `d6550b2`.
+
+Protocol byte-identical to `ladder-ctl` — verified by diffing the actual
+`selfplay_run.py` command lines, which match modulo output paths — and
+**seed-paired to it** (77881733) via a new `train.py --seed`.
+
+### 7.12.4 The intervention worked at the weight level
+
+Displacement from the chain head to each arm's **1000g** stamped net, which is
+available within minutes of the run starting and needs no gauntlet at all:
+
+| section | `ladder-ctl` rms(dw) | `lrfc0` rms(dw) | ratio |
+|---|---|---|---|
+| **fc0_w** | 0.3692 | **0.2237** | **0.61×** |
+| fc1_w | 0.2176 | 0.2151 | 0.99× |
+| ft_w | 0.1833 | 0.1833 | 1.000× |
+| psqt_w | 64.77 | 64.91 | 1.002× |
+| ft_b | 0.7215 | 0.7255 | 1.01× |
+| fc2_w | 0.8478 | 0.8772 | 1.03× |
+| fc1_b | 14.93 | 16.02 | 1.07× |
+| fc0_b | 21.89 | 27.48 | **1.26×** |
+| fc2_b | 5.35 | 7.382 | **1.38×** |
+
+Three readings.
+
+**The isolation held.**  `ft_w` is identical to four significant figures and
+PSQT to 0.2%, across 23M parameters on two independently-run 1000-game samples.
+Whatever the ladder returns is attributable to `fc0_w`.
+
+**`fc0_w` responded as a noise ball predicts.**  A 3.57× LR cut gave a 1.65×
+displacement reduction, against √3.57 = 1.89.  Slightly under the square-root
+law, which is the right sign for a section that is partly equilibrated and
+partly coherent.  The fraction of weights crossing a quantisation boundary fell
+from 13.6% to 5.0%.
+
+**The FC biases absorbed the slack** — `fc2_b` +38%, `fc0_b` +26%, `fc1_b` +7%,
+with nothing else moving.  This is D. Homan's 7.11.2 point (4), *"loss in one
+part of the net could be partly compensated by another, masking motion"*,
+visible inside the first 1000 games.
+
+### 7.12.5 And it bought nothing
+
+Seven points, each a 1000-game match against `Leaf_vm260720-7e6g-final` on an
+idle box, same protocol as the 7.11.4 ladder:
+
+| games | `ladder-ctl` | `lrfc0` | difference |
+|---|---|---|---|
+| 1,000 | −106.8 ± 9.8 | −91.7 ± 9.2 | +15.1 ± 13.4 |
+| 2,000 | −159.8 ± 9.9 | −177.7 ± 10.2 | −17.9 ± 14.2 |
+| 3,000 | −163.2 ± 10.1 | −150.1 ± 10.2 | +13.1 ± 14.3 |
+| 5,000 | −142.7 ± 9.5 | −148.8 ± 9.6 | −6.2 ± 13.5 |
+| 10,000 | −140.6 ± 9.2 | −128.9 ± 9.6 | +11.7 ± 13.3 |
+| 20,000 | −121.1 ± 9.7 | −120.3 ± 9.9 | +0.8 ± 13.9 |
+| 30,000 | −149.7 ± 10.2 | −129.8 ± 9.6 | +19.9 ± 14.0 |
+
+**χ² against all-zero is 6.68 on 7 dof, p = 0.46.**  The differences scatter
+around zero, changing sign three times.  Even the most generous pooling —
+treating the seven points as independent, which they are **not**, since they are
+consecutive checkpoints of one trajectory — gives **+5.4 ± 5.2**.
+
+The 30k point reads +19.9 ± 14.0 (1.4σ) and should not be banked.  `lrfc0`'s
+−129.8 sits squarely between the two known readings of the *same* control
+configuration — `ladder-ctl` −149.7 and `optfix-A` −123.4 (7.11.9) — so it is
+inside the arm-to-arm variance, and the sign flips twice earlier in the curve.
+Seed-pairing removes the *generation* seed's contribution to that variance but
+not the trajectory divergence that begins at the first Adam step, and not the
+independent match noise at each point.
+
+Note also that the 1000g point alone would have been read as encouraging
+(+15.1, and a 4 pp higher draw rate).  It was the slower descent, not smaller
+damage: by 2000g the arm was *below* the control.  **One early ladder point
+cannot distinguish "less damage" from "same damage, reached later"** — which is
+the same lesson 7.11.4 learned when a mid-series trough reversed at 30k.
+
+### 7.12.6 What this retires, and what survives
+
+**Retired: section-level displacement magnitude as the axis.**  The largest
+mover in the net had its motion cut by a third and nothing happened.  This
+closes the "find the badly calibrated section" line, which is where 7.11.5's own
+11× spread was pointing, and it closes it on the best candidate rather than a
+marginal one.  It is also the cleanest of the five nulls: one constant, 0.6% of
+the parameters, a verified byte-identical protocol, a seed-paired control, and a
+weight-level confirmation that the intervention did what it was designed to do.
+
+**Kept anyway, on hygiene grounds:** the LR change stays in.  `fc0_w` at 0.00129
+against `ft_w`/`psqt_w` at 0.00034/0.00036 is a real inconsistency and 0.0014
+costs nothing to carry.  What the null says is that nothing should be *expected*
+from it — not that it should be reverted.
+
+**Survives, and matters more than the arm:** the stationary / scale-finding
+split of 7.12.2, and the bias-growth observation.  Both are about the from-scratch
+restart rather than about the current head, and neither depends on the null.
+
+**One caveat on the arm itself.**  Cutting `fc0_w`'s LR also cut its AdamW decay
+by the same 3.6× (`wd = λ × lr × w`), since the decay is scaled by the section's
+own LR by design.  `fc0_w`'s RMS is stationary, so this is second order, but the
+arm is not a pure LR intervention.
+
+### Methodology notes (7.12)
+
+- `train.py --seed` overrides the `crc32(tag)` generation seed so an arm can be
+  seed-paired with a previous one; it is recorded in the run sidecar and is
+  **not** inherited through `--continue`.  Added for this arm.
+- **Measure displacement, not only Elo, and do it early.**  The 7.12.4 table was
+  available five minutes into a five-hour run and confirmed both that the
+  intervention worked and that the isolation held.  Had `ft_w` or PSQT moved, the
+  arm could have been killed on the spot.  Any future optimizer arm should bake a
+  1000g ladder net and diff it before spending the gauntlet time.
+- **`match.py` logs contain periodic interim result blocks.**  `grep -m1 "^Elo:"`
+  returns the *first* of these, not the final figure — at 1000g into a match the
+  interim read −47.7 ± 79.9 against a final of −91.7 ± 18.0.  Take the **last**
+  `Elo:` line, and only after `Finished match` appears.
+- The arms' generation wall-clock matched to within three minutes (2h11m against
+  the control's 2h14m), as expected for an identical config; the 30k generation
+  completed `rc=0` with all 30 ladder nets baked.
+- Per-section statistics were taken from the `.tdleaf.bin` FP32 shadows via
+  `merge_tdleaf.TDLeafFile` (remember the ÷128), and displacement from the
+  `.nnue` pairs via `merge_tdleaf.NNUEFile`.
 
 ## Methodology notes (Part 7)
 

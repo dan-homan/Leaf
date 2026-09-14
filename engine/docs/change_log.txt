@@ -1,5 +1,63 @@
 Changes since 2017_12_24
 
+2026_09_13e -- Part 7.12: the fc0_w LR arm is NULL.  Section-level displacement
+               magnitude is not what sets the online damage.
+
+               Fifth entry in the 7.11.1 mechanism table and the cleanest of
+               the five.  fc0_w was the strongest candidate the investigation
+               had left: 3.7x hot on LR/RMS against a ratio ft_w (0.00034) and
+               psqt_w (0.00036) agree on to 6%, AND the largest mover in the
+               net by a factor of two (13.5% of its own RMS over 30k games
+               against ft_w's 1.18% and psqt_w's 0.54%).
+
+               TDLEAF_ADAM_LR0 0.005 -> 0.0014, seed-paired 30k ladder against
+               ladder-ctl, protocol verified byte-identical by diffing the
+               selfplay_run.py command lines.
+
+               The intervention worked at the weight level and the isolation
+               held: fc0_w displacement fell 1.65x against sqrt(3.57) = 1.89
+               predicted, while ft_w stayed identical to FOUR significant
+               figures and psqt_w to 0.2%.  The FC biases absorbed the slack
+               (fc2_b +38%, fc0_b +26%) -- D. Homan's 7.11.2 point (4) visible
+               inside 1000 games.
+
+               And it bought nothing.  Seven ladder points, chi2 6.68 on 7 dof,
+               p = 0.46, three sign changes.  The 30k point (+19.9 +- 14.0)
+               sits between the two known readings of the SAME control config
+               (-149.7 and -123.4), i.e. inside the arm-to-arm variance.
+
+               Also recorded in 7.12, and both matter more than the null for
+               the planned from-scratch restart:
+
+                 - the STATIONARY / SCALE-FINDING split.  fc0_w, ft_w and
+                   psqt_w never move in RMS across 7e6 games (99.99% of the
+                   parameters); fc2_w and all five bias sections start at or
+                   near ZERO and spend the run finding their scale.  A
+                   magnitude rule is undefined for five of nine sections at
+                   init.  Sizing them off MATURE magnitudes would freeze a
+                   fresh net at its init scale.  A fixed absolute LR on a
+                   growing section is a self-annealing schedule nobody wrote.
+                 - 7.11.5 checked drift on the WEIGHTS (flat -- correct) and
+                   never checked the BIASES, which grew 3-16x monotonically
+                   and are STILL rising at 7e6 games.  Bias RMS per leg is a
+                   nearly free canary and, unlike the draw rate (7.2), is not
+                   blind to uniform decay.
+
+               Two measurement lessons worth the space:
+
+                 - bake a 1000g ladder net and DIFF IT before spending gauntlet
+                   time.  The 7.12.4 displacement table was available five
+                   minutes into a five-hour run and would have justified
+                   killing the arm on the spot had ft_w or psqt_w moved.
+                 - match.py logs contain periodic INTERIM result blocks.
+                   grep -m1 "^Elo:" returns the first, not the final: at 1000g
+                   into a match the interim read -47.7 +- 79.9 against a final
+                   of -91.7 +- 18.0.  Take the LAST Elo line, and only after
+                   "Finished match" appears.
+
+               The LR change itself stays in on hygiene grounds; nothing should
+               be expected from it.
+
 2026_09_13d -- Recalibrate the fc0_w learning rate from THIS net's statistics;
                split FC1 weights onto their own constant.
 
