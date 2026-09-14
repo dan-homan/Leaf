@@ -1,5 +1,58 @@
 Changes since 2017_12_24
 
+2026_09_14b -- Part 7.14: the ungated test is a NULL.  The quiet gate is not
+               the difference between the two learning modes; Sigma survives by
+               elimination.
+
+               7.13.6 left two readings of the handoff cost: (a) the two modes
+               have different TARGETS (offline fits root rows gated to
+               |cp-gate| <= 60, online fits ungated PV leaves), or (b) the same
+               target with different ESTIMATOR VARIANCE (Sigma).  (a) is dead.
+
+               Three arms, same state, identical settings, differing only as
+               shown.  Handoff damage = 5k online arm out of each net, rated
+               1000 games against that net, seed-paired.
+
+                 gateG  20,118,912 rows, 100%  in-gate, mean|cp| 163  -119.9 +- 9.8
+                 gateU  11,731,426 rows, 100%  in-gate, mean|cp| 163  -138.2 +- 9.7
+                 gateW  20,120,612 rows, 58.3% in-gate, mean|cp| 278  -133.8 +- 9.7
+
+                 gateW - gateG (THE GATE, rows matched)  -13.9 +- 13.8  1.0 sigma
+                 gateU - gateG (row count, gate matched) -18.3 +- 13.8  1.3 sigma
+                 chi2 vs a common value: 1.90 on 2 dof, p = 0.39
+
+               All three are the same number, inside the ~26 Elo arm-to-arm
+               variance, and the ungated arm is if anything marginally WORSE.
+               Net strength is equally flat (gateW vs gateG head-to-head
+               -4.9 +- 8.6).  Power check passed: a 20M-row consolidation
+               reproduces the full handoff that real 190M ones produce.
+
+               So eta is exhausted (7.13.1), per-section magnitude is exhausted
+               (7.12), the four optimizer mechanisms are exhausted (7.11.1), and
+               the target-difference reading is exhausted here.  SIGMA IS THE
+               ONLY LEVER LEFT: ~140k FC params estimated online from 8 games of
+               ~1200 autocorrelated positions vs 512 from a global shuffle.
+
+               TWO TRAPS, both cost time:
+
+                 - --bt-quiet-cp is a corpus-ASSEMBLY knob in train.py
+                   (train.py:380), NEVER passed to nnue_batch_train.  The 190M
+                   chain corpus is therefore already cut at 60 (max|cp-gate| =
+                   60, zero rows over) and CANNOT be un-gated -- the wide rows
+                   were never written.  Only the raw dumps are wide
+                   (TDLEAF_DUMP_QUIET_CP = 1000 since 2026-09-03, gate column
+                   per row).
+                 - The first "ungated" arm left --bt-quiet-cp at its default 60,
+                   so assembly silently dropped the out-of-gate rows and it
+                   trained on 11.7M rows that were 100% in-gate.  ALWAYS VERIFY
+                   THE ASSEMBLED CORPUS, not the input file.  That mistake
+                   became the row-count control above.
+
+               Incidental but useful for the restart: 11.7M and 20.1M rows give
+               statistically identical nets AND identical handoff damage, so
+               returns in that range are flat (though 190M still beats 20M by
+               ~20 Elo on the classic_eval anchor).
+
 2026_09_14a -- Part 7.13: the online "damage" is a HANDOFF cost, not a cost of
                online learning.  +140.9 +- 13.2 (10.7 sigma).
 

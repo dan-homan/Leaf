@@ -45,7 +45,10 @@ here is the only place that reflects all six parts at once.
    on 7 dof, p = 0.46).  **Section-level displacement magnitude is not what sets
    the damage.**  Crucially the damage is fully repaired: on a real 190M corpus, an arm
    carrying −123 of online damage consolidates to **+9.4 ± 8.4 against the chain
-   head** (7.11.7).  The untested lever is Σ, the gradient-noise covariance —
+   head** (7.11.7).  **Σ is now the only lever left, by elimination (7.14):** the target-difference
+   reading was tested by training the offline pass on the full ungated
+   distribution (44.3% out-of-gate, mean |cp| 278 against 163) and the handoff
+   was unchanged — χ² 1.90 on 2 dof, p = 0.39 across three arms.  Σ, the gradient-noise covariance —
    online batches are 8 games of sequential, highly correlated positions where
    the offline trainer shuffles globally (7.11.8).  The Adam second moment is
    shared and persisted between two objectives — online TDLeaf and offline
@@ -4499,6 +4502,116 @@ variance and the lever is batch decorrelation.
    online phase's own Elo — is *reinforced*: that number measures the handoff.
 3. The `-tdleaf` vs `-final` decomposition (7.9.2) is measuring the peak height,
    not the online phase's productivity.
+
+## 7.14 The ungated test: the gate is not the difference — Σ by elimination (2026-09-14)
+
+7.13.6 left two readings of the handoff.  **(a) Different targets** — the
+offline pass fits root rows gated to |cp − gate| ≤ 60 while the online phase
+fits ungated PV leaves, so the two objectives want different functions.
+**(b) Same target, different estimator variance** — the FC head is estimated
+offline from 512 globally-shuffled rows and online from 8 games of ~1200
+autocorrelated positions, i.e. Σ.
+
+**(a) is dead.**
+
+### 7.14.1 The 190M chain corpus cannot be un-gated, and why
+
+Worth recording because it cost an arm.  `--bt-quiet-cp` is **not** a training
+flag: `train.py` never passes it to `nnue_batch_train`, and applies it during
+corpus **assembly** (`train.py:380`).  The assembled corpus therefore has the
+gate baked in — measured on `m260720-7e6g_work/corpus.tsv.gz`, `max|cp − gate|`
+is exactly 60 with **zero** rows over.  The out-of-gate rows were never written,
+so `--bt-quiet-cp 0` at training time is a no-op on it.
+
+The wide rows survive only in the **raw dumps**, which since 2026-09-03 are
+dumped at `TDLEAF_DUMP_QUIET_CP = 1000` (effectively open) with a `gate` column
+per row.  Six surviving root dumps pooled, gids renumbered per source:
+34,518,338 rows, **58.3% in-gate / 41.7% out**.
+
+**The trap, and I fell into it.**  The first "ungated" arm passed the wide
+corpus but left `--bt-quiet-cp` at its default 60, so assembly silently dropped
+the out-of-gate rows: it assembled 11,731,426 rows that are **100% in-gate**
+(verified `max = 60`, 0% over).  That is a *row-count* control, not a gate
+control.  `--bt-quiet-cp 0` disables the assembly filter.  **Always verify the
+assembled corpus, not the input file** — the drop is silent, and the log line
+naming the gate only appears when the gate is active.
+
+### 7.14.2 Three arms
+
+All three consolidate the **same state** (`m260720.tdleaf.bin-lrfc0-online`)
+with identical settings (`--corpus-window 0 --epochs 1 --bt-lr 0.25 --bt-rows
+root`), differing only as shown.  Handoff damage is a 5,000-game online arm out
+of each net, rated 1000 games against that net (7.11.8's cheap protocol),
+seed-paired at 77881733.
+
+| arm | rows assembled | in-gate | mean \|cp\| | vs classic | handoff damage |
+|---|---|---|---|---|---|
+| `gateG` | 20,118,912 | 100% | 163 | +160 | **−119.9 ± 9.8** |
+| `gateU` | 11,731,426 | 100% | 163 | +173 | **−138.2 ± 9.7** |
+| `gateW` | 20,120,612 | **58.3%** | **278** | +148 | **−133.8 ± 9.7** |
+
+`gateW`'s corpus was verified genuinely wide *after assembly*: `max|cp − gate|`
+1000, 44.3% out-of-gate, and it is row-matched to `gateG` to **0.008%**.
+
+### 7.14.3 The result: flat
+
+| comparison | Δ | σ |
+|---|---|---|
+| `gateW` − `gateG` (THE GATE, rows matched) | −13.9 ± 13.8 | 1.0 |
+| `gateU` − `gateG` (row count, gate matched) | −18.3 ± 13.8 | 1.3 |
+| `gateW` − `gateU` | +4.4 ± 13.7 | 0.3 |
+
+Against a common value, **χ² = 1.90 on 2 dof, p = 0.39.**  All three are the
+same number, comfortably inside the ~26 Elo arm-to-arm variance of 7.11.9.  Such
+difference as there is runs the **wrong way** — the ungated arm is marginally
+*worse*.
+
+Net strength is equally flat: `gateW` vs `gateG` head-to-head **−4.9 ± 8.6**,
+`gateU` vs `gateG` **−4.9 ± 8.4**.  The gate is not trading strength against
+handoff either.
+
+**The power check passed**, which was the design risk.  A 20M-row consolidation
+reproduces the full handoff (−119.9) that real 190M consolidations produce
+(−123.4, −129.8, −149.7), so 7.11.7's starved-regime caveat does not apply and
+the comparison had the resolution to detect an effect.
+
+### 7.14.4 What it establishes
+
+**The quiet gate was the largest and most concrete difference between the two
+objectives' input distributions, and removing it changes the handoff by
+nothing.**  The two modes are not fitting meaningfully different functions.
+Reading (a) is closed.
+
+**Σ survives by elimination, and is the only lever left standing.**  η is
+exhausted (7.13.1 — it sets a radius, and cost and signal scale together);
+per-section magnitude is exhausted (7.12); the four optimizer mechanisms are
+exhausted (7.11.1); and the target-difference reading is exhausted here.  What
+remains is that the online phase estimates ~140k FC parameters from 8 games of
+~1200 autocorrelated positions where the offline pass uses 512 from a global
+shuffle.  That predicts exactly what 7.13 measured: a rank-deficient error whose
+preferred direction is set by architecture and data structure rather than by
+seed (cos 0.47 between independent runs), of size ∝ √η, anchored to whatever
+point the net starts from.
+
+**Corpus size is not a variable in this range.**  11.7M and 20.1M rows give
+statistically identical nets *and* identical handoff damage.  Do not over-read
+it — `gateG` at 20M reads +160 against `classic_eval` where the real 190M
+`7e6g_final` reads +181, so 190M genuinely beats 20M — but the returns between
+12M and 20M are flat, which bears on how much generation a leg actually needs.
+
+### Methodology notes (7.14)
+
+- `--bt-quiet-cp` is a corpus-**assembly** knob in `train.py`, never passed to
+  `nnue_batch_train`.  Gate changes must be verified on `<tag>_work/corpus.tsv`
+  after assembly; the input file's width proves nothing.
+- The matched-subsample construction: `corpus_G` is every in-gate row of the
+  pool; `corpus_U` is a Bresenham-spread subsample of the **full** pool to the
+  same row count, so the gate is not confounded with data volume.
+- Raw dumps are pruned at end of run by default.  The six that survived here
+  (`a2gate`, `ladder-ctl`, `ladder-reset`, `lrfc0`, `onon`, `warm-reset`) were
+  the only wide corpus material on disk; `--keep-work` preserves them in future.
+- Scripts: `learn/run_gate_test.sh` (arms G and U) and `learn/run_gate_test2.sh`
+  (the corrected arm W, which documents the trap inline).
 
 ## Methodology notes (Part 7)
 
