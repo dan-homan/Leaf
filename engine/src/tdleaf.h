@@ -183,7 +183,19 @@ static const int   TDLEAF_ADAM_WARMUP        = 1000; // linear LR warmup over fi
 static const int   TDLEAF_FT_SESSION_WARMUP  = 100; // per-session FT LR ramp over first N Adam steps.
                                                      // Applied every restart via t_ft_session (not persisted).
                                                      // Damps FT updates during the v_ft_w accumulation phase.
-static const int   TDLEAF_BATCH_SIZE    = 8;        // accumulate gradients across N games before Adam step
+// Accumulate gradients across N games before each Adam step.  Overridable at
+// compile time (`perl comp.pl <v> ... TDLEAF_BATCH_SIZE_DEFAULT=16`) so a
+// batch-size ladder can be built without editing this file.  NOTE when
+// sweeping it: gradients are SUMMED across the batch and Adam normalises the
+// step, so B does not change the step SIZE -- it changes samples-per-step and,
+// at fixed games, the step COUNT (games/B).  Match Adam STEPS across arms, not
+// games, or the sweep re-runs 6.15.1's confound.  The accumulated gradient norm
+// grows as sqrt(B) against the fixed TDLEAF_GRAD_CLIP_NORM, so check the clip
+// telemetry at large B.  See Online_Learning_Investigation 7.15.
+#ifndef TDLEAF_BATCH_SIZE_DEFAULT
+#define TDLEAF_BATCH_SIZE_DEFAULT 8
+#endif
+static const int   TDLEAF_BATCH_SIZE    = TDLEAF_BATCH_SIZE_DEFAULT;
 
 // ---------------------------------------------------------------------------
 // Per-ply record: accumulator snapshot + search score
