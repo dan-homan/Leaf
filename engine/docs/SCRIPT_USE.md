@@ -107,6 +107,7 @@ pruning for one run. A failed run's `<tag>_work/` is never touched. See
 | `--concurrency N`                            | 9                                                      | Concurrent games                                             |
 | `--hash N`                                   | 128                                                    | Per-actor hash size (MB) for generation.  16 MB is ~25% faster at depth 8 but measured **+8.9 ± 11.4 Elo weaker at fixed depth** (`Online_Learning_Investigation.md` 7.5), so the default reverted to 128.  See `docs/Generation_Throughput.md` |
 | `--openings FILE`                            | `training_openings.epd`                                | Opening set (FRC)                                            |
+| `--no-gen-pgn`                               | off (PGN is **on**)                                    | Skip the generation PGN.  On by default: the corpus is quiet-gated and the `.tdg` stream is consumed, so the PGN is the only complete record of the games played.  Lands as `<tag>_work/<tag>_gen.pgn.gz` (~304 MB per 300k games) |
 | `--games-per-actor N`                        | 1000                                                   | Actor respawn cadence / weight-refresh interval for the actor/learner split |
 | `--no-repeat`                                | deprecated no-op                                       | Kept for backward compatibility; the actor/learner split plays each opening once (striped across actors), so there is no fastchess pairing to suppress |
 | `--dedup-corpus`                             | **always on** (flag = deprecated no-op)                | Corpus assembly always drops duplicate rows (identical in every field except gid). Duplicate games straddle the trainer's by-game train/val split (different gids), so training on them both overfits and leaks validation; frozen deterministic pairs are the worst case (one unique game per opening) |
@@ -144,7 +145,7 @@ pruning for one run. A failed run's `<tag>_work/` is never touched. See
 | `--force`                                    | off                                                    | Reuse an existing `<tag>_work` directory                     |
 | `--recompile`                                | off                                                    | Force recompile of helper binaries                           |
 | `--keep-epoch-states`                        | off                                                    | Keep every epoch's `.tdleaf.bin` in `<tag>_work/train/` (default: only the promoted epoch's state survives) |
-| `--keep-work`                                | off                                                    | Skip all end-of-run pruning inside `<tag>_work/` for this run (raw dumps, non-winning epoch `.nnue`, epoch-ladder PGNs, epoch rating binaries all stay; `corpus.tsv` stays uncompressed) |
+| `--keep-work`                                | off                                                    | Skip all end-of-run pruning inside `<tag>_work/` for this run (raw dumps, non-winning epoch `.nnue`, epoch-ladder PGNs, epoch rating binaries all stay; `corpus.tsv` and the per-actor generation PGNs in `<tag>_work/pgn/` stay uncompressed and unconcatenated) |
 
 ---
 
@@ -174,6 +175,7 @@ python3 selfplay_run.py --binary Leaf_vtrain_hl_a --epd training_openings.epd \
 | `--games-per-actor M` | 1000 | Actor respawn cadence = weight-refresh interval |
 | `--total-games N` | required | Learner stop budget |
 | `--traj-dir DIR` | `traj` | `.tdg` handoff dir (`STOP` sentinel stops early) |
+| `--pgn-dir DIR` | off | Write the games played to PGN, one file per actor generation (`actor_<slot>_g<gen>.pgn`), with fastchess-shaped `{score/depth time}` comments.  <0.5% of actor wall clock, ~3.9 KB/game.  `train.py` turns this on by default |
 | `--tdleaf-out PATH` | live companion | Learner state file |
 | `--publish PATH` / `--publish-every G` | off / 512 | Bake a `.nnue` every G games |
 | `--seed N` / `--delete-consumed` | 1 / archive | Shuffle seed base / delete instead of archive |

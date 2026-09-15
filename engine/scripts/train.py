@@ -696,6 +696,16 @@ def gzip_and_remove(path):
     path.unlink()
 
 
+def concat_gzip(paths, out):
+    """Stream PATHS into one gzip at OUT, then remove the originals."""
+    with gzip.open(out, "wb") as fout:
+        for p in paths:
+            with open(p, "rb") as fin:
+                shutil.copyfileobj(fin, fout)
+    for p in paths:
+        p.unlink()
+
+
 def prune_work_dir(work, tdir, epoch_bin_dir, tag, pick_ep, keep_epoch_states):
     """End-of-run pruning inside <tag>_work/ on a successful run.  The work
     dir itself is never deleted — it's the permanent per-run archive — but
@@ -703,7 +713,10 @@ def prune_work_dir(work, tdir, epoch_bin_dir, tag, pick_ep, keep_epoch_states):
     (their Elo is already captured in the log/sidecar), non-winning epoch
     .nnue files (regenerable via Leaf_vbt --write-nnue), and per-epoch
     .tdleaf.bin unless --keep-epoch-states.  corpus.tsv, the online-generation
-    PGN and the raw per-shard dumps are gzip'd in place, not deleted.
+    PGN and the raw per-shard dumps are gzip'd in place, not deleted.  The
+    per-actor generation PGNs are concatenated into one <tag>_gen.pgn.gz and
+    kept — they are the only complete record of the games played (the corpus
+    is gated, the .tdg stream is consumed), so they are never pruned away.
 
     The raw dumps used to be deleted here as "superseded by corpus.tsv.gz".
     They are not: the assembled corpus holds the row type --bt-rows selected
@@ -732,6 +745,23 @@ def prune_work_dir(work, tdir, epoch_bin_dir, tag, pick_ep, keep_epoch_states):
     corpus = work / "corpus.tsv"
     if corpus.is_file():
         gzip_and_remove(corpus)
+
+    # Generation PGNs: one file per actor generation becomes one archive.  At
+    # ~4.8 KB/game this is ~1.4 GB raw / ~420 MB gzip'd per 300k-game iteration.
+    pgn_dir = work / "pgn"
+    if pgn_dir.is_dir():
+        # Chronological, not lexicographic: generation first (it is the weight
+        # epoch), then slot -- so the archive reads in the order the run played.
+        def _order(p):
+            m = re.match(r"actor_(\d+)_g(\d+)\.pgn$", p.name)
+            return (int(m.group(2)), int(m.group(1))) if m else (0, 0)
+        parts = sorted(pgn_dir.glob("actor_*.pgn"), key=_order)
+        if parts:
+            concat_gzip(parts, work / f"{tag}_gen.pgn.gz")
+        try:
+            pgn_dir.rmdir()
+        except OSError:
+            pass
 
     for pgn in work.glob(f"match_{tag}_d*.pgn"):
         gzip_and_remove(pgn)
@@ -822,6 +852,17 @@ def main():
                          "selfplay_run.py --hash and "
                          "docs/Online_Learning_Investigation.md 7.5)")
     ap.add_argument("--openings", default="training_openings.epd")
+    ap.add_argument("--no-gen-pgn", action="store_false", dest="gen_pgn",
+                    help="Skip the generation PGN.  It is ON by default: the "
+                         "corpus is quiet-gated and the .tdg stream is consumed, "
+                         "so the PGN is the only complete record of the games "
+                         "played (TODO G1c).  Costs <0.5%% of generation wall "
+                         "clock and ~304 MB gzip'd per 300k games; the "
+                         "per-actor files are concatenated into "
+                         "<tag>_work/<tag>_gen.pgn.gz at end of run (under "
+                         "--keep-work they stay uncompressed in "
+                         "<tag>_work/pgn/)")
+    ap.set_defaults(gen_pgn=True)
     # Online generation is always the actor/learner split (scripts/selfplay_run.py):
     # concurrency-1 FROZEN actors play internal self-play and emit .tdg trajectories;
     # ONE learner consumes them with a single optimizer (sole .tdleaf.bin writer, no
@@ -1191,6 +1232,7 @@ def main():
             "--games-per-actor", args.games_per_actor,
             "--total-games", args.games,
             "--traj-dir", traj_dir,
+            *(["--pgn-dir", str(work / "pgn")] if args.gen_pgn else []),
             "--tdleaf-out", f"{netbase}.tdleaf.bin",
             "--delete-consumed", "--refresh-scores",
             "--lr-scale", args.lr_scale,

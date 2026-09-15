@@ -106,7 +106,7 @@ errors (unknown types, undeclared identifiers).  These are expected and can be i
 | `src/nnue_training.cpp` | TDLeaf training: FP32 shadow weights, gradients, Adam optimizer, `.tdleaf.bin` I/O (TDLEAF=1 only) |
 | `src/tdleaf.cpp` | PV walking, TD error computation (with score-change clipping + ID-stability weighting), gradient backprop, leaf/root corpus dump (`TDLEAF_DUMP_TSV`) |
 | `src/nnue_batch_train.cpp` | Offline batch trainer (`--batch-train`): supervised training on quiet-position TSV corpora, λ-blend targets, within-batch thread parallelism (`--bt-threads`) (TDLEAF=1 only) |
-| `src/selfplay.cpp` | Internal self-play driver (`--selfplay`: whole games in one process, both sides recorded every ply, exact in-engine results) and the trajectory learner (`--learn-stream`: consumes actor-emitted `.tdg` files with ONE optimizer) (TDLEAF=1 only) |
+| `src/selfplay.cpp` | Internal self-play driver (`--selfplay`: whole games in one process, both sides recorded every ply, exact in-engine results, optional fastchess-format PGN via `--pgn-out`) and the trajectory learner (`--learn-stream`: consumes actor-emitted `.tdg` files with ONE optimizer) (TDLEAF=1 only) |
 | `src/selfplay_traj.h` | Binary `.tdg` per-game trajectory format (actor → learner): positions + search outputs + POV/gate metadata; accumulators/features/stack rebuilt exactly by `tdleaf_rebuild_record` |
 | `src/chess.h` | All major structs: `position`, `move`, `move_list`, `tree_search`, `game_rec` |
 | `src/define.h` | Compile-time constants and flag defaults (`NNUE`, `TDLEAF`, `MATERIAL_ONLY`, piece encodings, `MAXD`, `MAX_GAME_PLY`) |

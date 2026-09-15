@@ -90,9 +90,12 @@ held-out corpus is the cheap between-arm proxy.
       could rehabilitate them; (b) keep *more* root rows per game, since the
       root arm already consumed 92% of available root rows and scaling further
       needs more games, not more sampling; (c) **retain the generation PGN by
-      default** so the quiet gate can be re-cut after the fact — today the gate
-      is applied at dump time and is irreversible, which is exactly what blocks
-      A2 from being answered offline on data already in hand.
+      default — DONE (2026-09-15).**  Actors write the games they play
+      (`--selfplay --pgn-out`, fastchess-shaped `{score/depth time}` comments);
+      `train.py` turns it on by default and archives
+      `<tag>_work/<tag>_gen.pgn.gz`.  Measured at +0.23% of generation wall
+      clock (inside the run-to-run spread; bound it at 0.5%) and ~304 MB
+      gzip'd per 300k games.  See `TRAINING.md` "Game records".
 
 - [x] **A2 — Widen the corpus quiet gate. DONE — the gate is correct; widening
       does not help.**  Enabled by the `gate` column (dumps re-cut offline via

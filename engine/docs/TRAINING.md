@@ -1138,7 +1138,8 @@ itself remains — it is the gauntlet/rating tool, not a training generator.
 ### The engine's internal self-play driver (`--selfplay`)
 
 `Leaf_vX --selfplay --epd FILE --games N --depth D [--epd-offset K --epd-stride S]
-[--epd-shuffle SEED] [--traj-out DIR] [--no-adjudication] [--max-ply P] [--tdleaf-out PATH]`
+[--epd-shuffle SEED] [--traj-out DIR] [--no-adjudication] [--max-ply P] [--tdleaf-out PATH]
+[--pgn-out FILE] [--pgn-name TAG]`
 
 Plays whole games in-process: openings from plain 4-field EPD lines (FRC-ready),
 `tdleaf_record_ply` after **every** search (records alternate root STM; the
@@ -1167,6 +1168,69 @@ Stage-1 bit-exactness gate; it caught the FRC castle accumulator bug).
 `scripts/selfplay_run.py` drives the ensemble with epoch-style weight refresh:
 the learner's state saves are atomic, and actors exit every `--games-per-actor`
 games and respawn, reloading the latest state.
+
+### Game records — the generation PGN (`--pgn-out`)
+
+Actors write the games they play to PGN, one file per actor process.  This is
+the **only complete record of a generation run**: the TSV corpus is quiet-gated
+(`--quiet-cp`, and the `gate` column can only narrow it further), and the `.tdg`
+stream is consumed and archived away.  Neither can reconstruct a game — `.tdg`
+carries positions but no move order and no clock — so anything you later want to
+ask of the games themselves (re-cutting the quiet gate, game-length or
+decisiveness diagnostics, feeding `extract_positions.py`) needs the PGN.
+
+```sh
+Leaf_vX --selfplay ... --pgn-out games.pgn --pgn-name Leaf_vtrain_hl_a
+```
+
+The format is what fastchess wrote, so the existing readers
+(`extract_positions.py`, `pgn_winrate.py`, `bayeselo_ratings.py`) take these
+files unchanged:
+
+```
+[Result "0-1"]
+[SetUp "1"]
+[FEN "rnbqk2r/p1ppppbp/1p3np1/8/5PP1/1PN5/PBPPP2P/R2QKBNR b HAha - 0 1"]
+[Variant "Chess960"]
+[Termination "normal"]
+[SearchBudget "depth>=6 then up to 800 nodes/move"]
+[NetHash "6ed2d0e2"]
+
+1... Bb7 {+0.99/6 0.002s} 2. Nf3 {-0.95/6 0.000s} Nxg4 {+0.96/6 0.001s} ...
+```
+
+Notes on the details that matter:
+
+- **Castling is Shredder-FEN** (`HAha`), not the EPD's X-FEN `KQkq`, so the FRC
+  openings survive a round trip through tools that don't implement X-FEN
+  disambiguation.  `[Variant "Chess960"]` is stamped on every game — the book
+  mixes FRC and standard openings and standard chess is a well-formed Chess960
+  position, so one tag for the whole file keeps the reader's job simple.
+- **The score is the moving side's POV** in pawns, the fastchess convention;
+  it comes straight from `ts.g_last`, which is already root-STM POV.  Mate reads
+  `+M5` / `-M5`.
+- **The clock is `gettimeofday`, not `GetTime()`** — the latter is centiseconds
+  and a move at depth 6 / 800 nodes costs single-digit milliseconds, so every
+  time would have read `0.00s`.
+- **Every game is written**, including the ones the learner never sees: an
+  already-terminal opening, an early 3-rep below `TDLEAF_MIN_PLIES_REP`, and an
+  aborted game (`Result "*"`, `Termination "abandoned"`).
+- `[NetHash]` is the actor's base-net content hash, so a game can be tied to a
+  weight vintage across the epoch respawns.
+
+Cost: four paired 200-game runs measured **+0.23% of actor wall clock**, inside
+the run-to-run spread — treat 0.5% as the bound.  (An earlier proxy using
+`--verbose`, which writes unbuffered per move, read +0.77%; buffering and one
+flush per game is what closes that gap.)  Size is 3.9 KB/game raw and 1.0 KB
+gzip'd — **1.16 GB / 304 MB per 300k games**.  SAN generation touches only copies
+of the position, so the games played are bit-identical with and without the flag:
+verified over a fixed 150-game slice producing the same W/D/L, the same
+termination histogram, and byte-identical FEN headers.
+
+`scripts/selfplay_run.py --pgn-dir DIR` wires it per actor; `train.py` turns it
+on by default and concatenates the per-actor files into
+`<tag>_work/<tag>_gen.pgn.gz` at end of run (`--no-gen-pgn` to skip,
+`--keep-work` to leave them uncompressed in `<tag>_work/pgn/`).
 
 ### Online-stability rules (hard-won; both cost a full iteration to learn)
 

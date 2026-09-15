@@ -19,6 +19,7 @@
 //   Leaf_vX --selfplay --epd FILE [--games N] [--depth D] [--tdleaf-out PATH]
 //           [--epd-offset K] [--epd-stride S] [--epd-shuffle SEED]
 //           [--max-ply P] [--no-adjudication] [--verbose]
+//           [--pgn-out FILE] [--pgn-name TAG]
 
 #if TDLEAF
 
@@ -28,6 +29,8 @@
 #include <algorithm>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <sys/time.h>
+#include <ctime>
 #include "selfplay_traj.h"
 
 struct SelfplayEpdLine {
@@ -52,6 +55,8 @@ struct SelfplayConfig {
     char     tdleaf_out[FILENAME_MAX];
     const char *traj_dir;     // Stage 1: emit per-game .tdg files here (NULL = off)
     int      traj_max_pending; // backpressure: sleep while this many .tdg await the learner
+    const char *pgn_out;      // --pgn-out: append played games here (NULL = off)
+    const char *pgn_name;     // --pgn-name: White/Black tag text
 };
 
 struct SelfplayStats {
@@ -244,14 +249,217 @@ static bool selfplay_write_traj(const SelfplayConfig &cfg, const TDGameRecord &r
 }
 
 // ---------------------------------------------------------------------------
+// PGN export (--pgn-out).  One file per actor process, appended; the comment on
+// each half-move is the fastchess shape `{<score>/<depth> <time>s}`, so the
+// existing readers (extract_positions.py, pgn_winrate.py, bayeselo_ratings.py)
+// take these files unchanged.
+//
+// The ACTOR writes it because it is the only party that sees a whole game: a
+// .tdg trajectory carries positions but no move order, no clock, and only the
+// plies that pass the TDLeaf gates.  What lands here is the complete record --
+// including the games the learner never sees (early 3-rep draws), openings that
+// are already terminal, and aborted games (Result "*").
+//
+// Cost: +0.23% of actor wall clock at depth 6 / 800 nodes over four paired
+// 200-game runs -- inside the run-to-run spread, so read it as "under 0.5%".
+// print_move only ever touches copies of the position, so the games played are
+// bit-identical with and without --pgn-out (verified over a fixed 150-game
+// slice: same W/D/L, same termination histogram, same FEN headers).
+// ---------------------------------------------------------------------------
+struct SelfplayPgn {
+    FILE       *f;           // NULL = export off
+    const char *name;        // White/Black tag text
+    const char *budget;      // SearchBudget tag text
+    char        date[16];    // "YYYY.MM.DD", stamped once at open
+    char        fen[160];    // start position of the current game
+    std::string moves;       // SAN + comments accumulated for the current game
+    int         col;         // output column, for 80-column wrapping
+    int         plies;       // half-moves written this game
+};
+
+// Shredder-FEN castling field: the rook's FILE as a letter, uppercase for
+// White.  pos.Krook/Qrook hold absolute squares once setboard has resolved
+// them, and are meaningful only when the matching pos.castle bit is set
+// (1/2 = White king/queen side, 4/8 = Black king/queen side).  Shredder rather
+// than the EPD's X-FEN spelling so the FRC openings survive a round trip
+// through tools that do not implement X-FEN disambiguation.
+static void selfplay_shredder_castle(const position &p, char *out)
+{
+    // A right is emitted only if its rook is really there.  setboard leaves the
+    // resolver sentinels in place (-1 / 64 / -100) when a castling letter names
+    // a rook the board does not have, and FILE() of a sentinel is a plausible-
+    // looking wrong letter, so an inconsistent EPD line would otherwise produce
+    // a FEN asserting rights that cannot exist ("HHha" for one rook on h1).
+    auto emit = [&](int sq, int side, char base) -> int {
+        if (sq < 0 || sq > 63) return 0;
+        if (PTYPE(p.sq[sq]) != ROOK || PSIDE(p.sq[sq]) != side) return 0;
+        return (int)(base + FILE(sq));
+    };
+    // ...and the two rooks of a side are two different rooks.  Same cause: an
+    // EPD claiming both rights when the back rank holds one rook resolves both
+    // squares to it, which would spell a duplicate letter ("HH").
+    int n = 0, c;
+    if ((p.castle & 1) && (c = emit(p.Krook[WHITE], WHITE, 'A'))) out[n++] = (char)c;
+    if ((p.castle & 2) && p.Qrook[WHITE] != p.Krook[WHITE] &&
+        (c = emit(p.Qrook[WHITE], WHITE, 'A'))) out[n++] = (char)c;
+    if ((p.castle & 4) && (c = emit(p.Krook[BLACK], BLACK, 'a'))) out[n++] = (char)c;
+    if ((p.castle & 8) && p.Qrook[BLACK] != p.Krook[BLACK] &&
+        (c = emit(p.Qrook[BLACK], BLACK, 'a'))) out[n++] = (char)c;
+    if (!n) out[n++] = '-';
+    out[n] = '\0';
+}
+
+static bool selfplay_pgn_open(SelfplayPgn &pgn, const SelfplayConfig &cfg,
+                              const char *budget)
+{
+    pgn.f       = nullptr;
+    pgn.name    = "Leaf";
+    pgn.budget  = budget;
+    pgn.col     = 0;
+    pgn.plies   = 0;
+    pgn.fen[0]  = '\0';
+    pgn.date[0] = '\0';
+    if (!cfg.pgn_out) return true;
+    pgn.f = fopen(cfg.pgn_out, "a");
+    if (!pgn.f) {
+        fprintf(stderr, "selfplay: cannot open PGN %s\n", cfg.pgn_out);
+        return false;
+    }
+    // Buffer a whole game rather than syscalling per move: an unbuffered
+    // per-move write (what --verbose does) is most of the measured overhead.
+    static char pgn_buf[1 << 16];
+    setvbuf(pgn.f, pgn_buf, _IOFBF, sizeof(pgn_buf));
+    pgn.name = cfg.pgn_name ? cfg.pgn_name : "Leaf";
+    time_t now = time(nullptr);
+    struct tm tmv;
+    localtime_r(&now, &tmv);
+    strftime(pgn.date, sizeof(pgn.date), "%Y.%m.%d", &tmv);
+    return true;
+}
+
+static void selfplay_pgn_new_game(SelfplayPgn &pgn, const SelfplayEpdLine &op,
+                                  const position &start)
+{
+    if (!pgn.f) return;
+    char castle[8];
+    selfplay_shredder_castle(start, castle);
+    // An opening always starts a game, so the halfmove clock is 0 and the move
+    // number 1 (setboard sets T = 1 white to move, 2 black to move).
+    snprintf(pgn.fen, sizeof(pgn.fen), "%s %c %s %s 0 1",
+             op.board, op.ms, castle, op.ep[0] ? op.ep : "-");
+    pgn.moves.clear();
+    pgn.col   = 0;
+    pgn.plies = 0;
+}
+
+// Append one whitespace-separated token, wrapping at 80 columns.  A comment is
+// one token even though it contains a space -- same as fastchess, and it keeps
+// `{score/depth time}` readable by line-oriented greps.
+static void selfplay_pgn_token(SelfplayPgn &pgn, const char *tok)
+{
+    int len = (int)strlen(tok);
+    if (pgn.col && pgn.col + 1 + len > 80) { pgn.moves += '\n'; pgn.col = 0; }
+    else if (pgn.col)                      { pgn.moves += ' ';  pgn.col++; }
+    pgn.moves += tok;
+    pgn.col   += len;
+}
+
+// Record the move about to be played.  `before` is the position it is played
+// from -- print_move needs it to build SAN, and must be called before exec_move.
+static void selfplay_pgn_move(SelfplayPgn &pgn, position &before, move m, int T,
+                              int score, int depth, double secs)
+{
+    if (!pgn.f) return;
+    char tok[64], san[10], sc[16];
+
+    if (T & 1) {                        // white to move: "12."
+        snprintf(tok, sizeof(tok), "%d.", (T + 1) / 2);
+        selfplay_pgn_token(pgn, tok);
+    } else if (!pgn.plies) {            // game opens with Black: "12..."
+        snprintf(tok, sizeof(tok), "%d...", (T + 1) / 2);
+        selfplay_pgn_token(pgn, tok);
+    }
+
+    before.print_move(m, san, &game.ts.tdata[0]);
+    selfplay_pgn_token(pgn, san);
+
+    // Score is root-STM POV, i.e. from the point of view of the side that just
+    // moved -- already the convention fastchess writes, so no flip.
+    if (score > MATE / 2)        snprintf(sc, sizeof(sc), "+M%d", (MATE - score + 1) / 2);
+    else if (score < -MATE / 2)  snprintf(sc, sizeof(sc), "-M%d", (MATE + score + 1) / 2);
+    else {
+        int cp = (value[PAWN] > 0) ? (score * 100) / value[PAWN] : score;
+        snprintf(sc, sizeof(sc), "%+.2f", cp / 100.0);
+    }
+    snprintf(tok, sizeof(tok), "{%s/%d %.3fs}", sc, depth, secs);
+    selfplay_pgn_token(pgn, tok);
+    pgn.plies++;
+}
+
+static void selfplay_pgn_finish(SelfplayPgn &pgn, SelfplayTerm term,
+                                float result_w, int round)
+{
+    if (!pgn.f) return;
+    const char *res = (term == SP_TERM_ERROR) ? "*"
+                    : (result_w > 0.75f)      ? "1-0"
+                    : (result_w < 0.25f)      ? "0-1" : "1/2-1/2";
+    const char *why;
+    switch (term) {
+        case SP_TERM_ERROR:   why = "abandoned";    break;
+        case SP_TERM_MAXPLY:
+        case SP_TERM_RESIGN:
+        case SP_TERM_DRAWADJ: why = "adjudication"; break;
+        default:              why = "normal";       break;
+    }
+    // Variant is stamped Chess960 for every game: the training book mixes FRC
+    // and standard openings, standard chess is a well-formed Chess960 position,
+    // and one tag for the whole file keeps the reader's job simple.
+    fprintf(pgn.f,
+            "[Event \"Leaf self-play\"]\n"
+            "[Site \"?\"]\n"
+            "[Date \"%s\"]\n"
+            "[Round \"%d\"]\n"
+            "[White \"%s\"]\n"
+            "[Black \"%s\"]\n"
+            "[Result \"%s\"]\n"
+            "[SetUp \"1\"]\n"
+            "[FEN \"%s\"]\n"
+            "[Variant \"Chess960\"]\n"
+            "[PlyCount \"%d\"]\n"
+            "[Termination \"%s\"]\n"
+            "[TimeControl \"-\"]\n"
+            "[SearchBudget \"%s\"]\n"
+            "[NetHash \"%08x\"]\n\n",
+            pgn.date, round, pgn.name, pgn.name, res, pgn.fen,
+            pgn.plies, why, pgn.budget, nnue_get_content_hash());
+    selfplay_pgn_token(pgn, res);
+    fputs(pgn.moves.c_str(), pgn.f);
+    fputs("\n\n", pgn.f);
+    // Flush per game, not per buffer: actors are SIGTERMed on driver shutdown,
+    // and a 64 KB buffer would take ~13 finished games with it.  One write
+    // syscall per game is nothing against a game's worth of search.
+    fflush(pgn.f);
+}
+
+static void selfplay_pgn_close(SelfplayPgn &pgn)
+{
+    if (!pgn.f) return;
+    fclose(pgn.f);
+    pgn.f = nullptr;
+}
+
+// ---------------------------------------------------------------------------
 // Play one game from an opening.  Returns the termination reason; result_w is
 // the white-POV outcome (undefined for SP_TERM_ERROR).
 // ---------------------------------------------------------------------------
 static SelfplayTerm selfplay_play_game(const SelfplayEpdLine &op, const SelfplayConfig &cfg,
-                                       float &result_w)
+                                       float &result_w, SelfplayPgn &pgn)
 {
     selfplay_new_game_reset();
     game.setboard(op.board, op.ms, op.castle, op.ep);
+    // After setboard: Krook/Qrook are resolved, so the Shredder castling field
+    // for the PGN header can be read off the start position.
+    selfplay_pgn_new_game(pgn, op, game.pos);
     game.book = 0;                       // never probe the opening book
     game.over = 0;
     game.mttc = 0;
@@ -282,7 +490,13 @@ static SelfplayTerm selfplay_play_game(const SelfplayEpdLine &op, const Selfplay
     int plies_played = 0;
     while (1) {
         game.p_side = game.pos.wtm ^ 1;  // engine is always the side to move
+        // GetTime() is centiseconds, and a move here costs single-digit
+        // milliseconds -- every PGN time would read 0.00s.  gettimeofday is a
+        // vDSO read (~25 ns), so it is cheaper than branching around it.
+        struct timeval mv_t0, mv_t1;
+        gettimeofday(&mv_t0, nullptr);
         game.best = game.ts.search(game.pos, MAXT, game.T, &game);
+        gettimeofday(&mv_t1, nullptr);
 
 #if !TDLEAF_READONLY
         if (nnue_available) {
@@ -308,6 +522,15 @@ static SelfplayTerm selfplay_play_game(const SelfplayEpdLine &op, const Selfplay
             fprintf(stderr, "selfplay: illegal best move at ply %d — aborting game\n", game.T);
             return SP_TERM_ERROR;
         }
+
+        // After the legality check so an illegal best move cannot reach the PGN
+        // as garbage SAN, but before game.pos advances -- SAN is built against
+        // the position the move is played FROM.
+        selfplay_pgn_move(pgn, game.pos, game.best, game.T,
+                          game.ts.g_last, game.ts.last_depth,
+                          (double)(mv_t1.tv_sec - mv_t0.tv_sec) +
+                          (double)(mv_t1.tv_usec - mv_t0.tv_usec) / 1e6);
+
         game.last = game.pos;
         game.pos  = game.temp;
 
@@ -370,6 +593,8 @@ int selfplay_main(int argc, char *argv[])
     cfg.verbose    = false;
     cfg.traj_dir   = nullptr;
     cfg.traj_max_pending = 500;
+    cfg.pgn_out    = nullptr;
+    cfg.pgn_name   = nullptr;
     snprintf(cfg.tdleaf_out, sizeof(cfg.tdleaf_out), "%s%s",
              engine_cfg.exec_path, NNUE_TDLEAF_BIN);
 
@@ -390,6 +615,8 @@ int selfplay_main(int argc, char *argv[])
         else if (!strcmp(argv[ai], "--traj-out") && ai + 1 < argc) cfg.traj_dir = argv[++ai];
         else if (!strcmp(argv[ai], "--traj-max-pending") && ai + 1 < argc)
             cfg.traj_max_pending = atoi(argv[++ai]);
+        else if (!strcmp(argv[ai], "--pgn-out")  && ai + 1 < argc) cfg.pgn_out  = argv[++ai];
+        else if (!strcmp(argv[ai], "--pgn-name") && ai + 1 < argc) cfg.pgn_name = argv[++ai];
         else if (!strcmp(argv[ai], "--no-adjudication")) cfg.adjudicate = false;
         else if (!strcmp(argv[ai], "--verbose"))         cfg.verbose    = true;
     }
@@ -438,11 +665,15 @@ int selfplay_main(int argc, char *argv[])
     if (cfg.nodes) snprintf(budget, sizeof(budget), "depth>=%d then up to %llu nodes/move",
                             cfg.depth, (unsigned long long)cfg.nodes);
     else           snprintf(budget, sizeof(budget), "depth %d", cfg.depth);
-    fprintf(stderr, "selfplay: %d games, %s, %zu openings (slice %d: offset %d stride %d)%s%s\n",
+    fprintf(stderr, "selfplay: %d games, %s, %zu openings (slice %d: offset %d stride %d)%s%s%s\n",
             total_games, budget, openings.size(), slice_count,
             cfg.epd_offset, cfg.epd_stride,
             tdleaf_frozen() ? ", weights FROZEN" : "",
-            getenv("TDLEAF_DUMP_TSV") ? ", dumping TSV" : "");
+            getenv("TDLEAF_DUMP_TSV") ? ", dumping TSV" : "",
+            cfg.pgn_out ? ", writing PGN" : "");
+
+    SelfplayPgn pgn;
+    if (!selfplay_pgn_open(pgn, cfg, budget)) return 1;
 
     SelfplayStats st;
     memset(&st, 0, sizeof(st));
@@ -452,7 +683,12 @@ int selfplay_main(int argc, char *argv[])
         size_t idx = (size_t)cfg.epd_offset +
                      (size_t)((g % slice_count)) * (size_t)cfg.epd_stride;
         float result_w = 0.5f;
-        SelfplayTerm term = selfplay_play_game(openings[idx], cfg, result_w);
+        SelfplayTerm term = selfplay_play_game(openings[idx], cfg, result_w, pgn);
+
+        // Every game reaches the PGN, including the ones dropped below: an
+        // already-terminal opening, an early 3-rep the learner never sees, and
+        // an aborted game (Result "*") are all part of a complete record.
+        selfplay_pgn_finish(pgn, term, result_w, g + 1);
 
         if (cfg.verbose) fprintf(stderr, "\n");
 
@@ -514,6 +750,8 @@ int selfplay_main(int argc, char *argv[])
 #if !TDLEAF_READONLY
     tdleaf_flush_batch(cfg.tdleaf_out);
 #endif
+
+    selfplay_pgn_close(pgn);
 
     if (cfg.nodes)
         fprintf(stderr, "selfplay: node budget %llu/move — %llu extends, "

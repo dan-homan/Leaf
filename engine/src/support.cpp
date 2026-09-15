@@ -227,28 +227,42 @@ void position::print_move(move pmove, char mstring[10], ts_thread_data *temps)
          break;
        case KING:
          strcpy(dummy, ""); break;
-       default:
+       default: {
          move_list list;
-         int add_file = 0; 
+         position tpos;
+         int rivals = 0, same_file = 0, same_rank = 0;
 
-         // generate the legal moves
+         // SAN disambiguation.  Two rules matter and both used to be wrong:
+         //   - allmoves() is PSEUDO-legal, so a same-type piece that is pinned
+         //     counted as a rival and produced "Rad1" where "Rd1" is correct.
+         //     Each candidate is therefore played on a copy; exec_move returns
+         //     0 when the move leaves the own king in check (same test
+         //     in_check_mate uses).
+         //   - when a rival shares the from-FILE, SAN wants the RANK alone
+         //     ("N6b5"), not file+rank ("Nd6b5").  File+rank is only for the
+         //     case where rivals share both.
          allmoves(&list, temps);
-         // Match up the move in the move list
          for (int z = 0; z < list.count; z++) {
-          if (list.mv[z].m.b.to == pto && list.mv[z].m.b.from != pfrom &&
-	      ppiece == PTYPE(sq[list.mv[z].m.b.from])) {
-            if(!add_file) {
-              snprintf(dummy, sizeof(dummy), "%c", char(FILE(pfrom)+97));
-              add_file = 1;
-            }
-            if(FILE(pfrom) == FILE(list.mv[z].m.b.from)) { // || ics) {
-              char dummy2[4];
-              snprintf(dummy2, sizeof(dummy2), "%i", (RANK(pfrom)+1));
-              strcat(dummy,dummy2);
-              z = list.count;
-            }             
-          }        
-         }        
+          const move &cand = list.mv[z].m;
+          if (cand.b.to != pto || cand.b.from == pfrom) continue;
+          if (ppiece != PTYPE(sq[cand.b.from])) continue;
+          tpos = (*this);
+          if (!tpos.exec_move(cand, 0)) continue;     // illegal: not a rival
+          rivals++;
+          if (FILE(cand.b.from) == FILE(pfrom)) same_file++;
+          if (RANK(cand.b.from) == RANK(pfrom)) same_rank++;
+         }
+         if (rivals) {
+          if (!same_file)
+            snprintf(dummy, sizeof(dummy), "%c", char(FILE(pfrom)+97));
+          else if (!same_rank)
+            snprintf(dummy, sizeof(dummy), "%i", (RANK(pfrom)+1));
+          else
+            snprintf(dummy, sizeof(dummy), "%c%i", char(FILE(pfrom)+97),
+                     (RANK(pfrom)+1));
+         }
+         break;
+       }
       }
       if(ptype&CAPTURE) strcat(dummy,"x");      
 //   } else {  // If this is ics mode

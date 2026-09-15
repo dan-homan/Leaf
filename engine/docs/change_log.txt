@@ -1,5 +1,27 @@
 Changes since 2017_12_24
 
+2026_09_15b -- Generation PGN.  Self-play actors now write the games they play
+              (--selfplay --pgn-out FILE [--pgn-name TAG]), in the fastchess
+              format: {<score>/<depth> <time>s} per half-move, Shredder-FEN
+              castling so the FRC openings round-trip, [Variant "Chess960"],
+              and a [NetHash] tag tying a game to a weight vintage.  This is the
+              only complete record of a generation run -- the TSV corpus is
+              quiet-gated and the .tdg stream is consumed -- and it closes
+              TODO G1(c).  selfplay_run.py --pgn-dir wires it per actor;
+              train.py turns it ON by default and concatenates the per-actor
+              files into <tag>_work/<tag>_gen.pgn.gz (--no-gen-pgn to skip).
+              Cost: 4 paired 200-game runs put the writer at +0.23% of actor
+              wall clock, inside the run-to-run spread -- bound it at 0.5%.  Size
+              is 3.9 KB/game raw, 1.0 KB gzip'd (1.16 GB / 304 MB per 300k
+              games).  The games played are bit-identical with and without the
+              flag (same W/D/L, same termination histogram, same FEN headers).
+              Also fixed SAN disambiguation in position::print_move, which
+              affected every SAN the engine emits: it matched rivals against
+              PSEUDO-legal moves (so a pinned same-type piece produced "Rad1"
+              where "Rd1" is correct) and emitted file+rank where SAN wants the
+              rank alone ("Nd6b5" for "N6b5").  41 of 22,474 plies were
+              non-canonical before; 0 after.
+
 2026_09_15a -- Part 7.15: the SIGMA ladder.  Batch size at matched Adam steps is
                the first knob in Parts 6-7 that works.  8 -> 32 = +64.0 +- 12.9
                (5.0 sigma).
