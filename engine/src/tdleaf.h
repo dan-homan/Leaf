@@ -62,7 +62,25 @@ static const float TDLEAF_ID_VAR_SIGMA2  = 10000.0f;
 // learning were retired; see docs/history/ for that experiment.
 // Gradient clipping: if global L2 norm of all gradients exceeds this threshold,
 // scale all gradients by max_norm/norm.  Set to 0 to disable.
-static const float TDLEAF_GRAD_CLIP_NORM = 1.0f;
+//
+// Raised 1.0 -> 2.0 on 2026-09-15 alongside TDLEAF_BATCH_SIZE 8 -> 50.
+// Gradients are SUMMED across the batch, so the accumulated norm grows as
+// sqrt(B).  Measured on the 7.15 ladder at 1000 Adam steps each:
+//
+//     B      norm mean   norm max   fires
+//     8        0.160       0.583     0.0%
+//    16        0.231       0.572     0.0%
+//    32        0.331       0.719     0.0%
+//    64        0.475       1.029     0.1%
+//
+// At B = 50 that extrapolates to mean ~0.40 and max ~0.91, i.e. a threshold of
+// 1.0 would sit only ~1.1x above the typical maximum and fire on ORDINARY
+// steps, where at B = 8 it never fired at all.  This clip exists to catch
+// pathological gradients, not normal ones, and firing on normal ones would
+// silently cap exactly what the larger batch is meant to buy.  2.0 restores
+// roughly the B = 8 safety margin (1.7x).  If B changes again, rescale this
+// with sqrt(B) and check the `TDLeaf clip stats` fire rate.
+static const float TDLEAF_GRAD_CLIP_NORM = 2.0f;
 // Adam step clipping: bound the unit-less Adam step |m_hat / sqrt(v_hat)| (or
 // |g / sqrt(v_hat)| for the RMSProp FT path) to this value before multiplying
 // by the category LR.  Targets the rare-feature pathology where a low running
