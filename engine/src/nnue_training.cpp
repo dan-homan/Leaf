@@ -1314,15 +1314,26 @@ void nnue_apply_gradients(float lr_scale)
     // EVERY category (FC weights and biases, FT weights and biases, PSQT) so no
     // section is released at full rate while the others are still ramping.
     const uint32_t warm_t = nnue_warm_t();
-    const float warmup_factor = (TDLEAF_ADAM_WARMUP > 0 && warm_t <= (uint32_t)TDLEAF_ADAM_WARMUP)
+    const bool  global_warmup_active =
+        (TDLEAF_ADAM_WARMUP > 0 && warm_t <= (uint32_t)TDLEAF_ADAM_WARMUP);
+    const float warmup_factor = global_warmup_active
         ? (float)warm_t / (float)TDLEAF_ADAM_WARMUP
         : 1.0f;
 
     // Legacy per-session FT-weight ramp.  Superseded by the uniform warmup above
-    // whenever the moments were reset -- applying both would double-ramp FT and
-    // break the "same warmup everywhere" property.  Kept for the non-reset path
-    // so default behaviour is unchanged.
-    const float ft_session_factor = opt_cold ? 1.0f :
+    // whenever that warmup is ramping -- applying both would double-ramp FT
+    // ((t/N)^2 against every other section's t/N) and break the "same warmup
+    // everywhere" property.
+    //
+    // This guard used to key on opt_cold, i.e. on --opt-reset alone.  That
+    // missed the case that matters: a FRESH --init-nnue net has t_adam = 0, so
+    // the global warmup fires (for the first time ever -- it is keyed on the
+    // PERSISTED t_adam, see 7.10.3) while opt_cold is false, and FT was double
+    // ramped for the whole ramp.  Integrated over it that is 1/3 of full LR
+    // against everything else's 1/2.  Keying on global_warmup_active is what the
+    // comment always meant: one ramp at a time.  From leg 2 on, t_adam > N so
+    // the global warmup is inactive and this per-restart ramp resumes its job.
+    const float ft_session_factor = (opt_cold || global_warmup_active) ? 1.0f :
         ((TDLEAF_FT_SESSION_WARMUP > 0 && t_ft_session <= (uint32_t)TDLEAF_FT_SESSION_WARMUP)
         ? (float)t_ft_session / (float)TDLEAF_FT_SESSION_WARMUP
         : 1.0f);
@@ -1544,9 +1555,14 @@ static NNUEApplyParams nnue_apply_compute_params(float lr_scale)
     t_session++;
     const uint32_t ft_t       = std::min(t_adam, t_ft_session);
     const uint32_t warm_t = nnue_warm_t();
-    const float warmup_factor = (TDLEAF_ADAM_WARMUP > 0 && warm_t <= (uint32_t)TDLEAF_ADAM_WARMUP)
+    // Must mirror the serial path exactly (see the long note there): one ramp at
+    // a time, keyed on whether the global warmup is active -- NOT on opt_cold,
+    // which misses the fresh --init-nnue case.
+    const bool  global_warmup_active =
+        (TDLEAF_ADAM_WARMUP > 0 && warm_t <= (uint32_t)TDLEAF_ADAM_WARMUP);
+    const float warmup_factor = global_warmup_active
         ? (float)warm_t / (float)TDLEAF_ADAM_WARMUP : 1.0f;
-    const float ft_session_factor = opt_cold ? 1.0f :
+    const float ft_session_factor = (opt_cold || global_warmup_active) ? 1.0f :
         ((TDLEAF_FT_SESSION_WARMUP > 0 && t_ft_session <= (uint32_t)TDLEAF_FT_SESSION_WARMUP)
         ? (float)t_ft_session / (float)TDLEAF_FT_SESSION_WARMUP : 1.0f);
     NNUEApplyParams p;
