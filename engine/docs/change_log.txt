@@ -1,5 +1,74 @@
 Changes since 2017_12_24
 
+2026_09_15a -- Part 7.15: the SIGMA ladder.  Batch size at matched Adam steps is
+               the first knob in Parts 6-7 that works.  8 -> 32 = +64.0 +- 12.9
+               (5.0 sigma).
+
+               Gradients are SUMMED and Adam normalises the step, so batch size
+               does not change step SIZE -- it changes samples-per-step, i.e.
+               the gradient-noise covariance.  Every arm runs exactly 1000 Adam
+               steps (Adam's own 1/(1-beta2) equilibration time, >3x the ~300
+               steps damage needs), so games scale with B and samples-per-step
+               is the ONLY variable.
+
+                 bs8   B= 8   8,000 games  1000 steps  -140.6 +- 9.3
+                 bs16  B=16  16,000 games  1000 steps  -111.8 +- 9.3  (+28.9, 2.2s)
+                 bs32  B=32  32,000 games  1000 steps   -76.6 +- 8.9  (+64.0, 5.0s)
+                 bs64  B=64  64,000 games  1000 steps   -94.3 +- 9.5  (+46.3, 3.5s)
+
+               Inverted U peaking at 32, only the left side resolved (32->64 is
+               -17.7 at 1.4 sigma).  5.0 sigma is comfortably outside the ~26
+               Elo arm-to-arm variance that has undermined every single-arm
+               comparison in this investigation.
+
+               WHY 6.16 CLOSED THIS LINE AT A PEAK OF 8 AND WAS WRONG TO:
+                 - it rated leg total, not handoff damage;
+                 - its arms were matched on GAMES, so step count varied 4x
+                   (6.15.1's confound: cleaner steps and fewer steps moved
+                   together and cancelled);
+                 - it predates TDLEAF_ADAM_EPS 1e-8 -> 1e-12 (2026_09_12).  At
+                   1e-8 the optimizer was sensitive to the accumulated gradient
+                   SCALE -- the whole of how --grad-norm worked -- and batch
+                   size moves that scale as sqrt(B).  6.16 measured batch size
+                   through exactly the confound the eps fix removed.
+
+               DISPLACEMENT RISES WHILE DAMAGE FALLS: bs64 travelled 43%
+               FURTHER than bs8 and lost 46 fewer Elo.  Fourth independent
+               demonstration that direction quality, not displacement
+               magnitude, is the axis (after 7.12, 7.13.1, 7.13.4).  A
+               prediction that displacement would fall to ~0.69x failed because
+               it assumed displacement tracks gradient noise; Adam's
+               normalisation breaks that link -- a cleaner gradient buys a more
+               consistent step SIGN, not a shorter step.
+
+               Not the gradient clip: bs64 fired once in 1000 steps (0.1%).
+               The sqrt(B) norm scaling held to two decimals (predicted mean
+               0.47, measured 0.475) and the max crossed 1.00 exactly where
+               predicted, but one fire cannot produce 17.7 Elo.  It does mark
+               where the clip begins to bind: B=100 would sit near mean 0.57
+               with a tail over 1.0, and at large batch the FIXED clip -- not
+               the offline --bt-batch -- is what bites first.
+
+               CAVEAT: this rates DAMAGE, not leg yield.  6.16's batch 16 cut
+               damage 4x and made the loop WORSE (offline recovery +27.0 vs
+               +84.6).  Batch 32 is a candidate, not a conclusion, and needs a
+               full leg with a real corpus.
+
+               Corroboration from a different regime: D. Homan ran batch 50 with
+               a 100-step warmup from --init-nnue, 100k games, TDLeaf alone --
+               growth ~30 Elo better than any recent comparable.  Batch 50 sits
+               in the flat 32-64 band of this curve.
+
+               RESTART NOTE: warmup is counted in Adam STEPS, so its duration in
+               GAMES scales with B.  At batch 50, TDLEAF_ADAM_WARMUP's default
+               1000 steps ramps through 50,000 games.  That constant has been a
+               hard no-op since the first session ever run (keyed on persisted
+               t_adam) but FIRES FOR THE FIRST TIME on a fresh --init-nnue net,
+               so its value goes live exactly when the chain restarts.
+
+               TDLEAF_BATCH_SIZE is now compile-time overridable via
+               TDLEAF_BATCH_SIZE_DEFAULT=<N> (c6a9153).
+
 2026_09_14b -- Part 7.14: the ungated test is a NULL.  The quiet gate is not
                the difference between the two learning modes; Sigma survives by
                elimination.

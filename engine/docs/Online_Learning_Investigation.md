@@ -45,7 +45,17 @@ here is the only place that reflects all six parts at once.
    on 7 dof, p = 0.46).  **Section-level displacement magnitude is not what sets
    the damage.**  Crucially the damage is fully repaired: on a real 190M corpus, an arm
    carrying −123 of online damage consolidates to **+9.4 ± 8.4 against the chain
-   head** (7.11.7).  **Σ is now the only lever left, by elimination (7.14):** the target-difference
+   head** (7.11.7).  **Σ IS THE LEVER, AND IT WORKS (7.15):** batch size at *matched Adam steps*
+   gives −140.6 (B=8) → −111.8 (16) → **−76.6 (32)** → −94.3 (64) of handoff
+   damage.  8 → 32 is **+64.0 ± 12.9, 5.0σ**, the first knob in Parts 6–7 to
+   survive a controlled measurement; the peak is at 32, with 32–64 flat.  6.16
+   closed this line at a peak of 8, but rated leg total at *matched games* (so
+   step count varied 4×) and did so before `TDLEAF_ADAM_EPS` went 1e-8 → 1e-12 —
+   batch size moves accumulated gradient scale as √B, which is exactly the
+   sensitivity that fix removed.  ⚠️ 7.15 rates **damage, not leg yield**; 6.16's
+   batch 16 cut damage 4× and made the loop worse, so batch 32 needs a full leg
+   before adoption.
+   **Σ was the only lever left, by elimination (7.14):** the target-difference
    reading was tested by training the offline pass on the full ungated
    distribution (44.3% out-of-gate, mean |cp| 278 against 163) and the handoff
    was unchanged — χ² 1.90 on 2 dof, p = 0.39 across three arms.  Σ, the gradient-noise covariance —
@@ -4612,6 +4622,168 @@ it — `gateG` at 20M reads +160 against `classic_eval` where the real 190M
   the only wide corpus material on disk; `--keep-work` preserves them in future.
 - Scripts: `learn/run_gate_test.sh` (arms G and U) and `learn/run_gate_test2.sh`
   (the corrected arm W, which documents the trap inline).
+
+## 7.15 The Σ ladder: batch size at matched Adam steps — the first knob that works (2026-09-14/15)
+
+7.14 left Σ as the only surviving mechanism.  Batch size is the intervention:
+gradients are **summed** across the batch and Adam normalises the step, so B
+does not change the step *size* — it changes samples-per-step, i.e. the
+gradient-noise covariance.
+
+**It works.  Batch 8 → 32 is +64.0 ± 12.9, 5.0σ** — the first knob in Parts 6
+and 7 to survive a controlled measurement.
+
+### 7.15.1 Why 6.16's batch-size result does not settle this
+
+6.16 found an inverted U peaking at batch **8** and closed the line.  Three
+things separate that measurement from this one, and the third is decisive:
+
+1. 6.16 rated *leg total*; this rates *handoff damage* (7.11.8's cheap protocol).
+2. 6.16's arms were matched on **games**, so step count varied 4× — 6.15.1's
+   confound, in which "cleaner steps" and "fewer steps" moved together and
+   displacement came out invariant because two effects cancelled.
+3. **`TDLEAF_ADAM_EPS` went 1e-8 → 1e-12 on 2026-09-12.**  At 1e-8 the optimizer
+   was demonstrably sensitive to the *accumulated gradient scale* — that is the
+   entire mechanism by which `--grad-norm` worked, and a third of its effect
+   vanished when eps dropped (7.10.7).  Batch size changes accumulated gradient
+   scale directly, as √B.  **6.16 measured batch size through exactly the
+   confound the eps fix removed.**
+
+The line was therefore re-opened by the eps fix, and the optimum has moved from
+8 to ~32.
+
+### 7.15.2 Design: match Adam STEPS, not games
+
+Every arm runs exactly **1000 Adam steps** — Adam's own equilibration time
+1/(1−β₂), and >3× the ~300 steps damage needs to equilibrate (7.13.1) — so
+samples-per-step is the only variable.  Games therefore scale with B.
+
+All arms start from the chain head (`--continue m260720-7e6g`) and are rated
+1000 games against it, seed-paired at 77881733.  `TDLEAF_BATCH_SIZE` was made
+compile-time overridable (`TDLEAF_BATCH_SIZE_DEFAULT=<N>`, commit `c6a9153`).
+
+Guards, each against a confound identified before launch:
+
+- **`--opt-reset` never passed.**  It activates `TDLEAF_ADAM_WARMUP` (1000
+  steps), which at these step counts would span an entire arm.
+- **`TDLEAF_FT_SESSION_WARMUP` (100 steps, fires every session)** is a matched
+  *fraction* of every arm because steps are matched.  At matched games it would
+  have been 2.7% of steps at B=8 and 43% at B=128.
+- **Stale-binary guard.**  `TDLEAF_BATCH_SIZE` is compile-time and `train.py`
+  always builds the binary named `train_hl_a`, so arms cannot run concurrently.
+  Each arm rebuilds and **aborts if the learner's own startup banner does not
+  report the intended batch size.**
+- **Clip telemetry saved per arm** — see 7.15.4.
+
+### 7.15.3 The ladder
+
+| arm | batch | games | steps | handoff damage | Δ vs `bs8` | step-to-step |
+|---|---|---|---|---|---|---|
+| `bs8` | 8 | 8,000 | 1000 | −140.6 ± 9.3 | — | — |
+| `bs16` | 16 | 16,000 | 1000 | −111.8 ± 9.3 | +28.9 ± 13.2 | +28.9 (2.2σ) |
+| `bs32` | 32 | 32,000 | 1000 | **−76.6 ± 8.9** | **+64.0 ± 12.9 (5.0σ)** | +35.1 (2.7σ) |
+| `bs64` | 64 | 64,000 | 1000 | −94.3 ± 9.5 | +46.3 ± 13.3 (3.5σ) | **−17.7 (1.4σ)** |
+
+8 → 32 is +64.0 at **5.0σ**, comfortably outside the ~26 Elo arm-to-arm variance
+(7.11.9) that has undermined every single-arm comparison in this investigation.
+32 → 64 gives back 17.7 at 1.4σ — unresolved, but certainly no further gain.
+An inverted U peaking at 32 with **only the left side resolved** — the same
+honest shape 6.16.3 reported, at a different peak.
+
+`bs8`'s −140.6 is a sound baseline: `ladder-ctl` read −140.6 at 10k games.
+
+### 7.15.4 It is not the gradient clip
+
+The pre-launch forecast was that `bs64` might be contaminated by
+`TDLEAF_GRAD_CLIP_NORM = 1.0`, since the accumulated norm grows as √B against a
+fixed threshold.  The forecast was numerically right and operationally wrong:
+
+| arm | fires | norm mean | norm max |
+|---|---|---|---|
+| `bs8` | 0.0% | 0.160 | 0.583 |
+| `bs16` | 0.0% | 0.231 | 0.572 |
+| `bs32` | 0.0% | 0.331 | 0.719 |
+| `bs64` | **0.1%** | **0.475** | **1.029** |
+
+The √B scaling held to two decimals (predicted mean 0.47, measured 0.475) and
+the max crossed 1.00 exactly where predicted — but it **fired once in 1000
+steps** (histogram: 999 under 1.0, one above).  That cannot produce 17.7 Elo.
+The turn at 64 is real or it is noise; it is not clipping.
+
+**It does mark where the clip starts to bind.**  Extrapolating, B = 100 gives a
+mean near 0.57 with a tail well over 1.0.  At large batch the fixed clip — not
+the offline `--bt-batch` — is the parameter that bites first, and it would
+silently cap the very thing a large batch is meant to buy.
+
+### 7.15.5 Displacement rises while damage falls
+
+| section | `bs8` | `bs16` | `bs32` | `bs64` | ratio 64/8 |
+|---|---|---|---|---|---|
+| fc0_w | 0.2865 | 0.2957 | 0.3065 | 0.3183 | 1.11 |
+| fc1_w | 0.2615 | 0.2797 | 0.2977 | 0.3257 | 1.25 |
+| fc2_w | 1.259 | 1.514 | 1.786 | 2.528 | 2.01 |
+| fc0_b | 54.09 | 52.47 | 58.27 | 61.40 | 1.14 |
+| fc2_b | 9.728 | 10.25 | 14.69 | 21.08 | 2.17 |
+| ft_w | 0.3584 | 0.4050 | 0.4568 | 0.5046 | 1.41 |
+| psqt_w | 144.6 | 173.8 | 208.0 | 235.2 | 1.63 |
+| **mean** | | | | | **~1.43** |
+
+**`bs64` travelled 43% further than `bs8` and lost 46 fewer Elo.**  Across the
+ladder, distance and damage move in *opposite* directions.
+
+Fourth independent demonstration that **direction quality, not displacement
+magnitude, is the axis** — after 7.12 (cutting the largest mover's displacement
+bought nothing), 7.13.4 (`onon` diffused at 77–87% of normal and cost nothing)
+and 7.13.1 (η sets a radius, not a destination).
+
+A prediction of mine failed here, instructively.  I predicted displacement would
+*fall* toward √0.47 ≈ 0.69 of baseline, reasoning that averaging removes the
+incoherent component.  That assumed displacement tracks gradient noise.  **Adam's
+normalisation breaks the link**: the step is `η · m̂/√v̂`, and `m̂/√v̂` is ~±1 per
+coordinate regardless of gradient SNR.  A cleaner gradient buys a more consistent
+step *sign*, not a shorter step — so the net travels further, along a better
+path.  Distance is set by η and the step count; batch size can only change
+direction.
+
+### 7.15.6 What this does and does not license
+
+**Does:** Σ is a real lever, and the first one that works.  Batch 32 is the
+measured optimum for handoff damage, and 32–64 is flat enough that anything in
+that band is defensible.
+
+**Does not:** this rates **damage, not leg yield**, and 6.16 is the standing
+warning — its batch-16 arm reduced damage 4× and made the loop *worse*, because
+the corpus it produced was worth less (+27.0 offline recovery against +84.6).
+Rating on damage alone would have scored that as a triumph.  **Batch 32 is a
+candidate, not a conclusion**, and must go to a full leg with a real corpus —
+7.11.8's protocol exactly: measure damage only, take survivors to a full leg.
+
+**Independent corroboration, different regime.**  D. Homan ran batch 50 with a
+100-step warmup from `--init-nnue` on separate hardware: 100k games, TDLeaf
+alone, growth ~30 Elo better than any recent comparable — a *fresh-net growth*
+measurement rather than a mature-net damage one.  Batch 50 sits in the flat
+32–64 region of this curve, so two regimes and two metrics agree.
+
+**A practical note for the restart.**  Warmup is counted in Adam *steps*, so its
+duration in **games** scales with B.  At batch 50, `TDLEAF_ADAM_WARMUP`'s
+compiled default of 1000 steps would ramp through **50,000 games**.  That
+constant has been a hard no-op since the first session ever run because it is
+keyed on the persisted `t_adam` (7.10.3) — but on a fresh `--init-nnue` net
+`t_adam = 0` and **it fires for the first time**.  Its value goes live exactly
+when the chain restarts, and at large batch it must be small.
+
+### Methodology notes (7.15)
+
+- `TDLEAF_BATCH_SIZE_DEFAULT=<N>` reaches the compiler because `comp.pl`
+  forwards any unrecognised `FLAG=VALUE` as `-D FLAG=VALUE`.
+- Verify the batch size from the **learner's** `TDLeaf config:` banner in
+  `<tag>_work/traj/learner.log`, not from the build log — `train.py` skips a
+  recompile when the baked net matches, so a stale binary is otherwise silent.
+- The `TDLeaf clip stats` line (`nnue_training.cpp`, dumped at flush) reports
+  `N`, `fires`, threshold and norm min/mean/max plus a histogram.  It is the
+  instrument for the √B clip question.  The per-apply `[tdleaf step-clip]` line
+  is a *different* clip (Adam step, `clip=30.0`) and was zero throughout.
+- Script: `learn/run_batch_ladder.sh`.
 
 ## Methodology notes (Part 7)
 
