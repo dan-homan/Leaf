@@ -929,7 +929,12 @@ def main():
                     help="Worker threads for within-batch gradient compute "
                          "(single-process; default 8)")
     ap.add_argument("--epochs", type=int, default=2)
-    ap.add_argument("--bt-lr", type=float, default=0.25)
+    ap.add_argument("--bt-lr", type=float, default=1.0,
+                    help="Offline LR multiplier on the TDLEAF_ADAM_*_LR0 constants. "
+                         "Default 1.0 since 2026-09-15: the constants were rescaled to "
+                         "0.25x so BOTH phases now run at scale 1.0 on one shared LR set "
+                         "(the old offline effective LR).  Was 0.25 against online 1.0, "
+                         "i.e. online ran 4x hotter than offline.")
     ap.add_argument("--bt-lambda", type=float, default=1.0)
     ap.add_argument("--bt-K", type=float, default=220.0)
     ap.add_argument("--bt-batch", type=int, default=512)

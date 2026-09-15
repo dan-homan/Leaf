@@ -116,6 +116,23 @@ static const float TDLEAF_ADAM_STEP_CLIP = 30.0f;
 // structure) is learnable; the 8 PSQT buckets are what let it encode e.g. "pawn
 // worth more in deep endgame".  No gradient mean-centering or post-Adam dw
 // centering is applied.
+// ---------------------------------------------------------------------------
+// LR SCALE CONVENTION (changed 2026-09-15).  There is now ONE learning-rate set
+// used by BOTH phases at scale 1.0 -- online `lr_scale` 1.0 and offline
+// `--bt-lr` 1.0.  Previously the two differed: online ran at 1.0 and offline at
+// 0.25 of the same constants, so the online phase was 4x hotter, which 7.11's
+// standing conclusions flagged as the most likely reason the noise ball sat
+// where it did.
+//
+// The constants below are 0.25x their pre-2026-09-15 values, so the OFFLINE
+// phase is unchanged (1.0 x 0.25C == old 0.25 x C) while the ONLINE phase drops
+// 4x.  That online cut is already measured and safe: `lr25` vs `lr100` gave
+// damage -34 against -125 and final nets identical head-to-head at -0.7 +- 8.3
+// (7.9, 7.10).  D. Homan's independent tests support the smaller LR.
+//
+// Anything that reads an absolute LR from the chain history must be rescaled by
+// 4 before comparison.
+// ---------------------------------------------------------------------------
 // FC0 weights.  Recalibrated 2026-09-13 from 0.005 to 0.0014.  The old value
 // came from Stockfish-net statistics (assumed median ~5).  Measured on this
 // net's own FP32 shadows, fc0_w is STATIONARY across the whole m260720 chain
@@ -126,18 +143,18 @@ static const float TDLEAF_ADAM_STEP_CLIP = 30.0f;
 // contributor to online weight displacement (13.5% of its own RMS over 30k
 // games, against ft_w 1.18% and psqt_w 0.54%).  0.0014 = 0.00035 x 3.88 puts
 // all three stationary sections on one ratio.  See Online_Learning_Investigation 7.11.
-static const float TDLEAF_ADAM_LR0         = 0.0014f; // FC0 weights (int8, RMS ~3.88)
+static const float TDLEAF_ADAM_LR0         = 0.00035f;// FC0 weights (int8, RMS ~3.88)
 // FC1 weights kept at the historical 0.005 deliberately: fc1_w is NOT
 // stationary (RMS 3.00 at init -> 6.65 at 7e6 games), so it has no fixed
 // magnitude to calibrate against, and holding it fixed isolates fc0_w as the
 // single changed variable in the 30k ladder arm.
-static const float TDLEAF_ADAM_FC1_LR0     = 0.005f;  // FC1 weights (int8, RMS 3.0 -> 6.7)
-static const float TDLEAF_ADAM_FC2_LR0     = 0.07f;   // FC2 weights (int8, median ~68 — final 32→1 layer)
-static const float TDLEAF_ADAM_FC_BIAS_LR0 = 1.5f;    // FC biases (int32, median ~1500 across stacks)
-static const float TDLEAF_ADAM_FT_LR0      = 0.015f;  // FT weights (int16, median ~16)
-static const float TDLEAF_ADAM_FT_BIAS_LR0 = 0.02f;   // FT biases  (int16, median ~51; hedged below
+static const float TDLEAF_ADAM_FC1_LR0     = 0.00125f;// FC1 weights (int8, RMS 3.0 -> 6.7)
+static const float TDLEAF_ADAM_FC2_LR0     = 0.0175f; // FC2 weights (int8, final 32→1 layer)
+static const float TDLEAF_ADAM_FC_BIAS_LR0 = 0.375f;  // FC biases (int32; scale-finding, init 0)
+static const float TDLEAF_ADAM_FT_LR0      = 0.00375f;// FT weights (int16, RMS ~44 -> 40)
+static const float TDLEAF_ADAM_FT_BIAS_LR0 = 0.005f;  // FT biases  (int16; scale-finding, init 0
                                                        // 0.001×median to limit dying-ReLU risk)
-static const float TDLEAF_ADAM_PSQT_LR0    = 13.0f;   // PSQT (int32; sized to raw ~13 319 — active
+static const float TDLEAF_ADAM_PSQT_LR0    = 3.25f;   // PSQT (int32; RMS ~3.6e4 — active
                                                        // post-centering subspace is ~665, see note above)
 // Material representation: pure-PSQT — the bucketed PSQT is the SOLE trainable
 // material channel.  There is no dense piece_val channel and no gauge machinery
@@ -170,7 +187,7 @@ static const float TDLEAF_ADAM_EPS      = 1e-12f;  // numerical floor.  Lowered
 // Applied to FC weights and FT weights only (not biases, not PSQT).
 // Set to 0.0 to disable.
 static const float TDLEAF_WEIGHT_DECAY  = 1e-4f; //1e-4f;   // decoupled weight decay coefficient
-static const int   TDLEAF_ADAM_WARMUP        = 1000; // linear LR warmup over first N Adam
+static const int   TDLEAF_ADAM_WARMUP        = 100;  // linear LR warmup over first N Adam
                                         // steps, ALL categories.  1000 = 1/(1-beta2), the
                                         // time constant for Adam's second moment, so the
                                         // ramp lasts exactly as long as it takes v to
@@ -193,7 +210,7 @@ static const int   TDLEAF_FT_SESSION_WARMUP  = 100; // per-session FT LR ramp ov
 // grows as sqrt(B) against the fixed TDLEAF_GRAD_CLIP_NORM, so check the clip
 // telemetry at large B.  See Online_Learning_Investigation 7.15.
 #ifndef TDLEAF_BATCH_SIZE_DEFAULT
-#define TDLEAF_BATCH_SIZE_DEFAULT 8
+#define TDLEAF_BATCH_SIZE_DEFAULT 50
 #endif
 static const int   TDLEAF_BATCH_SIZE    = TDLEAF_BATCH_SIZE_DEFAULT;
 
