@@ -141,6 +141,17 @@ struct TDPvStats {
     uint64_t short_n;  double short_sum;
     uint64_t n_by_stm[2], len2_by_stm[2];   // does the len==2 spike track STM?
     uint64_t n_by_par[2];                   // ...or record parity (ply order)?
+    // SIGNED (leaf_static - propagated) in STM POV, split by whether the walk
+    // reached full depth.  This is the measurement that decides whether the
+    // truncation error is zero-mean noise (averages away offline) or a
+    // systematic STM-correlated bias (becomes an alternating sawtooth in
+    // white-POV d[], and TD errors are differences of consecutive d).
+    uint64_t len2_depth_sum, len2_n, oth_depth_sum, oth_n;  // depth cross-tab
+    uint64_t len2_neardraw, oth_neardraw;   // |propagated| < 25 cp
+    double   len2_absprop, oth_absprop;
+    double   sgn_full_sum, sgn_short_sum;
+    uint64_t sgn_full_n,   sgn_short_n;
+    double   sgn_full_sq,  sgn_short_sq;
 };
 static TDPvStats td_pv;
 
@@ -154,7 +165,11 @@ static void tdleaf_pv_stats_record(int pv_len, int walk_stop, int search_depth,
     if (pv_len == 2) td_pv.n_by_par[rec_index & 1]++;
     td_pv.len_exact[pv_len < 32 ? pv_len : 32]++;
     td_pv.len_sum += (uint64_t)pv_len;
-    if (search_depth > 0) td_pv.depth_sum += (uint64_t)search_depth;
+    if (search_depth > 0) {
+        td_pv.depth_sum += (uint64_t)search_depth;
+        if (pv_len == 2) { td_pv.len2_depth_sum += (uint64_t)search_depth; td_pv.len2_n++; }
+        else             { td_pv.oth_depth_sum  += (uint64_t)search_depth; td_pv.oth_n++;  }
+    }
     if (walk_stop == TDPV_STOP_ILLEGAL) td_pv.stop_illegal++;
     if (walk_stop == TDPV_STOP_MAXD)    td_pv.stop_maxd++;
     bool reached_depth = !(search_depth > 0 && pv_len < search_depth);
@@ -169,13 +184,23 @@ static void tdleaf_pv_stats_record(int pv_len, int walk_stop, int search_depth,
 
     // Propagate the root score to the leaf's POV: one sign flip per ply walked.
     int propagated = (pv_len & 1) ? -score_root_stm : score_root_stm;
+    { int ap = propagated < 0 ? -propagated : propagated;
+      if (pv_len == 2) { td_pv.len2_absprop += ap; if (ap < 25) td_pv.len2_neardraw++; }
+      else             { td_pv.oth_absprop  += ap; if (ap < 25) td_pv.oth_neardraw++;  } }
     int diff = leaf_score_stm - propagated;
     int adiff = diff < 0 ? -diff : diff;
     td_pv.miss_n++;
     td_pv.miss_sum += (double)adiff;
     if (adiff > td_pv.miss_max) td_pv.miss_max = adiff;
-    if (reached_depth) { td_pv.full_n++;  td_pv.full_sum  += (double)adiff; }
-    else               { td_pv.short_n++; td_pv.short_sum += (double)adiff; }
+    if (reached_depth) {
+        td_pv.full_n++;  td_pv.full_sum  += (double)adiff;
+        td_pv.sgn_full_n++;  td_pv.sgn_full_sum  += (double)diff;
+        td_pv.sgn_full_sq   += (double)diff * (double)diff;
+    } else {
+        td_pv.short_n++; td_pv.short_sum += (double)adiff;
+        td_pv.sgn_short_n++; td_pv.sgn_short_sum += (double)diff;
+        td_pv.sgn_short_sq  += (double)diff * (double)diff;
+    }
     static const int thr[5] = { 25, 50, 100, 300, 1000 };
     for (int i = 0; i < 5; i++)
         if (adiff > thr[i]) {
@@ -226,6 +251,30 @@ void tdleaf_report_pv_stats(const char *tag)
                 (unsigned long long)td_pv.full_n,
                 td_pv.short_n ? td_pv.short_sum / (double)td_pv.short_n : 0.0,
                 (unsigned long long)td_pv.short_n);
+    }
+    if (td_pv.len2_n && td_pv.oth_n)
+        fprintf(stderr, "TDLeaf len2-vs-depth %s: mean achieved depth  len==2: %.2f (n=%llu)"
+                "   other: %.2f (n=%llu)\n", T,
+                (double)td_pv.len2_depth_sum/(double)td_pv.len2_n, (unsigned long long)td_pv.len2_n,
+                (double)td_pv.oth_depth_sum/(double)td_pv.oth_n, (unsigned long long)td_pv.oth_n);
+    if (td_pv.len2_n && td_pv.oth_n)
+        fprintf(stderr, "TDLeaf len2-score %s: mean|root score| len==2: %.1f cp "
+                "(near-draw <25cp: %.1f%%)   other: %.1f cp (near-draw: %.1f%%)\n", T,
+                td_pv.len2_absprop/(double)td_pv.len2_n,
+                100.0*td_pv.len2_neardraw/(double)td_pv.len2_n,
+                td_pv.oth_absprop/(double)td_pv.oth_n,
+                100.0*td_pv.oth_neardraw/(double)td_pv.oth_n);
+    if (td_pv.sgn_short_n) {
+        double mf = td_pv.sgn_full_sum  / (double)td_pv.sgn_full_n;
+        double ms = td_pv.sgn_short_sum / (double)td_pv.sgn_short_n;
+        double sf = sqrt(td_pv.sgn_full_sq  / (double)td_pv.sgn_full_n  - mf*mf);
+        double ss = sqrt(td_pv.sgn_short_sq / (double)td_pv.sgn_short_n - ms*ms);
+        fprintf(stderr, "TDLeaf signed-bias %s (STM POV, leaf_static - propagated): "
+                "full-depth mean=%+.2f sd=%.1f n=%llu | short mean=%+.2f sd=%.1f "
+                "n=%llu | bias/sd short=%.4f\n", T,
+                mf, sf, (unsigned long long)td_pv.sgn_full_n,
+                ms, ss, (unsigned long long)td_pv.sgn_short_n,
+                ss > 0 ? ms/ss : 0.0);
     }
     fflush(stderr);
 }

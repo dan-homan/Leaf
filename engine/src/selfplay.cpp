@@ -770,6 +770,12 @@ int selfplay_main(int argc, char *argv[])
 #if !TDLEAF_READONLY
     tdleaf_report_pv_stats(nullptr);
 #endif
+#if PVTRUNC_DIAG
+    {   extern unsigned long long pvt_fifty, pvt_rep, pvt_kk, pvt_tt;
+        fprintf(stderr, "PV-node early returns WITHOUT pc: repetition=%llu "
+                "fifty=%llu KKdraw=%llu TTcutoff=%llu\n",
+                pvt_rep, pvt_fifty, pvt_kk, pvt_tt);   }
+#endif
     return 0;
 }
 

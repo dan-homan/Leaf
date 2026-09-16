@@ -292,7 +292,7 @@ struct search_node {
   /* search.cpp */ 
   void root_pvs();
   int pvs(int alpha, int beta, int depth, int in_pv, int skip_move);
-  int qsearch(int alpha, int beta, int qply);
+  int qsearch(int alpha, int beta, int qply, int in_pv = 0);
 
 };
 

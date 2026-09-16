@@ -76,6 +76,23 @@
  #define NNUE_FIXED_PIECE_VALUES 1
 #endif
 
+// Suppress transposition-table CUTOFFS at PV nodes (main search and qsearch).
+// TT stores, TT move hints and move ordering are untouched -- only the early
+// `return hscore` is skipped when in_pv is set.
+//
+// Why: a bound cutoff (FLAG_A/FLAG_B) returns without writing pc[], so the
+// parent copies a child PV that was never filled and the PV terminates there.
+// Measured on the m260915 head, 1.5M records at d8/4000n: 46.7% of TDLeaf
+// records had pv_len == 2 against a mean achieved depth of 8.95, and those
+// records' labels carry a coherent -36.5 cp bias (against -5.8 cp for
+// full-depth walks) that does NOT average away -- the wtm_sign convention
+// makes it a same-direction gradient push on every truncated record.
+// Harmless for play (the MOVE is right, only the continuation is short);
+// harmful for TDLeaf, which uses the PV as a pointer to the training position.
+#ifndef PV_NO_TT_CUTOFF
+ #define PV_NO_TT_CUTOFF 0
+#endif
+
 // Embed the .nnue file directly into the binary (via incbin).
 // Compile with -D NNUE_EMBED=1; also requires NNUE_NET_PATH to be set.
 #ifndef NNUE_EMBED

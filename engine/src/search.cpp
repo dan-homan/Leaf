@@ -642,6 +642,11 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
 
 }
 
+#if PVTRUNC_DIAG
+// Why does an in_pv node return without writing pc[]?  Diagnostic counters.
+unsigned long long pvt_fifty=0, pvt_rep=0, pvt_kk=0, pvt_tt=0;
+#endif
+
 /* Function to update principle continuation */
 // The principle continuation is stored as a "triangular" array.
 // It is updated by doing a mem-copy of the principle continuation
@@ -956,7 +961,7 @@ void search_node::root_pvs()
    //   Search the next node in the tree
    // -----------------------------------
    if(depth+depth_mod < 1) {
-     score = -next->qsearch(-beta, -alpha, 0);
+     score = -next->qsearch(-beta, -alpha, 0, 1);   // root is a PV node
      if (score == TIME_FLAG) { tdata->g = -TIME_FLAG; return; }
    } else {
     if(first) {
@@ -1184,7 +1189,7 @@ int search_node::pvs(int alpha, int beta, int depth, int in_pv, int move_to_skip
  // Don't search too deep!!
  //------------------------------
  if(ply >= MAX_MAIN_TREE) {
-   return qsearch(alpha,beta,0);
+   return qsearch(alpha,beta,0,in_pv);
  }
 
 #if DEBUG_SEARCH
@@ -1244,6 +1249,9 @@ int search_node::pvs(int alpha, int beta, int depth, int in_pv, int move_to_skip
    // fifty move rule
    if(pos.fifty >= 100) {
      //return 0;
+#if PVTRUNC_DIAG
+     if(in_pv) pvt_fifty++;
+#endif
      return(MAX(MIN(0,beta),alpha));
    }
    // avoid repeating a position if possible
@@ -1260,6 +1268,9 @@ int search_node::pvs(int alpha, int beta, int depth, int in_pv, int move_to_skip
      // check code for rep.
      if(tdata->plist[ri] == pos.hcode) {
        //return 0;
+#if PVTRUNC_DIAG
+       if(in_pv) pvt_rep++;
+#endif
        return(MAX(MIN(0,beta),alpha));
      }
    }
@@ -1284,6 +1295,9 @@ int search_node::pvs(int alpha, int beta, int depth, int in_pv, int move_to_skip
      +pos.plist[1][PAWN][0];
    if(total_pieces == 2) {
      //return 0;
+#if PVTRUNC_DIAG
+     if(in_pv) pvt_kk++;
+#endif
      if(ply > 1) return(MAX(MIN(0,beta),alpha));
      else return 0;
    }
@@ -1322,8 +1336,14 @@ int search_node::pvs(int alpha, int beta, int depth, int in_pv, int move_to_skip
        tt_ok = false;
      }
    }
-   // see if we can return a score
-   if(tt_ok && hdepth >= depth) {
+   // see if we can return a score.  Under PV_NO_TT_CUTOFF a PV node never
+   // takes the early return: a bound cutoff would leave pc[] unwritten and
+   // truncate the PV that TDLeaf uses to locate its training position.  The
+   // hmove hint above is still used for ordering either way.
+   if(tt_ok && hdepth >= depth && !(PV_NO_TT_CUTOFF && in_pv)) {
+#if PVTRUNC_DIAG
+     if(in_pv) pvt_tt++;
+#endif
      if(hflag == FLAG_P) {
        tdata->hash_count++;
        if(hscore > alpha) {
@@ -1626,8 +1646,9 @@ int search_node::pvs(int alpha, int beta, int depth, int in_pv, int move_to_skip
      // process the returned hash hit
      //---------------------------------
      if(tscore != HASH_MISS) {
-       // see if we can return a score 
-       if(tdepth >= depth) {    
+       // see if we can return a score (see PV_NO_TT_CUTOFF in define.h; this
+       // is the SMP skipped-move re-probe, so it only fires under threads).
+       if(tdepth >= depth && !(PV_NO_TT_CUTOFF && in_pv)) {    
 	 if(tflag == FLAG_P) {
 	   tdata->hash_count++;
 	   if(tscore > alpha) {
@@ -1895,7 +1916,7 @@ int search_node::pvs(int alpha, int beta, int depth, int in_pv, int move_to_skip
    //   Search the next node in the tree
    // -----------------------------------
    if(depth+depth_mod < 1) {
-     score = -next->qsearch(-beta, -alpha, 0);
+     score = -next->qsearch(-beta, -alpha, 0, in_pv);
      if (score == TIME_FLAG) return -TIME_FLAG;
      // Checking move reductions with a re-search    
      if (depth && score > alpha && score < (MATE/2)) { 
@@ -2109,7 +2130,7 @@ int search_node::pvs(int alpha, int beta, int depth, int in_pv, int move_to_skip
 // This searches only non-losing captures.  Futility cut-offs
 // are made if the capture is not likely to bring us up back
 // above alpha.   A straight alpha-beta algorithm is used here.
-int search_node::qsearch(int alpha, int beta, int qply)
+int search_node::qsearch(int alpha, int beta, int qply, int in_pv)
 {
   int qi, delta_score; 
  
@@ -2237,8 +2258,8 @@ int search_node::qsearch(int alpha, int beta, int qply)
           tt_ok = false;
         }
       }
-      // see if we can return a score
-      if(tt_ok && hdepth >= -1) {
+      // see if we can return a score (see PV_NO_TT_CUTOFF in define.h).
+      if(tt_ok && hdepth >= -1 && !(PV_NO_TT_CUTOFF && in_pv)) {
 	if(hflag == FLAG_P) {
 	  tdata->hash_count++;
 	  if(hscore > alpha) {
@@ -2345,7 +2366,7 @@ int search_node::qsearch(int alpha, int beta, int qply)
     //__builtin_prefetch((score_rec *)(score_table + (((SCORE_SIZE-1)*((next->pos.hcode)&MAX_UINT))/MAX_UINT)));
 
     // call next iteration to obtain a score
-    score = -next->qsearch(-beta, -alpha, qply+1);
+    score = -next->qsearch(-beta, -alpha, qply+1, in_pv);
     if (score == TIME_FLAG) return -TIME_FLAG; 
 
     if(score > alpha) {
