@@ -93,6 +93,27 @@
  #define PV_NO_TT_CUTOFF 0
 #endif
 
+// Root fallback for records whose PV walk could not reach a real leaf.
+//
+// When the walked PV is shorter than the achieved search depth, the position
+// the walk ended on is NOT what the search evaluated, and its static eval
+// carries a coherent -32 cp bias (measured; see docs/).  With this set, such a
+// record is instead anchored at the ROOT position and labelled with the root's
+// SEARCH score (score_root_stm) -- the offline "root row" construction, whose
+// labels measured +2.08% dMSE_out against leaf rows' +0.41%.
+//
+// NOTE the root's STATIC eval is NOT the right label and was measured worse than
+// the truncated leaf it would replace (|miss| 131.4 cp signed -38.1, against the
+// leaf's 109.3 / -31.6).  The root is only better BECAUSE it carries a search
+// score; using its static eval throws away the sole reason to prefer it.
+//
+// 0 = off (current behaviour).  N > 0 = fall back when pv_len < min(depth, N)
+// is false, i.e. when pv_len < achieved depth; N is the shortfall threshold in
+// plies (1 = any shortfall).
+#ifndef TDLEAF_ROOT_FALLBACK
+ #define TDLEAF_ROOT_FALLBACK 0
+#endif
+
 // Embed the .nnue file directly into the binary (via incbin).
 // Compile with -D NNUE_EMBED=1; also requires NNUE_NET_PATH to be set.
 #ifndef NNUE_EMBED

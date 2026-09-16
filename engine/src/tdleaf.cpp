@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <algorithm>
+#include <climits>
 #include <unistd.h>     // getpid — leaf-dump per-process file naming
 #include "chess.h"
 #include "nnue.h"
@@ -148,6 +149,10 @@ struct TDPvStats {
     // white-POV d[], and TD errors are differences of consecutive d).
     uint64_t len2_depth_sum, len2_n, oth_depth_sum, oth_n;  // depth cross-tab
     uint64_t len2_neardraw, oth_neardraw;   // |propagated| < 25 cp
+    // Is the ROOT a better stand-in for the search value than a truncated leaf?
+    double   sh_leafmiss, sh_rootmiss;  uint64_t sh_cmp_n;
+    double   sh_leafsgn, sh_rootsgn;
+    uint64_t fallback_n;   // records re-anchored at the root
     double   len2_absprop, oth_absprop;
     double   sgn_full_sum, sgn_short_sum;
     uint64_t sgn_full_n,   sgn_short_n;
@@ -157,7 +162,7 @@ static TDPvStats td_pv;
 
 static void tdleaf_pv_stats_record(int pv_len, int walk_stop, int search_depth,
                                    int leaf_score_stm, int score_root_stm,
-                                   int root_wtm, int rec_index)
+                                   int root_wtm, int rec_index, int root_static_diag)
 {
     td_pv.n++;
     td_pv.n_by_stm[root_wtm & 1]++;
@@ -189,6 +194,15 @@ static void tdleaf_pv_stats_record(int pv_len, int walk_stop, int search_depth,
       else             { td_pv.oth_absprop  += ap; if (ap < 25) td_pv.oth_neardraw++;  } }
     int diff = leaf_score_stm - propagated;
     int adiff = diff < 0 ? -diff : diff;
+    // For SHORT walks only: compare the leaf's miss against the ROOT's own
+    // static-vs-search miss.  If the root is closer, falling back to it is a
+    // strict improvement for those records.
+    if (search_depth > 0 && pv_len < search_depth && root_static_diag != INT_MIN) {
+        int rds = root_static_diag - score_root_stm;
+        int rd = rds < 0 ? -rds : rds;
+        td_pv.sh_leafmiss += adiff; td_pv.sh_rootmiss += rd; td_pv.sh_cmp_n++;
+        td_pv.sh_leafsgn += diff;   td_pv.sh_rootsgn += rds;
+    }
     td_pv.miss_n++;
     td_pv.miss_sum += (double)adiff;
     if (adiff > td_pv.miss_max) td_pv.miss_max = adiff;
@@ -264,6 +278,19 @@ void tdleaf_report_pv_stats(const char *tag)
                 100.0*td_pv.len2_neardraw/(double)td_pv.len2_n,
                 td_pv.oth_absprop/(double)td_pv.oth_n,
                 100.0*td_pv.oth_neardraw/(double)td_pv.oth_n);
+    if (td_pv.fallback_n)
+        fprintf(stderr, "TDLeaf root-fallback %s: %llu records (%.2f%%) re-anchored at "
+                "the root with the root search score as label\n", T,
+                (unsigned long long)td_pv.fallback_n, 100.0*td_pv.fallback_n/N);
+    if (td_pv.sh_cmp_n)
+        fprintf(stderr, "TDLeaf short-walk leaf-vs-root %s: mean |leaf_static-propagated| "
+                "= %.1f cp (signed %+.2f)   vs   mean |root_static-root_search| = %.1f cp "
+                "(signed %+.2f)   (n=%llu)\n", T,
+                td_pv.sh_leafmiss/(double)td_pv.sh_cmp_n,
+                td_pv.sh_leafsgn/(double)td_pv.sh_cmp_n,
+                td_pv.sh_rootmiss/(double)td_pv.sh_cmp_n,
+                td_pv.sh_rootsgn/(double)td_pv.sh_cmp_n,
+                (unsigned long long)td_pv.sh_cmp_n);
     if (td_pv.sgn_short_n) {
         double mf = td_pv.sgn_full_sum  / (double)td_pv.sgn_full_n;
         double ms = td_pv.sgn_short_sum / (double)td_pv.sgn_short_n;
@@ -336,9 +363,17 @@ void tdleaf_record_ply(TDGameRecord &rec,
     // (The propagated search score includes quiescence and may differ.)
     int leaf_score_stm = nnue_evaluate(acc_a, (int)leaf_wtm, pc);
 
+    int root_static_diag = INT_MIN;
+#if PVTRUNC_DIAG
+    {   int pcr = 0;
+        for (int sd = 0; sd < 2; sd++)
+            for (int pt = PAWN; pt <= KING; pt++) pcr += root_pos.plist[sd][pt][0];
+        pcr = (pcr < 1) ? 1 : (pcr > 32) ? 32 : pcr;
+        root_static_diag = nnue_evaluate(root_acc, (int)root_pos.wtm, pcr);   }
+#endif
     tdleaf_pv_stats_record(pv_len, walk_stop, search_depth,
                            leaf_score_stm, score_root_stm,
-                           (int)root_pos.wtm, rec.n_plies);
+                           (int)root_pos.wtm, rec.n_plies, root_static_diag);
 
 #if TDLEAF_CHECK_SCORE
     {
@@ -398,6 +433,26 @@ void tdleaf_record_ply(TDGameRecord &rec,
             }
         }
     }
+
+    // ---- Root fallback (TDLEAF_ROOT_FALLBACK) -----------------------------
+    // The walk could not reach what the search actually evaluated.  Anchor the
+    // record at the ROOT and label it with the root's SEARCH score, rather than
+    // training on the static eval of a position the search never scored.
+    bool used_root_fallback = false;
+#if TDLEAF_ROOT_FALLBACK
+    if (search_depth > 0 && (search_depth - pv_len) >= TDLEAF_ROOT_FALLBACK) {
+        used_root_fallback = true;
+        acc_a    = root_acc;
+        cur      = root_pos;
+        leaf_wtm = (bool)root_pos.wtm;
+        pc = 0;
+        for (int sd = 0; sd < 2; sd++)
+            for (int pt = PAWN; pt <= KING; pt++) pc += root_pos.plist[sd][pt][0];
+        pc = (pc < 1) ? 1 : (pc > 32) ? 32 : pc;
+        leaf_score_stm = score_root_stm;   // the SEARCH score, not a static eval
+        td_pv.fallback_n++;
+    }
+#endif
 
     TDRecord &r = rec.plies[rec.n_plies++];
     memcpy(r.acc[0],  acc_a.acc[0],  NNUE_HALF_DIMS  * sizeof(int16_t));
