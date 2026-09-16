@@ -86,6 +86,20 @@ static const float TDLEAF_SCORE_CLIP_PAWNS = 1.0f;
 // RULE, not from evaluating the leaf, so the mismatch is enormous (mate sentinel)
 // or the eval simply disagrees with the 0.
 //
+// APPLIES TO THE DUMPED LEAF ROW TOO (via TDRecord::leaf_ok), so the offline
+// leaf population is exactly the online one -- a leaf the search never valued is
+// no more useful offline than online.  dump_quiet_cp remains as an additional
+// cap, so the effective gate is the tighter of the two.
+//
+// TRADE-OFF, stated because it gives something up: the wide-dump design (Offline
+// Part 4.1) exists so the leaf gate can be RE-CUT OFFLINE from the `gate` column.
+// Gating the dump at 10 cp keeps re-cutting TIGHTER but makes WIDER impossible
+// without regenerating.  That is deliberate -- rows failing this test have a
+// label the search never endorsed at any threshold -- but note Offline Part 4
+// measured gate 60/120/200 as FLAT and "none" as -27.9 Elo, and never tested
+// tighter than 60.  Moving the offline leaf population from 60 cp to 10 cp is
+// therefore an untested corpus change and should be rated, not assumed.
+//
 // OFFLINE: the dumped LEAF row already has a gate on this SAME quantity --
 // |leaf_static - propagated root SEARCH score| (tdleaf.cpp, leaf-row block),
 // re-cuttable via --bt-quiet-cp -- but at 60 cp by default, 6x looser than this.

@@ -1057,7 +1057,13 @@ static void tdleaf_dump_game(const TDGameRecord &rec, float result)
         if (leaf_f) {
             int root_leaf_pov = ((int)r.wtm == root_wtm) ? r.score_root_stm
                                                          : -r.score_root_stm;
-            if (abs(r.score_stm - root_leaf_pov) <= dump_quiet_cp) {
+            // Leaf rows use the SAME test as the online trace (r.leaf_ok, i.e.
+            // TDLEAF_LEAF_MATCH_CP), so the offline leaf population is exactly
+            // the online one.  A leaf the search never valued is no more useful
+            // offline than online.  dump_quiet_cp still applies as an additional
+            // cap, so the gate is the tighter of the two and disabling the
+            // leaf-match gate restores the historical behaviour.
+            if (r.leaf_ok && abs(r.score_stm - root_leaf_pov) <= dump_quiet_cp) {
                 int cp_white = r.wtm ? r.score_stm : -r.score_stm;
                 // Column 8 "gate": what the quietness test compared cp against,
                 // same POV as cp, so the gate is |cp - gate| <= QUIET_CP and can
