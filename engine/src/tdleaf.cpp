@@ -162,7 +162,14 @@ struct TDPvStats {
     uint64_t tr_n, tr_incheck, tr_hascaps, tr_quiet, tr_fifty_hi, tr_lowpieces;
     // Are the residual short PVs the LEGITIMATE terminal ones -- draws and mates?
     uint64_t tr_neardraw, tr_exactzero, tr_mate, tr_matescore_n;
-    uint64_t tr_rep_pos;   // truncation position repeats earlier in the PV walk
+    uint64_t tr_rep_pos;
+    // How often does leaf_static EQUAL the propagated root score?  For a fully
+    // resolved PV that runs through qsearch it should, exactly -- the backed-up
+    // value IS the leaf's static eval.  Mismatches mark records where the search
+    // value came from somewhere other than this leaf.
+    uint64_t mm_n, mm_exact, mm_le2, mm_le10, mm_le25, mm_le50, mm_gt50;
+    uint64_t mm_mate, mm_zero;          // classified BEFORE the tolerance test
+    uint64_t mm_gt50_short, mm_gt50_full;
     double   len2_absprop, oth_absprop;
     double   sgn_full_sum, sgn_short_sum;
     uint64_t sgn_full_n,   sgn_short_n;
@@ -189,6 +196,29 @@ static void tdleaf_pv_stats_record(int pv_len, int walk_stop, int search_depth,
     if (walk_stop == TDPV_STOP_MAXD)    td_pv.stop_maxd++;
     bool reached_depth = !(search_depth > 0 && pv_len < search_depth);
     if (!reached_depth) td_pv.shorter_than_depth++;
+
+    // Leaf-vs-root correspondence over ALL records, mates and draws classified
+    // separately rather than silently dropped.
+    {
+        int prop = (pv_len & 1) ? -score_root_stm : score_root_stm;
+        int dd = leaf_score_stm - prop; if (dd < 0) dd = -dd;
+        int asr = score_root_stm < 0 ? -score_root_stm : score_root_stm;
+        td_pv.mm_n++;
+        if (asr > MATE - 1000)        td_pv.mm_mate++;
+        else if (score_root_stm == 0) td_pv.mm_zero++;
+        else {
+            if (dd == 0)  td_pv.mm_exact++;
+            if (dd <= 2)  td_pv.mm_le2++;
+            if (dd <= 10) td_pv.mm_le10++;
+            if (dd <= 25) td_pv.mm_le25++;
+            if (dd <= 50) td_pv.mm_le50++;
+            if (dd > 50) {
+                td_pv.mm_gt50++;
+                if (search_depth > 0 && pv_len < search_depth) td_pv.mm_gt50_short++;
+                else                                          td_pv.mm_gt50_full++;
+            }
+        }
+    }
 
     // A mate sentinel (|score| near MATE) against a finite static eval is a
     // scale artifact, not a disagreement — count and exclude.
@@ -288,6 +318,20 @@ void tdleaf_report_pv_stats(const char *tag)
                 100.0*td_pv.len2_neardraw/(double)td_pv.len2_n,
                 td_pv.oth_absprop/(double)td_pv.oth_n,
                 100.0*td_pv.oth_neardraw/(double)td_pv.oth_n);
+    if (td_pv.mm_n) {
+        double M = (double)td_pv.mm_n;
+        double R = (double)(td_pv.mm_n - td_pv.mm_mate - td_pv.mm_zero);
+        fprintf(stderr, "TDLeaf leaf-vs-root correspondence %s: n=%llu | "
+                "MATE-scored %.2f%%  score==0 %.2f%% | of the remaining %.0f: "
+                "EXACT %.2f%%  <=2cp %.2f%%  <=10 %.2f%%  <=25 %.2f%%  <=50 %.2f%%  "
+                ">50 %.2f%% (short %llu / full %llu)\n", T,
+                (unsigned long long)td_pv.mm_n,
+                100.0*td_pv.mm_mate/M, 100.0*td_pv.mm_zero/M, R,
+                100.0*td_pv.mm_exact/R, 100.0*td_pv.mm_le2/R, 100.0*td_pv.mm_le10/R,
+                100.0*td_pv.mm_le25/R, 100.0*td_pv.mm_le50/R, 100.0*td_pv.mm_gt50/R,
+                (unsigned long long)td_pv.mm_gt50_short,
+                (unsigned long long)td_pv.mm_gt50_full);
+    }
     if (td_pv.tr_n) {
         double T2 = (double)td_pv.tr_n;
         fprintf(stderr, "TDLeaf truncation-point %s: n=%llu | in_check=%.1f%% "

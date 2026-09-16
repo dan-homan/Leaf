@@ -37,6 +37,15 @@
 // update leaves it at 1.
 int tdleaf_pv_is_stub = 1;
 
+// PV_NO_TT_CUTOFF and PV_LAST_RESOLVED both make the engine slightly WEAKER in
+// competitive play -- the first spends nodes re-searching PV nodes the TT could
+// have cut off, the second hands back a shallower iteration's move when the
+// deepest one did not resolve.  They exist to give TDLeaf a trustworthy leaf
+// position, which is worth nothing outside learning.  So both are gated on this
+// flag, set only by the self-play and learner drivers; UCI/xboard play in a
+// TDLEAF build is bit-for-bit unaffected.
+int pv_learning_mode = 0;
+
 #if PV_LAST_RESOLVED
 // Snapshot of the last RESOLVED root iteration: its PV, score and depth.  Used
 // to replace the fail-high stub when an iteration ends without resolving.
@@ -713,7 +722,7 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
   // resolve instead: a real PV with a real leaf, plus its own score and depth.
   // The returned best move is unchanged unless the stub's move differs, in which
   // case the resolved one is the move that was actually verified.
-  if (tdleaf_pv_is_stub && pv_saved_valid) {
+  if (pv_learning_mode && tdleaf_pv_is_stub && pv_saved_valid) {
     for (int i = 0; i < MAXD; i++) {
       tdata[0].pc[0][i] = pv_saved[i];
       if (!pv_saved[i].t) break;
@@ -1438,7 +1447,7 @@ int search_node::pvs(int alpha, int beta, int depth, int in_pv, int move_to_skip
    // takes the early return: a bound cutoff would leave pc[] unwritten and
    // truncate the PV that TDLeaf uses to locate its training position.  The
    // hmove hint above is still used for ordering either way.
-   if(tt_ok && hdepth >= depth && !(PV_NO_TT_CUTOFF && in_pv)) {
+   if(tt_ok && hdepth >= depth && !(PV_NO_TT_CUTOFF && pv_learning_mode && in_pv)) {
 #if PVTRUNC_DIAG
      if(in_pv) pvt_tt++;
 #endif
@@ -1746,7 +1755,7 @@ int search_node::pvs(int alpha, int beta, int depth, int in_pv, int move_to_skip
      if(tscore != HASH_MISS) {
        // see if we can return a score (see PV_NO_TT_CUTOFF in define.h; this
        // is the SMP skipped-move re-probe, so it only fires under threads).
-       if(tdepth >= depth && !(PV_NO_TT_CUTOFF && in_pv)) {    
+       if(tdepth >= depth && !(PV_NO_TT_CUTOFF && pv_learning_mode && in_pv)) {    
 	 if(tflag == FLAG_P) {
 	   tdata->hash_count++;
 	   if(tscore > alpha) {
@@ -2357,7 +2366,7 @@ int search_node::qsearch(int alpha, int beta, int qply, int in_pv)
         }
       }
       // see if we can return a score (see PV_NO_TT_CUTOFF in define.h).
-      if(tt_ok && hdepth >= -1 && !(PV_NO_TT_CUTOFF && in_pv)) {
+      if(tt_ok && hdepth >= -1 && !(PV_NO_TT_CUTOFF && pv_learning_mode && in_pv)) {
 	if(hflag == FLAG_P) {
 	  tdata->hash_count++;
 	  if(hscore > alpha) {
