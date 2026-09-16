@@ -173,6 +173,7 @@ struct TDPvStats {
     // Signed delta in ROOT-STM POV: (leaf eval propagated back to the root's
     // frame) - (root search score).  Parity-invariant, so a systematic search
     // miss shows as a one-sided mean; a pure PV-approximation shows symmetric.
+    uint64_t gate_seen, gate_skipped;   // leaf-match gate
     uint64_t rp_n, rp_hi, rp_lo, rp_eq;
     double   rp_sum, rp_sq;
     uint64_t rp_n_w, rp_n_b;  double rp_sum_w, rp_sum_b;   // split by root STM
@@ -367,6 +368,14 @@ void tdleaf_report_pv_stats(const char *tag)
                         100.0*td_pv.q_exact[i]/(double)td_pv.q_n[i],
                         td_pv.q_absmiss[i]/(double)td_pv.q_n[i]);
     }
+    if (td_pv.gate_seen)
+        fprintf(stderr, "TDLeaf leaf-match gate %s (<=%d cp): %llu of %llu records "
+                "excluded from the online trace (%.2f%%), %.2f%% retained\n", T,
+                TDLEAF_LEAF_MATCH_CP,
+                (unsigned long long)td_pv.gate_skipped,
+                (unsigned long long)td_pv.gate_seen,
+                100.0*td_pv.gate_skipped/(double)td_pv.gate_seen,
+                100.0*(td_pv.gate_seen-td_pv.gate_skipped)/(double)td_pv.gate_seen);
     if (td_pv.rp_n) {
         double N2 = (double)td_pv.rp_n;
         double m = td_pv.rp_sum / N2;
@@ -697,6 +706,16 @@ void tdleaf_record_ply(TDGameRecord &rec,
     r.pos               = cur;  // leaf position (trajectory learner rebuilds from it)
     r.id_depth          = (int8_t)((search_depth < 1) ? 1 :
                                    (search_depth > 127) ? 127 : search_depth);
+    // Does the leaf's static eval match the root score propagated to the leaf's
+    // POV?  If not, the PV did not locate the position the score came from and
+    // this record's gradient is uninformative online.  See TDLEAF_LEAF_MATCH_CP.
+    {
+        int prop = (pv_len & 1) ? -score_root_stm : score_root_stm;
+        int d = leaf_score_stm - prop; if (d < 0) d = -d;
+        r.leaf_ok = (TDLEAF_LEAF_MATCH_CP <= 0) || (d <= TDLEAF_LEAF_MATCH_CP);
+        if (!r.leaf_ok) td_pv.gate_skipped++;
+        td_pv.gate_seen++;
+    }
     if (tdleaf_dump_wanted() || tdleaf_capture_root) {
         // Root snapshot + static eval for the root-row TSV dump and the .tdg
         // trajectory format.
@@ -755,15 +774,25 @@ static uint32_t td_grad_samples = 0;  // POSITIONS accumulated since last apply
 
 static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
 {
-    int T = rec.n_plies;
+    // 0. Compact to records that pass the leaf-match gate.  A gated-out record
+    //    has a leaf the search never valued, so it contributes neither a
+    //    gradient nor a link in the eligibility trace.  Dropping it simply
+    //    widens the game-ply gap to its neighbours, which pow(lambda, dply)
+    //    already handles by construction -- exactly as under UCI play, where
+    //    only every other ply is recorded.
+    static int ix[MAX_GAME_PLY];
+    int T = 0;
+    for (int t = 0; t < rec.n_plies; t++)
+        if (rec.plies[t].leaf_ok) ix[T++] = t;
+    if (T < 1) return;          // nothing trainable in this game
 
     // 1. Convert scores to White-POV sigmoid values d[t] ∈ (0,1)
     static float d[MAX_GAME_PLY];
     static float score_w_cp[MAX_GAME_PLY];
     for (int t = 0; t < T; t++) {
-        score_w_cp[t] = rec.plies[t].wtm
-                        ?  (float)rec.plies[t].score_stm
-                        : -(float)rec.plies[t].score_stm;
+        score_w_cp[t] = rec.plies[ix[t]].wtm
+                        ?  (float)rec.plies[ix[t]].score_stm
+                        : -(float)rec.plies[ix[t]].score_stm;
         d[t] = 1.0f / (1.0f + expf(-score_w_cp[t] / TDLEAF_K));
     }
 
@@ -789,7 +818,7 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
         // harness (own moves only), 1 under internal self-play — so one lambda
         // expresses the same real-game horizon in both modes.  Guard dply >= 1
         // against any out-of-order/duplicate ply.
-        int dply = rec.plies[t + 1].game_ply - rec.plies[t].game_ply;
+        int dply = rec.plies[ix[t + 1]].game_ply - rec.plies[ix[t]].game_ply;
         if (dply < 1) dply = 1;
         float trace_decay = (dply == 1) ? lambda : powf(lambda, (float)dply);
         e[t] = delta_d + trace_decay * e[t + 1];
@@ -820,12 +849,12 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
         // backprops ∂(stm-POV score)/∂w, so the white-POV sign is
         // (wtm ? +1 : -1) and the loss-form sign we pass downstream is its
         // negative — hence (wtm ? -1 : +1).
-        float wtm_sign = rec.plies[t].wtm ? -1.0f : 1.0f;
-        float id_weight = 1.0f / (1.0f + rec.plies[t].id_score_variance / TDLEAF_ID_VAR_SIGMA2);
+        float wtm_sign = rec.plies[ix[t]].wtm ? -1.0f : 1.0f;
+        float id_weight = 1.0f / (1.0f + rec.plies[ix[t]].id_score_variance / TDLEAF_ID_VAR_SIGMA2);
         float grad_scale = e[t] * sig_grad * cp_factor * wtm_sign * id_weight;
 
         if (trace_f) {
-            const TDRecord &r = rec.plies[t];
+            const TDRecord &r = rec.plies[ix[t]];
             long acc_sum = 0;
             for (int p = 0; p < 2; p++)
                 for (int i = 0; i < NNUE_HALF_DIMS; i++) acc_sum += r.acc[p][i];
@@ -843,21 +872,21 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
 
         if (grad_scale != 0.0f) {
             NNUEActivations act;
-            act.stack = rec.plies[t].stack;
-            nnue_forward_fp32(rec.plies[t].acc, rec.plies[t].psqt,
-                              rec.plies[t].wtm, act);
-            memcpy(act.acc_raw[0], rec.plies[t].acc[0], NNUE_HALF_DIMS * sizeof(int16_t));
-            memcpy(act.acc_raw[1], rec.plies[t].acc[1], NNUE_HALF_DIMS * sizeof(int16_t));
-            act.n_ft[0] = rec.plies[t].n_ft[0];
-            act.n_ft[1] = rec.plies[t].n_ft[1];
-            memcpy(act.ft_idx[0], rec.plies[t].ft_idx[0], rec.plies[t].n_ft[0] * sizeof(int));
-            memcpy(act.ft_idx[1], rec.plies[t].ft_idx[1], rec.plies[t].n_ft[1] * sizeof(int));
+            act.stack = rec.plies[ix[t]].stack;
+            nnue_forward_fp32(rec.plies[ix[t]].acc, rec.plies[ix[t]].psqt,
+                              rec.plies[ix[t]].wtm, act);
+            memcpy(act.acc_raw[0], rec.plies[ix[t]].acc[0], NNUE_HALF_DIMS * sizeof(int16_t));
+            memcpy(act.acc_raw[1], rec.plies[ix[t]].acc[1], NNUE_HALF_DIMS * sizeof(int16_t));
+            act.n_ft[0] = rec.plies[ix[t]].n_ft[0];
+            act.n_ft[1] = rec.plies[ix[t]].n_ft[1];
+            memcpy(act.ft_idx[0], rec.plies[ix[t]].ft_idx[0], rec.plies[ix[t]].n_ft[0] * sizeof(int));
+            memcpy(act.ft_idx[1], rec.plies[ix[t]].ft_idx[1], rec.plies[ix[t]].n_ft[1] * sizeof(int));
 
             // Dense piece value gradient: stm_count − opp_count per piece type.
-            int stm_p = rec.plies[t].wtm ? 1 : 0;
+            int stm_p = rec.plies[ix[t]].wtm ? 1 : 0;
             for (int pt = PAWN; pt <= KING; pt++)
-                act.piece_count_diff[pt - 1] = (int8_t)(rec.plies[t].pos.plist[stm_p][pt][0]
-                                                       - rec.plies[t].pos.plist[stm_p ^ 1][pt][0]);
+                act.piece_count_diff[pt - 1] = (int8_t)(rec.plies[ix[t]].pos.plist[stm_p][pt][0]
+                                                       - rec.plies[ix[t]].pos.plist[stm_p ^ 1][pt][0]);
 
             nnue_accumulate_gradients(act, grad_scale);
             td_grad_samples++;

@@ -53,6 +53,55 @@ static const int   TDLEAF_MIN_PLIES_REP   = 40;     // skip 3-rep draws shorter 
 // scale drifts.  The max() floor and the runtime read of value[] matter only if
 // that flag is turned off.  Set to a large value to disable.
 static const float TDLEAF_SCORE_CLIP_PAWNS = 1.0f;
+// Leaf-match gate (ONLINE only).  A record contributes a gradient only when its
+// leaf's static eval agrees with the root search score propagated to the leaf's
+// POV, within this many centipawns.  0 disables.
+//
+// WHY.  The PV stored in the triangular array is an APPROXIMATION of the minimax
+// line.  The leaf position and its accumulator are provably exact (verified by
+// TDLEAF_CHECK_ACC and an off-by-one probe), but the root score is not that
+// leaf's static eval in roughly half of records -- a real alpha-beta search with
+// a TT, extensions, reductions and pruning can take its value from a node the
+// stored PV does not name.  A gradient computed at a position unrelated to the
+// score it is being trained against carries no usable information.
+//
+// The error is SYMMETRIC (leaf higher 27.4% / lower 27.4%, mean +0.7 cp against
+// sd 74), so it is variance rather than bias -- and variance on the labels is a
+// direct contributor to Sigma, the gradient-noise covariance that is the one
+// lever left standing after 7.14, and the one 7.15 showed pays (batch 8 -> 32 =
+// +64.0 Elo, 5.0 sigma).
+//
+// WHY A CONSTANT WORKS.  Measured across the m260720 chain from 1e5 to 7e6 games,
+// the exact-match SPIKE grows with maturity (38% -> 55%) but the error SCALE does
+// not: sd flat at 63-72 cp and the <=10 cp band flat at 78-82% over a 70x range
+// of training.  So the gate needs one constant, not a maturity schedule.
+//
+// AT 10 cp this keeps ~80% of records.  That is a good trade because plies within
+// one game are highly correlated -- dropping 20% of them costs far less
+// INDEPENDENT information than the count suggests, while removing the records
+// whose gradients point somewhere the score did not come from.
+// Retention by threshold: 10 cp ~80%, 25 cp ~89%, 50 cp ~95%.
+//
+// Mates and drawn lines are excluded for free: their value comes from a terminal
+// RULE, not from evaluating the leaf, so the mismatch is enormous (mate sentinel)
+// or the eval simply disagrees with the 0.
+//
+// OFFLINE: the dumped LEAF row already has a gate on this SAME quantity --
+// |leaf_static - propagated root SEARCH score| (tdleaf.cpp, leaf-row block),
+// re-cuttable via --bt-quiet-cp -- but at 60 cp by default, 6x looser than this.
+// Do NOT confuse it with the ROOT row gate, which is |root_static -
+// root_search|, i.e. root QUIETNESS, a different quantity.  Root rows are not
+// affected by leaf approximation quality at all.
+// Offline Part 4 measured gate 60/120/200 as flat and "none" as -27.9 Elo, and
+// explicitly never tested TIGHTER than 60 -- which is this same question from
+// the other end, and is a one-flag experiment on corpora already on disk.
+// Compile-time overridable (`perl comp.pl <v> ... TDLEAF_LEAF_MATCH_CP_DEFAULT=25`)
+// so the threshold can be swept without editing this file.  0 disables the gate
+// and reproduces the pre-gate behaviour exactly.
+#ifndef TDLEAF_LEAF_MATCH_CP_DEFAULT
+ #define TDLEAF_LEAF_MATCH_CP_DEFAULT 10
+#endif
+static const int TDLEAF_LEAF_MATCH_CP = TDLEAF_LEAF_MATCH_CP_DEFAULT;
 // Horizon-noise mitigation 2 — iterative-deepening score stability weight.
 // w_t = 1 / (1 + id_score_variance / TDLEAF_ID_VAR_SIGMA2)
 // Expressed in cp²: 10000 corresponds to a 100 cp std-dev reference.
@@ -251,6 +300,11 @@ struct TDRecord {
     position root_pos;
     int      root_static;
     int8_t   id_depth;    // ID iteration count ≈ achieved search depth
+    bool     leaf_ok;     // leaf static eval agrees with the propagated root
+                          // score within TDLEAF_LEAF_MATCH_CP.  False = the PV
+                          // did not locate the position the score came from, so
+                          // the record is excluded from the ONLINE trace (it is
+                          // still dumped; the dump has its own gate).
 #if TDLEAF_REFRESH_DIAG
     // Actor-vintage values, preserved by tdleaf_rebuild_record before the
     // --refresh-scores rewrite.  Telemetry only.
