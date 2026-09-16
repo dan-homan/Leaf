@@ -388,7 +388,7 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
     //     without re-tuning these guards together.
     //------------------------------------------
     if(max_ply > MAX(start_depth,3))
-     { root_alpha = g_last-15; root_beta = g_last+15; }
+     { root_alpha = g_last-WIDEWIN; root_beta = g_last+WIDEWIN; }
     else
      { root_alpha = -MATE; root_beta = +MATE; }
 
@@ -645,6 +645,10 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
 #if PVTRUNC_DIAG
 // Why does an in_pv node return without writing pc[]?  Diagnostic counters.
 unsigned long long pvt_fifty=0, pvt_rep=0, pvt_kk=0, pvt_tt=0;
+#endif
+
+#ifndef WIDEWIN
+ #define WIDEWIN 15
 #endif
 
 /* Function to update principle continuation */

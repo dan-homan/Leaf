@@ -153,6 +153,9 @@ struct TDPvStats {
     double   sh_leafmiss, sh_rootmiss;  uint64_t sh_cmp_n;
     double   sh_leafsgn, sh_rootsgn;
     uint64_t fallback_n;   // records re-anchored at the root
+    // Classify the position the walk STOPPED on (truncated records only):
+    // what would the search have done there?
+    uint64_t tr_n, tr_incheck, tr_hascaps, tr_quiet, tr_fifty_hi, tr_lowpieces;
     double   len2_absprop, oth_absprop;
     double   sgn_full_sum, sgn_short_sum;
     uint64_t sgn_full_n,   sgn_short_n;
@@ -278,6 +281,16 @@ void tdleaf_report_pv_stats(const char *tag)
                 100.0*td_pv.len2_neardraw/(double)td_pv.len2_n,
                 td_pv.oth_absprop/(double)td_pv.oth_n,
                 100.0*td_pv.oth_neardraw/(double)td_pv.oth_n);
+    if (td_pv.tr_n) {
+        double T2 = (double)td_pv.tr_n;
+        fprintf(stderr, "TDLeaf truncation-point %s: n=%llu | in_check=%.1f%% "
+                "has_captures=%.1f%% QUIET(no check,no caps)=%.1f%% | "
+                "fifty>=80=%.1f%% pieces<=6=%.1f%%\n", T,
+                (unsigned long long)td_pv.tr_n,
+                100.0*td_pv.tr_incheck/T2, 100.0*td_pv.tr_hascaps/T2,
+                100.0*td_pv.tr_quiet/T2, 100.0*td_pv.tr_fifty_hi/T2,
+                100.0*td_pv.tr_lowpieces/T2);
+    }
     if (td_pv.fallback_n)
         fprintf(stderr, "TDLeaf root-fallback %s: %llu records (%.2f%%) re-anchored at "
                 "the root with the root search score as label\n", T,
@@ -451,6 +464,27 @@ void tdleaf_record_ply(TDGameRecord &rec,
         pc = (pc < 1) ? 1 : (pc > 32) ? 32 : pc;
         leaf_score_stm = score_root_stm;   // the SEARCH score, not a static eval
         td_pv.fallback_n++;
+    }
+#endif
+
+#if PVTRUNC_DIAG
+    // Characterise the truncation point.  If the PV ended because the
+    // continuation was a quiescent stand-pat, the position should be QUIET
+    // (not in check, no captures).  If it ended on a draw exit, it should show
+    // a high fifty counter or very few pieces.
+    if (search_depth > 0 && pv_len < search_depth) {
+        td_pv.tr_n++;
+        bool incheck = cur.in_check();
+        int caps = 0;
+        { move_list ml; cur.captures(&ml, -10000); caps = ml.count; }
+        if (incheck) td_pv.tr_incheck++;
+        if (caps > 0) td_pv.tr_hascaps++;
+        if (!incheck && caps == 0) td_pv.tr_quiet++;
+        if (cur.fifty >= 80) td_pv.tr_fifty_hi++;
+        { int np = 0;
+          for (int sd = 0; sd < 2; sd++)
+            for (int pt = PAWN; pt <= KING; pt++) np += cur.plist[sd][pt][0];
+          if (np <= 6) td_pv.tr_lowpieces++; }
     }
 #endif
 
