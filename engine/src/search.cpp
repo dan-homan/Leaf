@@ -37,6 +37,23 @@
 // update leaves it at 1.
 int tdleaf_pv_is_stub = 1;
 
+#if PV_LAST_RESOLVED
+// Snapshot of the last RESOLVED root iteration: its PV, score and depth.  Used
+// to replace the fail-high stub when an iteration ends without resolving.
+static move pv_saved[MAXD];
+static int  pv_saved_score = 0, pv_saved_depth = 0, pv_saved_valid = 0;
+unsigned long long pv_fallback_used = 0, pv_fallback_unavail = 0;
+#endif
+
+#if PVTRUNC_DIAG
+// Why did the LAST aspiration iteration of this search end?
+//   0 = resolved (g strictly inside the window -> real PV)
+//   1 = interrupted (g == -TIME_FLAG: node budget or clock)
+//   2 = sequential fail-high/fail-low (the `} else break;` with g outside)
+int asp_last_exit = 0;
+unsigned long long asp_exit[3] = {0,0,0}, asp_stub[3] = {0,0,0};
+#endif
+
 #ifndef WIDEWIN
  #define WIDEWIN 15
 #endif
@@ -100,6 +117,9 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
   // trustworthy: it may be last search's, a book/singular stub, or a fail-high
   // stub.  See TDLEAF_SKIP_STUB_PV.
   tdleaf_pv_is_stub = 1;
+#if PV_LAST_RESOLVED
+  pv_saved_valid = 0;   // per-search: never carry a PV across positions
+#endif
   gr->terminate_search = 0;
 
   // reseting the number of times the search time has been doubled
@@ -450,6 +470,9 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
     fail_low = 0; fail_high = 0;
     while(1) {
       g = search_threads(root_alpha, root_beta, max_ply-1-fail_high, thread_cfg.threads);
+#if PVTRUNC_DIAG
+      if(g == -TIME_FLAG) asp_last_exit = 1;
+#endif
       if(g == -TIME_FLAG) break;
       if(g <= root_alpha && !fail_high) {
 	root_beta = root_alpha; fail_low = 1;
@@ -462,7 +485,23 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
 	  sort_root_moves();
 	}
 	root_beta = MIN(+MATE,g+1.5*(root_beta-g_last));
-      } else break;
+      } else {
+        bool resolved = (g > root_alpha && g < root_beta);
+#if PVTRUNC_DIAG
+        asp_last_exit = resolved ? 0 : 2;
+#endif
+#if PV_LAST_RESOLVED
+        // Snapshot only a PV that came from a real pc_update at the root.
+        if (resolved && !tdleaf_pv_is_stub) {
+          for (int i = 0; i < MAXD; i++) {
+            pv_saved[i] = tdata[0].pc[0][i];
+            if (!pv_saved[i].t) break;
+          }
+          pv_saved_score = g; pv_saved_depth = max_ply; pv_saved_valid = 1;
+        }
+#endif
+        break;
+      }
       if(root_alpha < MAX(-5000,g_last-500)) root_alpha = -MATE;
       if(root_beta > MIN(5000,g_last+500)) root_beta = +MATE;
     }
@@ -665,6 +704,27 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
 #if PVTRUNC_DIAG
   pvt_searches++;
   if (pvt_pc_is_stub) pvt_fh_stub++; else pvt_resolved++;
+  asp_exit[asp_last_exit]++;
+  if (pvt_pc_is_stub) asp_stub[asp_last_exit]++;
+#endif
+#if PV_LAST_RESOLVED
+  // The final iteration never resolved, so tdata[0].pc[0] is the fail-high stub
+  // (move + TT-guessed reply + NOMOVE).  Hand back the last iteration that DID
+  // resolve instead: a real PV with a real leaf, plus its own score and depth.
+  // The returned best move is unchanged unless the stub's move differs, in which
+  // case the resolved one is the move that was actually verified.
+  if (tdleaf_pv_is_stub && pv_saved_valid) {
+    for (int i = 0; i < MAXD; i++) {
+      tdata[0].pc[0][i] = pv_saved[i];
+      if (!pv_saved[i].t) break;
+    }
+    g_last     = pv_saved_score;
+    last_depth = pv_saved_depth;
+    tdleaf_pv_is_stub = 0;
+    pv_fallback_used++;
+  } else if (tdleaf_pv_is_stub) {
+    pv_fallback_unavail++;   // stub on the FIRST iteration: nothing to fall back to
+  }
 #endif
   gr->searching = 0; return tdata[0].pc[0][0];
 

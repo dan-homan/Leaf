@@ -117,6 +117,28 @@
  #define TDLEAF_ROOT_FALLBACK 0
 #endif
 
+// Fall back to the last RESOLVED iteration when the current one ends without
+// resolving, instead of handing the caller the fail-high stub.
+//
+// The aspiration loop can exit unresolved two ways: interrupted (node budget or
+// clock) and sequential fail-high/fail-low.  Measured at d8/4000n: of 3,222
+// stubs, 2,063 (64%) are sequential failures -- iterations that COMPLETED but
+// never resolved -- and 1,159 (36%) are interrupts.  With no node budget at all
+// every stub is a sequential failure.  So keying on "interrupted" would miss the
+// majority; this keys on "did not resolve", which covers both.
+//
+// The saved PV is genuinely resolved and has a real leaf, and its score and
+// depth come from the same iteration, so the record stays self-consistent.  It
+// is one ply shallower than the aborted iteration -- which is what last_depth
+// already means ("deepest COMPLETED iteration", search.cpp).
+//
+// Strictly better than TDLEAF_SKIP_STUB_PV: same condition, but keeps the record
+// instead of discarding ~35% of them.  Set both and the fallback wins (nothing
+// is left for the skip to drop).
+#ifndef PV_LAST_RESOLVED
+ #define PV_LAST_RESOLVED 1
+#endif
+
 // Skip TDLeaf recording for plies whose PV did not come from a RESOLVED root
 // search.  The root fail-high handler writes pc[0] = {move, TT-guessed reply,
 // NOMOVE} explicitly -- a 2-ply stub, where the second move was never searched
@@ -134,7 +156,7 @@
 // historical behaviour.  NOTE it discards ~35% of plies -- fewer records per
 // game, same number of Adam steps (the batch is counted in GAMES).
 #ifndef TDLEAF_SKIP_STUB_PV
- #define TDLEAF_SKIP_STUB_PV 1
+ #define TDLEAF_SKIP_STUB_PV 0
 #endif
 
 // Embed the .nnue file directly into the binary (via incbin).

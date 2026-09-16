@@ -780,7 +780,18 @@ int selfplay_main(int argc, char *argv[])
                 "(pc cut to 2 by construction)=%llu (%.1f%%) | from resolved "
                 "pc_update=%llu (%.1f%%)\n", pvt_searches,
                 pvt_fh_stub, 100.0*pvt_fh_stub/(double)pvt_searches,
-                pvt_resolved, 100.0*pvt_resolved/(double)pvt_searches);   }
+                pvt_resolved, 100.0*pvt_resolved/(double)pvt_searches);
+        { extern unsigned long long pv_fallback_used, pv_fallback_unavail;
+          fprintf(stderr, "PV last-resolved fallback: used=%llu  unavailable"
+                  "(stub on first iteration)=%llu\n",
+                  pv_fallback_used, pv_fallback_unavail); }
+        extern unsigned long long asp_exit[3], asp_stub[3];
+        const char *nm[3] = {"resolved","interrupted(node/clock)","seq fail-hi/lo"};
+        for (int i = 0; i < 3; i++)
+            fprintf(stderr, "  aspiration exit %-24s : %8llu searches (%5.1f%%)"
+                    "  of which STUB %8llu (%5.1f%%)\n", nm[i], asp_exit[i],
+                    100.0*asp_exit[i]/(double)pvt_searches, asp_stub[i],
+                    asp_exit[i] ? 100.0*asp_stub[i]/(double)asp_exit[i] : 0.0);   }
 #endif
     return 0;
 }
