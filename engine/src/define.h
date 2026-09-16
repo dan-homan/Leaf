@@ -89,8 +89,11 @@
 // makes it a same-direction gradient push on every truncated record.
 // Harmless for play (the MOVE is right, only the continuation is short);
 // harmful for TDLeaf, which uses the PV as a pointer to the training position.
+// DEFAULT ON since 2026-09-16 on this branch (tdleaf-pv-telemetry) so the
+// combined fix can be evaluated in parallel on other hardware.  Set to 0 to
+// restore the historical behaviour.
 #ifndef PV_NO_TT_CUTOFF
- #define PV_NO_TT_CUTOFF 0
+ #define PV_NO_TT_CUTOFF 1
 #endif
 
 // Root fallback for records whose PV walk could not reach a real leaf.
@@ -125,8 +128,13 @@
 //
 // A skipped ply costs nothing structurally: it widens dply, which the trace's
 // pow(TDLEAF_LAMBDA, dply) decay already handles by construction.
+// DEFAULT ON since 2026-09-16 on this branch (tdleaf-pv-telemetry).  Together
+// with PV_NO_TT_CUTOFF this removes 85% of the coherent label bias
+// (-24.88 -> +3.80 cp) and halves its variance.  Set to 0 to restore the
+// historical behaviour.  NOTE it discards ~35% of plies -- fewer records per
+// game, same number of Adam steps (the batch is counted in GAMES).
 #ifndef TDLEAF_SKIP_STUB_PV
- #define TDLEAF_SKIP_STUB_PV 0
+ #define TDLEAF_SKIP_STUB_PV 1
 #endif
 
 // Embed the .nnue file directly into the binary (via incbin).
