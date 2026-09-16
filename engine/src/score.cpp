@@ -45,7 +45,11 @@ int position::score_pos(game_rec *gr, ts_thread_data *tdata NNUE_ACC_DEF)
      tdata->eval_count++;
      // Probe score hash table (same mechanism as classical eval)
      score_rec *scores_n = score_table + (((SCORE_SIZE-1)*((hcode)&MAX_UINT))/MAX_UINT);
+#if SCORE_HASH_OFF
+     if (false) {
+#else
      if (scores_n->get_key() == hcode) {
+#endif
        int cached = scores_n->score;
        int8_t cached_qc0 = scores_n->qchecks[0];
        int8_t cached_qc1 = scores_n->qchecks[1];

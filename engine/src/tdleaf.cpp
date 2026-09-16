@@ -170,6 +170,12 @@ struct TDPvStats {
     uint64_t mm_n, mm_exact, mm_le2, mm_le10, mm_le25, mm_le50, mm_gt50;
     uint64_t mm_mate, mm_zero;          // classified BEFORE the tolerance test
     uint64_t mm_gt50_short, mm_gt50_full;
+    uint64_t ob_n, ob_leaf_exact, ob_prev_exact, ob_prev_better;
+    double   ob_leaf_sum, ob_prev_sum;
+    // Exact-match rate split by whether the LEAF is quiescent.  If the PV runs
+    // through qsearch as intended, the leaf should be quiet and match exactly.
+    uint64_t q_n[4], q_exact[4];   // [0]=quiet [1]=has caps [2]=in check [3]=caps+check
+    double   q_absmiss[4];
     double   len2_absprop, oth_absprop;
     double   sgn_full_sum, sgn_short_sum;
     uint64_t sgn_full_n,   sgn_short_n;
@@ -179,7 +185,8 @@ static TDPvStats td_pv;
 
 static void tdleaf_pv_stats_record(int pv_len, int walk_stop, int search_depth,
                                    int leaf_score_stm, int score_root_stm,
-                                   int root_wtm, int rec_index, int root_static_diag)
+                                   int root_wtm, int rec_index, int root_static_diag,
+                                   int leaf_incheck_diag, int leaf_hascaps_diag)
 {
     td_pv.n++;
     td_pv.n_by_stm[root_wtm & 1]++;
@@ -207,6 +214,21 @@ static void tdleaf_pv_stats_record(int pv_len, int walk_stop, int search_depth,
         if (asr > MATE - 1000)        td_pv.mm_mate++;
         else if (score_root_stm == 0) td_pv.mm_zero++;
         else {
+            // Dump the first 25 mismatches with everything that feeds them.
+            static int dumped = 0;
+            if (dd != 0 && dumped < 25) {
+                dumped++;
+                fprintf(stderr, "MISMATCH#%02d pv_len=%2d depth=%2d  leaf_static=%6d  "
+                        "root_score=%6d  propagated=%6d  diff=%+6d  incheck=%d caps=%d\n",
+                        dumped, pv_len, search_depth, leaf_score_stm,
+                        score_root_stm, prop, leaf_score_stm - prop,
+                        leaf_incheck_diag, leaf_hascaps_diag);
+            }
+            int cls = (leaf_incheck_diag ? 2 : 0) | (leaf_hascaps_diag ? 1 : 0);
+            if (cls > 3) cls = 3;
+            td_pv.q_n[cls]++;
+            td_pv.q_absmiss[cls] += dd;
+            if (dd == 0) td_pv.q_exact[cls]++;
             if (dd == 0)  td_pv.mm_exact++;
             if (dd <= 2)  td_pv.mm_le2++;
             if (dd <= 10) td_pv.mm_le10++;
@@ -318,6 +340,26 @@ void tdleaf_report_pv_stats(const char *tag)
                 100.0*td_pv.len2_neardraw/(double)td_pv.len2_n,
                 td_pv.oth_absprop/(double)td_pv.oth_n,
                 100.0*td_pv.oth_neardraw/(double)td_pv.oth_n);
+    {
+        static const char *cn[4] = {"QUIET (no caps, no check)","has captures",
+                                    "in check","captures+check"};
+        for (int i = 0; i < 4; i++)
+            if (td_pv.q_n[i])
+                fprintf(stderr, "TDLeaf leaf-class %s %-26s: n=%8llu  EXACT %6.2f%%  "
+                        "mean|miss| %7.1f cp\n", T, cn[i],
+                        (unsigned long long)td_pv.q_n[i],
+                        100.0*td_pv.q_exact[i]/(double)td_pv.q_n[i],
+                        td_pv.q_absmiss[i]/(double)td_pv.q_n[i]);
+    }
+    if (td_pv.ob_n) {
+        double O = (double)td_pv.ob_n;
+        fprintf(stderr, "TDLeaf off-by-one probe %s: n=%llu | LEAF exact %.2f%% "
+                "mean|miss| %.1f | ONE-PLY-BACK exact %.2f%% mean|miss| %.1f | "
+                "prev closer in %.2f%% of records\n", T, (unsigned long long)td_pv.ob_n,
+                100.0*td_pv.ob_leaf_exact/O, td_pv.ob_leaf_sum/O,
+                100.0*td_pv.ob_prev_exact/O, td_pv.ob_prev_sum/O,
+                100.0*td_pv.ob_prev_better/O);
+    }
     if (td_pv.mm_n) {
         double M = (double)td_pv.mm_n;
         double R = (double)(td_pv.mm_n - td_pv.mm_mate - td_pv.mm_zero);
@@ -423,6 +465,8 @@ void tdleaf_record_ply(TDGameRecord &rec,
     NNUEAccumulator acc_a = root_acc;   // current leaf accumulator
     NNUEAccumulator acc_b;              // scratch for next step
     position cur = root_pos;
+    NNUEAccumulator acc_prev = root_acc;   // accumulator one ply back (diagnostic)
+    position prev_pos = root_pos;
     int pv_len = 0;
     int walk_stop = TDPV_STOP_NOMOVE;   // why the walk ended (telemetry only)
 
@@ -434,6 +478,7 @@ void tdleaf_record_ply(TDGameRecord &rec,
         }
         nnue_record_delta(acc_b, cur, next, pv[k]);
         nnue_apply_delta(acc_b, acc_a, next);
+        acc_prev = acc_a; prev_pos = cur;
         cur   = next;
         acc_a = acc_b;
         pv_len++;
@@ -464,9 +509,34 @@ void tdleaf_record_ply(TDGameRecord &rec,
         pcr = (pcr < 1) ? 1 : (pcr > 32) ? 32 : pcr;
         root_static_diag = nnue_evaluate(root_acc, (int)root_pos.wtm, pcr);   }
 #endif
+    int leaf_incheck_diag = 0, leaf_hascaps_diag = 0;
+#if PVTRUNC_DIAG
+    // Off-by-one probe: does the root score match the LEAF, or the position one
+    // ply before it?  A systematic win for prev would mean the walk overshoots.
+    if (pv_len >= 1) {
+        int pcp = 2;
+        for (int sd = 0; sd < 2; sd++)
+            for (int pt = PAWN; pt <= QUEEN; pt++) pcp += prev_pos.plist[sd][pt][0];
+        pcp = (pcp < 1) ? 1 : (pcp > 32) ? 32 : pcp;
+        bool prev_wtm = (bool)root_pos.wtm ^ (bool)((pv_len - 1) & 1);
+        int prev_eval = nnue_evaluate(acc_prev, (int)prev_wtm, pcp);
+        int prop_leaf = (pv_len & 1) ? -score_root_stm : score_root_stm;
+        int prop_prev = ((pv_len - 1) & 1) ? -score_root_stm : score_root_stm;
+        int dl = leaf_score_stm - prop_leaf; if (dl < 0) dl = -dl;
+        int dp = prev_eval - prop_prev;      if (dp < 0) dp = -dp;
+        td_pv.ob_n++;
+        td_pv.ob_leaf_sum += dl; td_pv.ob_prev_sum += dp;
+        if (dl == 0) td_pv.ob_leaf_exact++;
+        if (dp == 0) td_pv.ob_prev_exact++;
+        if (dp < dl) td_pv.ob_prev_better++;
+    }
+    leaf_incheck_diag = cur.in_check() ? 1 : 0;
+    { move_list ml; cur.captures(&ml, -10000); leaf_hascaps_diag = ml.count > 0; }
+#endif
     tdleaf_pv_stats_record(pv_len, walk_stop, search_depth,
                            leaf_score_stm, score_root_stm,
-                           (int)root_pos.wtm, rec.n_plies, root_static_diag);
+                           (int)root_pos.wtm, rec.n_plies, root_static_diag,
+                           leaf_incheck_diag, leaf_hascaps_diag);
 
 #if TDLEAF_CHECK_SCORE
     {

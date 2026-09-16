@@ -159,6 +159,20 @@
  #define TDLEAF_SKIP_STUB_PV 0
 #endif
 
+// Diagnostic: force every score-hash probe to miss, so score_pos() always
+// recomputes via nnue_evaluate().  Used to test whether cached scores explain
+// the leaf_static vs propagated-root mismatch.
+#ifndef SCORE_HASH_OFF
+ #define SCORE_HASH_OFF 0
+#endif
+
+// Diagnostic: return the true best score instead of clamping it into the local
+// [alpha,beta] window (fail-soft instead of fail-hard).  Used to test whether
+// window clamping explains the leaf_static vs propagated-root mismatch.
+#ifndef FAIL_SOFT_DIAG
+ #define FAIL_SOFT_DIAG 0
+#endif
+
 // Embed the .nnue file directly into the binary (via incbin).
 // Compile with -D NNUE_EMBED=1; also requires NNUE_NET_PATH to be set.
 #ifndef NNUE_EMBED

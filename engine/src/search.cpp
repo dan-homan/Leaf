@@ -2228,7 +2228,11 @@ int search_node::pvs(int alpha, int beta, int depth, int in_pv, int move_to_skip
  //return best;
  if(best < -(MATE/2) && best < alpha) return best;
  if(ABS(best) > MATE/2) return best;
+#if FAIL_SOFT_DIAG
+ return best;
+#else
  return MAX(MIN(best,beta),alpha);
+#endif
  //return best;
 
 }
@@ -2418,7 +2422,11 @@ int search_node::qsearch(int alpha, int beta, int qply, int in_pv)
     else if(best >= beta) {               // return (stand pat) if we already have a high enough score
       put_hash(&pos.hcode, best, save_alpha, beta, -1, NOMOVE, ts->h_id, ply);
       //return best;
+#if FAIL_SOFT_DIAG
+      return best;
+#else
       return MAX(alpha,MIN(best,beta));
+#endif
     }
   }
   else { best = -MATE+ply; } 
@@ -2497,7 +2505,11 @@ int search_node::qsearch(int alpha, int beta, int qply, int in_pv)
   // return the best score
   if(best < -(MATE/2) && best < alpha) return best;
   if(ABS(best) > MATE/2) return best;
+#if FAIL_SOFT_DIAG
+  return best;
+#else
   return MAX(alpha,MIN(best,beta));
+#endif
   //return best;
 
 }
