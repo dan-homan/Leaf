@@ -190,6 +190,27 @@ cp threshold is defensible -- the gate does not need a maturity schedule.
       gated on the same |leaf - root| tolerance, so it only retargets records
       where the pairing is actually tight.
 
+      **REVISIT REQUIRED after the tdleaf-pv-telemetry changes (2026-09-16).**
+      Two things moved underneath this mode and neither is reflected in it yet:
+
+      1. Leaf rows are now dumped only when |leaf_static - propagated root
+         search| <= TDLEAF_LEAF_MATCH_CP (10 cp), the same test the online trace
+         uses.  So on corpora generated from that branch onward, the stored
+         (root, leaf) pairs are ALREADY tight by construction -- which is the
+         gating this item proposed, applied at generation time instead.
+         `--bt-rescore` on a NEW corpus is therefore a different experiment from
+         `--bt-rescore` on the archives, where pairs are 60 cp-gated and ~45-55%
+         mismatched.  Do not pool results across the two.
+      2. PV_LAST_RESOLVED changes WHICH leaf is stored: an unresolved iteration
+         now yields the last resolved iteration's PV rather than a 2-ply
+         fail-high stub.  Archived corpora contain the stubs; new ones do not.
+
+      So the honest status is that 7.7's null was measured on a corpus whose
+      pairings were far worse than what the loop now produces, and the mode has
+      never been tested on tight pairs.  Either re-run it on a post-change corpus
+      or retire it explicitly -- but it should not simply be left in the tree
+      carrying a null that no longer describes the data it would run on.
+
 ### Post-restart learning queue (2026-09-15)
 
 Ranked in `docs/Learning_Investigation.md` §6, which carries the rationale, the

@@ -56,7 +56,7 @@ Six sections carry the load and they are meant to be used differently:
 |---|---|---|
 | 1. The model | what the loop is believed to be, in present tense | orienting |
 | 2. Evidence ledger | one row per standing claim, graded, with the regime it was measured in | before quoting any number |
-| 3. Regime boundaries | the seven changes — plus net maturity — that decide whether an old result still holds | before trusting an old result |
+| 3. Regime boundaries | the eight changes — plus net maturity — that decide whether an old result still holds | before trusting an old result |
 | 4. The graveyard | closed lines, each with **what would reopen it** | before proposing anything |
 | 5. Measurement manual | hygiene rules, each with what it cost to learn | before designing an arm |
 | 6. Open lines | ranked, with the arm and its pre-committed reading | deciding what to run |
@@ -68,7 +68,7 @@ they disagree about status, `TODO.md` is the one to fix.
 
 ## 1. The model
 
-Eleven statements.  Each is tagged with its strongest evidence; grades and effect
+Twelve statements.  Each is tagged with its strongest evidence; grades and effect
 sizes are in §2.  Statement I is explicitly an interpretation, not a mechanism.
 **All of it describes a mature net** — see the scope box above; K is the statement
 about young ones, and it is mostly a statement about what is not known.
@@ -164,6 +164,23 @@ is where the noise ball lives and where `LR ≈ 0.001 × median|w|` is well defi
 initialise at or near zero and spend the run finding their own scale, so the LR is
 a *growth rate* and a fixed absolute LR is a self-annealing schedule.  Sizing a
 bias LR off a converged magnitude would leave a fresh net unable to move it.
+**L. The PV the engine records is an APPROXIMATION of the line that produced the
+score, and TDLeaf trains at that PV's leaf.**  The leaf position and its
+accumulator are provably exact (`TDLEAF_CHECK_ACC` reports zero mismatches; an
+off-by-one probe matches the leaf 43% against one-ply-back 2%), but the root
+search score is *not* that leaf's static eval in roughly half of records — a real
+alpha-beta search with a TT, extensions, reductions and pruning can take its
+value from a node the triangular-array PV does not name.  Two repairable causes
+were found and fixed on `tdleaf-pv-telemetry`: the root **fail-high stub**, where
+`pc[0]` is written explicitly as `{move, TT-guessed reply, NOMOVE}` when an
+aspiration iteration never resolves (35.9% of searches), and **TT bound cutoffs
+at PV nodes**.  What remains is irreducible and **symmetric** — leaf higher 27.4%
+/ lower 27.4%, mean +0.7 cp against sd 74 — so it is variance, not bias, and
+therefore a Σ contributor rather than a gradient-direction problem.  Crucially
+the error *scale* is maturity-invariant (sd 63–72 across 1e5→7e6 games) even
+though the exact-match spike grows 38%→55%, which is what makes a single
+threshold implementable.
+
 **K. Everything above is a mature-net statement, and the young-net case is
 unmeasured.**  The handoff becomes apparent only after ~1M games of learning,
 sometimes longer; the chain's own decomposition read +18 / +7 / −2 / −1 at
@@ -250,6 +267,11 @@ for one.
 | The draw-rate canary detects pathology, not decay | 7.2 | 35.1% flat across ten deciles through a −151 leg | R5 | **ESTABLISHED** |
 | Bias sections grow monotonically and were still rising at 7M games | 7.12.2 | fc0_b ×15.9, fc2_b ×8.9, ft_b ×6.4, fc1_b ×3.3 | R5 | SUPPORTED, unexplained |
 | Online play as hypothesis generation | 6.14.1 | — | R3 | **FRAMING** (§1 I) |
+| The recorded PV's leaf is exact; the root score is not its static eval in ~half of records | branch `tdleaf-pv-telemetry` | `CHECK_ACC` 0 mismatches; off-by-one 43% vs 2% | R7 | **ESTABLISHED** |
+| The root fail-high stub writes a 2-ply PV by construction | same | 35.9% of searches | R7 | **ESTABLISHED** |
+| The residual mis-approximation is symmetric, not directional | same | hi 27.4% / lo 27.4%, mean +0.7 cp vs sd 74 | R7 | **ESTABLISHED** |
+| Its scale is maturity-invariant | same, m260720 ladder 1e5→7e6 | sd 63–72, ≤10 cp band 78–82% | R7 | **ESTABLISHED** |
+| Six candidate causes of the residual are excluded | same | aspiration clamping, score hash, leaf quiescence, off-by-one, accumulator rebuild, fail-hard clamping | R7 | **ESTABLISHED** |
 | Batch 50 from a fresh `--init-nnue` chain: 500k games in, ahead of `m260720` at the same point | D. Homan, current run | not clearly significant | **R7** | SUPPORTED |
 
 ² Absent on a young net, or present and masked by concurrent learning gains?  No
@@ -266,7 +288,7 @@ support is thinner than 6.2 claimed.
 
 ## 3. Regime boundaries
 
-A result is only as portable as the regime it was measured in.  These seven
+A result is only as portable as the regime it was measured in.  These eight
 changes are what decide whether an old number still means anything.  Every ledger
 row and graveyard entry above and below carries one of these tags.
 
@@ -341,6 +363,18 @@ R4's ~45 Elo of game diversity so the new chain starts clean.
 handoff on the new chain should be roughly a quarter the size before Σ is counted
 — and η and Σ moved *at the same time*, so the restart cannot attribute between
 them.
+
+**R8 — the PV repairs (branch `tdleaf-pv-telemetry`, not yet on `main`).**
+`PV_NO_TT_CUTOFF=1`, `PV_LAST_RESOLVED=1` (both gated to TDLeaf learning play;
+competitive search verified node-identical) and `TDLEAF_LEAF_MATCH_CP=10`, which
+gates both the online trace and the dumped **leaf** rows on
+`|leaf_static − propagated root search| ≤ 10 cp`.  Root rows are untouched — they
+are gated on root *quietness*, a different quantity.  Effect on label quality:
+coherent bias **−24.88 → +0.15 cp**, sd **185.9 → 79.7**, records reaching full
+depth **42% → 86%**, ~74% of records retained.  **No Elo measured.**  When this
+merges it becomes a regime boundary: corpora generated before it contain
+fail-high stubs and 60 cp-gated leaf rows; corpora after it do not, so leaf-row
+results must not be pooled across the merge.
 
 Two narrower confounds worth remembering: **hash 16** applies only to the `6e6g`
 leg (everything else ran at 128, and generation has reverted); and
@@ -607,7 +641,29 @@ property of a converged optimum, and handoff cost is a late-chain concern only.
 **Cost:** ~50 min per state, and the states are produced by the chain anyway.
 Cheap enough that not running it is the expensive choice.
 
-**3. Attack Σ directly, not through batch size.**  Batch size is a proxy: the
+**3. Rate the PV repairs (R8).**  The label-quality case is strong — bias
+essentially eliminated, variance halved, and the residual filtered rather than
+trained on — and the mechanism is one that can be pointed at in the source rather
+than inferred statistically.  But nothing is measured in Elo, and four prior
+interventions in this investigation (alpha 6.10, rbar 6.13, `fc0_w` 7.12, root
+fallback) were correct at the label level and bought nothing.  **Arm:** `both`
+against `base` from a state with known handoff damage, **matched Adam steps**
+(~15–31k games at batch 50 — the batch counts games, so games-matched is
+steps-matched), two replicates per side against the ~26 Elo arm-to-arm variance.
+A 5k-game arm at 98 steps is *not* sufficient — that mistake was made once
+already.  Note the residual mis-approximation is a Σ contributor, and Σ is the
+one lever 7.14 left standing and 7.15 showed pays.
+
+**4. ⚠️ `--bt-rescore` must be revisited, not merely re-run.**  It retargets a
+stored root label to its paired PV leaf, assuming the stored leaf is where the
+root score came from — false in ~45–55% of archived records.  7.7 measured it
+null (−2.5 ± 21.0) *without knowing this*, so the null now has a candidate
+explanation.  Under R8 new corpora carry pairs that are tight by construction, so
+`--bt-rescore` on a new corpus is a **different experiment** from the archives
+and results must not be pooled.  Either re-run it on a post-R8 corpus or retire
+it explicitly.  Details in `TODO.md`.
+
+**5. Attack Σ directly, not through batch size.**  Batch size is a proxy: the
 mechanism is decorrelation, and B only buys it by averaging more whole games.  The
 learner consumes `.tdg` files, so it could shuffle *records across a pool of games*
 before forming a batch — the actual offline-style intervention, never tried.  This
@@ -617,7 +673,7 @@ rather than by elimination (§2 marks Σ as FRAMING for exactly that reason).
 demonstrated; if it does not, "Σ" is standing in for something else about whole-game
 aggregation.
 
-**4. ⚠️ Re-read alpha and rbar against the damage protocol.**  Both were rejected
+**6. ⚠️ Re-read alpha and rbar against the damage protocol.**  Both were rejected
 on *leg total* in R3, judged partly through "online Δ" — which 7.13 has since shown
 is a handoff cost rather than a dosage meter — and both predate R6.  Both are
 Σ-adjacent.  Nothing suggests they will win, and 6.13.3's finding that duration is
@@ -625,7 +681,7 @@ evidence is a real reason to expect rbar not to.  But they were closed on an
 observable now known to be the wrong one, and the 5k-game protocol makes the
 re-read cost ~50 minutes each rather than a full iteration.
 
-**5. ⚠️ Depth, on the new chain.**  d10 was rejected on a single leg (−13.6) that
+**7. ⚠️ Depth, on the new chain.**  d10 was rejected on a single leg (−13.6) that
 was confounded by a 52% draw rate — cutting outcome information ~25% — and that
 predates R4 (corpus window, root rows) and R6.  `E ← search_d(E)` remains the only
 mechanism known to restore headroom by construction.  **Precondition:** treat the
@@ -633,13 +689,16 @@ draw rate as a hard gate and buy decisiveness from the opening book rather than
 from depth [Offline A6].  Fixed-nodes generation gives phase-adaptive depth for
 free.
 
-**6. ⚠️ A quiet gate *tighter* than 60 cp.**  Never tested in either direction
+**8. ⚠️ A quiet gate *tighter* than 60 cp.**  Partly overtaken by R8, which gates
+the dumped **leaf** rows at 10 cp — so on post-R8 corpora this is already answered
+for leaf rows and the open question is the **root** row gate, a different quantity
+(root quietness).  Never tested in either direction
 below 60, and `--bt-diag` reads **negative** ΔMSE_out for `|cp − gate| < 40`,
 which hints the optimum sits under 60.  The A2 arms had power for 28 Elo, not for
 5–10 [Offline 4.5].  Cheap: dumps are wide by default and the gate is now an
 offline filter, so this is one `--bt-quiet-cp` sweep over a corpus already on disk.
 
-**7. Restore the deferred offline wins on the new chain.**  `--corpus-window` was
+**9. Restore the deferred offline wins on the new chain.**  `--corpus-window` was
 turned down to 1 for R7 deliberately, giving up a measured **+36 anchor / +45
 paired** [Offline 2.4]; `--bt-rows root` is worth **+35.6 paired** [Offline 3.2].
 These are not retired, they are deferred, and the point of recording them here is
@@ -647,7 +706,7 @@ that they get revisited rather than forgotten.  A1b — dropping the stalest cor
 from the window, whose labels came from a generator 75 Elo weaker — was never run
 and bounds what label staleness costs.
 
-**8. Actor refresh cadence.**  The one clean A/B measured the wrong observable:
+**10. Actor refresh cadence.**  The one clean A/B measured the wrong observable:
 the learner's `--refresh-scores` means actor staleness never reaches the labels, so
 cadence acts only on the behaviour policy — which positions get played — while the
 measurement was weight displacement, downstream of the gradient [6.14.4].  Under
@@ -659,7 +718,7 @@ and costs no games, but it has **no repeat-run noise floor** — two identically
 configured runs were never compared, so its absolute scale is uncalibrated.  Build
 that floor first.
 
-**9. Leaf rows — settle the blend confound before dropping them.**  `--bt-rows
+**11. Leaf rows — settle the blend confound before dropping them.**  `--bt-rows
 root` won at the blend production actually uses, but every constant in
 `p = w·outcome + (1−w)·σ(cp/K)` was calibrated on the *mixture* and
 `--bt-leaf-lambda` has always sat at parity with the root ceiling.  A leaf row's
@@ -668,7 +727,7 @@ regression at `w ≈ 0.30` [Offline 3.5].  Nobody should quote Part 3 as proof t
 leaf positions are worthless *in principle*.  Worth running only when deciding
 whether to keep *generating* leaf rows (54% of dump I/O).
 
-**10. The bias-growth canary.**  `fc0_b` ×15.9, `fc2_b` ×8.9, `ft_b` ×6.4,
+**12. The bias-growth canary.**  `fc0_b` ×15.9, `fc2_b` ×8.9, `ft_b` ×6.4,
 `fc1_b` ×3.3 across the chain, monotone and **still rising at 7M games** — `fc2_b`
 +28% in a leg whose total was +6.6 ± 8.2 [7.12.2].  These are the constant-capable
 channels `TRAINING.md` flags for outcome-imbalance absorption.  Self-play is
@@ -676,7 +735,7 @@ supposed to be immune, so this is unexplained rather than known-pathological.  I
 is nearly free to log per leg and, unlike the draw rate, not blind to uniform
 decay.  Carry it through the R7 chain from the start.
 
-**11. The root-vs-mix confound.**  `mix` carried 34 root rows/game against `root`'s
+**13. The root-vs-mix confound.**  `mix` carried 34 root rows/game against `root`'s
 76, so `root > mix` may be nothing more than "more root rows".  The discriminating
 arm is root-only at 86M rows, matching the root-row count *inside* `mix`: landing
 near +155 means the leaf rows were actively harmful, near +109 that `mix` was
