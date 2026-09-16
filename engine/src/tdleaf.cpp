@@ -160,6 +160,9 @@ struct TDPvStats {
     // Classify the position the walk STOPPED on (truncated records only):
     // what would the search have done there?
     uint64_t tr_n, tr_incheck, tr_hascaps, tr_quiet, tr_fifty_hi, tr_lowpieces;
+    // Are the residual short PVs the LEGITIMATE terminal ones -- draws and mates?
+    uint64_t tr_neardraw, tr_exactzero, tr_mate, tr_matescore_n;
+    uint64_t tr_rep_pos;   // truncation position repeats earlier in the PV walk
     double   len2_absprop, oth_absprop;
     double   sgn_full_sum, sgn_short_sum;
     uint64_t sgn_full_n,   sgn_short_n;
@@ -294,6 +297,12 @@ void tdleaf_report_pv_stats(const char *tag)
                 100.0*td_pv.tr_incheck/T2, 100.0*td_pv.tr_hascaps/T2,
                 100.0*td_pv.tr_quiet/T2, 100.0*td_pv.tr_fifty_hi/T2,
                 100.0*td_pv.tr_lowpieces/T2);
+        fprintf(stderr, "TDLeaf truncation-score %s: MATE-scored=%.1f%% | of the "
+                "non-mate rest (n=%llu): EXACTLY 0 = %.1f%%, |score|<25cp = %.1f%%\n",
+                T, 100.0*td_pv.tr_mate/T2,
+                (unsigned long long)td_pv.tr_matescore_n,
+                td_pv.tr_matescore_n ? 100.0*td_pv.tr_exactzero/(double)td_pv.tr_matescore_n : 0.0,
+                td_pv.tr_matescore_n ? 100.0*td_pv.tr_neardraw/(double)td_pv.tr_matescore_n : 0.0);
     }
     if (td_pv.skipped_stub)
         fprintf(stderr, "TDLeaf stub-skip %s: %llu plies not recorded (%.1f%% of "
@@ -512,6 +521,15 @@ void tdleaf_record_ply(TDGameRecord &rec,
           for (int sd = 0; sd < 2; sd++)
             for (int pt = PAWN; pt <= KING; pt++) np += cur.plist[sd][pt][0];
           if (np <= 6) td_pv.tr_lowpieces++; }
+        // Score classification of the ROOT search value for this record.
+        { int sr = score_root_stm;
+          int asr = sr < 0 ? -sr : sr;
+          if (asr > MATE - 1000) td_pv.tr_mate++;
+          else {
+            td_pv.tr_matescore_n++;
+            if (sr == 0)   td_pv.tr_exactzero++;
+            if (asr < 25)  td_pv.tr_neardraw++;
+          } }
     }
 #endif
 
