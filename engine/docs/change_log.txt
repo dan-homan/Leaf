@@ -1,5 +1,69 @@
 Changes since 2017_12_24
 
+2026_09_15d -- Comment hygiene: fix comments that had gone FALSE, and rewrite
+               tdleaf.h rule-first.  No behaviour change -- verified by building
+               before and after at an identical VERS string and byte-comparing
+               the binaries (md5 5603130d94213ab559cdbb3a37c078d0 both ways).
+
+               The pattern being corrected: comments had been APPENDED to as
+               things were tried, rather than rewritten for the current state, so
+               each constant accumulated a stack of notes about values it no
+               longer has.  Nine statements had become outright wrong:
+
+                 - tdleaf.h said the hyperparameters "can be overridden by
+                   setvalue/environment at runtime".  They are static const, and
+                   tdleaf_check_env() hard-errors on any TDLEAF_* var outside a
+                   6-entry allowlist containing no hyperparameter.
+                 - tdleaf.h documented the multi-writer max(v_file, v_local)
+                   merge, removed in the Phase-3 single-writer cleanup.
+                 - tdleaf.h explained TDLEAF_ADAM_WARMUP as 1000 steps ("at batch
+                   8 that is 8000 games") above a value of 100, at batch 50, plus
+                   an orphaned line contradicting the two above it about keying.
+                 - tdleaf.h said FC1 was "kept at the historical 0.005"
+                   immediately above = 0.00125f (the 0.25x LR rescale).
+                 - tdleaf.h referenced PSQT slot-means and post-centering
+                   subspaces; that machinery was deleted, not disabled.
+                 - nnue.h described piece-value extraction as overwriting
+                   value[1..5] "+ piece_val correction"; it is REPORT-ONLY under
+                   the default NNUE_FIXED_PIECE_VALUES and the piece_val channel
+                   no longer exists.
+                 - nnue.h described NOPRIOR nets as learning "corrections via
+                   piece_val"; under pure-PSQT all material is learned in PSQT.
+                 - main.cpp justified the extract-after-load ordering by piece_val.
+                   The real reason is that nnue_load_fc_weights() allocates the
+                   FP32 PSQT shadow, which the extraction prefers.
+                 - tdleaf.cpp said the score clip "tracks piece-value drift",
+                   directly contradicting tdleaf.h.  The header is right: under
+                   fixed piece values the threshold is a constant 100 cp and
+                   deliberately does NOT stretch with the net's material scale.
+                 - nnue_training.cpp said TDLEAF_ADAM_WARMUP "has been hard 1.0
+                   since the first session ever run".  True mid-chain, FALSE on a
+                   fresh --init-nnue net (t_adam = 0), which is the condition
+                   0073f23's double-ramp guard exists for.
+
+               tdleaf.h rewritten 405 -> 378 lines, now rule-first: each block
+               states the current rule and its trap, with the evidence pushed to
+               docs/Learning_Investigation.md.  Every landmine is preserved (the
+               sqrt(B) clip rescaling rule and its measured table, the
+               stationary vs scale-finding LR split and the
+               don't-calibrate-against-converged-magnitude trap, the x4 LR
+               conversion for pre-2026-09-15 numbers, DO-NOT-freeze-PSQT, and the
+               EPS floor now bracketed from BOTH sides).  The retired two-process
+               harness is no longer referenced: dply 2 now reads as UCI play,
+               which is where it still happens.
+
+               nnue_training.cpp: dropped four write-path "(v12: ... removed.)"
+               markers that duplicate the format spec 40 lines above them; the
+               read-path read-and-discard comments are load-bearing and stay.
+
+               Also corrected four stale doc paths in src (BT_PARALLEL_PLAN.md
+               has lived in docs/history/ for a while).  Every docs/ path
+               referenced from src/ now resolves.
+
+               NOT touched, deliberately: EXchess-era commented-out code
+               (search.cpp, score.cpp, hash.cpp, setup.cpp,
+               tree_search_functions.cpp) and smp.cpp's first-person narration.
+
 2026_09_15c -- Docs: distil the two learning investigations into
                docs/Learning_Investigation.md, and move the records to history/.
 

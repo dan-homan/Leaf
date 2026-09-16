@@ -113,8 +113,12 @@ uint32_t nnue_get_content_hash();
 // live (re-extracted) PSQT piece-value report.  The `netinfo` command's handler.
 void nnue_print_diag_info();
 
-// Extract average piece values from loaded PSQT (+ piece_val correction if TDLEAF)
-// and overwrite value[1..5] in score.h with the result in centipawns.
+// Derive average piece values in centipawns from the loaded PSQT (the sole
+// material channel under pure-PSQT).  Under NNUE_FIXED_PIECE_VALUES — the
+// default — this is REPORT-ONLY: value[1..5] in score.h keeps its classical
+// constants, so search calibration is decoupled from eval-scale drift, and the
+// extracted numbers serve as the drift canary.  With that flag off, value[1..5]
+// is overwritten.
 // Call after nnue_load() and, in TDLEAF builds, after nnue_load_fc_weights().
 // No-op if nnue_available is false.
 // verbose=true (default) prints the extracted values; pass false to suppress
@@ -167,15 +171,17 @@ int nnue_evaluate(const NNUEAccumulator &acc, int stm, int piece_count);
 // builds even when TDLEAF=0: nnue_io.cpp reads the stored mode for the header
 // description, and main.cpp reads CLI flags before deciding whether the build
 // supports init mode.  nnue_init_zero_weights itself lives under TDLEAF.
+// Under pure-PSQT the bucketed PSQT is the only material channel, so a prior
+// mode is entirely a choice of what to seed PSQT with; everything a net knows
+// about material is learned there.
 //   NNUE_PRIOR_MATERIAL  — PSQT = classical material only (own=+V, enemy=-V,
 //                          P=100 N=380 B=400 R=600 Q=1200 cp), all 8 buckets equal.
-//                          piece_val = 0 (learns corrections).
-//   NNUE_PRIOR_NOPRIOR   — PSQT = uniform 100 cp (P=N=B=R=Q=100, symmetric own/enemy),
-//                          piece_val = 0.  Materially blind from move 1 but
-//                          value[PAWN] is anchored at 100 cp; N/B/R/Q learn
-//                          their corrections via piece_val from a 100 cp baseline.
+//   NNUE_PRIOR_NOPRIOR   — PSQT = uniform 100 cp (P=N=B=R=Q=100, symmetric own/enemy).
+//                          Materially blind from move 1: every piece reads as a
+//                          pawn until training separates them, which it must do
+//                          through PSQT itself.
 //   NNUE_PRIOR_CLASSICAL — PSQT = material + 4-stage classical piece-square tables,
-//                          gstage-interpolated per NNUE bucket; piece_val = 0.
+//                          gstage-interpolated per NNUE bucket.
 // ---------------------------------------------------------------------------
 enum NnuePriorMode : int {
     NNUE_PRIOR_MATERIAL  = 0,
@@ -237,7 +243,7 @@ void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
                                NNUEGradBuf *gb = nullptr);
 
 // Per-thread gradient-buffer helpers for the offline batch trainer's
-// within-batch parallelism (see docs/BT_PARALLEL_PLAN.md).  TDLEAF-only.
+// within-batch parallelism (see docs/history/BT_PARALLEL_PLAN.md).  TDLEAF-only.
 NNUEGradBuf *nnue_global_gradbuf();          // the online / reduce-target buffer
 NNUEGradBuf *nnue_gradbuf_alloc();           // allocate a zeroed worker buffer
 void nnue_gradbuf_free(NNUEGradBuf *g);
@@ -284,7 +290,7 @@ extern bool nnue_grad_normalize;
 // Adam (the per-batch bottleneck) are split across nthreads via the
 // caller-supplied `run`, which must execute its argument fn(tid) for tid in
 // [0, nthreads) and join.  Bit-identical to nnue_apply_gradients for the same
-// input gradients.  TDLEAF-only.  See docs/BT_PARALLEL_PLAN.md.
+// input gradients.  TDLEAF-only.  See docs/history/BT_PARALLEL_PLAN.md.
 void nnue_apply_gradients_parallel(float lr_scale, int nthreads,
         const std::function<void(const std::function<void(int)>&)> &run);
 
