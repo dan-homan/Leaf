@@ -103,6 +103,134 @@ static void tdleaf_dump_fen(const position &pos, bool wtm, char *out);
 bool tdleaf_capture_root = false;
 
 // ---------------------------------------------------------------------------
+// PV-walk / score-consistency telemetry.  Counters only, always on: the cost is
+// a handful of adds per recorded ply against a full search, and the questions it
+// answers ("how often does the PV walk fail to reach a real leaf?", "how far is
+// the leaf's static eval from the propagated search score?") are otherwise
+// unmeasurable after the fact.  Reported by tdleaf_report_pv_stats().
+//
+// A short walk is not a bug — it means the record's label d_t is the static eval
+// of a shallower position than the search actually evaluated, in the limit the
+// ROOT itself (pv_len == 0), which makes that record self-distillation rather
+// than a search label.  Its own TD error is then wrong at full strength; earlier
+// records are contaminated only at (1-lambda) = 1.5% because a wrong d_t enters
+// two adjacent deltas with opposite signs and telescopes out.
+// ---------------------------------------------------------------------------
+enum { TDPV_STOP_NOMOVE = 0, TDPV_STOP_ILLEGAL = 1, TDPV_STOP_MAXD = 2 };
+
+struct TDPvStats {
+    uint64_t n;                 // records seen
+    uint64_t len_exact[33];     // exact pv_len 0..31, [32] = 32+
+    uint64_t stop_illegal;      // walk ended on an illegal PV move
+    uint64_t stop_maxd;         // walk hit the MAXD bound
+    uint64_t shorter_than_depth;// pv_len < achieved search depth
+    uint64_t len_sum;
+    uint64_t depth_sum;         // achieved search depth, for the shortfall ratio
+    // |leaf static eval - propagated root search score|, in cp.  Not an error
+    // bound: the search score includes quiescence, so a nonzero miss is expected.
+    // Mate-scored records are counted separately: a MATE sentinel against a
+    // finite static eval is a scale artifact, not a measurable disagreement.
+    uint64_t miss_n;
+    double   miss_sum;
+    int      miss_max;
+    uint64_t miss_over[5];      // > 25, 50, 100, 300, 1000 cp
+    uint64_t miss_over_by_short;// of the >100cp records, those with pv_len <= 2
+    uint64_t mate_n;            // records whose root score is a mate sentinel
+    // Miss split by whether the walk reached the full achieved depth.
+    uint64_t full_n;   double full_sum;
+    uint64_t short_n;  double short_sum;
+    uint64_t n_by_stm[2], len2_by_stm[2];   // does the len==2 spike track STM?
+    uint64_t n_by_par[2];                   // ...or record parity (ply order)?
+};
+static TDPvStats td_pv;
+
+static void tdleaf_pv_stats_record(int pv_len, int walk_stop, int search_depth,
+                                   int leaf_score_stm, int score_root_stm,
+                                   int root_wtm, int rec_index)
+{
+    td_pv.n++;
+    td_pv.n_by_stm[root_wtm & 1]++;
+    if (pv_len == 2) td_pv.len2_by_stm[root_wtm & 1]++;
+    if (pv_len == 2) td_pv.n_by_par[rec_index & 1]++;
+    td_pv.len_exact[pv_len < 32 ? pv_len : 32]++;
+    td_pv.len_sum += (uint64_t)pv_len;
+    if (search_depth > 0) td_pv.depth_sum += (uint64_t)search_depth;
+    if (walk_stop == TDPV_STOP_ILLEGAL) td_pv.stop_illegal++;
+    if (walk_stop == TDPV_STOP_MAXD)    td_pv.stop_maxd++;
+    bool reached_depth = !(search_depth > 0 && pv_len < search_depth);
+    if (!reached_depth) td_pv.shorter_than_depth++;
+
+    // A mate sentinel (|score| near MATE) against a finite static eval is a
+    // scale artifact, not a disagreement — count and exclude.
+    if (score_root_stm > MATE - 1000 || score_root_stm < -(MATE - 1000)) {
+        td_pv.mate_n++;
+        return;
+    }
+
+    // Propagate the root score to the leaf's POV: one sign flip per ply walked.
+    int propagated = (pv_len & 1) ? -score_root_stm : score_root_stm;
+    int diff = leaf_score_stm - propagated;
+    int adiff = diff < 0 ? -diff : diff;
+    td_pv.miss_n++;
+    td_pv.miss_sum += (double)adiff;
+    if (adiff > td_pv.miss_max) td_pv.miss_max = adiff;
+    if (reached_depth) { td_pv.full_n++;  td_pv.full_sum  += (double)adiff; }
+    else               { td_pv.short_n++; td_pv.short_sum += (double)adiff; }
+    static const int thr[5] = { 25, 50, 100, 300, 1000 };
+    for (int i = 0; i < 5; i++)
+        if (adiff > thr[i]) {
+            td_pv.miss_over[i]++;
+            if (i == 2 && pv_len <= 2) td_pv.miss_over_by_short++;
+        }
+}
+
+void tdleaf_report_pv_stats(const char *tag)
+{
+    if (!td_pv.n) return;
+    const double N = (double)td_pv.n;
+    const char *T = tag ? tag : "";
+    fprintf(stderr, "TDLeaf PV stats %s: records=%llu mean_pv_len=%.2f "
+            "mean_depth=%.2f stop_illegal=%llu (%.4f%%) stop_maxd=%llu "
+            "shorter_than_depth=%llu (%.2f%%) mate_scored=%llu (%.2f%%)\n",
+            T, (unsigned long long)td_pv.n, (double)td_pv.len_sum / N,
+            (double)td_pv.depth_sum / N,
+            (unsigned long long)td_pv.stop_illegal, 100.0 * td_pv.stop_illegal / N,
+            (unsigned long long)td_pv.stop_maxd,
+            (unsigned long long)td_pv.shorter_than_depth,
+            100.0 * td_pv.shorter_than_depth / N,
+            (unsigned long long)td_pv.mate_n, 100.0 * td_pv.mate_n / N);
+    fprintf(stderr, "TDLeaf PV len2-split %s: by_stm black=%llu/%llu white=%llu/%llu | "
+            "len2 by record parity even=%llu odd=%llu\n", T,
+            (unsigned long long)td_pv.len2_by_stm[0], (unsigned long long)td_pv.n_by_stm[0],
+            (unsigned long long)td_pv.len2_by_stm[1], (unsigned long long)td_pv.n_by_stm[1],
+            (unsigned long long)td_pv.n_by_par[0], (unsigned long long)td_pv.n_by_par[1]);
+    fprintf(stderr, "TDLeaf PV len %s:", T);
+    for (int i = 0; i <= 32; i++)
+        if (td_pv.len_exact[i])
+            fprintf(stderr, " %d:%llu(%.2f%%)", i,
+                    (unsigned long long)td_pv.len_exact[i],
+                    100.0 * td_pv.len_exact[i] / N);
+    fprintf(stderr, "\n");
+    if (td_pv.miss_n) {
+        const double M = (double)td_pv.miss_n;
+        fprintf(stderr, "TDLeaf score-miss %s: n=%llu mean|d|=%.1f cp max=%d cp | "
+                ">25=%.2f%% >50=%.2f%% >100=%.2f%% >300=%.3f%% >1000=%.4f%% | "
+                "of >100cp with pv_len<=2: %llu | mean|d| full-depth=%.1f (n=%llu) "
+                "short=%.1f (n=%llu)\n",
+                T, (unsigned long long)td_pv.miss_n, td_pv.miss_sum / M, td_pv.miss_max,
+                100.0 * td_pv.miss_over[0] / M, 100.0 * td_pv.miss_over[1] / M,
+                100.0 * td_pv.miss_over[2] / M, 100.0 * td_pv.miss_over[3] / M,
+                100.0 * td_pv.miss_over[4] / M,
+                (unsigned long long)td_pv.miss_over_by_short,
+                td_pv.full_n  ? td_pv.full_sum  / (double)td_pv.full_n  : 0.0,
+                (unsigned long long)td_pv.full_n,
+                td_pv.short_n ? td_pv.short_sum / (double)td_pv.short_n : 0.0,
+                (unsigned long long)td_pv.short_n);
+    }
+    fflush(stderr);
+}
+
+// ---------------------------------------------------------------------------
 // tdleaf_record_ply — walk the PV to the leaf, then snapshot its accumulator
 // ---------------------------------------------------------------------------
 void tdleaf_record_ply(TDGameRecord &rec,
@@ -127,15 +255,20 @@ void tdleaf_record_ply(TDGameRecord &rec,
     NNUEAccumulator acc_b;              // scratch for next step
     position cur = root_pos;
     int pv_len = 0;
+    int walk_stop = TDPV_STOP_NOMOVE;   // why the walk ended (telemetry only)
 
     for (int k = 0; k < MAXD && pv[k].t != NOMOVE; k++) {
         position next = cur;
-        if (!next.exec_move(pv[k], 0)) break;  // illegal — stop here
+        if (!next.exec_move(pv[k], 0)) {   // illegal — stop here
+            walk_stop = TDPV_STOP_ILLEGAL;
+            break;
+        }
         nnue_record_delta(acc_b, cur, next, pv[k]);
         nnue_apply_delta(acc_b, acc_a, next);
         cur   = next;
         acc_a = acc_b;
         pv_len++;
+        if (pv_len >= MAXD) walk_stop = TDPV_STOP_MAXD;
     }
     // acc_a now holds the fully computed leaf accumulator; cur is the leaf position.
 
@@ -153,6 +286,10 @@ void tdleaf_record_ply(TDGameRecord &rec,
     // at that position, making the gradient self-consistent.
     // (The propagated search score includes quiescence and may differ.)
     int leaf_score_stm = nnue_evaluate(acc_a, (int)leaf_wtm, pc);
+
+    tdleaf_pv_stats_record(pv_len, walk_stop, search_depth,
+                           leaf_score_stm, score_root_stm,
+                           (int)root_pos.wtm, rec.n_plies);
 
 #if TDLEAF_CHECK_SCORE
     {

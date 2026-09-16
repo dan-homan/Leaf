@@ -767,6 +767,9 @@ int selfplay_main(int argc, char *argv[])
             st.term_mate, st.term_stale, st.term_fifty, st.term_rep,
             st.term_material, st.term_maxply, st.term_resign, st.term_drawadj,
             st.term_error);
+#if !TDLEAF_READONLY
+    tdleaf_report_pv_stats(nullptr);
+#endif
     return 0;
 }
 

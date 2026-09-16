@@ -328,6 +328,11 @@ extern bool tdleaf_capture_root;
 // either way — it converges on generating from a net that stops drifting.
 extern float tdleaf_lr_scale;
 
+// Report the PV-walk and score-consistency counters accumulated by
+// tdleaf_record_ply (to stderr).  Diagnostic only — nothing reads these back.
+// `tag` is an optional label for distinguishing concurrent processes.
+void tdleaf_report_pv_stats(const char *tag);
+
 // Startup guardrail + config banner (call once at main() entry in TDLEAF
 // builds).  Hard-errors on any TDLEAF_* env var outside the known allowlist;
 // then logs the effective online-training constants.
