@@ -170,6 +170,13 @@ struct TDPvStats {
     uint64_t mm_n, mm_exact, mm_le2, mm_le10, mm_le25, mm_le50, mm_gt50;
     uint64_t mm_mate, mm_zero;          // classified BEFORE the tolerance test
     uint64_t mm_gt50_short, mm_gt50_full;
+    // Signed delta in ROOT-STM POV: (leaf eval propagated back to the root's
+    // frame) - (root search score).  Parity-invariant, so a systematic search
+    // miss shows as a one-sided mean; a pure PV-approximation shows symmetric.
+    uint64_t rp_n, rp_hi, rp_lo, rp_eq;
+    double   rp_sum, rp_sq;
+    uint64_t rp_n_w, rp_n_b;  double rp_sum_w, rp_sum_b;   // split by root STM
+    uint64_t rp_hi_big, rp_lo_big;                          // |delta| > 25 cp
     uint64_t ob_n, ob_leaf_exact, ob_prev_exact, ob_prev_better;
     double   ob_leaf_sum, ob_prev_sum;
     // Exact-match rate split by whether the LEAF is quiescent.  If the PV runs
@@ -214,6 +221,15 @@ static void tdleaf_pv_stats_record(int pv_len, int walk_stop, int search_depth,
         if (asr > MATE - 1000)        td_pv.mm_mate++;
         else if (score_root_stm == 0) td_pv.mm_zero++;
         else {
+            // Root-STM-POV signed delta.
+            int leaf_in_root = (pv_len & 1) ? -leaf_score_stm : leaf_score_stm;
+            int dr = leaf_in_root - score_root_stm;
+            td_pv.rp_n++;  td_pv.rp_sum += dr;  td_pv.rp_sq += (double)dr*dr;
+            if (dr > 0) { td_pv.rp_hi++; if (dr >  25) td_pv.rp_hi_big++; }
+            else if (dr < 0) { td_pv.rp_lo++; if (dr < -25) td_pv.rp_lo_big++; }
+            else td_pv.rp_eq++;
+            if (root_wtm) { td_pv.rp_n_w++; td_pv.rp_sum_w += dr; }
+            else          { td_pv.rp_n_b++; td_pv.rp_sum_b += dr; }
             // Dump the first 25 mismatches with everything that feeds them.
             static int dumped = 0;
             if (dd != 0 && dumped < 25) {
@@ -350,6 +366,25 @@ void tdleaf_report_pv_stats(const char *tag)
                         (unsigned long long)td_pv.q_n[i],
                         100.0*td_pv.q_exact[i]/(double)td_pv.q_n[i],
                         td_pv.q_absmiss[i]/(double)td_pv.q_n[i]);
+    }
+    if (td_pv.rp_n) {
+        double N2 = (double)td_pv.rp_n;
+        double m = td_pv.rp_sum / N2;
+        double sd = sqrt(td_pv.rp_sq / N2 - m * m);
+        fprintf(stderr, "TDLeaf ROOT-POV delta %s (leaf_eval_in_root_frame - root_score): "
+                "n=%llu  mean=%+.3f cp  sd=%.1f  SE=%.3f  -> %.1f sigma from zero\n", T,
+                (unsigned long long)td_pv.rp_n, m, sd, sd/sqrt(N2),
+                sd > 0 ? fabs(m)/(sd/sqrt(N2)) : 0.0);
+        fprintf(stderr, "TDLeaf ROOT-POV sides %s: leaf HIGHER than search %.2f%% "
+                "(>25cp %.2f%%) | LOWER %.2f%% (>25cp %.2f%%) | equal %.2f%% || "
+                "mean by root STM: white %+.2f (n=%llu)  black %+.2f (n=%llu)\n", T,
+                100.0*td_pv.rp_hi/N2, 100.0*td_pv.rp_hi_big/N2,
+                100.0*td_pv.rp_lo/N2, 100.0*td_pv.rp_lo_big/N2,
+                100.0*td_pv.rp_eq/N2,
+                td_pv.rp_n_w ? td_pv.rp_sum_w/(double)td_pv.rp_n_w : 0.0,
+                (unsigned long long)td_pv.rp_n_w,
+                td_pv.rp_n_b ? td_pv.rp_sum_b/(double)td_pv.rp_n_b : 0.0,
+                (unsigned long long)td_pv.rp_n_b);
     }
     if (td_pv.ob_n) {
         double O = (double)td_pv.ob_n;

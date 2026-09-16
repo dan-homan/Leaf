@@ -143,6 +143,53 @@ held-out corpus is the cheap between-arm proxy.
       health gate (35–40%) and buy decisiveness elsewhere — more unbalanced
       opening lines, or a wider book — rather than with depth.
 
+### PV-leaf approximation quality — open line (2026-09-16)
+
+Branch `tdleaf-pv-telemetry`.  The PV recorded in the triangular array is an
+APPROXIMATION of the minimax line: the leaf position, its accumulator and its
+static eval are all provably correct (TDLEAF_CHECK_ACC = 0 mismatches; an
+off-by-one probe matches the leaf 43% against one-ply-back 2%), but the root
+search score is not that leaf's static eval in ~45-55% of records.  Six causes
+ruled out by experiment: aspiration clamping, score hash, leaf quiescence,
+off-by-one, accumulator rebuild, fail-hard clamping.
+
+The mis-approximation is SYMMETRIC — leaf higher 23.3% / lower 21.5%, mean
++1.13 cp against sd 65 — so it is variance, not bias.  That matters because
+Sigma (gradient-noise covariance) is the one lever 7.14/7.15 left standing, and
+7.15 showed it pays (batch 8->32 = +64.0 Elo, 5.0 sigma).
+
+Approximation quality vs net maturity, m260720 chain, 120 games/point at d8/4000n:
+
+  state     n      EXACT   <=10cp  <=25cp  >50cp    sd    bias
+  1e5g    16,977   38.46%  82.48%  93.54%  3.42%   67.7  +1.16
+  5e5g    14,267   49.29%  77.99%  89.36%  5.43%   72.4  +1.10
+  1e6g    16,713   49.45%  80.31%  90.59%  4.53%   63.0  -0.22
+  2.5e6g  14,738   55.46%  78.04%  88.01%  6.38%   64.8  +1.10
+  7e6g    15,961   55.13%  79.86%  88.89%  6.27%   65.4  +1.13
+
+The exact-match SPIKE grows with maturity (38% -> 55%, saturating ~2.5M) but the
+error SCALE does not (sd flat at 63-72, <=10cp band flat at 78-82%).  So a fixed
+cp threshold is defensible -- the gate does not need a maturity schedule.
+
+- [ ] **Rules for using / replacing / skipping a leaf** (D. Homan's framing).
+      Well-approximated leaves carry gradients related to the root score and are
+      fine; poorly-approximated ones cannot.  Candidate gate:
+      `|leaf_static - propagated_root| <= T`, one constant.  From the bands,
+      T=25 keeps ~89%, T=10 keeps ~80%, and the >50 cp tail is 3-6%.
+      Judge by foreign-anchor gauntlet, not by label statistics -- four prior
+      interventions were correct at the label level and bought no Elo.
+
+- [ ] **⚠️ OFFLINE RETARGETING IS AFFECTED — do not lose this.**
+      `--bt-rescore` (SCRIPT_USE.md; Online 7.7) retargets a stored ROOT label to
+      its paired PV LEAF re-evaluated on current weights.  That mode assumes the
+      stored leaf is the position the root score came from.  It is not, in
+      ~45-55% of records, and the error is +/- 65 cp of symmetric noise.
+      7.7 already measured retargeting as null (-2.5 +- 21.0) WITHOUT knowing
+      this; the null now has a candidate explanation rather than being a
+      mystery.  Decide whether the mode is dropped or re-envisioned -- e.g.
+      gated on the same |leaf - root| tolerance, so it only retargets records
+      where the pairing is actually tight.
+
 ### Post-restart learning queue (2026-09-15)
 
 Ranked in `docs/Learning_Investigation.md` §6, which carries the rationale, the
