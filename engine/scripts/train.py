@@ -927,7 +927,7 @@ def main():
                     help="Skip offline training (generate-only)")
     ap.add_argument("--corpus", action="append", default=[],
                     help="Extra corpus TSV(s) to include in training (repeatable)")
-    ap.add_argument("--corpus-window", type=int, default=1, metavar="N",
+    ap.add_argument("--corpus-window", type=int, default=0, metavar="N",
                     help="Dilute this run's dump with the archived corpora of "
                          "up to N prior iterations from the --continue chain, "
                          "holding the TOTAL row count fixed (see --corpus-rows) "
@@ -937,12 +937,12 @@ def main():
                          "against the classical anchor.  0 disables the window "
                          "and trains on this run's corpus alone (the pre-A1 "
                          "behaviour).  Needs --continue to find the chain. "
-                         "Default: 1 since 2026-09-15 (was 4) — the new chain "
+                         "Default: 0 since 2026-09-15 (was 4) — the new chain "
                          "starts deliberately clean, with offline-stage "
                          "optimisations deferred until the net is established. "
                          "Note this gives up the ~45 Elo of game diversity "
                          "quoted above; revisit once the chain is running.")
-    ap.add_argument("--corpus-weight", choices=["source", "game"], default="source",
+    ap.add_argument("--corpus-weight", choices=["source", "game"], default="game",
                     help="How the row budget is split across corpus sources. "
                          "'source' (default) gives every ITERATION an equal share; "
                          "'game' splits proportionally to available rows so every "
