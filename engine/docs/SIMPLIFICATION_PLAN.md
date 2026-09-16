@@ -38,7 +38,10 @@ earlier note refers to that moment, not to today.
 > CLAUDE.md, SCRIPT_USE.md, `selfplay_run.py` docstring); TODO.md Phase D/E marked
 > delivered. `Online_Learning_Investigation.md` was **kept in place** (not moved to
 > `history/`) — it is still actively cited from TRAINING.md, so a move would only
-> create dangling references.
+> create dangling references.  **(Superseded 2026-09-15:** both investigation
+> records moved to `docs/history/` once `docs/Learning_Investigation.md` was
+> written to carry their conclusions, and every inbound citation was retargeted
+> with them.)
 
 
 > **Phase 1 done.** Removed the experimental target modes (`TDLEAF_TARGET`
@@ -166,9 +169,13 @@ check plus `TDLEAF_CHECK_ACC=1` are the guardrails.
   - Fix `selfplay_run.py`'s docstring line "inherits `TDLEAF_TARGET` etc." (that var is
     gone after Phase 1).
 - Prune stale docs:
-  - ~~`Online_Learning_Investigation.md` → `docs/history/`~~ — **not done, deliberately.**
-    It is still actively cited from TRAINING.md and it kept growing (Parts 5–6 landed
-    after this plan was written), so it stays a living doc.
+  - `Online_Learning_Investigation.md` → `docs/history/` — **DONE 2026-09-15**, along
+    with `Offline_Learning_Investigation.md`.  Deferred at the time for two good
+    reasons (it was actively cited from TRAINING.md, and it kept growing — Parts 5–7
+    all landed after this plan was written).  Both were resolved by writing
+    `docs/Learning_Investigation.md`, which distils the two records into graded
+    standing conclusions and takes over as the cited living doc; the ~30
+    path-qualified citations were retargeted with the move.
   - TODO.md: Phase D/E internal-self-play items are largely delivered by actor/learner;
     close them out.
 

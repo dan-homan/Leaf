@@ -1,5 +1,133 @@
 Changes since 2017_12_24
 
+2026_09_15d -- Comment hygiene: fix comments that had gone FALSE, and rewrite
+               tdleaf.h rule-first.  No behaviour change -- verified by building
+               before and after at an identical VERS string and byte-comparing
+               the binaries (md5 5603130d94213ab559cdbb3a37c078d0 both ways).
+
+               The pattern being corrected: comments had been APPENDED to as
+               things were tried, rather than rewritten for the current state, so
+               each constant accumulated a stack of notes about values it no
+               longer has.  Nine statements had become outright wrong:
+
+                 - tdleaf.h said the hyperparameters "can be overridden by
+                   setvalue/environment at runtime".  They are static const, and
+                   tdleaf_check_env() hard-errors on any TDLEAF_* var outside a
+                   6-entry allowlist containing no hyperparameter.
+                 - tdleaf.h documented the multi-writer max(v_file, v_local)
+                   merge, removed in the Phase-3 single-writer cleanup.
+                 - tdleaf.h explained TDLEAF_ADAM_WARMUP as 1000 steps ("at batch
+                   8 that is 8000 games") above a value of 100, at batch 50, plus
+                   an orphaned line contradicting the two above it about keying.
+                 - tdleaf.h said FC1 was "kept at the historical 0.005"
+                   immediately above = 0.00125f (the 0.25x LR rescale).
+                 - tdleaf.h referenced PSQT slot-means and post-centering
+                   subspaces; that machinery was deleted, not disabled.
+                 - nnue.h described piece-value extraction as overwriting
+                   value[1..5] "+ piece_val correction"; it is REPORT-ONLY under
+                   the default NNUE_FIXED_PIECE_VALUES and the piece_val channel
+                   no longer exists.
+                 - nnue.h described NOPRIOR nets as learning "corrections via
+                   piece_val"; under pure-PSQT all material is learned in PSQT.
+                 - main.cpp justified the extract-after-load ordering by piece_val.
+                   The real reason is that nnue_load_fc_weights() allocates the
+                   FP32 PSQT shadow, which the extraction prefers.
+                 - tdleaf.cpp said the score clip "tracks piece-value drift",
+                   directly contradicting tdleaf.h.  The header is right: under
+                   fixed piece values the threshold is a constant 100 cp and
+                   deliberately does NOT stretch with the net's material scale.
+                 - nnue_training.cpp said TDLEAF_ADAM_WARMUP "has been hard 1.0
+                   since the first session ever run".  True mid-chain, FALSE on a
+                   fresh --init-nnue net (t_adam = 0), which is the condition
+                   0073f23's double-ramp guard exists for.
+
+               tdleaf.h rewritten 405 -> 378 lines, now rule-first: each block
+               states the current rule and its trap, with the evidence pushed to
+               docs/Learning_Investigation.md.  Every landmine is preserved (the
+               sqrt(B) clip rescaling rule and its measured table, the
+               stationary vs scale-finding LR split and the
+               don't-calibrate-against-converged-magnitude trap, the x4 LR
+               conversion for pre-2026-09-15 numbers, DO-NOT-freeze-PSQT, and the
+               EPS floor now bracketed from BOTH sides).  The retired two-process
+               harness is no longer referenced: dply 2 now reads as UCI play,
+               which is where it still happens.
+
+               nnue_training.cpp: dropped four write-path "(v12: ... removed.)"
+               markers that duplicate the format spec 40 lines above them; the
+               read-path read-and-discard comments are load-bearing and stay.
+
+               Also corrected four stale doc paths in src (BT_PARALLEL_PLAN.md
+               has lived in docs/history/ for a while).  Every docs/ path
+               referenced from src/ now resolves.
+
+               NOT touched, deliberately: EXchess-era commented-out code
+               (search.cpp, score.cpp, hash.cpp, setup.cpp,
+               tree_search_functions.cpp) and smp.cpp's first-person narration.
+
+2026_09_15c -- Docs: distil the two learning investigations into
+               docs/Learning_Investigation.md, and move the records to history/.
+
+               The online record had reached 4,854 lines and the offline one 796,
+               both chronological, with 41 and 10 retraction/supersession markers
+               between them.  The online file's own 165-line TL;DR had accreted a
+               second retraction layer (conclusion 0 "SUPERSEDED BY 7.13" followed
+               by the superseded text, 1 "SUSPENDED", 3 "the rule stands, the
+               numbers do not", 5 still recommending batch 8 against a shipped
+               50).  Neither front page survived contact with its own Part 7.
+
+               The synthesis is organised by mechanism, not chronology, because the
+               largest result (7.13, the handoff) is a statement about the BOUNDARY
+               between the two phases and splitting by phase cuts it in half.  Six
+               sections: the model (11 statements, each tagged to its evidence); an
+               evidence ledger of 40 rows graded ESTABLISHED / SUPPORTED / FRAMING
+               and stamped with the regime each was measured in; the seven regime
+               boundaries; a graveyard of 14 closed lines each carrying WHAT WOULD
+               REOPEN IT; a measurement manual; and 11 ranked open lines.
+
+               The graveyard's reopen field is the point of the exercise.  Batch
+               size is the worked example: 6.16 closed it at a peak of 8, 7.15
+               reopened it at 32, because 6.16 rated leg total rather than handoff
+               damage, matched games rather than Adam steps, and predated
+               TDLEAF_ADAM_EPS 1e-8 -> 1e-12.  Four open lines are flagged as
+               previously ruled out under a regime or criterion that has since
+               changed: alpha/rbar (judged partly through "online Delta", now known
+               to be a handoff cost), depth 10 (one leg, confounded by a 52% draw
+               rate), a gate tighter than 60 cp (never tested), and batch size.
+
+               MATURITY IS CALLED OUT AS AN EIGHTH AXIS, orthogonal to the seven
+               regimes.  Every arm in both records ran on a net at 2.2-7M
+               cumulative games; no arm anywhere was run on a young one.  D. Homan
+               reports the handoff damage is only APPARENT after ~1M games of
+               learning, sometimes longer, and the chain's own decomposition agrees
+               as far as it goes (online Delta +18/+7/-2/-1 at 100k-1M, -27 at
+               2.2M, -151 by 6e6).  Two readings are open and nothing
+               discriminates them: the excursion is absent on an unsaturated net,
+               or it happens every time and is masked by concurrent learning gains.
+               New arm (§6 item 2): the 5k-game damage protocol plus a within-leg
+               checkpoint ladder at 100k/500k/1M/2M of the fresh chain.  Note the
+               early rows sit in R1/R2 and 7.11.5 already warned that "the damage
+               grew across the chain" is unestablished, since --gauntlet-tdleaf
+               stopped being passed after 3e6.
+
+               Online_Learning_Investigation.md and
+               Offline_Learning_Investigation.md moved to docs/history/ UNEDITED
+               apart from a pointer banner (plus one correction to the online
+               file's standing conclusion 5, which still recommended batch 8).
+               They keep their value as provenance: every number in the synthesis
+               cites a section in them, and their methodology notes name the
+               artifacts on disk.  All 30 path-qualified citations were retargeted
+               (README.md, TRAINING.md, SCRIPT_USE.md, TODO.md,
+               Generation_Throughput.md, change_log.txt, train.py,
+               selfplay_run.py, bucket_phase_analysis.py); bare name-only
+               citations in src/ were left, since the filename did not change.
+               SIMPLIFICATION_PLAN.md recorded the earlier deliberate decision NOT
+               to move them -- superseded, with the reason it became safe.
+
+               TODO.md now carries the 11 open lines as a checklist and points at
+               the synthesis for rationale; the "online learning-rate scale - the
+               last untested magnitude knob" section is closed out (the LR arms ran,
+               lr25 and lr100 produced identical final nets at -0.7 +- 8.3).
+
 2026_09_15b -- Generation PGN.  Self-play actors now write the games they play
               (--selfplay --pgn-out FILE [--pgn-name TAG]), in the fastchess
               format: {<score>/<depth> <time>s} per half-move, Shredder-FEN
@@ -1033,7 +1161,7 @@ Changes since 2017_12_24
                ever significant (~+-17 at one sigma per delta).  The plateau is
                real as a five-leg trend; the legs are not individually resolved.
 
-               scripts/train.py (pgn_score), docs/Online_Learning_Investigation.md
+               scripts/train.py (pgn_score), docs/history/Online_Learning_Investigation.md
                (7.8 new; 7.1 table, Part 7 intro, 7.6, methodology notes and
                standing conclusion 3 corrected).
 
@@ -1101,7 +1229,7 @@ Changes since 2017_12_24
                does not predict Elo in either direction and must not be used to
                rank arms.  7.4 and standing conclusion 7 amended.
 
-               src/nnue_batch_train.cpp, docs/Online_Learning_Investigation.md
+               src/nnue_batch_train.cpp, docs/history/Online_Learning_Investigation.md
                (7.7 + 7.4 correction + standing conclusion 7),
                docs/TRAINING.md, docs/SCRIPT_USE.md.
 
@@ -1192,7 +1320,7 @@ Changes since 2017_12_24
                6e6g trajectories replayed frozen: 99.5% of root rows paired at the
                wide dump gate, 84.4% after the 60cp re-cut.
 
-               docs/Online_Learning_Investigation.md (Part 7 + standing
+               docs/history/Online_Learning_Investigation.md (Part 7 + standing
                conclusions 1/3/6 amended, new conclusion 7),
                docs/Generation_Throughput.md (retraction in section 3),
                docs/TRAINING.md, docs/SCRIPT_USE.md, scripts/selfplay_run.py,
@@ -1519,7 +1647,7 @@ Changes since 2017_12_24
                renumbering gids at corpus-build time; loader fix filed in TODO.
 
                Artifacts: learn/offline_a1/ (both arms, corpus builders, gauntlet
-               and head-to-head PGNs).  Write-up: docs/Offline_Learning_Investigation.md
+               and head-to-head PGNs).  Write-up: docs/history/Offline_Learning_Investigation.md
                Part 2.  Follow-ups A1a-A1c in docs/TODO.md.
 
 2026_09_02  -- Offline-phase plateau investigation: --bt-diag, and the finding that
@@ -1535,7 +1663,7 @@ Changes since 2017_12_24
                E <- search(E) bootstrap is saturated for that channel.  Writes
                nothing; the training path is untouched.
 
-               FINDING (docs/Offline_Learning_Investigation.md).  The m260720 chain
+               FINDING (docs/history/Offline_Learning_Investigation.md).  The m260720 chain
                has netted ~0 Elo per iteration since 3.5e6g, and the depth-10
                iteration regressed (-13.6, and 283/378/339 against its own parent).
                Measured on the 5.5e6g corpus against the state that generated it:
@@ -2066,7 +2194,7 @@ NNUE_EMBED=1 is now canonical for release, and the two overlapping
                unaffected.
 
 2026_08_15 -- docs only, NO code change: carried the Part 6 investigation record
-               (docs/Online_Learning_Investigation.md 6.1-6.14) onto main.  Two
+               (docs/history/Online_Learning_Investigation.md 6.1-6.14) onto main.  Two
                attempts to improve the TDLeaf online update rule were run to
                production A/B and BOTH REJECTED, so main's rule is unchanged —
                and that unchanged rule is the baseline every arm below was

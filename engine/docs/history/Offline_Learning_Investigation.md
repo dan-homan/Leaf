@@ -1,6 +1,12 @@
 # Offline Learning Investigation — why the hybrid loop plateaued
 
-> Companion to `docs/Online_Learning_Investigation.md`, which covers the online
+> **📖 Read `docs/Learning_Investigation.md` first.**  That document is the
+> distilled synthesis of this one and its online companion.  **This file is now
+> the chronological record** — kept unedited for provenance and for its
+> methodology notes.  Part 1.5's central reading was retracted by its own Part 4;
+> the synthesis states what survives.
+>
+> Companion to `docs/history/Online_Learning_Investigation.md`, which covers the online
 > (TDLeaf) half of the loop.  This document covers the **offline consolidation**
 > half: `--batch-train` and the corpora it consumes.
 >

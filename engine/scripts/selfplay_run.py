@@ -115,7 +115,7 @@ def main():
                          "(default 1.0 = unchanged), mirroring --bt-lr offline. "
                          "Below 1.0 the learner drifts less per game, so the "
                          "actors it refreshes stay closer to the starting net; "
-                         "see docs/Online_Learning_Investigation.md 7.9")
+                         "see docs/history/Online_Learning_Investigation.md 7.9")
     ap.add_argument("--refresh-scores", action="store_true",
                     help="Learner re-evaluates leaf statics with CURRENT weights "
                          "at consume time (Flavor A).  Recommended: without it, "

@@ -288,11 +288,13 @@ int main(int argc, char *argv[])
     }
   }
 #if NNUE
-  // Extract PSQT-derived piece values and update the search's value[] array.
-  // Must be called after both nnue_load() and nnue_load_fc_weights() complete
-  // so that any piece_val correction from .tdleaf.bin is included.  Silent at
-  // startup (verbose=false) — the `netinfo` command re-extracts and prints
-  // these live via nnue_print_diag_info().
+  // Report the PSQT-derived piece values (report-only under the default
+  // NNUE_FIXED_PIECE_VALUES; see nnue.h).  Must run after BOTH nnue_load() and,
+  // in TDLEAF builds, nnue_load_fc_weights(): the latter allocates the FP32 PSQT
+  // shadow, which the extraction prefers over the quantised int32 array, so
+  // calling earlier reads a coarser number.  Silent at startup (verbose=false) —
+  // the `netinfo` command re-extracts and prints these live via
+  // nnue_print_diag_info().
   if (nnue_available) nnue_extract_piece_values(false);
 #endif
 #if NNUE && TDLEAF

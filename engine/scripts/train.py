@@ -248,7 +248,7 @@ def chain_corpora(continue_tag, window, anchors):
     A corpus is labelled by its GENERATOR — the net that played those games,
     which is that iteration's PARENT's promoted net, not its own.  (Getting
     this backwards is what made the A1 arm silently include a corpus 75 Elo
-    staler than the rest; see docs/Offline_Learning_Investigation.md 2.1.)"""
+    staler than the rest; see docs/history/Offline_Learning_Investigation.md 2.1.)"""
     out, tag, seen = [], continue_tag, set()
     while tag and len(out) < window and tag not in seen:
         seen.add(tag)
@@ -843,14 +843,14 @@ def main():
                     help="Uniform multiplier on every online TDLeaf step during "
                          "generation (default 1.0 = unchanged).  The offline "
                          "phase is unaffected -- that is --bt-lr.  See "
-                         "docs/Online_Learning_Investigation.md 7.9")
+                         "docs/history/Online_Learning_Investigation.md 7.9")
     ap.add_argument("--concurrency", type=int, default=9)
     ap.add_argument("--hash", type=int, default=128,
                     help="Per-actor hash size in MB passed to generation "
                          "(default 128; 16 is ~25%% faster but measured +8.9 +- "
                          "11.4 Elo weaker at fixed depth -- see "
                          "selfplay_run.py --hash and "
-                         "docs/Online_Learning_Investigation.md 7.5)")
+                         "docs/history/Online_Learning_Investigation.md 7.5)")
     ap.add_argument("--openings", default="training_openings.epd")
     ap.add_argument("--no-gen-pgn", action="store_false", dest="gen_pgn",
                     help="Skip the generation PGN.  It is ON by default: the "
@@ -1002,7 +1002,7 @@ def main():
                          "head-to-head and the natural mix by +46 on the "
                          "foreign anchor, so the ~54%% of every corpus that is "
                          "leaf rows was worse than useless at the margin "
-                         "(docs/Offline_Learning_Investigation.md Part 3).  "
+                         "(docs/history/Offline_Learning_Investigation.md Part 3).  "
                          "Budget and quotas count only the selected row type, "
                          "and the archived corpus.tsv.gz holds only that type "
                          "— use 'both' to keep the full mix.  "
@@ -1285,7 +1285,7 @@ def main():
     # head-to-head by +45.4 +- 11.1.  So dilute the fresh dump with archived
     # corpora from the --continue chain at a FIXED total row count — the window
     # changes which games the rows come from, not how many.
-    # See docs/Offline_Learning_Investigation.md Part 2.
+    # See docs/history/Offline_Learning_Investigation.md Part 2.
     window = []
     if args.corpus_window > 0:
         if args.continue_tag:

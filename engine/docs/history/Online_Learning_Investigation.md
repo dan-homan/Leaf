@@ -1,5 +1,16 @@
 # Online Learning Investigation — the TDLeaf online phase, Parts 1–6
 
+> **📖 Read `docs/Learning_Investigation.md` first.**  That document is the
+> distilled synthesis of this one and its offline companion: what is known, graded
+> by confidence, with the regime each result was measured in, the closed lines and
+> what would reopen them, and the ranked open questions.  **This file is now the
+> chronological record** — kept unedited for provenance, for its methodology notes
+> (which point at the artifacts on disk), and so that every `§6.17`-style citation
+> in the source and scripts stays resolvable.  It is blow-by-blow: several of its
+> conclusions, including parts of the standing-conclusions list immediately below,
+> were overturned by later sections of the same document.  Do not quote a number
+> from here without checking its regime in the synthesis.
+
 Scope: 2026-07-14 → 2026-08-16, across two hybrid-loop training chains
 (`material_260708`, then `m260720`) and the regime change between them (13-writer
 merge → actor/learner split).  Written across a series of Claude Code sessions
@@ -126,10 +137,16 @@ here is the only place that reflects all six parts at once.
    (`tdleaf-stack-norm-alpha`, `tdleaf-feature-dedup`) are kept for reproduction
    only and are byte-exact no-ops at their defaults.
 
-5. **`TDLEAF_BATCH_SIZE = 8` stays, and is now measured rather than inherited.**
-   Batch 16 is clearly worse (+19.3 total vs +53.0, 2.2σ); batch 4 is not better
-   (+39.3, 0.9σ — points lower but unresolved).  The three points describe an
-   inverted U peaking at the default, with only the upper side resolved (6.16.3).
+5. **⚠️ SUPERSEDED — the batch size is now 50.**  This conclusion read
+   "`TDLEAF_BATCH_SIZE = 8` stays, and is now measured rather than inherited",
+   from 6.16.3: batch 16 clearly worse (+19.3 total vs +53.0, 2.2σ), batch 4 not
+   better (+39.3, 0.9σ), an inverted U peaking at the default with only the upper
+   side resolved.  **7.15 reopened the line and moved the peak to 32** (8 → 32 is
+   +64.0 ± 12.9, 5.0σ on handoff damage), because 6.16 rated leg total, matched
+   games rather than Adam steps, and predated `TDLEAF_ADAM_EPS` 1e-8 → 1e-12.
+   `main` now ships `TDLEAF_BATCH_SIZE_DEFAULT = 50`.  6.16's caveat still stands
+   and is the live risk: its batch-16 arm cut damage 4× and made the loop *worse*,
+   so batch 32/50 is validated on damage, not yet on leg yield.
 
 6. **The health canary is the draw rate** (~35–40% at d8), plus game length — not
    gradient norms or clip counts.  Both online-stability collapses (adjudication

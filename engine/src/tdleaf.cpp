@@ -16,8 +16,12 @@
 #include "tdleaf.h"
 
 // value[] lives in score.h (included earlier in the unity build).  Declared
-// extern here so TDLEAF_SCORE_CLIP_PAWNS × value[PAWN] can be evaluated at
-// runtime — the threshold tracks piece-value drift under TDLeaf.
+// extern here so TDLEAF_SCORE_CLIP_PAWNS × max(value[PAWN], 100) can be
+// evaluated at runtime.  Under the default NNUE_FIXED_PIECE_VALUES value[PAWN]
+// stays at the classical 100, so the threshold is constant and does NOT stretch
+// with the net's material scale — which is the point: the clip must not widen as
+// PSQT drifts.  The runtime read and the max() floor matter only if that flag is
+// turned off.
 extern int value[7];
 
 // ---------------------------------------------------------------------------

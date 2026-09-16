@@ -1,4 +1,4 @@
-// Leaf TDLeaf(λ) online learning for the NNUE FC layers.
+// Leaf TDLeaf(λ) online learning for the NNUE weights.
 //
 // Algorithm (Baxter, Tridgell & Weaver, 2000):
 //   After a game of T half-moves, let d_t = sigmoid(score_white_t / K).
@@ -8,8 +8,8 @@
 //   Weight update:
 //     Δw = Σ_t  e_t * ∇_w d_t   (step size governed by Adam LR schedule)
 //
-// FC layers (FC0/FC1/FC2) and FT biases (1024 int16) are trained.  FT weights
-// and PSQT are also trained (FT weights 46 MB, PSQT 720 KB).
+// Every weight section is trained: FC0/FC1/FC2, all FC biases, FT weights
+// (46 MB), FT biases (1024 int16) and PSQT (720 KB).
 // FP32 shadow copies of the FC weights are maintained in nnue.cpp; after each
 // game the int8 inference arrays are updated via nnue_requantize_fc().
 //
@@ -22,50 +22,57 @@
 #include "nnue.h"
 
 // ---------------------------------------------------------------------------
-// Hyperparameters (can be overridden by setvalue/environment at runtime)
+// Hyperparameters — all compile-time.  None of these is settable at runtime:
+// tdleaf_check_env() hard-errors on any TDLEAF_* environment variable outside a
+// short allowlist (freeze, corpus dump, two diagnostics), so a stray or mistyped
+// variable can never silently alter a training run.  The only runtime knobs are
+// the learner's --lr-scale (uniform multiplier, see tdleaf_lr_scale below) and
+// the compile-time TDLEAF_BATCH_SIZE_DEFAULT override.
 // ---------------------------------------------------------------------------
-// Eligibility trace decay, expressed PER GAME-PLY.  The online trace applies
-// pow(TDLEAF_LAMBDA, dply) where dply is the game-ply gap between consecutive
-// records (2 in the two-process harness, since the engine records only its own
-// moves; 1 under internal self-play), so one lambda expresses the same
-// real-game horizon in both modes.  0.985 (down from the earlier 0.98994949 =
-// sqrt(0.98)) comes from offline batch-training convergence testing, which
-// found better convergence at 0.985; since that's close to the prior default,
-// the same constant is now used everywhere (online trace and --bt-td-lambda's
-// default alike) rather than keeping separate per-mode values.
-static const float TDLEAF_LAMBDA           = 0.985f;  // per game ply, from offline convergence testing
-static const float TDLEAF_K               = 220.0f; // sigmoid temperature (centipawns)
-                                                     // MLE over 58M positions from the classical
-                                                     // eval side of match_nn-fresh-260514-
-                                                     // 1.39e6g_9.5e5g.pgn (1.015M games,
-                                                     // 2026-05-25): optimum 217.71 cp, rounded
-                                                     // to 220.
+// Eligibility trace decay, expressed PER GAME-PLY: the trace applies
+// pow(TDLEAF_LAMBDA, dply), where dply is the game-ply gap between consecutive
+// records — 1 under internal self-play (every ply recorded), 2 under UCI play
+// where only the engine's own moves are recorded.  Expressing it per game-ply
+// means one constant gives the same real-game horizon in both.
+// 0.985 comes from offline batch-training convergence testing, and is used
+// everywhere (online trace and --bt-td-lambda's default alike).
+static const float TDLEAF_LAMBDA           = 0.985f;  // per game ply
+// Sigmoid temperature (centipawns).  MLE over 58M positions from the classical
+// eval side of a 1.015M-game match (2026-05-25): optimum 217.71 cp, rounded.
+// Also the loss anchor for absolute eval scale under pure-PSQT — see the
+// material-representation note below.
+static const float TDLEAF_K               = 220.0f;
 static const int   TDLEAF_MIN_PLIES       = 8;      // skip games shorter than this
 static const int   TDLEAF_MIN_PLIES_REP   = 40;     // skip 3-rep draws shorter than this
-// Approach 1 — TD error clipping.
+// Horizon-noise mitigation 1 — TD error clipping.
 // When the white-POV score change between consecutive moves exceeds
 // TDLEAF_SCORE_CLIP_PAWNS × max(value[PAWN], 100 cp), the (d[t+1]−d[t])
 // contribution to the eligibility trace is scaled down proportionally.
-// Under NNUE_FIXED_PIECE_VALUES the threshold is constant at
-// TDLEAF_SCORE_CLIP_PAWNS × 100 cp (value[PAWN] stays at the classical 100);
-// the max() floor is belt-and-braces only.
-// Set to a large value to disable.
+// GOTCHA: under the default NNUE_FIXED_PIECE_VALUES this threshold is a
+// CONSTANT 100 cp — it deliberately does not stretch as the net's material
+// scale drifts.  The max() floor and the runtime read of value[] matter only if
+// that flag is turned off.  Set to a large value to disable.
 static const float TDLEAF_SCORE_CLIP_PAWNS = 1.0f;
-// Approach 2 — iterative-deepening score stability weight.
+// Horizon-noise mitigation 2 — iterative-deepening score stability weight.
 // w_t = 1 / (1 + id_score_variance / TDLEAF_ID_VAR_SIGMA2)
 // Expressed in cp²: 10000 corresponds to a 100 cp std-dev reference.
 // Larger values are more tolerant of ID score instability.
 static const float TDLEAF_ID_VAR_SIGMA2  = 10000.0f;
-// The learning target is the classic λ-decayed eligibility trace (per game-ply
-// decay pow(λ, dply), with the score-change clip and ID-variance stability
-// weight above).  Earlier opt-in "blend"/"hybrid" targets and online root
-// learning were retired; see docs/history/ for that experiment.
-// Gradient clipping: if global L2 norm of all gradients exceeds this threshold,
-// scale all gradients by max_norm/norm.  Set to 0 to disable.
+// The learning target is the λ-decayed eligibility trace above, and is the only
+// target: the opt-in "blend"/"hybrid" targets and online root learning were
+// tested and deleted.  Do not re-derive them without reading why they failed —
+// three unrelated error formulas all lost 50–95 Elo, which is what exonerated
+// the target math and pointed at the update machinery instead.
+// See docs/history/Online_Learning_Investigation.md 3.1.
 //
-// Raised 1.0 -> 2.0 on 2026-09-15 alongside TDLEAF_BATCH_SIZE 8 -> 50.
-// Gradients are SUMMED across the batch, so the accumulated norm grows as
-// sqrt(B).  Measured on the 7.15 ladder at 1000 Adam steps each:
+// Gradient clipping: if the global L2 norm of all gradients exceeds this
+// threshold, scale all gradients by max_norm/norm.  Set to 0 to disable.
+//
+// RULE: gradients are SUMMED across the batch, so the accumulated norm grows as
+// sqrt(B).  If TDLEAF_BATCH_SIZE changes, rescale this with sqrt(B) and check
+// the `TDLeaf clip stats` fire rate — this clip is meant to catch pathological
+// gradients, and if it fires on ordinary steps it silently caps exactly what a
+// larger batch is meant to buy.  Measured at 1000 Adam steps per batch size:
 //
 //     B      norm mean   norm max   fires
 //     8        0.160       0.583     0.0%
@@ -73,13 +80,8 @@ static const float TDLEAF_ID_VAR_SIGMA2  = 10000.0f;
 //    32        0.331       0.719     0.0%
 //    64        0.475       1.029     0.1%
 //
-// At B = 50 that extrapolates to mean ~0.40 and max ~0.91, i.e. a threshold of
-// 1.0 would sit only ~1.1x above the typical maximum and fire on ORDINARY
-// steps, where at B = 8 it never fired at all.  This clip exists to catch
-// pathological gradients, not normal ones, and firing on normal ones would
-// silently cap exactly what the larger batch is meant to buy.  2.0 restores
-// roughly the B = 8 safety margin (1.7x).  If B changes again, rescale this
-// with sqrt(B) and check the `TDLeaf clip stats` fire rate.
+// At B = 50 that gives mean ~0.40, max ~0.91; 2.0 keeps roughly the 1.7x margin
+// a threshold of 1.0 gave at B = 8.
 static const float TDLEAF_GRAD_CLIP_NORM = 2.0f;
 // Adam step clipping: bound the unit-less Adam step |m_hat / sqrt(v_hat)| (or
 // |g / sqrt(v_hat)| for the RMSProp FT path) to this value before multiplying
@@ -87,137 +89,106 @@ static const float TDLEAF_GRAD_CLIP_NORM = 2.0f;
 // v makes a normal gradient produce an oversized parameter change.  Uniform
 // across FC / FT / FT-bias / PSQT because the Adam step is scale-
 // normalised by design.  Set to a large value to disable.
-static const float TDLEAF_ADAM_STEP_CLIP = 30.0f; 
+static const float TDLEAF_ADAM_STEP_CLIP = 30.0f;
 
 // ---------------------------------------------------------------------------
 // Adam hyperparameters
 //
 // FT weights use RMSProp (per-weight v, no m); all other layers use full Adam.
-// v arrays (second moment / gradient scale) and t_adam are persisted to .tdleaf.bin
-// (v6+) so gradient scale knowledge survives across sessions.  Multi-writer merge
-// uses max(v_file, v_local) per element.  m (momentum) is session-local.
-// FT weight v (~92 MB) is sparsely persisted in v8+ (only non-zero rows saved).
-// LR warmup: ramps from 0 to full LR over first WARMUP Adam steps.
+// v arrays (second moment / gradient scale) and t_adam are persisted to
+// .tdleaf.bin (v6+) so gradient-scale knowledge survives across sessions; m
+// (momentum) is session-local.  The learner is the SOLE writer and saves are a
+// plain atomic write of in-memory state — the old cross-writer max/average merge
+// of v and m is gone.  FT weight v (~92 MB) is sparsely persisted in v8+ (only
+// non-zero rows saved).
 // Mini-batch: gradients accumulated across BATCH_SIZE games before each Adam step.
 // ---------------------------------------------------------------------------
-// Per-section Adam LRs.  Targets ~0.1% fractional change per Adam step at
-// each section's typical weight magnitude in the int-equivalent FP32 shadow
-// space (rule: LR ≈ 0.001 × median(|w|) measured on nn-ad9b42354671).
-// Per-section magnitudes in that net (signed std vs median of absolute val):
-//                      median(|w|)   std(w)   std/med
-//   FC0 weights              3          8       2.8×    (sparse, heavy-tail)
-//   FC1 weights              7         18       2.6×    (sparse, heavy-tail)
-//   FC2 weights             68         76       1.1×    (dense, final 32→1)
-//   FC0 bias              2067       2937       1.4×
-//   FC1 bias              1582       2510       1.6×
-//   FC2 bias               861       1218       1.4×
-//   FT weights              15         44       3.0×    (~92% near zero;
-//                                                        std dominated by tail)
-//   FT bias                 51         97       1.9×
-//   PSQT                 13319      20519       1.5×    (int32)
-//   PSQT deviation         665       1207       1.8x    (slot mean PV removed)
+// Per-section Adam LRs.
 //
-// Median (not std) drives LR sizing: in the sparse sections (FC0/FC1/FT
-// weights), std is dominated by the heavy upper tail rather than the bulk
-// where most updates land, so a std-based rule would over-LR by 2–3×.  std
-// is recorded here for regime-drift monitoring — if std/med ever collapses
-// toward 1 for the sparse sections, the bulk has spread and the "0.1% of
-// typical weight" interpretation no longer holds.
-// FC2 weights are dramatically larger than FC0/FC1 because the 32→1 fan-in
-// gives each FC2 weight unusually high leverage on the score; they need
-// their own LR.  FC biases are int32-scale and need a different LR than
-// the int8-scale FC weights.
+// Two kinds of section, and only one obeys a magnitude rule:
+//   STATIONARY — fc0_w, ft_w, psqt_w (99.99% of parameters).  Scale is set by
+//     the init constants and does not move across millions of games, so "LR as a
+//     fraction of typical weight" is well defined; all three are held to one
+//     ratio, ~0.00035 of RMS.
+//   SCALE-FINDING — fc2_w and the five bias sections (~1,672 parameters).  All
+//     initialise at or near ZERO and spend the run finding their own scale, so
+//     the LR is a GROWTH RATE and a fixed absolute LR self-anneals.
 //
-// PSQT_LR0 = 13 is sized to the raw weight magnitude (median ~13 319).  Under
-// pure-PSQT the bucketed PSQT is the sole material channel and moves freely —
-// its full range (material level + spatial deviation + phase-dependent per-bucket
-// structure) is learnable; the 8 PSQT buckets are what let it encode e.g. "pawn
-// worth more in deep endgame".  No gradient mean-centering or post-Adam dw
-// centering is applied.
+// TRAP: never recalibrate a scale-finding section against its CONVERGED
+// magnitude — sizing the FC biases off fc0_b ~ 1400 would give a fresh net a
+// bias LR that cannot move a section sitting at zero.  And measure on the FP32
+// shadows (.tdleaf.bin is scaled by TDLEAF_SCALE = 128) over TOUCHED weights,
+// never on the rounded, structurally padded .nnue.
+// Evidence and per-section trajectories: docs/Learning_Investigation.md §1 J.
 // ---------------------------------------------------------------------------
-// LR SCALE CONVENTION (changed 2026-09-15).  There is now ONE learning-rate set
-// used by BOTH phases at scale 1.0 -- online `lr_scale` 1.0 and offline
-// `--bt-lr` 1.0.  Previously the two differed: online ran at 1.0 and offline at
-// 0.25 of the same constants, so the online phase was 4x hotter, which 7.11's
-// standing conclusions flagged as the most likely reason the noise ball sat
-// where it did.
+// LR SCALE CONVENTION.  ONE learning-rate set, used by BOTH phases at scale 1.0
+// — the learner's `--lr-scale` and the batch trainer's `--bt-lr` multiply these
+// same constants.
 //
-// The constants below are 0.25x their pre-2026-09-15 values, so the OFFLINE
-// phase is unchanged (1.0 x 0.25C == old 0.25 x C) while the ONLINE phase drops
-// 4x.  That online cut is already measured and safe: `lr25` vs `lr100` gave
-// damage -34 against -125 and final nets identical head-to-head at -0.7 +- 8.3
-// (7.9, 7.10).  D. Homan's independent tests support the smaller LR.
-//
-// Anything that reads an absolute LR from the chain history must be rescaled by
-// 4 before comparison.
+// GOTCHA: before 2026-09-15 the phases ran at different scales (online 1.0,
+// offline 0.25, against constants 4x larger than these), so **any absolute LR
+// quoted from a run before that date must be divided by 4** to compare with the
+// numbers below.  The 4x online cut that implies is measured and safe.
 // ---------------------------------------------------------------------------
-// FC0 weights.  Recalibrated 2026-09-13 from 0.005 to 0.0014.  The old value
-// came from Stockfish-net statistics (assumed median ~5).  Measured on this
-// net's own FP32 shadows, fc0_w is STATIONARY across the whole m260720 chain
-// (RMS 3.881 at fresh init, 3.863 at 7e6 games) -- so a magnitude rule is
-// well defined here, and 0.005 put fc0_w at LR/RMS = 0.00129 against ft_w's
-// 0.00034 and psqt_w's 0.00036, the two other stationary sections, which agree
-// with each other to 6%.  fc0_w was therefore 3.7x hot AND the largest single
-// contributor to online weight displacement (13.5% of its own RMS over 30k
-// games, against ft_w 1.18% and psqt_w 0.54%).  0.0014 = 0.00035 x 3.88 puts
-// all three stationary sections on one ratio.  See Online_Learning_Investigation 7.11.
+// 0.00035 x RMS 3.88.  Deliberately NOT the value inherited from Stockfish-net
+// statistics (which lands at 0.00125 here): that assumed a median of ~5 and left
+// fc0_w at 3.7x the ratio ft_w and psqt_w agree on, making it the net's largest
+// single source of online weight displacement.
 static const float TDLEAF_ADAM_LR0         = 0.00035f;// FC0 weights (int8, RMS ~3.88)
-// FC1 weights kept at the historical 0.005 deliberately: fc1_w is NOT
-// stationary (RMS 3.00 at init -> 6.65 at 7e6 games), so it has no fixed
-// magnitude to calibrate against, and holding it fixed isolates fc0_w as the
-// single changed variable in the 30k ladder arm.
+// FC1 weights sit at the ratio fc0_w used to have, deliberately: fc1_w is NOT
+// stationary (RMS 3.00 at init -> 6.65 at 7M games), so there is no fixed
+// magnitude to calibrate it against and the fc0_w reasoning does not transfer.
 static const float TDLEAF_ADAM_FC1_LR0     = 0.00125f;// FC1 weights (int8, RMS 3.0 -> 6.7)
-static const float TDLEAF_ADAM_FC2_LR0     = 0.0175f; // FC2 weights (int8, final 32→1 layer)
+static const float TDLEAF_ADAM_FC2_LR0     = 0.0175f; // FC2 weights (scale-finding, 1.9 -> 36;
+                                                       // 32→1 fan-in gives high score leverage)
 static const float TDLEAF_ADAM_FC_BIAS_LR0 = 0.375f;  // FC biases (int32; scale-finding, init 0)
 static const float TDLEAF_ADAM_FT_LR0      = 0.00375f;// FT weights (int16, RMS ~44 -> 40)
-static const float TDLEAF_ADAM_FT_BIAS_LR0 = 0.005f;  // FT biases  (int16; scale-finding, init 0
-                                                       // 0.001×median to limit dying-ReLU risk)
-static const float TDLEAF_ADAM_PSQT_LR0    = 3.25f;   // PSQT (int32; RMS ~3.6e4 — active
-                                                       // post-centering subspace is ~665, see note above)
+static const float TDLEAF_ADAM_FT_BIAS_LR0 = 0.005f;  // FT biases  (int16; scale-finding, init 0;
+                                                       // kept low to limit dying-ReLU risk)
+static const float TDLEAF_ADAM_PSQT_LR0    = 3.25f;   // PSQT (int32, RMS ~3.6e4)
 // Material representation: pure-PSQT — the bucketed PSQT is the SOLE trainable
 // material channel.  There is no dense piece_val channel and no gauge machinery
 // (pin / gradient mean-centering / post-Adam dw centering / persisted slot-mean
-// recentering) — with a single material channel there is no gauge null direction
-// for the multi-writer merge to amplify.  Absolute eval scale is anchored by the
-// outcome term through TDLEAF_K (outcome-dominated lambda-return targets force
-// sigmoid(v/K) to match empirical win rates).  Search is decoupled from the eval
-// scale by NNUE_FIXED_PIECE_VALUES (define.h): value[] stays at the classical
-// constants, so SEE, pruning margins, and TDLEAF_SCORE_CLIP are unaffected by any
-// slow PSQT scale drift.  DO NOT reintroduce a second material channel or freeze
-// PSQT — see docs/history/TRAINING_HISTORY.md "Material Representation —
-// Dense Piece Values & the Gauge Machinery" and "PSQT Freezing" for why both fail.
+// recentering); all of it was deleted, not disabled.  Absolute eval scale is
+// anchored by the outcome term through TDLEAF_K, and search is decoupled from
+// that scale by NNUE_FIXED_PIECE_VALUES (define.h), so SEE, pruning margins and
+// TDLEAF_SCORE_CLIP are unaffected by PSQT drift.
+// DO NOT reintroduce a second material channel, and DO NOT freeze PSQT — both
+// were tried and both fail (freezing costs ~200 Elo).  See
+// docs/history/TRAINING_HISTORY.md "Material Representation — Dense Piece Values
+// & the Gauge Machinery" and "PSQT Freezing".
 static const float TDLEAF_ADAM_BETA1    = 0.9f;    // first-moment decay  (FC + FT bias + PSQT)
 static const float TDLEAF_ADAM_BETA2    = 0.999f;  // second-moment decay (all layers)
-static const float TDLEAF_ADAM_EPS      = 1e-12f;  // numerical floor.  Lowered
-                                        // from 1e-8 (2026-09-12): at 1e-8 it
-                                        // was not negligible against real
-                                        // sqrt(v_hat) and silently gated the
-                                        // low-gradient tail out of Adam's
-                                        // normalisation, making the optimizer
-                                        // sensitive to the accumulated gradient
-                                        // SCALE (7.10.7).  Do NOT push this much
-                                        // lower: the build is -ffast-math, so
-                                        // flush-to-zero makes v == 0 reachable,
-                                        // and then m_hat/(0 + EPS) saturates
-                                        // TDLEAF_ADAM_STEP_CLIP -- a full-size
-                                        // step from a meaningless gradient.
+// Numerical floor in m_hat / (sqrt(v_hat) + EPS).  This value is bracketed from
+// BOTH sides and neither bound is obvious:
+//   too HIGH (it was 1e-8) — EPS stops being negligible against real sqrt(v_hat),
+//     silently gating the low-gradient tail out of Adam's normalisation and
+//     making the optimizer sensitive to the ACCUMULATED GRADIENT SCALE, hence to
+//     batch size.  That sensitivity was mistaken for a real effect more than once.
+//   too LOW — the build is -ffast-math, so flush-to-zero makes v == 0 reachable,
+//     and then m_hat/(0 + EPS) saturates TDLEAF_ADAM_STEP_CLIP: a full-size step
+//     from a meaningless gradient.
+static const float TDLEAF_ADAM_EPS      = 1e-12f;
 // AdamW decoupled weight decay: w -= λ × lr × w after each Adam step.
 // Applied to FC weights and FT weights only (not biases, not PSQT).
 // Set to 0.0 to disable.
-static const float TDLEAF_WEIGHT_DECAY  = 1e-4f; //1e-4f;   // decoupled weight decay coefficient
-static const int   TDLEAF_ADAM_WARMUP        = 100;  // linear LR warmup over first N Adam
-                                        // steps, ALL categories.  1000 = 1/(1-beta2), the
-                                        // time constant for Adam's second moment, so the
-                                        // ramp lasts exactly as long as it takes v to
-                                        // become a usable per-weight estimate.  At batch 8
-                                        // that is 8000 games.  Sized from the 30k ladder,
-                                        // which put the online damage complete by ~5000
-                                        // games / ~600 steps.  Keyed on the SESSION clock
-                                        // after --opt-reset, else on persisted t_adam.
-                                                     // Keyed on t_adam (persisted) so only fires in first session.
-static const int   TDLEAF_FT_SESSION_WARMUP  = 100; // per-session FT LR ramp over first N Adam steps.
-                                                     // Applied every restart via t_ft_session (not persisted).
-                                                     // Damps FT updates during the v_ft_w accumulation phase.
+static const float TDLEAF_WEIGHT_DECAY  = 1e-4f;   // decoupled weight decay coefficient
+// Linear LR warmup over the first N Adam steps, applied to ALL categories so no
+// section is released at full rate while others are still ramping.
+//
+// GOTCHA: this is counted in Adam STEPS, so its length in GAMES scales with
+// TDLEAF_BATCH_SIZE — 100 steps is 5,000 games at batch 50.  Keep it short for
+// that reason; at batch 50 the historical 1000 would ramp through 50,000 games.
+//
+// WHEN IT FIRES: keyed on the SESSION clock after --opt-reset, otherwise on the
+// PERSISTED t_adam — so on an established net it is inert, and it fires for real
+// only on a fresh --init-nnue net (t_adam = 0) or after an explicit reset.
+static const int   TDLEAF_ADAM_WARMUP        = 100;
+// Per-session FT-weight LR ramp, applied every restart via t_ft_session (not
+// persisted), damping FT updates while v_ft_w re-accumulates.  Suppressed while
+// the global warmup above is ramping: applying both would give FT (t/N)^2 where
+// every other section gets t/N, breaking the "same warmup everywhere" property.
+static const int   TDLEAF_FT_SESSION_WARMUP  = 100;
 // Accumulate gradients across N games before each Adam step.  Overridable at
 // compile time (`perl comp.pl <v> ... TDLEAF_BATCH_SIZE_DEFAULT=16`) so a
 // batch-size ladder can be built without editing this file.  NOTE when
@@ -226,7 +197,7 @@ static const int   TDLEAF_FT_SESSION_WARMUP  = 100; // per-session FT LR ramp ov
 // at fixed games, the step COUNT (games/B).  Match Adam STEPS across arms, not
 // games, or the sweep re-runs 6.15.1's confound.  The accumulated gradient norm
 // grows as sqrt(B) against the fixed TDLEAF_GRAD_CLIP_NORM, so check the clip
-// telemetry at large B.  See Online_Learning_Investigation 7.15.
+// telemetry at large B.  See docs/history/Online_Learning_Investigation.md 7.15.
 #ifndef TDLEAF_BATCH_SIZE_DEFAULT
 #define TDLEAF_BATCH_SIZE_DEFAULT 50
 #endif
@@ -253,13 +224,15 @@ struct TDRecord {
     int     stack;                     // layer stack index used (piece_count-1)/4
     bool    wtm;                       // White to move at the leaf position
     bool    root_wtm;                  // White to move at the ROOT (recorded) position.
-                                        // In harness mode == engine_color for every
-                                        // record; per-record (alternates) under internal
-                                        // self-play.  Used by the TSV dump for POV.
+                                        // Alternates per record under internal
+                                        // self-play (all training); == engine_color for
+                                        // every record under UCI play, where only the
+                                        // engine's own moves are recorded.  Used by the
+                                        // TSV dump for POV.
     int     game_ply;                  // 1-based game-ply of the ROOT position.  Gap
-                                        // between consecutive records = 2 in the harness
-                                        // (own moves only), 1 under internal self-play.
-                                        // Drives the pow(lambda, dply) trace decay.
+                                        // between consecutive records (dply) = 1 under
+                                        // internal self-play, 2 under UCI play (own moves
+                                        // only).  Drives the pow(lambda, dply) decay.
     float   id_score_variance;         // variance of last N ID depth scores (cp²); 0 if < 2 depths
     // Active feature indices at the leaf position (indexed by actual perspective 0=BLACK,1=WHITE).
     // Used for FT and PSQT gradient backprop.
@@ -304,7 +277,7 @@ struct TDGameRecord {
 // ---------------------------------------------------------------------------
 // Score-history adjudication constants — cutechess/fastchess defaults
 // (-resign movecount=6 score=600, -draw movenumber=40 movecount=8 score=10).
-// Shared by tdleaf_self_adjudicate (UCI harness games) and the internal
+// Shared by tdleaf_self_adjudicate (UCI games) and the internal
 // selfplay adjudicator (selfplay.cpp) so both modes stay in sync.
 // ---------------------------------------------------------------------------
 static const int TDLEAF_RESIGN_PLIES     = 6;

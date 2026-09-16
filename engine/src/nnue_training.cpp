@@ -37,7 +37,7 @@ static uint32_t l2_bias_cnt   [NNUE_LAYER_STACKS];
 // nnue_accumulate_gradients).  Grouped into NNUEGradBuf so the offline batch
 // trainer can give each worker thread a private accumulation target and reduce
 // them into the global instance (see the nnue_gradbuf_* helpers below and
-// docs/BT_PARALLEL_PLAN.md).  The online TDLeaf path always uses g_grad.
+// docs/history/BT_PARALLEL_PLAN.md).  The online TDLeaf path always uses g_grad.
 struct NNUEGradBuf {
     float grad_l0_w[NNUE_LAYER_STACKS][NNUE_L0_SIZE * NNUE_L0_INPUT];
     float grad_l0_b[NNUE_LAYER_STACKS][NNUE_L0_SIZE];
@@ -215,14 +215,17 @@ static uint32_t  t_ft_session = 0;
 // scales (measured 0.039 offline vs 0.168 online — partly a 512-vs-1203
 // positions-per-step difference, partly a real per-sample difference).  Adam is
 // scale-invariant only in steady state; across a phase boundary the stale v
-// makes the first ~1/(1-beta2) = 1000 steps oversized by the scale ratio.  At 8
-// games/step that is ~8000 games of oversized updates, and the damage it does
-// scales with the LR and not with run length — exactly the front-loaded,
-// LR-proportional loss measured in Online_Learning_Investigation.md 7.10.
+// makes the first ~1/(1-beta2) = 1000 steps oversized by the scale ratio — at
+// TDLEAF_BATCH_SIZE games per step, 1000 x B games of oversized updates.  The
+// damage scales with the LR and not with run length, which is the front-loaded,
+// LR-proportional loss measured in
+// docs/history/Online_Learning_Investigation.md 7.10.
 //
-// TDLEAF_ADAM_WARMUP does not cover this: it is keyed on the PERSISTED t_adam
-// (~5.2M by now), so warmup_factor has been hard 1.0 since the first session
-// ever run.  FT weights were already protected by t_ft_session; nothing else was.
+// TDLEAF_ADAM_WARMUP does not cover this on an ESTABLISHED net: it keys on the
+// PERSISTED t_adam, which by mid-chain is in the millions, so warmup_factor is
+// hard 1.0 and only t_ft_session protected the FT weights.  It DOES fire on a
+// fresh --init-nnue net (t_adam = 0) — which is why the FT ramp must yield to it
+// there, see the double-ramp guard in nnue_apply_gradients.
 static uint32_t  t_session = 0;
 static bool      opt_cold  = false;
 
@@ -920,7 +923,7 @@ void nnue_accumulate_gradients(const NNUEActivations &act, float grad_scale,
 
 // ---------------------------------------------------------------------------
 // NNUEGradBuf helpers — used by the offline batch trainer for within-batch
-// thread parallelism (docs/BT_PARALLEL_PLAN.md).  Each worker accumulates its
+// thread parallelism (docs/history/BT_PARALLEL_PLAN.md).  Each worker accumulates its
 // slice of a batch into a private buffer (nnue_accumulate_gradients(..., wbuf));
 // the reduce phase sums the workers into g_grad in worker index order (so a
 // fixed thread count is deterministic), and the existing serial tail runs the
@@ -1470,7 +1473,7 @@ void nnue_apply_gradients(float lr_scale)
                 // 31.6x (clipped to TDLEAF_ADAM_STEP_CLIP) on the warm path where
                 // bc2 == 1.  Measured: FT mean step 4.6 -> 28.2 across a 30k run
                 // with 3,183 clips in the last third, while FC/FTB/PSQT never
-                // clipped.  See Online_Learning_Investigation 7.11.
+                // clipped.  See docs/history/Online_Learning_Investigation.md 7.11.
                 uint16_t *vs = ft_w_vsamples + (size_t)fi * NNUE_HALF_DIMS;
                 float *vw = v_ft_w + (size_t)fi * NNUE_HALF_DIMS;
                 for (int d = 0; d < NNUE_HALF_DIMS; d++) {
@@ -2133,7 +2136,6 @@ bool nnue_save_fc_weights(const char *path)
         fwrite(ft_bias_cnt, sizeof(uint32_t), NNUE_HALF_DIMS, f);
     }
 
-    // (v12: the dense piece_val weight section was removed.)
 
     // Adam v section (v6+): t_adam + FC v + FT bias v + sparse PSQT v.
     // Raw float32 (no TDLEAF_SCALE — v values are always non-negative and can be
@@ -2148,7 +2150,6 @@ bool nnue_save_fc_weights(const char *path)
         fwrite(v_l2_w[s], sizeof(float), NNUE_L2_PADDED, f);
     }
     fwrite(v_ft_bias, sizeof(float), NNUE_HALF_DIMS, f);
-    // (v12: piece_val v removed.)
     // Sparse PSQT v: write v for each dirty row (same dirty-row set as weights).
     {
         uint32_t n_pv_rows = v_psqt_w ? n_ft_rows : 0u;
@@ -2174,7 +2175,6 @@ bool nnue_save_fc_weights(const char *path)
         fwrite(m_l2_w[s], sizeof(float), NNUE_L2_PADDED, f);
     }
     fwrite(m_ft_bias, sizeof(float), NNUE_HALF_DIMS, f);
-    // (v12: piece_val m removed.)
     // Sparse PSQT m: same dirty rows as weights/v.
     {
         uint32_t n_pm_rows = m_psqt_w ? n_ft_rows : 0u;
@@ -2222,7 +2222,6 @@ bool nnue_save_fc_weights(const char *path)
         }
     }
 
-    // (v12: the v11 PSQT init slot-means block was removed.)
 
     // ---- Verify the temp file is COMPLETE before installing it -----------
     // rename() is atomic, but atomicity only guarantees that whatever the temp
