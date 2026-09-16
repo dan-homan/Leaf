@@ -30,6 +30,26 @@
 #include "search.h"
 #include "extern.h"
 
+// Set by the root move handler: 1 when the PV in tdata[0].pc[0] is the
+// fail-high STUB (or stale, i.e. no resolved root update happened this search),
+// 0 when it came from a real pc_update.  Read by tdleaf_record_ply under
+// TDLEAF_SKIP_STUB_PV.  Conservative: anything that is not a confirmed resolved
+// update leaves it at 1.
+int tdleaf_pv_is_stub = 1;
+
+#ifndef WIDEWIN
+ #define WIDEWIN 15
+#endif
+
+#if PVTRUNC_DIAG
+// Did the PV the caller finally sees come from the ROOT FAIL-HIGH stub (which
+// writes pc[0] = {move, TT-guessed reply, NOMOVE} explicitly) rather than from
+// a resolved pc_update?
+unsigned long long pvt_fh_stub = 0, pvt_resolved = 0, pvt_searches = 0;
+int pvt_pc_is_stub = 0;
+#endif
+
+
 // ---------------------------------------------------------------------------
 // LMR precomputed lookup tables — eliminates repeated integer division inside
 // the move loop.  Indexed by depth (0..MAXD) and move index (0..MAX_MOVES-1).
@@ -76,6 +96,10 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
 
   // Set searching flags in game record
   gr->searching = 1;
+  // Until a resolved root pc_update happens this search, the PV is not
+  // trustworthy: it may be last search's, a book/singular stub, or a fail-high
+  // stub.  See TDLEAF_SKIP_STUB_PV.
+  tdleaf_pv_is_stub = 1;
   gr->terminate_search = 0;
 
   // reseting the number of times the search time has been doubled
@@ -638,6 +662,10 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
   //------------------------------------------------------------------
   //   Return the best move found by the search
   //------------------------------------------------------------------
+#if PVTRUNC_DIAG
+  pvt_searches++;
+  if (pvt_pc_is_stub) pvt_fh_stub++; else pvt_resolved++;
+#endif
   gr->searching = 0; return tdata[0].pc[0][0];
 
 }
@@ -645,10 +673,6 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
 #if PVTRUNC_DIAG
 // Why does an in_pv node return without writing pc[]?  Diagnostic counters.
 unsigned long long pvt_fifty=0, pvt_rep=0, pvt_kk=0, pvt_tt=0;
-#endif
-
-#ifndef WIDEWIN
- #define WIDEWIN 15
 #endif
 
 /* Function to update principle continuation */
@@ -1112,7 +1136,17 @@ void search_node::root_pvs()
            tdata->pc[0][1].t = NOMOVE;
        }
        tdata->pc[0][2].t = NOMOVE;
-     } else tdata->pc_update(smove, ply);
+       if (tdata == &ts->tdata[0]) tdleaf_pv_is_stub = 1;
+#if PVTRUNC_DIAG
+       pvt_pc_is_stub = 1;
+#endif
+     } else {
+       tdata->pc_update(smove, ply);
+       if (tdata == &ts->tdata[0]) tdleaf_pv_is_stub = 0;
+#if PVTRUNC_DIAG
+       pvt_pc_is_stub = 0;
+#endif
+     }
      //---------------------------------
      // display/output search info
      //---------------------------------

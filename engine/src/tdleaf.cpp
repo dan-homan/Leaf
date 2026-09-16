@@ -103,6 +103,9 @@ static void tdleaf_dump_fen(const position &pos, bool wtm, char *out);
 // even when neither the TSV dump nor root learning would.
 bool tdleaf_capture_root = false;
 
+// Set by search(): 1 when pc[0] is not from a resolved root update.
+extern int tdleaf_pv_is_stub;
+
 // ---------------------------------------------------------------------------
 // PV-walk / score-consistency telemetry.  Counters only, always on: the cost is
 // a handful of adds per recorded ply against a full search, and the questions it
@@ -153,6 +156,7 @@ struct TDPvStats {
     double   sh_leafmiss, sh_rootmiss;  uint64_t sh_cmp_n;
     double   sh_leafsgn, sh_rootsgn;
     uint64_t fallback_n;   // records re-anchored at the root
+    uint64_t skipped_stub; // plies skipped: PV was an unresolved stub
     // Classify the position the walk STOPPED on (truncated records only):
     // what would the search have done there?
     uint64_t tr_n, tr_incheck, tr_hascaps, tr_quiet, tr_fifty_hi, tr_lowpieces;
@@ -291,6 +295,12 @@ void tdleaf_report_pv_stats(const char *tag)
                 100.0*td_pv.tr_quiet/T2, 100.0*td_pv.tr_fifty_hi/T2,
                 100.0*td_pv.tr_lowpieces/T2);
     }
+    if (td_pv.skipped_stub)
+        fprintf(stderr, "TDLeaf stub-skip %s: %llu plies not recorded (%.1f%% of "
+                "%llu offered) -- PV was not from a resolved root search\n", T,
+                (unsigned long long)td_pv.skipped_stub,
+                100.0*td_pv.skipped_stub/(double)(td_pv.skipped_stub + td_pv.n),
+                (unsigned long long)(td_pv.skipped_stub + td_pv.n));
     if (td_pv.fallback_n)
         fprintf(stderr, "TDLeaf root-fallback %s: %llu records (%.2f%%) re-anchored at "
                 "the root with the root search score as label\n", T,
@@ -333,6 +343,14 @@ void tdleaf_record_ply(TDGameRecord &rec,
                        int game_ply)
 {
     if (rec.n_plies >= MAX_GAME_PLY) return;  // safety guard
+
+#if TDLEAF_SKIP_STUB_PV
+    // The PV did not come from a resolved root search (fail-high stub, or an
+    // early return that left pc[0] stale/guessed).  Its second move was never
+    // searched and its score is a bound, so there is no leaf to differentiate.
+    // Skip the ply entirely: the trace's pow(lambda, dply) absorbs the gap.
+    if (tdleaf_pv_is_stub) { td_pv.skipped_stub++; return; }
+#endif
 
     // Capture engine color on the first ply of a fresh game.  Every recorded
     // ply has root_pos.wtm == engine's color (we only record on engine moves).

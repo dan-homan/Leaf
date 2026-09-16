@@ -774,7 +774,13 @@ int selfplay_main(int argc, char *argv[])
     {   extern unsigned long long pvt_fifty, pvt_rep, pvt_kk, pvt_tt;
         fprintf(stderr, "PV-node early returns WITHOUT pc: repetition=%llu "
                 "fifty=%llu KKdraw=%llu TTcutoff=%llu\n",
-                pvt_rep, pvt_fifty, pvt_kk, pvt_tt);   }
+                pvt_rep, pvt_fifty, pvt_kk, pvt_tt);
+        extern unsigned long long pvt_fh_stub, pvt_resolved, pvt_searches;
+        fprintf(stderr, "ROOT PV provenance: searches=%llu | from FAIL-HIGH stub "
+                "(pc cut to 2 by construction)=%llu (%.1f%%) | from resolved "
+                "pc_update=%llu (%.1f%%)\n", pvt_searches,
+                pvt_fh_stub, 100.0*pvt_fh_stub/(double)pvt_searches,
+                pvt_resolved, 100.0*pvt_resolved/(double)pvt_searches);   }
 #endif
     return 0;
 }

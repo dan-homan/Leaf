@@ -114,6 +114,21 @@
  #define TDLEAF_ROOT_FALLBACK 0
 #endif
 
+// Skip TDLeaf recording for plies whose PV did not come from a RESOLVED root
+// search.  The root fail-high handler writes pc[0] = {move, TT-guessed reply,
+// NOMOVE} explicitly -- a 2-ply stub, where the second move was never searched
+// and the score is a BOUND, not a resolved value.  Measured at 35.9% of searches
+// (d8/4000n, m260915 head), which is the bulk of the pv_len==2 spike.
+//
+// Also skips the search() early-return paths (book move, singular reply, ponder
+// hit), which leave pc[0] stale or guessed from a previous position.
+//
+// A skipped ply costs nothing structurally: it widens dply, which the trace's
+// pow(TDLEAF_LAMBDA, dply) decay already handles by construction.
+#ifndef TDLEAF_SKIP_STUB_PV
+ #define TDLEAF_SKIP_STUB_PV 0
+#endif
+
 // Embed the .nnue file directly into the binary (via incbin).
 // Compile with -D NNUE_EMBED=1; also requires NNUE_NET_PATH to be set.
 #ifndef NNUE_EMBED
