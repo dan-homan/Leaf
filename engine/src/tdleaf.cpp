@@ -325,6 +325,15 @@ void tdleaf_report_pv_stats(const char *tag)
                 mf, sf, (unsigned long long)td_pv.sgn_full_n,
                 ms, ss, (unsigned long long)td_pv.sgn_short_n,
                 ss > 0 ? ms/ss : 0.0);
+        // Overall bias across every record that actually gets a gradient --
+        // the bottom line, since this is the component that does not average out.
+        double tot_n   = (double)(td_pv.sgn_full_n + td_pv.sgn_short_n);
+        double tot_sum = td_pv.sgn_full_sum + td_pv.sgn_short_sum;
+        double tot_sq  = td_pv.sgn_full_sq  + td_pv.sgn_short_sq;
+        double mt = tot_sum / tot_n;
+        double st = sqrt(tot_sq / tot_n - mt * mt);
+        fprintf(stderr, "TDLeaf OVERALL bias %s: mean=%+.2f cp  sd=%.1f  n=%.0f  "
+                "bias/sd=%.4f\n", T, mt, st, tot_n, st > 0 ? mt/st : 0.0);
     }
     fflush(stderr);
 }
