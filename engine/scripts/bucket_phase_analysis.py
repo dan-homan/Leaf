@@ -22,7 +22,7 @@ phase reverses:
 negative proj = offline repairs/undoes online's movement in that bucket,
 positive = offline confirms and extends it.
 
-First used in Part 3 of docs/Online_Learning_Investigation.md (2026-07-16).
+First used in Part 3 of docs/history/Online_Learning_Investigation.md (2026-07-16).
 """
 import os
 import sys

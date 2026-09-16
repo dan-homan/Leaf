@@ -110,10 +110,10 @@ Hash size sweep at 14 actors, depth 6, for the shape:
 >
 > **The default reverted to 128 MB.**  16 MB buys ~25% generation throughput,
 > but the corpora that generation produces currently measure worth *zero*
-> (`Online_Learning_Investigation.md` 7.3), so the throughput is not worth
+> (`history/Online_Learning_Investigation.md` 7.3), so the throughput is not worth
 > leaving a confound in every comparison against the pre-`6e6g` chain.
 > `clear_hash()` below is unaffected and stays — it is bit-identical output.
-> Full account in `Online_Learning_Investigation.md` 7.5.
+> Full account in `history/Online_Learning_Investigation.md` 7.5.
 
 The original (insufficient) evidence, kept for the record — 600 games per arm,
 same openings, patched binary:

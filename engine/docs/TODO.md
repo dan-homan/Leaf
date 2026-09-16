@@ -4,6 +4,12 @@ Planned investigations, improvements, and open questions. Resolved items and
 experiment write-ups have moved to `docs/history/TRAINING_HISTORY.md` — this
 file tracks only what's still open.
 
+> **Training/learning items: the rationale lives in
+> `docs/Learning_Investigation.md`.**  That document holds the graded evidence
+> ledger, the regime boundaries that decide whether an old result still holds, the
+> closed lines with what would reopen each, and the ranked open questions (§6).
+> This file is the checklist; where the two disagree about status, fix this one.
+
 ---
 
 ## TDLeaf(λ) Training
@@ -32,7 +38,7 @@ STM + game-ply λ^Δ), and **Phases D and E have since landed:**
 
 ### Offline-phase plateau — ranked experiment plan (2026-09-02)
 
-Evidence and measurements: `docs/Offline_Learning_Investigation.md` Part 1.  The
+Evidence and measurements: `docs/history/Offline_Learning_Investigation.md` Part 1.  The
 offline phase is data-starved on both of its channels at once — the eval bootstrap
 is gated shut by `TDLEAF_DUMP_QUIET_CP = 60` (45% of root positions discarded,
 ranked by informativeness), and the outcome channel gets one 500k-game corpus per
@@ -48,7 +54,7 @@ held-out corpus is the cheap between-arm proxy.
       head-to-head**, and **+50.0 ± 11.1 over the net actually promoted** for that
       iteration — for zero extra compute and zero new games.  Validation MSE ordered
       the arms *backwards* and had no power to see it.  Full write-up:
-      `docs/Offline_Learning_Investigation.md` Part 2.
+      `docs/history/Offline_Learning_Investigation.md` Part 2.
 
 - [x] **A1a — Fold A1 into `train.py`. DONE.**  `--corpus-window N` (default 4)
       walks the `--continue` chain, pulls each ancestor's archived corpus, and
@@ -105,7 +111,7 @@ held-out corpus is the cheap between-arm proxy.
       discarded tail carries the label information (`ΔMSE_out` +52% in the top
       bin) but it is **not learnable** — those labels are good because search
       resolved a tactic.  Part 1's "the gate throws away the signal" reading is
-      retracted; see `Offline_Learning_Investigation.md` Part 4.4.
+      retracted; see `history/Offline_Learning_Investigation.md` Part 4.4.
       Scale caveat: 7.8M rows / ~15k steps had power for 28 Elo, not for 5–10, so
       a 60-vs-120-vs-200 difference of that size is not excluded — and a gate
       *tighter* than 60 was never tested (the diagnostic's negative `ΔMSE_out`
@@ -137,6 +143,57 @@ held-out corpus is the cheap between-arm proxy.
       health gate (35–40%) and buy decisiveness elsewhere — more unbalanced
       opening lines, or a wider book — rather than with depth.
 
+### Post-restart learning queue (2026-09-15)
+
+Ranked in `docs/Learning_Investigation.md` §6, which carries the rationale, the
+arm design and the pre-committed reading for each.  Checklist form only here.
+⚠️ = previously ruled out under a regime or criterion that has since changed.
+
+**Everything the investigations established was measured on a net at 2.2–7M
+cumulative games.**  R7 is the first young chain since those records begin, so
+cheap questions are worth re-asking on it rather than assuming the mature-net
+answer carries.
+
+- [ ] **1. Batch 50 on a full leg — damage reduction vs leg *yield*.**  7.15 rates
+      handoff damage only, and 6.16's batch-16 arm cut damage 4× while making the
+      loop worse.  Pass `--gauntlet-tdleaf` on **every** leg; dropping it after
+      `3e6` is how the online drift went unseen for five legs.
+- [ ] **2. ⚠️ Does the handoff happen on a YOUNG net — absent, or masked?**  The
+      damage is only *apparent* after ~1M games of learning; the chain read
+      +18/+7/−2/−1 at 100k–1M before turning negative at 2.2M.  Either it does not
+      occur on an unsaturated net, or it occurs every time and is netted out by
+      concurrent learning gains.  Decides whether "minimise handoffs" is a
+      whole-chain rule or a late-life one.  **Arm:** 5k-game damage protocol plus a
+      within-leg checkpoint ladder at 100k / 500k / 1M / 2M of the R7 chain, each
+      rated against its own starting net.  ~50 min per state, on states the chain
+      produces anyway.  The R7 chain is the first opportunity since the records
+      begin.
+- [ ] **3. Attack Σ directly — shuffle records across a pool of games in the
+      learner**, rather than buying decorrelation only through larger B.  The only
+      arm that would confirm Σ positively rather than by elimination.
+- [ ] **4. ⚠️ Re-read alpha and rbar against the 5k-game damage protocol.**  Both
+      were rejected on leg total, judged partly through "online Δ" — now known to
+      be a handoff cost — and both predate the eps fix.  ~50 min each.
+- [ ] **5. ⚠️ Depth, on the new chain.**  d10 was rejected on one leg confounded
+      by a 52% draw rate, predating the corpus-window/root-row wins and the eps
+      fix.  Gate on draw rate first (see A6); consider fixed-nodes generation.
+- [ ] **6. ⚠️ A quiet gate *tighter* than 60 cp** — never tested, and `--bt-diag`
+      reads negative ΔMSE_out below 40.  One `--bt-quiet-cp` sweep on disk data.
+- [ ] **7. Restore the deferred offline wins** — `--corpus-window` (+36 anchor /
+      +45 paired) and `--bt-rows root` (+35.6 paired) are deferred for a clean
+      restart, not retired.  A1b below bounds what label staleness costs.
+- [ ] **8. Actor refresh cadence** — blocked on a corpus-diversity observable.
+      `cos(online, offline)` is the candidate; **measure its repeat-run noise
+      floor first**, which was never done.
+- [ ] **9. Leaf rows: settle the blend confound** (`--bt-leaf-lambda`) before
+      deciding whether to keep generating them.  See A4 and Offline 3.5.
+- [ ] **10. Log per-section bias RMS per leg.**  Nearly free, and unlike the draw
+      rate it is not blind to uniform decay.  Monotone growth was still rising at
+      7M games on the old chain and is unexplained.
+- [ ] **11. The root-vs-mix confound** — root-only at 86M rows, matching the root
+      count inside `mix`, discriminates "leaf rows are harmful" from "mix was
+      root-starved".  The density question from the same arms is unresolved.
+
 ### Open items
 
 - [ ] Iteration 3+: long d8 online generation from a consolidated net (needs
@@ -154,17 +211,19 @@ held-out corpus is the cheap between-arm proxy.
 - [ ] Bayeselo pool rating (not head-to-heads) once a consolidated net gets
       close to classic_eval.
 
-### Online learning-rate scale — the last untested magnitude knob
+### ~~Online learning-rate scale — the last untested magnitude knob~~ — CLOSED
 
-Every update-rule and magnitude arm tried so far was rejected because it changed
-*direction quality* as a side effect (stack-norm alpha redistributes by bucket;
-per-feature `rbar` discards persistence; batch size varies SNR per step at constant
-displacement).  A uniform scale on every section's `TDLEAF_ADAM_*_LR0` is the only
-knob that moves displacement in proportion while leaving step count and every
-gradient direction untouched.  Suggested arms: ×1.5 and ×0.67.  The recipe —
-including how to keep the offline phase out of it, since the trainer shares those
-constants — is written up and parked in `docs/Online_Learning_Investigation.md`
-§6.17.  Judge by iteration total against a foreign anchor, never by online Elo.
+Run and closed.  `--lr-scale` (7.9.5) removed the need for the parked 6.17
+constants-edit recipe, and the arms settled it: damage scales as η exactly
+(displacement ∝ √η, Elo ∝ displacement², 7.13.1), but `lr25` and `lr100` produced
+final nets that were **identical head-to-head at −0.7 ± 8.3** — η cuts signal and
+noise together.  Displacement magnitude is not the axis (four independent
+demonstrations, `Learning_Investigation.md` §1 D).  The online LR dropped 4× under
+the 2026-09-15 restart as a by-product of unifying the two phases' LR sets, not as
+an experiment.
+
+**What replaced it as the live magnitude-adjacent line is Σ** — see
+`Learning_Investigation.md` §6 items 1–3.
 
 ### Search parameter tuning
 The search's pruning parameters (null-move margins, futility thresholds, aspiration

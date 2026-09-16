@@ -383,7 +383,7 @@ variable outside its allowlist (see [Diagnostic Flags](#diagnostic-flags) below)
 `TDLEAF_BATCH_SIZE = 8` is the measured optimum, not just the inherited default:
 batch 16 scored 34 Elo worse per iteration (2.2σ) and batch 4 was not better, with
 net weight displacement invariant across the whole 4× range — see
-`Online_Learning_Investigation.md` 6.15–6.16 before changing it.
+`history/Online_Learning_Investigation.md` 6.15–6.16 before changing it.
 Set `TDLEAF_BATCH_SIZE = 1` to restore per-game Adam steps.
 Set `TDLEAF_ADAM_WARMUP = 0` to disable warmup.
 Set `TDLEAF_WEIGHT_DECAY = 0.0` to disable weight decay.
@@ -645,7 +645,7 @@ skipped, so the corpus labels come from a fixed net.  This is the tool for
 actor/learner split run.  It is *not* a production generation mode: freeze-generate
 → consolidate is closed at both d6 and d8 (see
 [Current settled recipe](#current-settled-recipe) below and
-`Online_Learning_Investigation.md` Parts 4 and 6).  If ever used for production
+`history/Online_Learning_Investigation.md` Parts 4 and 6).  If ever used for production
 generation anyway, corpus dedup is mandatory — see the determinism caveat below.  Do **not** use the compile-time
 `TDLEAF_READONLY=1` flag for this: it compiles out the record/update hooks
 entirely, so a READONLY binary plays with frozen weights but **dumps no
@@ -888,7 +888,7 @@ Alignment is the whole contract, so it refuses `--bt-rows` and `--bt-quiet-cp`
 > −2.5 ± 21.0 Elo, and refreshing the labels between epochs a further
 > −6.0 ± 20.8.  The seed→generator correction moved labels 31.8 cp for zero
 > gain; the epoch-to-epoch refresh moved them only 14.0 cp.  See
-> `Online_Learning_Investigation.md` 7.7 — the mode is kept because it is
+> `history/Online_Learning_Investigation.md` 7.7 — the mode is kept because it is
 > general and cheap, not because that experiment worked.
 
 #### Retargeting root labels — `train.py --bt-rescore`
@@ -924,7 +924,7 @@ Cost is ~12 minutes on a 190M-row window: ~5 min to join, ~7 min to rescore.
 
 > **Measured null on the mature `m260720` chain: −2.5 ± 21.0 Elo**, and
 > refreshing the labels between epochs a further −6.0 ± 20.8
-> (`Online_Learning_Investigation.md` 7.7).  The seed→generator correction moved
+> (`history/Online_Learning_Investigation.md` 7.7).  The seed→generator correction moved
 > labels 31.8 cp on average and bought nothing, because the bootstrap was
 > saturated — there was no information in the correction the net did not already
 > have.  It is worth retrying only *below* saturation, e.g. early in a fresh
@@ -951,7 +951,7 @@ material stack), and by `|label − net|` in 10 cp bins.
 
 Use it to decide whether a corpus is worth consolidating *before* spending an epoch
 on it, and to compare corpora (or generation settings) against a fixed net.  See
-`docs/Offline_Learning_Investigation.md` for the analysis this was built for.
+`docs/history/Offline_Learning_Investigation.md` for the analysis this was built for.
 
 > **⚠️ `ΔMSE_out` prices label *information*, not label *usability*.**  It is an
 > upper bound on the signal a corpus can offer, not a training recommendation.
@@ -959,7 +959,7 @@ on it, and to compare corpora (or generation settings) against a fixed net.  See
 > the net** at predicting game outcomes (corr +0.73), and training on them costs
 > **28 Elo** — their labels are good precisely because *search resolved a tactic*,
 > which is exactly what a static evaluator cannot represent
-> (`Offline_Learning_Investigation.md` Part 4).  High `ΔMSE_out` means "worth
+> (`history/Offline_Learning_Investigation.md` Part 4).  High `ΔMSE_out` means "worth
 > investigating", never "worth training on".  Rate by gauntlet.
 
 #### Re-cutting the quiet gate offline — `--bt-quiet-cp`
@@ -999,7 +999,7 @@ row-matched four-arm test (gate 60 / 120 / 200 / none over the same 100k games)
 found 60–200 flat and *no gate at all* **28 Elo worse** against the foreign anchor.
 The tail the gate discards carries the information but not usable signal — those
 labels are good because search resolved a tactic a static eval cannot represent.
-See `docs/Offline_Learning_Investigation.md` Part 4.  Dumping wide is still correct:
+See `docs/history/Offline_Learning_Investigation.md` Part 4.  Dumping wide is still correct:
 it costs nothing, and it makes the width a knob rather than a baked-in decision.
 
 The knob is **`train.py --bt-quiet-cp` (default 60)**, and it acts at corpus
@@ -1324,7 +1324,7 @@ achieved depth drifts *upward* over a run.  Log the depth distribution.
 **UCI:** `go nodes <x>` is implemented (it is standard UCI), so `match.py
 --nodes1/--nodes2` rates at fixed nodes.  That makes ratings **load-independent**
 — matches can run at any concurrency and stay comparable, which the 3+0.05
-gauntlets are not (`Online_Learning_Investigation.md` 7.8).
+gauntlets are not (`history/Online_Learning_Investigation.md` 7.8).
 
 ### Online learning rate — `--lr-scale`
 
@@ -1347,7 +1347,7 @@ the run sidecar as `lr_scale` and is deliberately **not** inherited through
 Because actors are frozen and refreshed from the learner, `K = 0` is *not*
 "generation without learning off to the side" — it is generation from a net
 that never drifts, i.e. a fixed-net corpus dump.  The reason to reach for this
-knob is the equilibrium documented in `Online_Learning_Investigation.md` 7.9:
+knob is the equilibrium documented in `history/Online_Learning_Investigation.md` 7.9:
 the online phase reliably costs ~−126 Elo and the offline phase reliably
 recovers ~+139, so the loop's yield is the small difference between two large
 stable numbers, and `K` is the only cheap handle on the first of them.
@@ -1367,7 +1367,7 @@ Two things dominate wall-clock generation speed, both measured in
    but a fixed-depth A/B put Hash 128 at **+8.9 ± 11.4 Elo** (a 95% interval, so
    1.5σ) over Hash 16, and hash size does reach search quality through TT-driven
    move ordering and pruning — so 128 MB plus no wipe gets the speed without the
-   question.  See `Online_Learning_Investigation.md` 7.5.
+   question.  See `history/Online_Learning_Investigation.md` 7.5.
    **The wipe is skipped only when weights are frozen** (`tdleaf_frozen()`), which
    train.py's actors always are.  A process that *learns* between games still
    clears: the score hash caches NNUE evaluations and the TT stores search
@@ -1495,7 +1495,7 @@ which disables all pruning for that run):
 > the training cut.  Deleting them is irreversible without replaying the games,
 > and it is what made `m260720-6e6g`'s leaf rows unrecoverable and forced the
 > retargeting experiment to rebuild pairs from five older archives instead
-> (`Online_Learning_Investigation.md` 7.7.1).  Costs roughly +5 GB per leg.
+> (`history/Online_Learning_Investigation.md` 7.7.1).  Costs roughly +5 GB per leg.
 
 `--keep-epoch-states` additionally keeps **every** epoch's `.tdleaf.bin` in
 `<tag>_work/train/` (default: only the promoted epoch's state survives; its
@@ -1523,7 +1523,7 @@ mode and is closed at both depths: at d8 with a mature chain behind it, a frozen
 before it on 1.7× the games, and its offline consolidation made validation MSE
 *rise* at every epoch — a frozen generator labels positions with evaluations the
 seed already reproduces, so there is nothing for consolidation to find.  See
-`Online_Learning_Investigation.md` Part 6.
+`history/Online_Learning_Investigation.md` Part 6.
 
 Two consequences worth internalising before tuning anything online:
 
@@ -1537,7 +1537,7 @@ Two consequences worth internalising before tuning anything online:
   reweighted or rescaled the online update — stack-norm alpha, per-feature
   vote normalisation, batch size — was rejected on production A/B.  `TDLEAF_BATCH_SIZE
   = 8` is now measured as the optimum.  The one clean magnitude lever never tested
-  in isolation is a uniform LR scale (recipe parked in `Online_Learning_Investigation.md`
+  in isolation is a uniform LR scale (recipe parked in `history/Online_Learning_Investigation.md`
   6.17).
 
 **The corpus window draws each prior leg's RAW DUMPS, not its assembled corpus.**
@@ -1579,7 +1579,7 @@ online phase (the normal production case — `6e6g` entered offline training at
 +4.2 against classic) epoch 2 finishes what epoch 1 began, and the ladder picks
 it.  From an **undamaged or lightly-damaged** seed — any `--skip-online`
 re-consolidation, or a leg whose online phase behaved — epoch 1 reaches the
-ceiling and **epoch 2 costs 14–20 Elo** (`Online_Learning_Investigation.md`
+ceiling and **epoch 2 costs 14–20 Elo** (`history/Online_Learning_Investigation.md`
 7.7.4).  `--gauntlet-epochs` protects the promoted net by picking the best
 epoch, but it pays for a wasted epoch to do it; pass `--epochs 1` when the seed
 is not damaged.
@@ -1594,7 +1594,7 @@ corpus rather than silently shrinking the training set.  Note the archived
 `corpus.tsv.gz` then holds root rows only — pass `--bt-rows both` to keep the full
 mix for later re-analysis.  Caveat worth knowing before over-reading this: the
 outcome/eval blend was calibrated on the *mixture* and has never been retuned per
-row type (`docs/Offline_Learning_Investigation.md` Part 3.5).
+row type (`docs/history/Offline_Learning_Investigation.md` Part 3.5).
 
 **Consolidation: use a multi-iteration corpus — also the `train.py` default.**
 Consolidating one iteration's own ~90M-row dump measurably leaves Elo on the table.
@@ -1603,7 +1603,7 @@ only in how many distinct games the rows came from) put **500k games at +112.9 a
 2.5M games at +148.7** against the classical anchor — **+45 Elo head-to-head, for
 zero extra compute and zero new games**, since the archived
 `<tag>_work/corpus.tsv.gz` files are already on disk.  See
-`docs/Offline_Learning_Investigation.md` Part 2.
+`docs/history/Offline_Learning_Investigation.md` Part 2.
 
 `train.py --corpus-window N` (default **4**) implements this: under `--continue` it
 walks the chain, pulls each ancestor's archived corpus, and splits a fixed row

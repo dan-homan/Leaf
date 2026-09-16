@@ -8,12 +8,22 @@ re-attempted — but none of it describes the system as it exists today. For tha
 see the living docs one level up in `engine/docs/`: `NNUE.md` (network
 architecture), `TRAINING.md` (online + offline training, the hybrid loop),
 `SCRIPT_USE.md` (script/CLI reference), `TODO.md` (open work),
-`Online_Learning_Investigation.md` (the standing research record for the online
-phase — read its top-of-file conclusions), and `SIMPLIFICATION_PLAN.md`
-(the completed consolidation around actor/learner self-play).
+`Learning_Investigation.md` (what is known about the hybrid loop, distilled from
+the two chronological investigation records that sit beside it), and
+`SIMPLIFICATION_PLAN.md` (the completed consolidation around actor/learner
+self-play).
 
 ## What's here
 
+- **`Online_Learning_Investigation.md`** and **`Offline_Learning_Investigation.md`**
+  — the chronological research records of the two halves of the hybrid loop
+  (2026-07-14 → 09-15, ~5,650 lines between them). Moved here 2026-09-15 when
+  `docs/Learning_Investigation.md` was written to carry their conclusions. They are
+  kept for provenance: every number in the synthesis cites a section here, and the
+  per-part methodology notes name the artifacts on disk that back each measurement.
+  Read them for reproduction, never for conclusions — both are blow-by-blow and
+  several of their confident intermediate readings were overturned by their own
+  later sections.
 - **`TRAINING_HISTORY.md`** — the training-system experiment log: the retired
   dense-piece-value channel and its gauge-anchoring machinery, the PSQT-freezing
   failure, the offline-consolidation sweep history (gen-1 through gen-3+), K/λ
