@@ -152,6 +152,27 @@ int main(int argc, char *argv[])
   set_search_param();
   set_hash_size(engine_cfg.hash_size);
   gen_check_table();
+  // ---------------------------------------------------------------------
+  // PV repairs (PV_NO_TT_CUTOFF, PV_LAST_RESOLVED) are for games whose results
+  // FEED TDLEAF LEARNING -- they buy a trustworthy leaf position at a small cost
+  // in playing strength.  In a TDLEAF build that is every game regardless of
+  // protocol: the record/update hooks fire under UCI and xboard exactly as they
+  // do under --selfplay, so gating on the self-play driver alone would leave UCI
+  // TDLeaf learning silently unrepaired.  Rating matches normally use plain
+  // NNUE=1 binaries, where this flag is never set; use --no-pv-learning to rate
+  // WITH a TDLEAF binary.
+#if TDLEAF && !TDLEAF_READONLY
+  {
+    extern int pv_learning_mode;
+    pv_learning_mode = 1;
+    for (int ai = 1; ai < argc; ai++)
+      if (strcmp(argv[ai], "--no-pv-learning") == 0) pv_learning_mode = 0;
+    if (!pv_learning_mode)
+      fprintf(stderr, "PV learning repairs DISABLED (--no-pv-learning): "
+                      "competitive search behaviour.\n");
+  }
+#endif
+
   srand(time(NULL));
 #if NNUE
   {

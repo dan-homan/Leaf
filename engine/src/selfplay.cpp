@@ -579,10 +579,6 @@ static SelfplayTerm selfplay_play_game(const SelfplayEpdLine &op, const Selfplay
 // ---------------------------------------------------------------------------
 int selfplay_main(int argc, char *argv[])
 {
-    // Both PV repairs are learning-only: they cost a little strength and buy a
-    // trustworthy leaf position, which only matters here.  See search.cpp.
-    { extern int pv_learning_mode; pv_learning_mode = 1; }
-
     SelfplayConfig cfg;
     cfg.epd_path   = nullptr;
     cfg.games      = 0;
@@ -900,10 +896,6 @@ static bool learner_process_file(const char *path, TDGameRecord *grec,
 
 int learner_main(int argc, char *argv[])
 {
-    // Both PV repairs are learning-only: they cost a little strength and buy a
-    // trustworthy leaf position, which only matters here.  See search.cpp.
-    { extern int pv_learning_mode; pv_learning_mode = 1; }
-
     bool opt_reset = false;
     LearnerConfig cfg;
     cfg.dir             = nullptr;
