@@ -394,7 +394,7 @@ generated position is scored at `--eval-depth` via xboard protocol and positions
 `|score| > --eval-limit` cp are discarded.  Chess960 castling rights are stripped from
 the EPD before sending to the engine.  `--eval-workers` parallel engine processes run
 concurrently (~75 pos/sec at depth 10 with 4 workers).  Compile the eval binary with
-`perl src/comp.pl classic_eval OVERWRITE` (no NNUE, no TDLEAF).  If the binary is
+`perl comp.pl classic_eval OVERWRITE` from `run/` or `learn/` (no NNUE, no TDLEAF).  If the binary is
 absent, a warning is printed and the filter is skipped.
 
 ---

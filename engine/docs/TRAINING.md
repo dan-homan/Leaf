@@ -63,8 +63,11 @@ See [The Hybrid Loop Workflow](#the-hybrid-loop-workflow--scriptstrainpy) below,
 
 Manual online-training workflow (what `train.py` automates), including initialization of a fresh net.  The supported generation path is the **actor/learner split** (`scripts/selfplay_run.py`): frozen actors emit `.tdg` trajectories and one learner owns the optimizer.
 
+All of this runs **from `engine/learn/`** — training binaries are built and run
+there, never in `run/` (see "The `run/` invariant").
+
 ```sh
-# 1. Build a training binary
+# 1. Build a training binary, in learn/ where it will run
 perl comp.pl train_hl_a NNUE=1 NNUE_NET=nn-fresh.nnue TDLEAF=1 OVERWRITE
 
 # 2. Initialize a fresh network (default material values baked into PSQT).
@@ -72,7 +75,7 @@ perl comp.pl train_hl_a NNUE=1 NNUE_NET=nn-fresh.nnue TDLEAF=1 OVERWRITE
 #    .tdleaf.bin FIRST — --init-nnue refuses to run when one already exists.
 ./Leaf_vtrain_hl_a --init-nnue --write-nnue nn-fresh.nnue
 
-# 3. Run actor/learner self-play (from learn/, with the binary installed there).
+# 3. Run actor/learner self-play.
 #    Actors are frozen (TDLEAF_FREEZE=1) and the learner runs --refresh-scores;
 #    fixed depth with no early adjudication provides the best learning targets.
 python3 selfplay_run.py --binary Leaf_vtrain_hl_a --epd training_openings.epd \
@@ -1596,13 +1599,29 @@ dumps and logs available.
 
 ### The `run/` invariant
 
-No compiled binary — rating binaries, the trainer, anything — is ever executed with
-`engine/run/` as its working directory. `run/` holds files like `main_bk.dat` that could
-otherwise silently bias match outcomes if a training or rating binary picked them up.
-Binaries are compiled in `run/` (a build-system requirement of `comp.pl`) but are then
-copied or moved into `engine/learn/` or `<tag>_work/epoch_binaries/` before anything
-executes them, and `match.py` is always given a resolved path so each engine's working
-directory is derived from that path, not from `run/`.
+**Nothing is ever executed with `engine/run/` as its working directory** — not a
+rating binary, not the trainer, nothing.  `run/` holds `main_bk.dat`, and a
+training or rating binary that picked up the opening book would silently bias
+every result.  `match.py` is always given a resolved path, so each engine's
+working directory comes from that path rather than from `run/`.
+
+**Build training and rating binaries directly in `learn/`.**  `comp.pl` compiles
+into the current directory, so from `engine/learn/`:
+
+```sh
+perl ../src/comp.pl <version> NNUE=1 TDLEAF=1 NNUE_NET=<net>.nnue
+```
+
+drops `Leaf_v<version>` right where it will run.  There is no need to build in
+`run/` and copy — an earlier version of this section called that "a build-system
+requirement of `comp.pl`", which was simply wrong.
+
+`run/` is for **durable executables**: the end point of a line of work, kept for
+regular play.  Transient training and rating binaries do not belong there.
+
+(`train.py` still builds in `run/` and copies into `learn/` itself.  That is an
+internal implementation detail, harmless because it copies before executing, and
+not a pattern to follow by hand.)
 
 ### Current settled recipe
 

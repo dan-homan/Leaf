@@ -16,32 +16,49 @@ protocol is auto-detected from the first command received on stdin.
 ## Build System
 
 Compilation is managed by `src/comp.pl`.  The build uses a **unity build** pattern: `src/Leaf.cc`
-includes every other `.cpp` file as a single translation unit.  Binaries land in `run/`.
+includes every other `.cpp` file as a single translation unit.  **`comp.pl` compiles into the
+current directory** — run it from wherever the binary belongs:
+
+- **`run/`** for *durable* executables: the end point of a line of work, kept for regular play.
+- **`learn/`** for training and rating binaries — `cd engine/learn && perl comp.pl <version> ...`
+  builds straight into `learn/`, where they run.  Do **not** build in `run/` and copy; and never
+  execute anything with `run/` as the working directory, because `main_bk.dat` lives there and a
+  training or rating binary would silently pick up book moves (`docs/TRAINING.md`, "The `run/`
+  invariant").
+
+Both directories carry a `comp.pl` symlink, so `perl comp.pl ...` works in either.
+⚠️ It must be invoked **from `run/` or `learn/`** — `comp.pl` resolves `../src/Leaf.cc`
+against the current directory, so `perl src/comp.pl` from `engine/` fails.
+
+The examples below build a playable engine, so they run from `run/`:
 
 ```sh
+cd engine/run/
+
 # Classical eval (no NNUE)
-perl src/comp.pl <version>
+perl comp.pl <version>
 
 # NNUE eval
-perl src/comp.pl <version> NNUE=1
+perl comp.pl <version> NNUE=1
 
 # NNUE with a specific net file
-perl src/comp.pl <version> NNUE=1 NNUE_NET=nn-leaf-260414.nnue
+perl comp.pl <version> NNUE=1 NNUE_NET=nn-leaf-260414.nnue
 
 # NNUE with net embedded in binary (no external .nnue file needed at runtime)
-perl src/comp.pl <version> NNUE=1 NNUE_EMBED=1 NNUE_NET=nn-leaf-260414.nnue
+perl comp.pl <version> NNUE=1 NNUE_EMBED=1 NNUE_NET=nn-leaf-260414.nnue
 
 # NNUE + TDLeaf(λ) training
-perl src/comp.pl <version> NNUE=1 TDLEAF=1
+perl comp.pl <version> NNUE=1 TDLEAF=1
 
 # Read-only weights (inference only)
-perl src/comp.pl <version> NNUE=1 TDLEAF=1 TDLEAF_READONLY=1
+perl comp.pl <version> NNUE=1 TDLEAF=1 TDLEAF_READONLY=1
 
 # Skip interactive overwrite prompt
-perl src/comp.pl <version> NNUE=1 OVERWRITE
+perl comp.pl <version> NNUE=1 OVERWRITE
 ```
 
-Binary naming: `run/Leaf_v<version>` — e.g. `Leaf_v2026_03_09a`, `Leaf_vtrain_nn-fresh`.
+Binary naming: `Leaf_v<version>` in whichever directory you build from — e.g.
+`run/Leaf_v2026_03_09a` for a durable engine, `learn/Leaf_vtrain_nn-fresh` for a training binary.
 
 ### Key compile flags
 
@@ -194,7 +211,8 @@ UCI_Chess960: when `setoption name UCI_Chess960 value true` is sent, castling no
 
 ## Scripts
 
-All scripts live in `scripts/`; `run/` and `learn/` have symlinks for in-place invocation.
+All scripts live in `scripts/`; `run/` and `learn/` have symlinks for in-place invocation
+(including `comp.pl`, so `perl comp.pl <version> ...` builds into whichever of the two you are in).
 See `docs/SCRIPT_USE.md` for full option tables.
 
 ```sh
@@ -273,17 +291,21 @@ tables.
 Manual online-only workflow (equivalent to what `selfplay_run.py` automates):
 
 ```sh
+# All of this runs from engine/learn/ — training binaries are built and run
+# there.  run/ is only for durable engines, and nothing executes with run/ as
+# its cwd (main_bk.dat would feed it book moves).
+
 # 1. Initialise a fresh random network (optional)
-perl src/comp.pl init_nnue NNUE=1 TDLEAF=1 OVERWRITE
-./run/Leaf_vinit_nnue --init-nnue --write-nnue learn/nn-fresh.nnue
+perl comp.pl init_nnue NNUE=1 TDLEAF=1 OVERWRITE
+./Leaf_vinit_nnue --init-nnue --write-nnue nn-fresh.nnue
 # Or with no material prior at all (learns piece values from scratch):
-./run/Leaf_vinit_nnue --init-nnue-noprior --write-nnue learn/nn-fresh.nnue
+./Leaf_vinit_nnue --init-nnue-noprior --write-nnue nn-fresh.nnue
 
 # 2. Build training binaries (symmetric self-play: both engines learn)
-perl src/comp.pl train_fresh_a NNUE=1 NNUE_NET=learn/nn-fresh.nnue TDLEAF=1 OVERWRITE
-perl src/comp.pl train_fresh_b NNUE=1 NNUE_NET=learn/nn-fresh.nnue TDLEAF=1 OVERWRITE
+perl comp.pl train_fresh_a NNUE=1 NNUE_NET=nn-fresh.nnue TDLEAF=1 OVERWRITE
+perl comp.pl train_fresh_b NNUE=1 NNUE_NET=nn-fresh.nnue TDLEAF=1 OVERWRITE
 
-# 3. Run training matches (from learn/)
+# 3. Run training matches
 python3 match.py Leaf_vtrain_fresh_a Leaf_vtrain_fresh_b -c 5 -tc 0:03+0.05 --wait 500 -n 500
 ```
 
@@ -302,9 +324,11 @@ engine/
                 SIMPLIFICATION_PLAN.md, change_log.txt, history/ for retired
                 designs and experiment write-ups)
   scripts/      Python automation scripts
-  run/          Compiled binaries + runtime config (opening book, incl.
-                main_bk.dat) — binaries land here only as a compile-time
-                step; no training/rating binary ever executes from here
+  run/          DURABLE binaries + runtime config (opening book, incl.
+                main_bk.dat).  End-of-line-of-work engines for regular play.
+                Nothing ever EXECUTES with run/ as its working directory —
+                main_bk.dat would silently feed book moves to a training or
+                rating binary.  Build training binaries in learn/ instead
   learn/        Training artifacts: .nnue, .tdleaf.bin, per-run <tag>_work/
                 archives, PGNs
 gui/            LeafGUI Flutter chess GUI (see gui/CLAUDE.md)
