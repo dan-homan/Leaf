@@ -1,6 +1,8 @@
 # Leaf Script Reference
 
-All Python scripts live in `scripts/`.  Symlinks in `run/` and `learn/` allow
+All Python scripts live in `scripts/`.  One-off experiment drivers — the arms
+behind specific published results — live in `scripts/arms/` with their own
+README; they are reproduction handles, not tooling.  Symlinks in `run/` and `learn/` allow
 them to be invoked in-place from those directories, which is the normal workflow
 since engines, `.nnue` files, and `.tdleaf.bin` files live there.
 

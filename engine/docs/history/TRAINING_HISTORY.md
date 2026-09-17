@@ -592,7 +592,7 @@ game end. That motivated the decayed target (`--bt-td-lambda`, default
 `TDLEAF_LAMBDA`): near-terminal positions trust the result, early positions
 lean on the eval bootstrap. Under decay the nominal ceilings roughly double
 (mean decay 0.502 on the iter2 corpus), so the plateau maps to diagonal
-ceilings λ ≈ 0.4–0.65 — swept before iteration 3 (`learn/sweep_td.sh`:
+ceilings λ ≈ 0.4–0.65 — swept before iteration 3 (`scripts/arms/sweep_td.sh`:
 diagonal λ = leaf-λ ∈ {0.3, 0.5, 0.7, 1.0} plus two crossed arms that test
 whether the mean-is-the-knob result still holds under decay).
 

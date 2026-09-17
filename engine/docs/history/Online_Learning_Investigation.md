@@ -4637,7 +4637,7 @@ it — `gateG` at 20M reads +160 against `classic_eval` where the real 190M
 - Raw dumps are pruned at end of run by default.  The six that survived here
   (`a2gate`, `ladder-ctl`, `ladder-reset`, `lrfc0`, `onon`, `warm-reset`) were
   the only wide corpus material on disk; `--keep-work` preserves them in future.
-- Scripts: `learn/run_gate_test.sh` (arms G and U) and `learn/run_gate_test2.sh`
+- Scripts: `scripts/arms/run_gate_test.sh` (arms G and U) and `scripts/arms/run_gate_test2.sh`
   (the corrected arm W, which documents the trap inline).
 
 ## 7.15 The Σ ladder: batch size at matched Adam steps — the first knob that works (2026-09-14/15)
@@ -4800,7 +4800,7 @@ when the chain restarts, and at large batch it must be small.
   `N`, `fires`, threshold and norm min/mean/max plus a histogram.  It is the
   instrument for the √B clip question.  The per-apply `[tdleaf step-clip]` line
   is a *different* clip (Adam step, `clip=30.0`) and was zero throughout.
-- Script: `learn/run_batch_ladder.sh`.
+- Script: `scripts/arms/run_batch_ladder.sh`.
 
 ## Methodology notes (Part 7)
 

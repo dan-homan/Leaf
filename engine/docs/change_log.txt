@@ -2842,7 +2842,7 @@ NNUE_EMBED=1 is now canonical for release, and the two overlapping
                identical (plateau at mean ~0.2-0.3), i.e. a flat lambda
                only sets the mean — the decay makes the per-position
                weight follow distance-to-end as TD(lambda) prescribes.
-               Ceiling sweep under decay: learn/sweep_td.sh.
+               Ceiling sweep under decay: scripts/arms/sweep_td.sh.
 
 2026_07_04 -- Batch trainer: --bt-leaf-blend generalized to --bt-leaf-lambda
                (nnue_batch_train.cpp + hybrid_loop.py): depth-0 leaf rows get
