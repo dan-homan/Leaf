@@ -118,7 +118,6 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 ENGINE_DIR = SCRIPT_DIR.parent
-RUN_DIR    = ENGINE_DIR / "run"
 LEARN_DIR  = ENGINE_DIR / "learn"
 COMP_PL    = "../src/comp.pl"
 DEFAULT_NET = "nn-fresh-260628.nnue"
@@ -549,8 +548,13 @@ def binary_baked_net_matches(binary, net_name):
 
 
 def compile_binary(version, net_name, tdleaf, force=False):
-    """Compile Leaf_v<version> in run/; returns the binary path."""
-    binary = RUN_DIR / f"Leaf_v{version}"
+    """Compile Leaf_v<version> in learn/, where it will run; returns its path.
+
+    comp.pl compiles into the current directory, so building here means no copy
+    step and nothing transiting run/.  run/ is for durable engines only, and
+    nothing may execute with run/ as its cwd (main_bk.dat would feed it book
+    moves) -- see docs/TRAINING.md, "The run/ invariant"."""
+    binary = LEARN_DIR / f"Leaf_v{version}"
     if binary.exists() and not force:
         if binary_baked_net_matches(binary, net_name):
             log(f"using existing binary {binary.name}")
@@ -562,7 +566,7 @@ def compile_binary(version, net_name, tdleaf, force=False):
     flags = ["NNUE=1", f"NNUE_NET={net_name}"]
     if tdleaf:
         flags.append("TDLEAF=1")
-    sh(["perl", COMP_PL, version] + flags + ["OVERWRITE"], cwd=RUN_DIR)
+    sh(["perl", COMP_PL, version] + flags + ["OVERWRITE"], cwd=LEARN_DIR)
     if not binary.exists():
         die(f"compile did not produce {binary}")
     return binary
@@ -1133,12 +1137,8 @@ def main():
         # Any TDLeaf binary can init; reuse the trainer binary (compiled against
         # --net, but --init-nnue writes a fresh net rather than reading one, so
         # the not-yet-existing net file is fine at compile time without EMBED).
-        # Compiled in run/ (build-system requirement) but never executed there —
-        # run/ holds files (e.g. main_bk.dat) that must never affect a training
-        # binary's behavior, so run() only ever happens from a copy in learn/.
-        init_bin = compile_binary("bt", args.net, tdleaf=True, force=args.recompile)
-        init_bin_learn = LEARN_DIR / init_bin.name
-        shutil.copy2(init_bin, init_bin_learn)
+        init_bin_learn = compile_binary("bt", args.net, tdleaf=True,
+                                        force=args.recompile)
         flag = {"material":  "--init-nnue",
                 "classical": "--init-nnue-classical",
                 "noprior":   "--init-nnue-noprior"}[args.init_nnue]
@@ -1157,7 +1157,6 @@ def main():
     bt_bin = compile_binary("bt", args.net, tdleaf=True, force=args.recompile)
     if not args.skip_online:
         tr_a = compile_binary("train_hl_a", args.net, tdleaf=True, force=args.recompile)
-        shutil.copy2(tr_a, LEARN_DIR / tr_a.name)
 
     # ---- Phase 1: promote state -----------------------------------------
     if args.state:
@@ -1469,16 +1468,14 @@ def main():
         nothing lingers in run/.  Returns (binary_path, net_path, display_name):
         binary_path is the absolute path match.py should be given (it resolves
         absolute paths directly and derives each engine's own execution
-        directory from os.path.dirname(exe), so this guarantees the engine
-        never runs with run/ as its directory); display_name is the bare
+        directory from os.path.dirname(exe), so each engine runs from its own
+        directory); display_name is the bare
         Leaf_v<ver> for PGN filenames and log messages."""
-        shutil.copy2(snap, RUN_DIR / snap.name)
         b = compile_binary(ver, snap.name, tdleaf=False, force=True)
         dest_bin = epoch_bin_dir / b.name
         dest_net = epoch_bin_dir / snap.name
         shutil.move(str(b), str(dest_bin))
         shutil.copy2(snap, dest_net)   # net resolves next to binary
-        (RUN_DIR / snap.name).unlink()
         return dest_bin, dest_net, b.name
 
     # Pre-training baseline net = the net exactly as it enters offline
@@ -1509,12 +1506,9 @@ def main():
         # can't simply be renamed).
         tdleaf_nnue = LEARN_DIR / f"{args.tag}-tdleaf.nnue"
         shutil.copy2(pre_nnue, tdleaf_nnue)
-        shutil.copy2(tdleaf_nnue, RUN_DIR / tdleaf_nnue.name)
-        b = compile_binary(f"{args.tag}-tdleaf", tdleaf_nnue.name,
-                           tdleaf=False, force=True)
-        tdleaf_rate_bin = LEARN_DIR / b.name
-        shutil.move(str(b), str(tdleaf_rate_bin))
-        (RUN_DIR / tdleaf_nnue.name).unlink()
+        tdleaf_rate_bin = compile_binary(f"{args.tag}-tdleaf",
+                                         tdleaf_nnue.name,
+                                         tdleaf=False, force=True)
         log(f"tdleaf-phase net saved: {tdleaf_nnue.name} + {tdleaf_rate_bin.name}")
 
     log(f"training: {args.bt_threads} threads x {args.epochs} epochs "
@@ -1652,14 +1646,9 @@ def main():
 
     # Always build Leaf_v<tag>-final (needed as the anchor opponent for any
     # future --continue chain, even if this run has nothing to gauntlet
-    # against yet) — compiled in run/ (build-system requirement) but moved
-    # into learn/ before anything executes it, never left resident in run/.
-    shutil.copy2(out_nnue, RUN_DIR / out_nnue.name)
-    compiled_final = compile_binary(f"{args.tag}-final", out_nnue.name,
-                                    tdleaf=False, force=True)
-    rate_bin = LEARN_DIR / compiled_final.name
-    shutil.move(str(compiled_final), str(rate_bin))
-    (RUN_DIR / out_nnue.name).unlink()
+    # against yet).  Built directly in learn/, where it runs.
+    rate_bin = compile_binary(f"{args.tag}-final", out_nnue.name,
+                              tdleaf=False, force=True)
 
     def run_gauntlet(bin_name, label):
         """Rate Leaf_v<label> (binary bin_name in learn/) against every

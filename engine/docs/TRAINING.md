@@ -1619,9 +1619,9 @@ requirement of `comp.pl`", which was simply wrong.
 `run/` is for **durable executables**: the end point of a line of work, kept for
 regular play.  Transient training and rating binaries do not belong there.
 
-(`train.py` still builds in `run/` and copies into `learn/` itself.  That is an
-internal implementation detail, harmless because it copies before executing, and
-not a pattern to follow by hand.)
+`train.py` does the same: every binary it builds — the trainer, the actor, and
+the `-tdleaf` / `-final` / epoch rating binaries — is compiled directly in
+`learn/`.  Nothing transits `run/`.
 
 ### Current settled recipe
 
