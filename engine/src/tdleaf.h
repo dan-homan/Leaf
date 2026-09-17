@@ -314,6 +314,9 @@ struct TDRecord {
     position root_pos;
     int      root_static;
     int8_t   id_depth;    // ID iteration count ≈ achieved search depth
+    // NOT a .tdg field: recomputed by tdleaf_rebuild_record on the learner side.
+    // Anything derived that the learner needs MUST be recomputed there or added
+    // to the trajectory format -- the learner never calls tdleaf_record_ply.
     bool     leaf_ok;     // leaf static eval agrees with the propagated root
                           // score within TDLEAF_LEAF_MATCH_CP.  False = the PV
                           // did not locate the position the score came from, so

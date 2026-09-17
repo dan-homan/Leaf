@@ -1275,6 +1275,27 @@ void tdleaf_rebuild_record(TDRecord &r, bool refresh_score)
         r.root_static = nnue_evaluate_acc_raw(root_acc.acc, root_acc.psqt,
                                               (int)r.root_pos.wtm, pc_root);
     }
+
+    // Leaf-match gate (TDLEAF_LEAF_MATCH_CP).  MUST be recomputed here: the flag
+    // is set by tdleaf_record_ply in the ACTOR, is not a field of the .tdg
+    // trajectory format, and this is the learner's only path to a TDRecord --
+    // so without this the learner sees an uninitialised flag, excludes every
+    // record, and both the online trace and the leaf dump go empty.
+    //
+    // Recomputing is also the more correct choice than shipping the actor's
+    // value: under --refresh-scores the stored evaluations have just been
+    // re-expressed on CURRENT weights, so the gate should judge the refreshed
+    // numbers rather than the vintage the actor recorded.
+    //
+    // No pv_len here, and none is needed: the leaf is an even number of plies
+    // from the root exactly when leaf STM == root STM, which is the same sign
+    // rule the TSV dump uses.
+    {
+        int prop = ((int)r.wtm == (int)r.root_wtm) ? r.score_root_stm
+                                                   : -r.score_root_stm;
+        int d = r.score_stm - prop; if (d < 0) d = -d;
+        r.leaf_ok = (TDLEAF_LEAF_MATCH_CP <= 0) || (d <= TDLEAF_LEAF_MATCH_CP);
+    }
 }
 
 // ---------------------------------------------------------------------------
