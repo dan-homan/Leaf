@@ -64,7 +64,7 @@ def main():
                          "ZERO (Online_Learning_Investigation.md 7.3), so the "
                          "throughput is not worth the confound.  Revisit if "
                          "generation becomes productive again; see "
-                         "docs/Generation_Throughput.md.")
+                         "docs/history/Generation_Throughput.md.")
     ap.add_argument("--depth", type=int, default=8)
     ap.add_argument("--nodes", type=int, default=0,
                     help="Node budget per move (0 = fixed depth, the default). "

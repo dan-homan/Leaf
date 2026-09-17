@@ -561,7 +561,7 @@ deltas and, on save, re-read the file and applied `file + delta` (weights), addi
 count merge, `max(v_file, v_local)`, and `(m_file + m_local)/2` per element. Those
 generation modes and the entire delta-merge machinery were removed in the Phase-3
 simplification once the single actor/learner learner became the sole optimizer; see
-`docs/SIMPLIFICATION_PLAN.md`.
+`docs/history/SIMPLIFICATION_PLAN.md`.
 
 ---
 
@@ -1449,7 +1449,7 @@ stable numbers, and `K` is the only cheap handle on the first of them.
 ### Generation throughput
 
 Two things dominate wall-clock generation speed, both measured in
-`docs/Generation_Throughput.md`:
+`docs/history/Generation_Throughput.md`:
 
 1. **Hash size (`--hash`, default 128 MB) and the per-game wipe.**  Under frozen
    weights the hash tables are **no longer cleared between games** — probes match

@@ -1,5 +1,12 @@
 # Generation Throughput on Linux — why self-play scaled badly, and what fixed it
 
+> **📖 Historical record.**  Moved to `docs/history/` on 2026-09-17: the question
+> was answered and the fix (`clear_hash()` in place of a per-game realloc)
+> shipped.  ⚠️ **§3's conclusion was later reversed**: the 16 MB hash it
+> validated was reverted to 128 MB after a fixed-depth A/B measured it
+> +8.9 ± 11.4 Elo *weaker* — see `Online_Learning_Investigation.md` 7.5.  The
+> throughput analysis stands; the hash-size recommendation does not.
+
 **Question asked (2026-09-03).**  Since generation moved from the fastchess
 driver to internal self-play (the actor/learner split), per-game generation on
 the Linux box has felt ~30–50% slower for large runs, while on the Macintosh

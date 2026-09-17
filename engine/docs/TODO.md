@@ -33,7 +33,7 @@ STM + game-ply λ^Δ), and **Phases D and E have since landed:**
   now the sole `train.py` generation mode (the multi-writer `--selfplay-gen` and
   `--uci-pair-gen` paths were removed).  The follow-on cleanup that unblocked —
   replacing the in-engine multi-writer `.tdleaf.bin` merge with a plain atomic
-  write — **also landed** (Phase 3, `docs/SIMPLIFICATION_PLAN.md`), validated
+  write — **also landed** (Phase 3, `docs/history/SIMPLIFICATION_PLAN.md`), validated
   byte-exact.  Nothing in this section is outstanding.
 
 ### Offline-phase plateau — ranked experiment plan (2026-09-02)
@@ -428,7 +428,7 @@ single-writer learner is unexamined; the learner's saves are already infrequent.
 > (`--traj-out`/`--learn-stream` via `scripts/selfplay_run.py`), now the default
 > `train.py` generation mode.  The roadmap below is retained as the historical
 > implementation spec.  Remaining follow-on (retire the in-engine multi-writer
-> merge) is Phase 3 in `docs/SIMPLIFICATION_PLAN.md`.
+> merge) is Phase 3 in `docs/history/SIMPLIFICATION_PLAN.md`.
 
 **Date:** 2026-07-07 (Phases A–C); this file trimmed to the still-pending phases
 **Status:** Phases A–C (pure-PSQT + ply semantics) are **done** — see

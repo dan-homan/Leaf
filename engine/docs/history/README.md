@@ -8,10 +8,8 @@ re-attempted — but none of it describes the system as it exists today. For tha
 see the living docs one level up in `engine/docs/`: `NNUE.md` (network
 architecture), `TRAINING.md` (online + offline training, the hybrid loop),
 `SCRIPT_USE.md` (script/CLI reference), `TODO.md` (open work),
-`Learning_Investigation.md` (what is known about the hybrid loop, distilled from
-the two chronological investigation records that sit beside it), and
-`SIMPLIFICATION_PLAN.md` (the completed consolidation around actor/learner
-self-play).
+and `Learning_Investigation.md` (what is known about the hybrid loop, distilled
+from the two chronological investigation records that now sit in here).
 
 ## What's here
 
@@ -34,6 +32,18 @@ self-play).
   resolved/implemented changelog carried over from `TODO.md`.
 - **`NNUE_HISTORY.md`** — the original NNUE port's file-change record and its
   performance-optimization history (NPS benchmarks, early match results).
+- **`SIMPLIFICATION_PLAN.md`** — the consolidation around actor/learner self-play
+  (Phases 1–3, all landed 2026-07-20): retired TDLeaf env knobs, actor/learner made
+  the sole generation mode, and the in-engine multi-writer `.tdleaf.bin` merge
+  replaced by a direct atomic write. Marked `COMPLETE` in its own header; the one
+  item never closed is a compile-flag audit. Its per-phase notes are chronological,
+  so an "still open" remark inside an earlier note refers to that moment, not today.
+- **`Generation_Throughput.md`** — why self-play generation scaled badly on the
+  Linux box and what fixed it (2026-09-03). Resolved: the memory/NUMA hypothesis
+  did not hold, the hash hypothesis did, and `clear_hash()` replacing the
+  per-game realloc is worth ~25%. Note the 16 MB hash it validated was later
+  reverted to 128 MB after a fixed-depth A/B — see
+  `Online_Learning_Investigation.md` 7.5, which supersedes §3 of this file.
 - **`BT_PARALLEL_PLAN.md`** — a completed, self-contained implementation plan
   (threaded batch trainer replacing multi-process sharding), moved here as-is.
   Marked `Status: IMPLEMENTED` in its own header.

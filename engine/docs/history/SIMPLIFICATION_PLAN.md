@@ -1,5 +1,11 @@
 # Simplification Plan — Consolidating Around Actor/Learner Self-Play
 
+> **📖 Historical record.**  Moved to `docs/history/` on 2026-09-17.  The plan is
+> COMPLETE (see the status line below); it is kept for the rationale behind what
+> was removed, so the retired knobs and the multi-writer merge are not
+> re-proposed.  The per-phase notes are chronological — a remark reading "still
+> open" inside an earlier note refers to that moment, not to today.
+
 **Status:** COMPLETE — Phases 1–3 all landed (2026-07-20).  The one item never
 closed is the compile-flag audit at the end of Phase 3 (does `TDLEAF_LOG_STEP_CLIPS`
 still earn its keep?).  Everything below this line is the record of a finished

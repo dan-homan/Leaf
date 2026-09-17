@@ -175,7 +175,7 @@ See `docs/TRAINING.md` for the full algorithm reference, hyperparameters, and gr
 - Sustained training score far from 50% (e.g. vs a fixed stronger opponent) causes outcome-imbalance drift — the constant component of the TD outcome term is absorbed by FC output biases and other constant-capable channels, collapsing the net.  Self-play is immune and balanced play actively heals drift.  See "Outcome-Imbalance Drift" in `docs/TRAINING.md`; canary monitor: `scripts/diff_tdleaf_checkpoints.py`.
 - **Online-stability rules** (each violation collapsed a full iteration; `docs/TRAINING.md` "Online-stability rules"): (1) online-learning self-play must play to **natural termination** — resign/draw adjudication + learning is a runaway decisiveness spiral; (2) TD targets must be on **current weights** — the actor/learner path requires the learner's `--refresh-scores` (trajectory scores otherwise lag by a refresh cycle).  The health canary is the **draw rate** (healthy ≈ 35–40% at d8), NOT gradient norms — both collapses kept nominal grad telemetry throughout.
 - Env diagnostics: `TDLEAF_CHECK_ACC=1` verifies walked-vs-rebuilt leaf accumulators per record (this check caught the FRC castle phantom-capture bug in `nnue_record_delta`); `TDLEAF_TRACE_UPDATE=<file>` dumps a per-record gradient trace in exact hex.
-- **Env guardrail** (`tdleaf_check_env()`, runs at `main()` entry in TDLEAF builds): the binary **hard-errors on any `TDLEAF_*` env var outside the allowlist** (`TDLEAF_FREEZE`, `TDLEAF_DUMP_TSV`, `TDLEAF_DUMP_QUIET_CP`, `TDLEAF_DUMP_MAX_CP`, `TDLEAF_CHECK_ACC`, `TDLEAF_TRACE_UPDATE`) and logs the effective training config (K, λ, LRs, batch) at startup.  **Adding a new `TDLEAF_*` env var requires adding it to this allowlist** or the binary refuses to start.  The experimental target-mode / root-learning / `TDLEAF_LR_*` knobs were removed in Phase 1 (`docs/SIMPLIFICATION_PLAN.md`).
+- **Env guardrail** (`tdleaf_check_env()`, runs at `main()` entry in TDLEAF builds): the binary **hard-errors on any `TDLEAF_*` env var outside the allowlist** (`TDLEAF_FREEZE`, `TDLEAF_DUMP_TSV`, `TDLEAF_DUMP_QUIET_CP`, `TDLEAF_DUMP_MAX_CP`, `TDLEAF_CHECK_ACC`, `TDLEAF_TRACE_UPDATE`) and logs the effective training config (K, λ, LRs, batch) at startup.  **Adding a new `TDLEAF_*` env var requires adding it to this allowlist** or the binary refuses to start.  The experimental target-mode / root-learning / `TDLEAF_LR_*` knobs were removed in Phase 1 (`docs/history/SIMPLIFICATION_PLAN.md`).
 - Setting `TDLEAF_DUMP_TSV=<prefix>` dumps quiet leaf+root training corpora during play (see `docs/TRAINING.md`).  Under `--learn-stream`, set it on the learner to dump the corpus from consumed trajectories.
 
 ### Protocol support
@@ -318,11 +318,10 @@ engine/
   src/          Source code (unity-built via Leaf.cc)
   docs/         Documentation (NNUE.md, TRAINING.md, SCRIPT_USE.md, TODO.md,
                 Learning_Investigation.md — the distilled synthesis of what is
-                known about the hybrid loop, READ THIS ONE; the chronological
-                records it distils, Online_Learning_Investigation.md and
-                Offline_Learning_Investigation.md; Generation_Throughput.md,
-                SIMPLIFICATION_PLAN.md, change_log.txt, history/ for retired
-                designs and experiment write-ups)
+                known about the hybrid loop, READ THIS ONE; change_log.txt;
+                history/ for retired designs, completed plans and experiment
+                write-ups — the two investigation records, the simplification
+                plan, generation-throughput, and the older training/NNUE logs)
   scripts/      Python automation scripts
   run/          DURABLE binaries + runtime config (opening book, incl.
                 main_bk.dat).  End-of-line-of-work engines for regular play.

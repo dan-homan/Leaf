@@ -59,7 +59,7 @@ void tdleaf_check_env()
             fprintf(stderr, "TDLeaf: unrecognized environment variable %.*s — "
                             "retired experimental knobs (blend/hybrid targets, "
                             "root learning, TDLEAF_LR_*, TDLEAF_FREEZE_PASSTHROUGH) "
-                            "were removed.  Unset it (see docs/SIMPLIFICATION_PLAN.md).\n",
+                            "were removed.  Unset it (see docs/history/SIMPLIFICATION_PLAN.md).\n",
                     (int)nlen, *e);
             bad++;
         }
