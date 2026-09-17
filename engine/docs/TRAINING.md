@@ -262,12 +262,13 @@ FC biases ≈ 1500 (int32 scale), FT weights ≈ 16, FT biases ≈ 51, PSQT ≈ 
 
 | Layer | Update Rule | LR0 | Notes |
 |-------|-------------|-----|-------|
-| FC0/FC1 weights | Full Adam | `TDLEAF_ADAM_LR0 = 0.005` | Float shadow clamped to ±127 after each update |
-| FC2 weights | Full Adam | `TDLEAF_ADAM_FC2_LR0 = 0.07` | Separate LR — 32→1 fan-in gives FC2 weights ~14× the leverage and ~14× the median magnitude of FC0/FC1 |
-| FC0/FC1/FC2 biases  | Full Adam | `TDLEAF_ADAM_FC_BIAS_LR0 = 1.5` | Int32 scale; separate from int8-scale FC weights |
-| FT weights | RMSProp (per-weight v, no m) | `TDLEAF_ADAM_FT_LR0 = 0.015` | Sparse update; per-session warmup damps first 100 steps |
-| FT biases  | Full Adam | `TDLEAF_ADAM_FT_BIAS_LR0 = 0.02` | Hedged below the median-rule value to limit dying-ReLU risk from update-frequency asymmetry |
-| PSQT       | Full Adam | `TDLEAF_ADAM_PSQT_LR0 = 13.0` | Int32 scale; the sole material channel |
+| FC0 weights | Full Adam | `TDLEAF_ADAM_LR0 = 0.00035` | Float shadow clamped to ±127 after each update.  Recalibrated from this net's own shadows (stationary, RMS ≈ 3.88) rather than inherited Stockfish statistics |
+| FC1 weights | Full Adam | `TDLEAF_ADAM_FC1_LR0 = 0.00125` | Split from FC0: fc1_w is NOT stationary (RMS 3.0 → 6.7), so it has no fixed magnitude to calibrate against |
+| FC2 weights | Full Adam | `TDLEAF_ADAM_FC2_LR0 = 0.0175` | Separate LR — 32→1 fan-in gives FC2 weights ~14× the leverage and ~14× the median magnitude of FC0/FC1 |
+| FC0/FC1/FC2 biases  | Full Adam | `TDLEAF_ADAM_FC_BIAS_LR0 = 0.375` | Int32 scale; separate from int8-scale FC weights |
+| FT weights | RMSProp (per-weight v, no m) | `TDLEAF_ADAM_FT_LR0 = 0.00375` | Sparse update; per-session warmup damps first 100 steps |
+| FT biases  | Full Adam | `TDLEAF_ADAM_FT_BIAS_LR0 = 0.005` | Hedged below the median-rule value to limit dying-ReLU risk from update-frequency asymmetry |
+| PSQT       | Full Adam | `TDLEAF_ADAM_PSQT_LR0 = 3.25` | Int32 scale; the sole material channel |
 
 #### Why a Separate PSQT LR0?
 
@@ -275,8 +276,20 @@ Adam normalises gradient magnitude: the effective per-step size in weight-space 
 approximately ±LR0 per update, independent of the raw gradient magnitude. PSQT
 weights are at int32 scale (median |w| ≈ 13343) while FC weights are at int8 scale
 (median |w| ≈ 5 for FC0/FC1) — a ratio of ~2600×. Using the same LR0 for both caused
-PSQT to change negligibly relative to its baseline scale. `TDLEAF_ADAM_PSQT_LR0 = 13.0`
+PSQT to change negligibly relative to its baseline scale. `TDLEAF_ADAM_PSQT_LR0 = 3.25`
 keeps PSQT's per-step fractional change matched to the other sections.
+
+**Two kinds of section, and only one obeys a magnitude rule.**  `fc0_w`, `ft_w`
+and `psqt_w` are STATIONARY — 99.99% of the parameters, scale fixed by the init
+constants and unmoved across 7M games — so "LR as a fraction of typical weight"
+is well defined and all three are held to one ratio.  `fc2_w` and the five bias
+sections are SCALE-FINDING: they initialise at or near zero and spend the run
+finding their own scale, so their LR is a growth rate and a fixed absolute LR
+self-anneals.  **Never recalibrate a scale-finding section against its converged
+magnitude** — sizing the FC biases off `fc0_b ≈ 1400` would give a fresh net a
+bias LR that cannot move a section sitting at zero.  Measure on the FP32 shadows
+(`.tdleaf.bin` values carry `TDLEAF_SCALE = 128`) over TOUCHED weights, never on
+the rounded, structurally padded `.nnue`.
 
 #### Why a Separate FT Bias LR0?
 
@@ -284,8 +297,8 @@ FT biases are updated densely (~200 times per game), while FT weights are update
 sparsely (~8 per 5000 games for a typical feature row). Without a hedged LR, biases
 race ahead of weights: they drift strongly negative before FT weights have learned
 useful features, suppressing SqrCReLU activations and causing dying-ReLU.
-`TDLEAF_ADAM_FT_BIAS_LR0 = 0.02` is hedged below the 0.001×median(|w|) value
-(median |w| ≈ 51 would suggest 0.05) to limit that drift without freezing adaptation.
+`TDLEAF_ADAM_FT_BIAS_LR0 = 0.005` is hedged below the magnitude-rule value to
+limit that drift without freezing adaptation.
 
 #### Adam step clipping
 
@@ -298,8 +311,9 @@ clip counts are logged when built with `-D TDLEAF_LOG_STEP_CLIPS=1`.
 
 #### Per-session FT warmup
 
-Beyond the global `TDLEAF_ADAM_WARMUP = 50` (keyed on the persisted `t_adam`, so
-it fires only on the very first session), FT updates use an additional
+Beyond the global `TDLEAF_ADAM_WARMUP = 100` (keyed on the session clock after
+`--opt-reset`, else on the persisted `t_adam` — so it is inert on an established
+net and fires on a fresh `--init-nnue` one), FT updates use an additional
 per-session ramp `TDLEAF_FT_SESSION_WARMUP = 100`. This damps FT-weight updates
 during the `v_ft_w` accumulation phase at every restart, regardless of whether `v`
 was loaded from disk — protecting freshly-zeroed (cold) FT rows from oversized
@@ -354,21 +368,22 @@ per-weight bias correction and monitoring.
 
 | Constant | Value | Notes |
 |----------|-------|-------|
-| `TDLEAF_ADAM_LR0` | 0.005 | FC0/FC1 weights (int8 scale; median \|w\| ≈ 5) |
-| `TDLEAF_ADAM_FC2_LR0` | 0.07 | FC2 weights (int8 scale; median \|w\| ≈ 68 — final 32→1 layer) |
-| `TDLEAF_ADAM_FC_BIAS_LR0` | 1.5 | FC0/FC1/FC2 biases (int32 scale; median ≈ 1500 across stacks) |
-| `TDLEAF_ADAM_FT_LR0` | 0.015 | FT weights (sparse; int16 scale; median \|w\| ≈ 16) |
-| `TDLEAF_ADAM_FT_BIAS_LR0` | 0.02 | FT biases (hedged below 0.001×median to limit dying-ReLU risk) |
-| `TDLEAF_ADAM_PSQT_LR0` | 13.0 | PSQT (int32 scale; median ≈ 13343) |
+| `TDLEAF_ADAM_LR0` | 0.00035 | FC0 weights (int8 scale; stationary, RMS ≈ 3.88) |
+| `TDLEAF_ADAM_FC1_LR0` | 0.00125 | FC1 weights (int8 scale; NOT stationary, RMS 3.0 → 6.7) |
+| `TDLEAF_ADAM_FC2_LR0` | 0.0175 | FC2 weights (int8 scale; median \|w\| ≈ 68 — final 32→1 layer) |
+| `TDLEAF_ADAM_FC_BIAS_LR0` | 0.375 | FC0/FC1/FC2 biases (int32 scale; median ≈ 1500 across stacks) |
+| `TDLEAF_ADAM_FT_LR0` | 0.00375 | FT weights (sparse; int16 scale; median \|w\| ≈ 16) |
+| `TDLEAF_ADAM_FT_BIAS_LR0` | 0.005 | FT biases (hedged below 0.001×median to limit dying-ReLU risk) |
+| `TDLEAF_ADAM_PSQT_LR0` | 3.25 | PSQT (int32 scale; median ≈ 13343) |
 | `TDLEAF_ADAM_BETA1` | 0.9 | First-moment decay (FC weights/biases, FT biases, PSQT) |
 | `TDLEAF_ADAM_BETA2` | 0.999 | Second-moment decay (all layers) |
-| `TDLEAF_ADAM_EPS` | 1e-8 | Numerical floor in denominator |
+| `TDLEAF_ADAM_EPS` | 1e-12 | Numerical floor in denominator.  Lowered from 1e-8 on 2026-09-12: at 1e-8 it gated the low-gradient tail out of Adam's normalisation, making the optimizer sensitive to accumulated gradient SCALE.  Do not raise it, and do not push it much lower — `-ffast-math` makes `v == 0` reachable |
 | `TDLEAF_ADAM_STEP_CLIP` | 30.0 | Bound on unit-less Adam step `\|m_hat/sqrt(v_hat)\|` before LR multiply; uniform across categories |
-| `TDLEAF_ADAM_WARMUP` | 50 | Linear LR warmup over first N Adam steps; keyed on persisted `t_adam` (first session only) |
+| `TDLEAF_ADAM_WARMUP` | 100 | Linear LR warmup over first N Adam steps, ALL categories.  Counted in STEPS, so its length in GAMES scales with the batch — 100 steps is 5,000 games at batch 50.  Keyed on the session clock after `--opt-reset`, else on persisted `t_adam`, so it is inert on an established net and fires on a fresh `--init-nnue` one |
 | `TDLEAF_FT_SESSION_WARMUP` | 100 | Per-session FT LR ramp over first N steps of each restart; keyed on `t_ft_session` (not persisted) |
-| `TDLEAF_BATCH_SIZE` | 8 | Mini-batch: accumulate gradients across N games before each Adam step |
+| `TDLEAF_BATCH_SIZE` | 50 | Mini-batch: accumulate gradients across N GAMES before each Adam step.  Compile-time overridable via `TDLEAF_BATCH_SIZE_DEFAULT` |
 | `TDLEAF_WEIGHT_DECAY` | 1e-4 | AdamW decoupled weight decay coefficient (FC + FT weights only) |
-| `TDLEAF_GRAD_CLIP_NORM` | 1.0 | Global gradient L2 norm clip threshold; 0 = disabled |
+| `TDLEAF_GRAD_CLIP_NORM` | 2.0 | Global gradient L2 norm clip threshold; 0 = disabled.  Gradients are SUMMED across the batch so the accumulated norm grows as √B — rescale with √B if the batch changes, and check the `TDLeaf clip stats` fire rate |
 | `TDLEAF_MIN_PLIES` | 8 | Skip games with fewer recorded TDLeaf plies than this |
 | `TDLEAF_MIN_PLIES_REP` | 40 | Skip 3-fold repetition draws with fewer plies than this |
 | `TDLEAF_SCORE_CLIP_PAWNS` | 1.0 | Clip threshold for inter-ply score-change attenuation: `score_clip_cp = SCORE_CLIP_PAWNS × max(value[PAWN], 100 cp)`. With PAWN fixed, the threshold is effectively constant at 100 cp. Set to a large value to disable |
@@ -380,10 +395,18 @@ multipliers and `TDLEAF_FREEZE_PASSTHROUGH` were removed in simplification Phase
 and a TDLEAF binary now **hard-errors at startup** on any `TDLEAF_*` environment
 variable outside its allowlist (see [Diagnostic Flags](#diagnostic-flags) below).
 
-`TDLEAF_BATCH_SIZE = 8` is the measured optimum, not just the inherited default:
-batch 16 scored 34 Elo worse per iteration (2.2σ) and batch 4 was not better, with
-net weight displacement invariant across the whole 4× range — see
-`history/Online_Learning_Investigation.md` 6.15–6.16 before changing it.
+`TDLEAF_BATCH_SIZE = 50`, and it is measured rather than inherited — but read the
+history before changing it, because the line was closed once at a different value.
+6.15–6.16 rated *leg total* at matched GAMES and found an optimum at 8.  7.15
+re-rated *handoff damage* at matched Adam STEPS and found −140.6 (B=8) → −76.6
+(B=32) → −94.3 (64), i.e. **8 → 32 = +64.0 ± 12.9, 5.0σ** — the first knob in
+Parts 6–7 to survive a controlled measurement.  What separated them: matching
+steps rather than games, and `TDLEAF_ADAM_EPS` going 1e-8 → 1e-12, which removed
+the optimizer's sensitivity to the accumulated gradient scale that batch size
+moves as √B.  50 sits in the flat 32–64 band and agreed with an independent
+fresh-net run.  ⚠️ 7.15 rated **damage, not leg yield**, and 6.16's batch-16 arm
+cut damage 4× while making the loop *worse* — so if you sweep this, rate a full
+leg, not the excursion.  Compile-time overridable: `TDLEAF_BATCH_SIZE_DEFAULT=N`.
 Set `TDLEAF_BATCH_SIZE = 1` to restore per-game Adam steps.
 Set `TDLEAF_ADAM_WARMUP = 0` to disable warmup.
 Set `TDLEAF_WEIGHT_DECAY = 0.0` to disable weight decay.
@@ -394,8 +417,11 @@ Set `TDLEAF_ADAM_STEP_CLIP` to a very large value to effectively disable step cl
 
 ### Mini-Batch Gradient Accumulation
 
-By default (`TDLEAF_BATCH_SIZE=8`), gradients are accumulated across 8 games before
-a single Adam step is applied. This gives the optimizer a more reliable gradient signal
+By default (`TDLEAF_BATCH_SIZE=50`), gradients are accumulated across 50 games before
+a single Adam step is applied.  Note the batch counts **games, not records**, so a
+games-matched comparison is automatically steps-matched — and anything that changes
+how many records a game contributes (e.g. `TDLEAF_LEAF_MATCH_CP`) does not change
+the step count. This gives the optimizer a more reliable gradient signal
 per step, reducing single-game noise that otherwise causes Adam's first moment to chase
 stochastic fluctuations.
 
@@ -765,6 +791,62 @@ disable one at a time (set its constant to a very large value) and compare Elo o
 
 ---
 
+### PV quality — the leaf TDLeaf actually trains on
+
+TDLeaf differentiates the **static eval at the PV leaf**, using the leaf as a
+stand-in for the root's minimax value.  That only works if the recorded PV
+actually locates the position the search valued, and by default it often did not.
+Three mechanisms address it; all are **gated to TDLeaf learning play** and are
+inert in competitive search (verified node-identical), so a plain `NNUE=1` rating
+binary is unaffected and a TDLEAF binary can be rated with `--no-pv-learning`.
+
+| flag (`define.h` / `tdleaf.h`) | default | what it does |
+|---|---|---|
+| `PV_LAST_RESOLVED` | 1 | When an aspiration iteration ends **unresolved**, hand back the PV, score and depth of the last iteration that DID resolve, instead of the root fail-high stub |
+| `PV_NO_TT_CUTOFF` | 1 | Suppress TT **cutoffs** at PV nodes (all three probe sites, main search and qsearch).  TT stores, move hints and ordering are untouched |
+| `TDLEAF_LEAF_MATCH_CP` | 10 | A record contributes a gradient — and its leaf row is dumped — only when `\|leaf_static − propagated root search\| ≤ 10 cp` |
+
+**The fail-high stub.**  The root move handler does not call `pc_update` on a
+fail-high; it writes `pc[0] = {move, TT-guessed reply, NOMOVE}` explicitly.  That
+2-ply stub reaches the caller whenever the iteration never resolves — sequential
+fail-high/fail-low, or a node-budget interrupt — and was 35.9% of searches.  The
+second move was never searched and the score is a bound.
+
+**What the PV still is.**  Even repaired, the triangular-array PV is an
+*approximation*: the leaf position and its accumulator are provably exact
+(`TDLEAF_CHECK_ACC` reports zero mismatches), but the root score is not that
+leaf's static eval in roughly half of records, because a real alpha-beta search
+can take its value from a node the stored PV does not name.  Six candidate causes
+were tested and excluded (aspiration clamping, the score hash, leaf quiescence,
+an off-by-one, the accumulator rebuild, fail-hard clamping).  The residual is
+**symmetric** — leaf higher 27.4% / lower 27.4%, mean +0.7 cp against sd 74 — so
+it is variance, not bias.  `TDLEAF_LEAF_MATCH_CP` filters it rather than training
+on it.
+
+**Why one constant works.**  Across the `m260720` chain from 1e5 to 7e6 games the
+exact-match spike grows (38% → 55%) but the error *scale* does not: sd flat at
+63–72 cp, the `≤10 cp` band flat at 78–82%.  The gate needs no maturity schedule.
+Retention: 10 cp ≈ 74% of records, 25 cp ≈ 85%, 0 disables.  Mates and
+draw-scored lines are excluded for free — their value comes from a terminal rule,
+not from evaluating the leaf.
+
+**Combined effect on label quality** (150 games, d8/4000n): coherent bias
+**−24.88 → +0.15 cp**, sd **185.9 → 79.7**, records reaching full depth
+**42% → 86%**.  Cost: 0.18 ply of search depth and ~1% wall clock from the TT
+half, and ~26% fewer recorded plies.  **No Elo measurement yet** — four prior
+interventions in this investigation were correct at the label level and bought
+nothing, so treat this as unproven until a leg is rated.
+
+⚠️ **Learner-side trap.**  `TDRecord::leaf_ok` is **not** a `.tdg` field and the
+learner never calls `tdleaf_record_ply` — it is recomputed in
+`tdleaf_rebuild_record`.  Any future TDRecord field that the learner needs must
+be recomputed there or added to the trajectory format, and must be smoke-tested
+through the **actor/learner** path (`--traj-out` then `--learn-stream <dir>
+--refresh-scores`), not just single-process `--selfplay`.  Getting this wrong
+silently produced an empty leaf corpus *and* zero applied gradients.
+
+---
+
 ## Offline Consolidation — Batch Training
 
 Offline consolidation is supervised training on quiet-position corpora harvested from
@@ -861,7 +943,7 @@ session, trains on the given TSVs, writes per-epoch snapshots, and exits:
 ```sh
 ./Leaf_vbt --batch-train corpus_a.tsv,corpus_b.tsv --bt-out myrun \
            [--bt-epochs 3] [--bt-lambda 0.7] [--bt-leaf-lambda <λ>] \
-           [--bt-td-lambda 0.985] [--bt-K 220] [--bt-lr 0.25] \
+           [--bt-td-lambda 0.985] [--bt-K 220] [--bt-lr 1.0] \
            [--bt-batch 512] [--bt-val 0.05] [--bt-seed 42] [--bt-max 0] \
            [--bt-threads 8] [--bt-clip-every 64] [--bt-loss-gamma 1.0]
 ```
@@ -1330,12 +1412,21 @@ gauntlets are not (`history/Online_Learning_Investigation.md` 7.8).
 
 The effective step at both ends of the hybrid loop is
 `lr_scale x warmup_factor x SECTION_LR0`.  The two phases share the
-`TDLEAF_ADAM_*_LR0` constants and differ **only** in `lr_scale`:
+`TDLEAF_ADAM_*_LR0` constants and differ only in `lr_scale` — and **since
+2026-09-15 they no longer differ at all**: one LR set, both phases at scale 1.0.
 
 | phase | flag | default |
 |---|---|---|
-| offline (`--batch-train`) | `--bt-lr` | 0.25 |
+| offline (`--batch-train`) | `--bt-lr` | **1.0** |
 | online (generation) | `--lr-scale` | **1.0** |
+
+⚠️ **Converting figures from the chain history.**  Before 2026-09-15 offline ran
+at 0.25 and online at 1.0 against constants **4× larger** than the current ones.
+The `TDLEAF_ADAM_*_LR0` values were rescaled to 0.25× so the offline product is
+unchanged while the **online phase dropped 4×**.  Any absolute LR quoted from a
+run before that date must be divided by 4 to compare with today's constants, and
+any "online cost" figure from Parts 6–7 was measured at 4× the current online LR
+— damage scales as η, so expect roughly a quarter of it now.
 
 `train.py --lr-scale K` and `selfplay_run.py --lr-scale K` set the online one;
 it reaches the learner (the sole `.tdleaf.bin` writer), never the frozen
@@ -1789,6 +1880,12 @@ See [Adam Optimizer](#adam-optimizer) above.
 | `TDLEAF_READONLY=1` | Load weights but skip gradient updates (inference only) |
 | `TDLEAF_CHECK_SCORE=1` | Print direct vs propagated leaf score on every ply |
 | `TDLEAF_LOG_STEP_CLIPS=1` | Per-batch step-clip telemetry to `tdleaf_telemetry.log` |
+| `PVTRUNC_DIAG=1` | PV-walk telemetry: exact `pv_len` histogram, walk-stop reason, root PV provenance (resolved vs fail-high stub), aspiration exit reasons, leaf-vs-root correspondence, leaf-match gate retention |
+| `TDLEAF_BATCH_SIZE_DEFAULT=N` | Override the mini-batch size without editing `tdleaf.h` |
+| `TDLEAF_LEAF_MATCH_CP_DEFAULT=N` | Override the leaf-match gate (0 disables) |
+| `SCORE_HASH_OFF=1` | Force every score-hash probe to miss.  Used to rule the score hash **out** as a cause of the leaf/root mismatch — it was not the cause |
+| `FAIL_SOFT_DIAG=1` | Return the true best score instead of clamping to `[alpha,beta]`.  Also ruled **out** |
+| `WIDEWIN=N` | Root aspiration half-window in cp (default 15).  ⚠️ `search.cpp` records the narrow window as load-bearing for strength — replacing it with `(-MATE,+MATE)` loses ~6:1 in self-play |
 
 **Runtime environment** — this is the *entire* allowlist.  `tdleaf_check_env()`
 runs at `main()` entry in every TDLEAF build, logs the effective training config
