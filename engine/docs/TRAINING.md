@@ -438,8 +438,8 @@ stochastic fluctuations.
 
 #### Trade-offs
 
-- **Pro:** each Adam step uses ~8× more gradient data, improving signal-to-noise ratio.
-- **Pro:** file I/O reduced by ~8× (one write per batch instead of per game).
+- **Pro:** each Adam step uses ~50× more gradient data, improving signal-to-noise ratio.
+- **Pro:** file I/O reduced by ~50× (one write per batch instead of per game).
 - **Con:** weight updates are delayed by up to `BATCH_SIZE-1` games (negligible in practice;
   the delay is a few seconds at typical game durations).
 
@@ -450,7 +450,7 @@ Set `TDLEAF_BATCH_SIZE = 1` to restore the original per-game update behaviour.
 ### LR Warmup
 
 A linear warmup ramps the learning rate from 0 to its full value over the first
-`TDLEAF_ADAM_WARMUP` Adam steps (default 50). The effective LR at step `t` is:
+`TDLEAF_ADAM_WARMUP` Adam steps (default 100). The effective LR at step `t` is:
 
 ```
 lr_effective = min(1.0, t / WARMUP) × lr_decay(LR0, cnt)
