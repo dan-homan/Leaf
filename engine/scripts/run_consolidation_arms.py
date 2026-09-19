@@ -20,12 +20,10 @@ trainer makes it reject the state and quietly train from the 5M-game-old base.  
 matched exactly by ``sample_corpus.py``; see that script for how (1) equal rows
 and (2) equal game weight are held simultaneously.
 
-  null   one leg (the newest) at the quota that reaches the same row total --
-         which is essentially all of it, so this is "epoch 3 on the same
-         corpus", the control the composite must beat.  Its quota is sized
-         from that leg's game count so it carries the same equal-game-weight
-         property as the composite; the two then differ only in HOW MANY
-         distinct games contribute, and in how old their labels are.
+  null   the newest leg's ENTIRE eligible corpus, unsampled.  This is exactly
+         "another epoch on the same corpus", the control the composite must
+         beat, and it sets the dose every other arm matches.  It is the one arm
+         with no sampling question hanging over it.
   base   four legs, quota-sampled, same row total.  base - null = the value of
          game diversity and label age at matched dose and matched steps.
   bout   base's EXACT row file, --bt-td-lambda raised: more outcome, less cp.
@@ -184,50 +182,55 @@ def check_engine_state(binary, cwd, expect_state=False):
 
 
 def build_corpora(args, arms_dir):
-    """base first (its natural total sets the dose), then null and leaf to it."""
+    """The DOSE is one leg's full eligible corpus, and every arm matches it.
+
+    The null must be "another epoch on the newest leg alone", so the cleanest
+    dose is that leg's entire eligible row set -- the null is then the corpus
+    itself, untouched, with no sampling question hanging over the control.  The
+    composite is quota-sampled and trimmed down to the same total.
+
+    The order matters: count the null leg FIRST, because the composite at any
+    useful quota is larger than one leg (four legs at quota 19 is 75.8M rows
+    against 68.9M eligible in 5e6g), so the dose has to be set by the smaller
+    side or the null cannot reach it."""
     corpora, rows = {}, {}
+
+    null_src = args.null_source or args.sources[-1]
+    cnt = sh(["python3", SCRIPT_DIR / "sample_corpus.py",
+              "--source", null_src, "--rows", "root",
+              "--quiet-cp", args.quiet_cp, "--count-only",
+              "--out", arms_dir / "corpus_null.tsv"],
+             capture_output=True, text=True)
+    sys.stderr.write(cnt.stderr)
+    info = json.loads(cnt.stdout)[str(null_src)]
+    n = info["eligible_rows"]
+    log(f"dose = {n:,} rows: every eligible row of {null_src} "
+        f"({info['games']:,} games, {n / info['games']:.1f}/game)")
+
+    have = args.quota * len(args.sources) * info["games"]
+    if have < n:
+        die(f"--quota {args.quota} over {len(args.sources)} legs yields about "
+            f"{have:,} rows, short of the {n:,} dose -- raise --quota")
+
     base = arms_dir / "corpus_base.tsv"
     if not base.exists():
         r = sh(["python3", SCRIPT_DIR / "sample_corpus.py",
                 "--source", *args.sources, "--rows", "root",
                 "--quiet-cp", args.quiet_cp, "--quota", args.quota,
-                "--seed", args.seed, "--out", base],
+                "--target-rows", n, "--seed", args.seed, "--out", base],
                capture_output=True, text=True)
         sys.stderr.write(r.stderr)
-    manifest = json.loads((base.with_suffix(".tsv.json")).read_text())
-    n = manifest["rows_total"]
     corpora["base"], rows["base"] = base, n
-    log(f"base corpus: {n:,} rows over "
-        f"{sum(manifest['games_per_source'].values()):,} games "
-        f"from {len(args.sources)} legs -- this is the dose")
 
-    null_src = args.null_source or args.sources[-1]
     null = arms_dir / "corpus_null.tsv"
     if not null.exists():
-        # The null must reach the SAME row total from ONE leg.  Size its quota
-        # from that leg's game count rather than setting it huge and trimming:
-        # shedding a large surplus flattens the short games to zero and leaves
-        # only the long ones, which would hand the null a game-length bias the
-        # composite does not have and confound the very comparison being made.
-        cnt = sh(["python3", SCRIPT_DIR / "sample_corpus.py",
-                  "--source", null_src, "--rows", "root",
-                  "--quiet-cp", args.quiet_cp, "--count-only",
-                  "--out", null],
-                 capture_output=True, text=True)
-        sys.stderr.write(cnt.stderr)
-        info = json.loads(cnt.stdout)[str(null_src)]
-        if info["eligible_rows"] < n:
-            die(f"{null_src} has only {info['eligible_rows']:,} eligible rows, "
-                f"short of the {n:,} dose -- lower --quota so the composite "
-                f"fits inside one leg")
-        q = -(-n // info["games"])          # ceil: the natural per-game quota
-        log(f"null arm: {info['games']:,} games in {null_src}, "
-            f"quota {q} to reach {n:,} rows "
-            f"({info['eligible_rows']:,} eligible)")
+        # No per-game cap: the null IS the leg's corpus.  A quota here would
+        # cost rows to the right tail of a skewed length distribution and the
+        # leg could not reach its own row count.
         r = sh(["python3", SCRIPT_DIR / "sample_corpus.py",
                 "--source", null_src, "--rows", "root",
-                "--quiet-cp", args.quiet_cp, "--quota", q,
-                "--target-rows", n, "--seed", args.seed, "--out", null],
+                "--quiet-cp", args.quiet_cp, "--quota", 1 << 30,
+                "--seed", args.seed, "--out", null],
                capture_output=True, text=True)
         sys.stderr.write(r.stderr)
     corpora["null"], rows["null"] = null, n
@@ -248,11 +251,13 @@ def build_corpora(args, arms_dir):
         sys.stderr.write(r.stderr)
     corpora["leaf"], rows["leaf"] = leaf, n
 
-    for k in ("null", "leaf"):
+    for k in ("base", "null", "leaf"):
         m = json.loads(corpora[k].with_suffix(".tsv.json").read_text())
         if m["rows_total"] != n:
-            die(f"{k} corpus has {m['rows_total']:,} rows, base has {n:,} -- "
+            die(f"{k} corpus has {m['rows_total']:,} rows, dose is {n:,} -- "
                 f"the arms would not be dose-matched")
+        log(f"{k}: {m['rows_total']:,} rows over "
+            f"{sum(m['games_per_source'].values()):,} games")
     return corpora, rows
 
 

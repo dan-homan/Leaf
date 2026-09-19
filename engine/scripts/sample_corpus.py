@@ -5,10 +5,13 @@
 Why this exists
 ---------------
 A leg's assembled ``corpus.tsv`` is fine for that leg's own consolidation, but
-it is useless for a multi-leg experiment: it carries the row type and gate the
-leg happened to use, and its ``gid`` column is zeroed, so games cannot be told
-apart.  The raw per-leg dumps (``<tag>.<pid>.root.tsv.gz`` /
-``...leaf.tsv.gz``) keep ``gid``, so this script builds from those.
+it is useless for a multi-leg experiment.  It carries only the row type and
+gate that leg happened to use, so a wider gate or the leaf rows cannot be
+recovered from it.  And its ``gid`` column is RENUMBERED per leg from 0, so
+game 5 of one leg and game 5 of another are indistinguishable -- which breaks
+both game-stratified sampling across legs and root-to-leaf pairing.  The raw
+per-leg dumps (``<tag>.<pid>.root.tsv.gz`` / ``...leaf.tsv.gz``) keep the
+original game ids, so this script builds from those.
 
 The sampling rule
 -----------------

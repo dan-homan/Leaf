@@ -203,8 +203,11 @@ python3 sample_corpus.py --source m260916-{2,3,4,5}e6g_work \
 ```
 
 Build from the **raw** `<tag>.<pid>.{root,leaf}.tsv.gz` dumps, not the assembled
-`corpus.tsv`: the latter carries only the row type and gate its leg happened to
-use, and its `gid` column is **zeroed**, so games cannot be told apart.
+`corpus.tsv`.  The latter carries only the row type and gate its leg happened to
+use, so a wider gate or the leaf rows cannot be recovered from it; and its `gid`
+column is **renumbered per leg from 0**, so game 5 of one leg and game 5 of
+another are indistinguishable — which breaks both cross-leg game stratification
+and root↔leaf pairing.
 
 The sampling rule holds two properties at once that the obvious approaches
 each destroy.  Uniform over rows gives an exact row count and weights games by
