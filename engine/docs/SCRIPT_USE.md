@@ -274,6 +274,13 @@ arm still "works" and none of them means anything.  The driver runs each
 binary once before use and dies on that warning, and on the matching
 silent failure where a missing `.nnue` falls back to classical eval.
 
+⚠️ **Time control.**  `--tc` (default `1+0.01`) applies to every arm and both
+opponents, so the programme is internally consistent — but `classic_eval` is a
+classical-eval engine with a different nps profile, so its column cannot be
+compared against anchor Elos recorded at another TC (the chain's
+`final_gauntlet` figures are `3+0.05`).  The paired column, against the seed, is
+the primary reading and is unaffected.
+
 Everything is resumable: an arm whose `_ep1.nnue` exists is not retrained, a
 match whose PGN exists is not replayed, and pass-1 corpus counts are cached.
 `--only` runs a subset, `--corpus-only` stops after assembly.

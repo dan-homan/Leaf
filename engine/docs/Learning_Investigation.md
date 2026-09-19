@@ -649,6 +649,18 @@ same trajectory, where it merely detects overfitting [7.9.3].
 about how the game ends and still be a worse thing to train on [Offline 4.4].
 Never read `--bt-diag` as a training recommendation.
 
+**An anchor Elo is only comparable at the SAME time control.**  `classic_eval`
+and an NNUE net differ in nodes per second, so the gap between them moves with
+the clock: a number measured at `3+0.05` cannot be read against one measured at
+`1+0.01`.  This binds the chain's recorded `final_gauntlet` anchors (3+0.05,
+`train.py`'s `--tc` default) against anything rated at the epoch-ladder default
+(1+0.01) — including the composite-corpus arms.  Within one programme it costs
+nothing as long as every arm *and its control* are rated identically; across
+programmes it is a trap.  The same caveat applies to `5e6g`'s e2→e3 ladder step
+(−12.7): same TC as the arms, but a different opponent (the pre-offline net,
+not the seed), which is why §6 item 2 measures its null directly instead of
+importing that number.
+
 **Mind the ± convention** (R5): `pgn_score` reports one sigma, fastchess's own line
 reports a 95% interval — a factor of 1.96.
 
