@@ -36,17 +36,17 @@ front page survived contact with its own Part 7.
 >    still gains real Elo and the leg total is the *sum* of a handoff loss and a
 >    learning gain.  Only once learning saturates does the loss show up naked.
 >
-> Reading 2 is the more conservative one and fits the handoff model without
-> modification.  Nothing in either document discriminates them, because the
-> instrument that would — a within-leg checkpoint ladder over the first few
-> thousand games [7.11.4] — was only ever pointed at mature states.  §6 item 2
-> makes this a first-class arm on the new chain, where young states exist again
-> for the first time since the records begin.
+> **ANSWERED 2026-09-17 on the `m260916` chain (R9) — reading 2, and smaller than
+> either party expected.**  Two 50k-game ladders from an early and a late
+> offline-trained state give a weighted mean of **−0.70 ± 3.23 (early)** against
+> **−13.46 ± 3.23 (late)**, a difference of +12.70 ± 4.57 (2.8σ).  So the cost is
+> masked early and visible later, but at ~13 Elo rather than the ~130 a mature
+> `m260720` net paid.  Full numbers and caveats in §1 K.
 >
-> Read every "−120 to −150 Elo" in this document as **a mature-net number of
-> unknown applicability to a young one**, and treat the §4 graveyard the same way:
-> a knob that bought nothing on a saturated net has not been tested on a growing
-> one.
+> Read every "−120 to −150 Elo" in this document as **a mature-net number at the
+> pre-2026-09-15 LR**, superseded for current work by §1 K.  Treat the §4
+> graveyard the same way: a knob that bought nothing on a saturated net at 4× the
+> present learning rate has not been tested on a growing one.
 
 ---
 
@@ -70,8 +70,9 @@ they disagree about status, `TODO.md` is the one to fix.
 
 Twelve statements.  Each is tagged with its strongest evidence; grades and effect
 sizes are in §2.  Statement I is explicitly an interpretation, not a mechanism.
-**All of it describes a mature net** — see the scope box above; K is the statement
-about young ones, and it is mostly a statement about what is not known.
+**Most of it describes a mature net at the pre-restart LR** — see the scope box;
+K is the statement about young nets under the current recipe, and it is now
+measured rather than open.
 
 **A. The loop.**  Actor/learner self-play generates games with online TDLeaf
 learning on, dumping a quiet-gated corpus; `--batch-train` then consolidates that
@@ -181,20 +182,38 @@ the error *scale* is maturity-invariant (sd 63–72 across 1e5→7e6 games) even
 though the exact-match spike grows 38%→55%, which is what makes a single
 threshold implementable.
 
-**K. Everything above is a mature-net statement, and the young-net case is
-unmeasured.**  The handoff becomes apparent only after ~1M games of learning,
-sometimes longer; the chain's own decomposition read +18 / +7 / −2 / −1 at
-100k–1M games and only turned clearly negative at 2.2M [6.1].  Whether the
-excursion is *absent* on a young net or merely *masked* by concurrent learning
-gains is the open question of §6 item 2 — and B's "minimise handoffs" follows from
-the mature case either way, since a masked cost is still a cost.  Two further
-cautions on reading the early numbers: they sit in R1/R2 (multi-writer merge, and
-the FRC castle bug that corrupted every pre-2026-07-18 online gradient), and 7.11.5
-independently warns that **"the online damage grew across the chain" is
-unestablished** because `--gauntlet-tdleaf` stopped being passed after `3e6`, so
-the early and late figures were not measured the same way.  The shape of the
-observation is D. Homan's from running the chains; the numbers that would settle it
-do not exist yet.
+**K. On a young net under the current recipe the handoff is small, and what
+remains scales with maturity.**  This was the open question of the scope box and
+it is now measured on the `m260916` chain (R7+R8, d6/800 nodes).  Two 50,000-game
+TDLeaf ladders — 1000 Adam steps at batch 50, so past the ~300-step equilibration
+— run from an EARLY offline-trained state (`1e6g_final`) and a LATE one
+(`5e6g_final`), each point a direct 1000-game match against its own starting net:
+
+| | weighted mean over 8 points | vs zero | χ² vs a constant |
+|---|---|---|---|
+| early seed (1e6g) | **−0.70 ± 3.23** | 0.2σ | 13.5 / 7 dof, p > 0.05 |
+| late seed (5e6g) | **−13.46 ± 3.23** | **4.2σ** | 8.1 / 7 dof, p > 0.05 |
+| early − late | **+12.70 ± 4.57** | **2.8σ** | |
+
+Three readings.  **The excursion is an order of magnitude smaller** than the
+−123…−150 of Parts 7.10–7.13 — the worst single point anywhere is −29.  **At the
+early seed it is statistically absent**, and at the late seed it is real but
+small.  So "masked early, naked later" is the right description, with the caveat
+that the late-seed cost is 13 Elo rather than the ~130 the mature `m260720`
+chain paid.  And **neither ladder shows a dip-then-recovery shape**: χ² against a
+constant is non-significant for both, so this is a flat offset from the moment
+the net leaves the offline optimum, held through 1000 steps — an equilibrium in
+the sense of C, at a tenth the radius, not a transient.
+
+How much of the shrinkage is the 4× LR cut (damage ∝ η, 7.13.1, predicts ~−32
+from −130) and how much is R8 is **not separated** — the restart moved both at
+once.  The measured −13.5 is below even the η-scaling prediction, which is
+suggestive but not attributable.
+
+Caveats: 8 points at ±9 each resolve a 13 Elo offset but not a 10 Elo dip, so
+"no excursion shape" is a statement about what this instrument can see.  And
+7.11.9's ~26 Elo arm-to-arm variance applies to any single ladder point; only
+the pooled means are tight.
 
 ---
 
@@ -273,11 +292,17 @@ for one.
 | Its scale is maturity-invariant | same, m260720 ladder 1e5→7e6 | sd 63–72, ≤10 cp band 78–82% | R7 | **ESTABLISHED** |
 | Six candidate causes of the residual are excluded | same | aspiration clamping, score hash, leaf quiescence, off-by-one, accumulator rebuild, fail-hard clamping | R7 | **ESTABLISHED** |
 | Batch 50 from a fresh `--init-nnue` chain: 500k games in, ahead of `m260720` at the same point | D. Homan, current run | not clearly significant | **R7** | SUPPORTED |
+| On a young net under R7+R8 the handoff is statistically absent | §1 K, `m260916` 1e6g ladder | −0.70 ± 3.23 over 8 points | R9 | **ESTABLISHED** |
+| It reappears with maturity, but at ~13 Elo not ~130 | §1 K, `m260916` 5e6g ladder | −13.46 ± 3.23 (4.2σ); early−late +12.70 ± 4.57 (2.8σ) | R9 | **ESTABLISHED** |
+| The residual is a flat offset, not an excursion-and-return | §1 K | χ² vs constant 13.5 and 8.1 on 7 dof, both p > 0.05 | R9 | SUPPORTED |
+| Under R7+R8 the online phase is PRODUCTIVE on every leg | `m260916` decomposition | online Δ +84, +64, +50, +49, +41, +7, +10 — never negative | R9 | **ESTABLISHED** |
+| …but the online contribution falls across the four 1M legs while the offline one does not | §3 R9 table | online −14.9 ± 3.7/leg (4.1σ); total −13.2 ± 3.7 (3.5σ); offline +1.6 ± 5.2 (0.3σ) | R9 | **ESTABLISHED** (the decline itself) |
+| ⚠️ …but its CAUSE is not established — the decline is perfectly confounded with the 2→4 offline-epoch switch | §3 R9 | online +45.1 (2-epoch legs) vs +8.7 (4-epoch); offline +27.2 → +45.3, opposite sign | R9 | **CONFOUNDED** — run `6e6g` at 2 epochs |
 
-² Absent on a young net, or present and masked by concurrent learning gains?  No
-measurement discriminates them — §1 K, §6 item 2.  The early rows additionally sit
-in R1/R2 and were not measured the same way as the late ones (7.11.5), so they
-support the *shape* of the observation, not a number.
+² Absent on a young net, or present and masked by concurrent learning gains?
+**Answered on R9: masked** — §1 K.  These older rows additionally sit in R1/R2 and
+were not measured the same way as the late ones (7.11.5), so they support the
+*shape* of the observation, not a number; the numbers to quote are §1 K's.
 
 ¹ 6.2's evidence was half Elo and half "validation MSE rose at every epoch"; 7.4
 subsequently disqualified val MSE as a ranking instrument, so the d8 half now
@@ -364,23 +389,79 @@ handoff on the new chain should be roughly a quarter the size before Σ is count
 — and η and Σ moved *at the same time*, so the restart cannot attribute between
 them.
 
-**R8 — the PV repairs (branch `tdleaf-pv-telemetry`, not yet on `main`).**
+**R8 — the PV repairs (merged to `main` 2026-09-17).**
 `PV_NO_TT_CUTOFF=1`, `PV_LAST_RESOLVED=1` (both gated to TDLeaf learning play;
 competitive search verified node-identical) and `TDLEAF_LEAF_MATCH_CP=10`, which
 gates both the online trace and the dumped **leaf** rows on
 `|leaf_static − propagated root search| ≤ 10 cp`.  Root rows are untouched — they
 are gated on root *quietness*, a different quantity.  Effect on label quality:
 coherent bias **−24.88 → +0.15 cp**, sd **185.9 → 79.7**, records reaching full
-depth **42% → 86%**, ~74% of records retained.  **No Elo measured.**  When this
-merges it becomes a regime boundary: corpora generated before it contain
-fail-high stubs and 60 cp-gated leaf rows; corpora after it do not, so leaf-row
-results must not be pooled across the merge.
+depth **42% → 86%**, ~74% of records retained.  This is a regime boundary for
+corpora: those generated before it contain fail-high stubs and 60 cp-gated leaf
+rows, those after do not, so **leaf-row results must not be pooled across it**.
+No isolated Elo measurement exists — the `m260916` chain (R9) runs R7 and R8
+together and cannot attribute between them.
 
-Two narrower confounds worth remembering: **hash 16** applies only to the `6e6g`
-leg (everything else ran at 128, and generation has reverted); and
-**`--gauntlet-tdleaf` stopped being passed after `3e6`**, so "the online damage
-grew across the chain" was never measured the same way at both ends and should be
-treated as unestablished [7.11.5].
+**R9 — the `m260916` chain (current).**  A fresh material-only seed carried to
+5M+ games at **depth 6 with an 800-node budget**, batch 50, one LR set at scale
+1.0 both phases, PV repairs on, `--corpus-window 0`, `--bt-rows root`,
+`--bt-quiet-cp 60`, 2 offline epochs (**4 at the `4e6g` and `5e6g` legs** — see
+the confound below).  It is the first chain to combine R7 and R8, and the first
+young chain since the records begin, which is what makes the ladders in §1 K
+possible.  Its shallower search (d6/800n against d8/4000n) means throughput
+figures and absolute Elo levels do not compare with the `m260720` chain; the
+decomposition does.  Unlike R7, **`--gauntlet-tdleaf` was passed on every leg**,
+so the online/offline split is measured the same way from end to end.
+
+**The leg decomposition.**  Each leg is rated by a paired family match against
+the previous leg's final net: the online Δ is the post-generation `.tdleaf` state
+against that opponent, the leg total is the post-consolidation net against the
+same opponent, and offline is the difference.  Recomputed from the `_final.json`
+sidecars:
+
+| leg | games | epochs | online Δ | leg total | offline Δ |
+|-----|------:|-------:|---------:|----------:|----------:|
+| `2e5g` | 100k | 2 | +84.3 ± 8.7 | +104.1 ± 8.8 | +19.8 ± 12.4 |
+| `5e5g` | 300k | 2 | +63.6 ± 8.6 | +92.5 ± 8.3 | +28.9 ± 12.0 |
+| `1e6g` | 500k | 2 | +50.4 ± 8.3 | +65.4 ± 8.5 | +15.0 ± 11.9 |
+| `2e6g` | 1M | 2 | +49.0 ± 8.1 | +90.2 ± 8.6 | +41.3 ± 11.8 |
+| `3e6g` | 1M | 2 | +41.2 ± 8.2 | +54.3 ± 8.1 | +13.1 ± 11.6 |
+| `4e6g` | 1M | **4** | +6.9 ± 8.5 | +66.1 ± 8.5 | +59.2 ± 12.0 |
+| `5e6g` | 1M | **4** | +10.4 ± 8.3 | +41.9 ± 8.1 | +31.5 ± 11.6 |
+
+Three readings, in descending order of confidence.
+
+*The online phase is productive on every leg.*  This is the headline, and it is
+the thing that was **not** true of the mature `m260720` chain, where online legs
+came in flat or negative and §4's graveyard entries were closed on that basis.
+Under R7+R8 on a young net, generation adds Elo every time.
+
+*Across the four 1M legs the online contribution falls and the offline one does
+not.*  Weighted least squares on the four equal-size legs: online **−14.9 ± 3.7
+per leg (4.1σ)**, leg total **−13.2 ± 3.7 (3.5σ)**, offline **+1.6 ± 5.2
+(0.3σ)**.  The offline fit has χ²/dof = 7.9/2, i.e. real leg-to-leg scatter
+beyond match error, so "flat" means "no trend resolvable through large noise",
+not "steady".
+
+*⚠️ But the online decline is perfectly confounded with the epoch change.*  The
+two legs where online collapsed are exactly the two legs that switched from 2
+offline epochs to 4.  Online averages **+45.1 on the 2-epoch 1M legs and +8.7 on
+the 4-epoch ones**; offline moves the other way, **+27.2 → +45.3**.  With two
+legs on each side of the switch, a maturity trend and an epoch effect are not
+separable in this data.  A mechanism for the epoch reading exists and is not
+exotic: leg *N*'s online phase starts from leg *N−1*'s consolidated net, so
+harder consolidation can leave the online phase less to add — which would make
+this a *transfer* of yield between phases rather than a loss of it.  The leg
+totals are consistent with either story.  **Resolving this is cheap and should
+come before any conclusion about online saturation: run the `6e6g` leg at 2
+epochs.**
+
+Two narrower confounds worth remembering: per-leg Δ is **not normalised per
+game** — the early legs are 100k–500k games, so the online yield *per 100k games*
+falls far faster than the table's per-leg column (84 → 21 → 10 → 4.9 → 4.1 → 0.7
+→ 1.0), which is the shape of an ordinary saturation curve; and **hash 16**
+applies only to the `6e6g` leg (everything else ran at 128, and generation has
+since reverted).
 
 ---
 
@@ -579,6 +660,24 @@ reports a 95% interval — a factor of 1.96.
   gauntlet time was spent.  **Any future optimizer arm should do this first.**
 - **Match Adam *steps*, not games**, whenever the knob touches aggregation — this
   is what separated 7.15 from 6.16.
+- **Decompose every leg — it costs one flag.**  `--gauntlet-tdleaf` rates the
+  post-generation `.tdleaf` state alongside the post-consolidation net, both as
+  paired family matches against the previous leg's final.  Online Δ is the first,
+  leg total the second, offline Δ the difference.  R9's entire decomposition (§3)
+  exists only because the flag was passed on every leg; R7 dropped it partway and
+  the corresponding question there is unanswerable [7.11.5].  Recompute from the
+  `<tag>_final.json` sidecars rather than from notes — the sidecars carry W/L/D
+  and the match error for each entry.
+- **The handoff ladder, as run for §1 K**: build a TDLEAF binary per rung, seed it
+  from the offline-trained state under test, run 50k self-play games at batch 50
+  (≈1000 Adam steps, well past the ~300-step equilibration), stamp a net every
+  ~6k games, and rate each stamp in a 1000-game match **against its own starting
+  net**.  Two traps, both paid for: the `.nnue` must travel with the binary into
+  the scratch directory — a missing net does **not** error, the engine silently
+  falls back to classical eval and the whole ladder rates a different program —
+  so guard the load and abort on `NNUE: not found`.  And build in `learn/`, never
+  `run/`, or `main_bk.dat` feeds book moves into the ladder.  Driver scripts are
+  in `scripts/arms/`.
 
 **Pre-commit the reading of an arm** (6.7, 6.12.5, 6.17.4 all did) so the
 interpretation is not chosen after the fact.  And state the arm-validity checks
@@ -613,38 +712,38 @@ Ranked by expected value per unit of compute.  `TODO.md` carries the checklist;
 this is the rationale.  Items marked ⚠️ were previously ruled out under a regime
 or criterion that has since changed.
 
-**1. Batch 50 on a full leg — does the damage reduction survive as leg yield?**
-7.15 rates damage, not yield, and 6.16's batch-16 arm cut damage 4× while making
-the loop *worse* (offline recovery +27.0 against +84.6).  The R7 chain has adopted
-batch 50 ahead of this test, and is currently 500k games in and ahead of `m260720`
-at the same point — encouraging, not yet significant.  **Arm:** the chain is the
-arm; the missing measurement is a decomposed leg (`--gauntlet-tdleaf` on *every*
-leg, which stopped being passed after `3e6` and is how the online drift went
-unseen).  **Reading:** if recovery falls in proportion to damage, Σ bought
-nothing at the loop level and the line returns to 6.16's warning.
+**1. Separate the ONLINE DECLINE from the EPOCH CHANGE — one leg, one flag.**
+Batch 50 on full legs is no longer hypothetical: `m260916` ran seven legs with
+the online phase productive on every one.  But across the four 1M legs online
+falls −14.9 ± 3.7/leg while offline does not, **and the two legs where it
+collapsed are the two that went from 2 offline epochs to 4** (§3 R9).  Maturity
+saturation and yield-transfer-to-offline both fit the data, and they imply
+opposite actions: the first says the online phase is nearly spent, the second
+says its yield moved and nothing was lost.  **Run `6e6g` at 2 epochs.**  If
+online returns to ~+45 the decline was the epoch switch; if it stays near +10 it
+is maturity, and with the handoff at ~−13 (§1 K) online Δ then crosses zero
+within 2–3 legs, around 7–8M games.  Nothing else in this list should be read
+until this is settled, because most of §4's graveyard was closed on a chain whose
+online phase had no yield left — and whether this chain's has is now the open
+question.  **Method note:** keep passing `--gauntlet-tdleaf`; the decomposition
+exists only because R9 passed it on every leg, and 7.11.5 records R7 legs where
+dropping it hid exactly this kind of drift.
 
-**2. ⚠️ Does the handoff happen on a YOUNG net?  Absent, or masked?**  The scope
-box states the problem: the damage is only *apparent* after ~1M games of learning,
-and the chain's own decomposition read +18 / +7 / −2 / −1 at 100k–1M before turning
-negative at 2.2M [6.1].  Either the excursion does not occur on an unsaturated net,
-or it occurs every time and is netted out by concurrent learning gains.  **The
-distinction decides whether "minimise handoffs" is a rule for the whole chain or
-only for its late life** — and therefore how often the restart should alternate
-online and offline phases.  **Arm:** the 5k-game damage protocol [7.11.8] plus a
-within-leg checkpoint ladder [7.11.4] applied at several young states of the R7
-chain — 100k, 500k, 1M, 2M cumulative games — each rated against its own starting
-net.  The R7 chain is the first opportunity since these records begin: every state
-in them is already mature.  **Reading:** a ladder that dips and recovers means the
-excursion is present and masked, and the leg total is a sum of two effects that
-should be optimised separately; a ladder that never dips means the excursion is a
-property of a converged optimum, and handoff cost is a late-chain concern only.
-**Cost:** ~50 min per state, and the states are produced by the chain anyway.
-Cheap enough that not running it is the expensive choice.
+**2. Restore `--corpus-window`.**  Every `m260916` leg ran at `corpus_window: 0`,
+so each consolidation saw only its own million games.  A1 measured multi-corpus
+dilution at **+36 anchor / +45 paired** at identical rows, epochs and wall clock
+[Offline 2.4], and the archives are already on disk.  If the online half is
+decaying, this is where the remaining yield has to come from, and it costs one
+flag.  (Supersedes the `--corpus-window` half of the old "deferred offline wins"
+item below.)
 
-**3. Rate the PV repairs (R8).**  The label-quality case is strong — bias
-essentially eliminated, variance halved, and the residual filtered rather than
-trained on — and the mechanism is one that can be pointed at in the source rather
-than inferred statistically.  But nothing is measured in Elo, and four prior
+**3. Rate the PV repairs (R8) IN ISOLATION.**  `m260916` runs R7 and R8 together
+and cannot attribute between them: the handoff fell from ~−130 to −13.5, but
+damage ∝ η alone predicts ~−32 from the 4× LR cut, so R8's share is the gap
+between −32 and −13.5 — suggestive, not attributed.  The label-quality case is
+strong on its own terms — bias essentially eliminated, variance halved, residual
+filtered rather than trained on — and the mechanism is visible in the source
+rather than inferred statistically.  But no isolated Elo exists, and four prior
 interventions in this investigation (alpha 6.10, rbar 6.13, `fc0_w` 7.12, root
 fallback) were correct at the label level and bought nothing.  **Arm:** `both`
 against `base` from a state with known handoff damage, **matched Adam steps**
@@ -698,7 +797,8 @@ which hints the optimum sits under 60.  The A2 arms had power for 28 Elo, not fo
 5–10 [Offline 4.5].  Cheap: dumps are wide by default and the gate is now an
 offline filter, so this is one `--bt-quiet-cp` sweep over a corpus already on disk.
 
-**9. Restore the deferred offline wins on the new chain.**  `--corpus-window` was
+**9. The remaining deferred offline win.**  Superseded in part by item 2.
+`--corpus-window` was
 turned down to 1 for R7 deliberately, giving up a measured **+36 anchor / +45
 paired** [Offline 2.4]; `--bt-rows root` is worth **+35.6 paired** [Offline 3.2].
 These are not retired, they are deferred, and the point of recording them here is
