@@ -732,13 +732,45 @@ offline half, which is what item 2 and the composite-corpus programme are for.
 because R9 passed it on every leg, and 7.11.5 records R7 legs where dropping it
 hid exactly this drift.
 
-**2. Restore `--corpus-window`.**  Every `m260916` leg ran at `corpus_window: 0`,
-so each consolidation saw only its own million games.  A1 measured multi-corpus
-dilution at **+36 anchor / +45 paired** at identical rows, epochs and wall clock
-[Offline 2.4], and the archives are already on disk.  If the online half is
-decaying, this is where the remaining yield has to come from, and it costs one
-flag.  (Supersedes the `--corpus-window` half of the old "deferred offline wins"
-item below.)
+**2. The composite-corpus consolidation arms — is a periodic wide round worth
+running?**  Every `m260916` leg ran at `corpus_window: 0`, so each consolidation
+saw only its own million games, while four legs' dumps sit on disk.  A1 measured
+multi-corpus dilution at **+36 anchor / +45 paired** at identical rows, epochs
+and wall clock [Offline 2.4].  If the online half is decaying (item 1), this is
+where the remaining yield has to come from.
+
+Five one-epoch arms from the `5e6g` state, row-for-row matched
+(`run_consolidation_arms.py`; sampling rule in `SCRIPT_USE.md`):
+
+| arm | corpus | isolates |
+|---|---|---|
+| `null` | newest leg only, quota-sized to the same rows | the control |
+| `base` | four legs, quota 19 | game diversity + label age |
+| `bout` / `bcp` | `base`'s **exact** row file, `--bt-td-lambda` 0.9925 / 0.97 | the outcome-vs-cp target |
+| `leaf` | four legs, leaf rows, **same games** as base | row type (R8's corpus, first valid test) |
+
+Three design points carry the weight.  **The null is the reading**, not the
+baseline: `5e6g`'s own ladder says a third epoch on its own corpus costs
+**−12.7** (e2 +49.3 → e3 +36.6), so `base − null` prices diversity at matched
+dose and matched Adam steps — but that −12.7 is two matches against a common
+opponent, which §5 forbids subtracting, so the null is measured directly rather
+than assumed.  **`bout`/`bcp` reuse `base`'s row file byte for byte**, so they
+carry no sampling noise and are the cheap screen that **bounds `--bt-rescore`**
+(item 5): if the curve slopes toward the outcome, stale cp labels are hurting
+and rescoring earns its cost; if it peaks at or below the default, cp labels are
+not the binding constraint and the expensive arm cannot pay.  **`leaf` holds the
+game set fixed** — leaf rows survive in games whose root rows the quiet gate
+removed, so an unrestricted leaf sample draws ~45% more games at fewer rows
+each, and the row-type contrast would carry a game-count difference inside it.
+
+The quiet gate is deliberately NOT an arm.  It is the one knob that fights the
+matching rules — tightening to 20 cp drops root to 36.8 rows/game, so the quota
+stops filling and the effective game population shifts — and R8 changed leaf
+gating, not root.  If `leaf` wins, the gate returns in a better form, as
+`TDLEAF_LEAF_MATCH_CP`.
+
+(Supersedes the `--corpus-window` half of the old "deferred offline wins" item
+below.)
 
 **3. Rate the PV repairs (R8) IN ISOLATION.**  `m260916` runs R7 and R8 together
 and cannot attribute between them: the handoff fell from ~−130 to −13.5, but
