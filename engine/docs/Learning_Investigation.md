@@ -297,7 +297,8 @@ for one.
 | The residual is a flat offset, not an excursion-and-return | §1 K | χ² vs constant 13.5 and 8.1 on 7 dof, both p > 0.05 | R9 | SUPPORTED |
 | Under R7+R8 the online phase is PRODUCTIVE on every leg | `m260916` decomposition | online Δ +84, +64, +50, +49, +41, +7, +10 — never negative | R9 | **ESTABLISHED** |
 | …but the online contribution falls across the four 1M legs while the offline one does not | §3 R9 table | online −14.9 ± 3.7/leg (4.1σ); total −13.2 ± 3.7 (3.5σ); offline +1.6 ± 5.2 (0.3σ) | R9 | **ESTABLISHED** (the decline itself) |
-| ⚠️ …but its CAUSE is not established — the decline is perfectly confounded with the 2→4 offline-epoch switch | §3 R9 | online +45.1 (2-epoch legs) vs +8.7 (4-epoch); offline +27.2 → +45.3, opposite sign | R9 | **CONFOUNDED** — run `6e6g` at 2 epochs |
+| The 2→4 epoch switch does NOT explain the decline | §3 R9 | `epochs(N)` postdates `online Δ(N)`; onset leg `4e6g` starts from a 2-epoch net; `picked_epoch` = 2 on six of eight legs | R9 | **ESTABLISHED** |
+| Offline gain peaks at epoch 2 and decays after | `5e6g` epoch ladder | e1 +16.3, e2 +49.3, e3 +36.6, e4 +26.8 | R9 | SUPPORTED (one leg) |
 
 ² Absent on a young net, or present and masked by concurrent learning gains?
 **Answered on R9: masked** — §1 K.  These older rows additionally sit in R1/R2 and
@@ -443,18 +444,22 @@ per leg (4.1σ)**, leg total **−13.2 ± 3.7 (3.5σ)**, offline **+1.6 ± 5.2
 beyond match error, so "flat" means "no trend resolvable through large noise",
 not "steady".
 
-*⚠️ But the online decline is perfectly confounded with the epoch change.*  The
-two legs where online collapsed are exactly the two legs that switched from 2
-offline epochs to 4.  Online averages **+45.1 on the 2-epoch 1M legs and +8.7 on
-the 4-epoch ones**; offline moves the other way, **+27.2 → +45.3**.  With two
-legs on each side of the switch, a maturity trend and an epoch effect are not
-separable in this data.  A mechanism for the epoch reading exists and is not
-exotic: leg *N*'s online phase starts from leg *N−1*'s consolidated net, so
-harder consolidation can leave the online phase less to add — which would make
-this a *transfer* of yield between phases rather than a loss of it.  The leg
-totals are consistent with either story.  **Resolving this is cheap and should
-come before any conclusion about online saturation: run the `6e6g` leg at 2
-epochs.**
+*The epoch change does NOT explain it — checked and dismissed.*  The two legs
+where online collapsed are also the two that extended the offline ladder from 2
+epochs to 4, which looks like a confound and is not one, for two reasons.
+**Timing:** leg *N*'s online phase runs *before* leg *N*'s consolidation, from leg
+*N−1*'s final net, so `epochs(N)` cannot reach `online Δ(N)`.  The relevant
+quantity is `epochs(N−1)`, and the **onset** of the collapse — `3e6g` +41.2 →
+`4e6g` +6.9 — starts from a 2-epoch net on both sides.  **Selection:** `train.py`
+ships the best-rated epoch, not the last, and `picked_epoch` is 2 on six of the
+eight legs including `5e6g` (whose ladder peaks at e2 +49.3 and *decays* to e4
++26.8).  Only `4e6g` shipped an epoch-4 net (+45.1, within 1σ of its own e2
++41.2).  So the offline dose was effectively constant across the chain.
+
+The one residue is second-order: picking the max of four noisy ladder points
+instead of two carries a selection bias of order +4 Elo, which inflates
+`final(4e6g)` and therefore deflates `online Δ(5e6g)` — the last point only, by
+roughly 4 of its 34-Elo shortfall.  The decline stands.
 
 Two narrower confounds worth remembering: per-leg Δ is **not normalised per
 game** — the early legs are 100k–500k games, so the online yield *per 100k games*
@@ -712,22 +717,20 @@ Ranked by expected value per unit of compute.  `TODO.md` carries the checklist;
 this is the rationale.  Items marked ⚠️ were previously ruled out under a regime
 or criterion that has since changed.
 
-**1. Separate the ONLINE DECLINE from the EPOCH CHANGE — one leg, one flag.**
-Batch 50 on full legs is no longer hypothetical: `m260916` ran seven legs with
-the online phase productive on every one.  But across the four 1M legs online
-falls −14.9 ± 3.7/leg while offline does not, **and the two legs where it
-collapsed are the two that went from 2 offline epochs to 4** (§3 R9).  Maturity
-saturation and yield-transfer-to-offline both fit the data, and they imply
-opposite actions: the first says the online phase is nearly spent, the second
-says its yield moved and nothing was lost.  **Run `6e6g` at 2 epochs.**  If
-online returns to ~+45 the decline was the epoch switch; if it stays near +10 it
-is maturity, and with the handoff at ~−13 (§1 K) online Δ then crosses zero
-within 2–3 legs, around 7–8M games.  Nothing else in this list should be read
-until this is settled, because most of §4's graveyard was closed on a chain whose
-online phase had no yield left — and whether this chain's has is now the open
-question.  **Method note:** keep passing `--gauntlet-tdleaf`; the decomposition
-exists only because R9 passed it on every leg, and 7.11.5 records R7 legs where
-dropping it hid exactly this kind of drift.
+**1. The ONLINE DECLINE is real — decide what to do about it.**  `m260916` ran
+seven legs with the online phase productive on every one, which the mature chain
+never managed.  But across the four 1M legs online falls −14.9 ± 3.7/leg (4.1σ)
+while offline does not, and the obvious confound — the 2→4 epoch switch — is
+dismissed on timing and on `picked_epoch` (§3 R9).  Per 100k games the series is
+84 → 21 → 10 → 4.9 → 4.1 → 0.7 → 1.0, the shape of ordinary saturation.  With the
+handoff at ~−13 (§1 K), **online Δ crosses zero within 2–3 legs, around 7–8M
+games** — at which point generation is paying 13 Elo for rows and the loop
+inverts.  Two responses, not exclusive: make generation productive again (depth,
+which R9's d6/800n makes cheap to raise — item 7), or shift the yield to the
+offline half, which is what item 2 and the composite-corpus programme are for.
+**Method note:** keep passing `--gauntlet-tdleaf`; this decomposition exists only
+because R9 passed it on every leg, and 7.11.5 records R7 legs where dropping it
+hid exactly this drift.
 
 **2. Restore `--corpus-window`.**  Every `m260916` leg ran at `corpus_window: 0`,
 so each consolidation saw only its own million games.  A1 measured multi-corpus
