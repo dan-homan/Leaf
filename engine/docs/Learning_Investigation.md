@@ -43,6 +43,11 @@ front page survived contact with its own Part 7.
 > masked early and visible later, but at ~13 Elo rather than the ~130 a mature
 > `m260720` net paid.  Full numbers and caveats in §1 K.
 >
+> **The offline half was measured separately on 2026-09-19** (`cons1`, §3): a
+> wide consolidation window is NOT the answer on this chain — four legs at a
+> matched dose lose −9.2 ± 8.8 to the newest leg alone — and the target and row
+> type are both at or past their optimum.  §4 gained three closures.
+>
 > Read every "−120 to −150 Elo" in this document as **a mature-net number at the
 > pre-2026-09-15 LR**, superseded for current work by §1 K.  Treat the §4
 > graveyard the same way: a knob that bought nothing on a saturated net at 4× the
@@ -133,15 +138,56 @@ d6 saturated around 2e6 games; d8 reopened it [4.6] and had saturated by ~5e6
 seed the offline pass converges to ~+151 across corpora differing in composition,
 coverage and labelling — a **2.7 Elo band over four arms** [7.7.4].
 
-**H. What the offline pass responds to is game diversity and row type.**  At
-identical rows, epochs, optimizer steps and wall clock, drawing from 2.5M games
-instead of 500k is worth **+36 anchor / +45 paired** [Offline 2.4].  At a fixed
-row budget, root rows (search labels) beat leaf rows (the generator's own static
-eval) by **+35.6 ± 11.0 paired** [Offline 3.2].  The 60 cp quiet gate is correct:
-60/120/200 are flat and removing it costs **−27.9 ± 11.3** [Offline 4.3] — the
-discarded tail carries label *information* (ΔMSE_out +52% in the top bin) that a
-static evaluator cannot represent, because those labels are good precisely because
-search resolved a tactic.
+**H. What the offline pass responds to is game diversity and row type — but the
+diversity half is REGIME-DEPENDENT and reverses on the young chain.**  On the
+mature `m260720` chain at 4× the present LR, drawing from 2.5M games instead of
+500k at identical rows, epochs, optimizer steps and wall clock was worth **+36
+anchor / +45 paired** [Offline 2.4].  On the young R9 chain the same manipulation
+is **negative**: the `cons1` arms (below) put a four-leg composite at **−9.2 ±
+8.8 paired / −12.1 ± 9.9 anchor** against the newest leg alone, at a matched
+68.9M-row dose.  Neither cons1 figure reaches 2σ, so the honest statement is
+"not helpful, plausibly ~10 Elo harmful" — but the sign is consistent across two
+instruments and opposite the mature-chain result.  **Do not carry the +36/+45
+into current work.**
+
+The row-type half survives intact and has now been re-measured on a corpus whose
+leaf rows are trustworthy.  At a fixed row budget root rows beat leaf rows by
+**+35.6 ± 11.0 paired** [Offline 3.2] pre-R8; `cons1`'s `nleaf`, which is the
+first test on an R8 corpus and holds the GAME SET fixed, agrees in sign at
+**−3.8 ± 9.0 paired / −18.4 ± 10.0 anchor**.  Smaller, same direction.  The 60 cp
+quiet gate is correct: 60/120/200 are flat and removing it costs **−27.9 ± 11.3**
+[Offline 4.3] — the discarded tail carries label *information* (ΔMSE_out +52% in
+the top bin) that a static evaluator cannot represent, because those labels are
+good precisely because search resolved a tactic.
+
+**M. The offline target sits in a broad λ optimum, and the slope above it is
+steep.**  `--bt-td-lambda` sets the outcome's weight as `λ^(N−ply)`; at the
+default 0.985 that is 0.08 at ply 0 of a 167-ply game and ~0.37 averaged.  Four
+points on the single-leg corpus, one epoch each, 2000 games each:
+
+| td_λ | vs seed | vs classic_eval |
+|---|---|---|
+| 0.9925 | +0.5 ± 6.5 | −125.4 ± 7.1 |
+| **0.9850** (default) | **+21.0 ± 6.3** | **−105.3 ± 6.9** |
+| 0.9775 | +13.0 ± 6.1 | −109.1 ± 7.1 |
+| 0.9700 | **+27.5 ± 6.1** | −110.2 ± 7.2 |
+
+**Only one of these is a real result: 0.9925 is worse, by −20.5 ± 9.1 paired and
+−20.1 ± 9.9 anchor, agreeing to within 0.4 Elo on two independent instruments.**
+Everything in 0.970–0.985 is flat within resolution, and the two instruments do
+not even agree on the ordering there (paired ranks 0.970 > 0.985 > 0.9775, anchor
+ranks 0.985 > 0.9775 > 0.970).  The 0.9775 interior point came in *below both its
+neighbours* on the paired column — a shape no smooth curve produces, and the
+clearest sign that this interval is noise.  The one trustworthy comparison inside
+it is a DIRECT match, 0.970 vs 0.985 = **+9.7 ± 5.9 (1.6σ)**, which hints at the
+lower value without establishing it.
+
+Two consequences.  **More outcome weight is the wrong direction**, confirmed
+independently on both corpora (−20.5 on the single leg, −10.3 ± 9.0 on the
+composite).  And because the cp channel is carrying more of the useful signal
+than the default λ credits it with, **this bounds `--bt-rescore` downward**: the
+cheap screen that was supposed to license the expensive arm has come back
+negative.
 
 **I. FRAMING, not mechanism — online play as hypothesis generation.**  Batch-Adam
 steps revalue features on the evidence of a handful of games, far too little to be
@@ -299,6 +345,12 @@ for one.
 | …but the online contribution falls across the four 1M legs while the offline one does not | §3 R9 table | online −14.9 ± 3.7/leg (4.1σ); total −13.2 ± 3.7 (3.5σ); offline +1.6 ± 5.2 (0.3σ) | R9 | **ESTABLISHED** (the decline itself) |
 | The 2→4 epoch switch does NOT explain the decline | §3 R9 | `epochs(N)` postdates `online Δ(N)`; onset leg `4e6g` starts from a 2-epoch net; `picked_epoch` = 2 on six of eight legs | R9 | **ESTABLISHED** |
 | Offline gain peaks at epoch 2 and decays after | `5e6g` epoch ladder | e1 +16.3, e2 +49.3, e3 +36.6, e4 +26.8 | R9 | SUPPORTED (one leg) |
+| ⚠️ A WIDE consolidation window is not helpful on the young chain — it reverses A1 | §1 H, `cons1` base vs null | −9.2 ± 8.8 paired, −12.1 ± 9.9 anchor, at a matched 68.9M-row dose | R9 | SUPPORTED (1.0σ, 1.2σ; consistent in sign) |
+| Outcome weight above the default costs ~20 Elo | §1 M, `cons1` nout vs null | −20.5 ± 9.1 paired, −20.1 ± 9.9 anchor — two instruments within 0.4 Elo | R9 | **ESTABLISHED** |
+| …and it costs on the composite too, so it is not a corpus artifact | `cons1` bout vs base | −10.3 ± 9.0 paired, −20.4 ± 10.2 anchor | R9 | SUPPORTED |
+| λ is FLAT across 0.970–0.985 | §1 M | spread ~5 Elo on the anchor at ±7; the two instruments rank the three points differently | R9 | SUPPORTED |
+| Leaf rows do not beat root rows, on an R8 corpus at a fixed game set | §1 H, `cons1` nleaf | −3.8 ± 9.0 paired, −18.4 ± 10.0 anchor | R9 | SUPPORTED |
+| The offline pipeline reproduces the chain's own epoch 1 | `cons1` null vs 5e6g ladder e1 | +21.0 ± 6.3 against +16.3 ± 8.9 (different host, book and n) | R9 | **ESTABLISHED** |
 
 ² Absent on a young net, or present and masked by concurrent learning gains?
 **Answered on R9: masked** — §1 K.  These older rows additionally sit in R1/R2 and
@@ -461,6 +513,45 @@ instead of two carries a selection bias of order +4 Elo, which inflates
 `final(4e6g)` and therefore deflates `online Δ(5e6g)` — the last point only, by
 roughly 4 of its 34-Elo shortfall.  The decline stands.
 
+**The `cons1` consolidation arms (2026-09-19), run within R9.**  Offline-only:
+no new games, seven one-epoch arms from a single seed, each rated over 2000
+games at 1+0.01 on `holdout_openings.epd` against two opponents — the seed
+itself (paired) and `classic_eval` (foreign anchor).  Driver
+`run_consolidation_arms.py`, sampler `sample_corpus.py`; both documented in
+`SCRIPT_USE.md`.
+
+Three design choices carry the results.  **The seed is the PRE-offline state**
+(`m260916-5e6g_work/train/m260916.tdleaf.bin`, exported as
+`m260916-5e6g-tdleaf.nnue`), not `5e6g_final`: seeding from the post-offline net
+would have made the control measure over-consolidation on data it had already
+seen twice, and left the target arms nothing to learn against.  **The dose is one
+leg's entire eligible corpus**, 68,934,511 rows, so the control is that corpus
+unsampled — the composite at any useful quota is larger than a single leg
+(four legs at quota 19 is 75.8M rows), so the dose had to be set by the smaller
+side.  **Every arm matches it row for row**, with the composite quota-sampled at
+19 rows/game over 4M games and trimmed by lowering the per-game cap.
+
+| arm | corpus | td_λ | vs seed | vs classic_eval |
+|---|---|---|---|---|
+| `null` | 5e6g alone, unsampled | 0.985 | +21.0 ± 6.3 | −105.3 ± 6.9 |
+| `base` | 4 legs, quota 19 | 0.985 | +11.8 ± 6.2 | −117.4 ± 7.1 |
+| `bout` | 4 legs | 0.9925 | +1.6 ± 6.5 | −137.8 ± 7.4 |
+| `nout` | 5e6g | 0.9925 | +0.5 ± 6.5 | −125.4 ± 7.1 |
+| `ncp2` | 5e6g | 0.9775 | +13.0 ± 6.1 | −109.1 ± 7.1 |
+| `ncp` | 5e6g | 0.970 | +27.5 ± 6.1 | −110.2 ± 7.2 |
+| `nleaf` | 5e6g leaf, same games as `null` | 0.985 | +17.2 ± 6.4 | −123.6 ± 7.2 |
+
+Plus one direct head-to-head, `ncp` vs `null` = +9.7 ± 5.9 (745/689/566).
+Conclusions in §1 H and §1 M; three lines closed in §4.
+
+**The pipeline validates against the chain's own numbers.**  `null` is one epoch
+on the 5e6g corpus from the 5e6g pre-offline state — exactly what the leg's own
+epoch 1 did, rated against the same opponent at the same time control.  The leg
+recorded **+16.3 ± 8.9**; `cons1` got **+21.0 ± 6.3**.  The two corpora differ by
+three rows out of 68.9M.  Remaining differences are host (Linux vs this Mac, so
+different nps at a fixed clock), opening book (`training` vs `holdout`) and n
+(1000 vs 2000), which is why the agreement is "consistent", not "reproduced".
+
 Two narrower confounds worth remembering: per-leg Δ is **not normalised per
 game** — the early legs are 100k–500k games, so the online yield *per 100k games*
 falls far faster than the table's per-leg column (84 → 21 → 10 → 4.9 → 4.1 → 0.7
@@ -610,6 +701,41 @@ late chain).  d8→d10 regressed: −13.6 on the leg and a head-to-head loss to 
 parent.  **Reopens** — see §6; the d10 leg is confounded by a 52% draw rate and
 predates R4 and R6.
 
+**The wide consolidation window (A1 opened it at +36/+45; `cons1` closed it on
+R9).**  The single clearest reversal in the record.  A1 measured a four-corpus
+window worth **+36 anchor / +45 paired** on the mature chain at 4× the present
+LR; `cons1` ran the same manipulation on the young R9 chain at a matched 68.9M
+row dose and got **−9.2 ± 8.8 paired / −12.1 ± 9.9 anchor**.  Both cons1 figures
+are ~1σ, so this closes on "not helpful", not on "harmful".  What makes it a
+closure rather than a null is that the *mechanism* proposed for it also failed:
+if old legs' rows hurt because their cp labels are stale, raising outcome weight
+(which is age-proof) should rescue them, and instead it cost a further
+−10.3 ± 9.0.  **Reopens if** a leg is run at a depth or LR that moves the regime
+again, or if someone finds a diversity manipulation that does not also age the
+labels — sampling wide *within* one leg, for instance, which cons1 did not test.
+
+**Leaf rows as a training corpus (Offline 3.2 closed it pre-R8; `cons1` closed
+it again post-R8).**  3.2's −35.6 ± 11.0 was confounded: it predates R8, so its
+leaf rows came from the broken corpus, and the doc's own rule says leaf results
+must not be pooled across that boundary.  `cons1`'s `nleaf` is the clean rerun —
+R8 corpus, same games as the root arm, same 68.9M dose — and it agrees in sign
+at **−3.8 ± 9.0 paired / −18.4 ± 10.0 anchor**.  Smaller than 3.2 claimed, same
+direction.  **Reopens** only as a BLEND: pure-leaf-vs-pure-root is now answered
+twice, but no one has tested leaf rows as a *supplement* to root rows at matched
+total dose, which is a different question and the one §6's old item 11 meant.
+
+**Outcome-weighted targets above the default, and with them the case for
+`--bt-rescore` (`cons1` closed both).**  λ = 0.9925 costs −20.5 ± 9.1 paired and
+−20.1 ± 9.9 anchor — two independent instruments within 0.4 Elo of each other,
+the most replicated single number in this document.  It costs on the composite
+corpus too (−10.3 ± 9.0), so it is not an artifact of which rows were used.  The
+screen was built so that a slope toward the outcome would license the expensive
+rescoring arm; the slope runs the other way, meaning the cp labels carry more
+usable signal than the default λ credits.  **Reopens if** a future regime makes
+cp labels demonstrably worse — a much deeper search, or a corpus deliberately
+aged beyond four legs — since staleness is the only mechanism that would flip
+the sign.
+
 ---
 
 ## 5. Measurement manual
@@ -633,6 +759,22 @@ generation-seed part of it, but not trajectory divergence or per-point match noi
 arm was better by 24.3 ± 11.8, the anchor said the other by 10.4 ± 16.3, the direct
 match said 0.7 ± 8.3 [7.10.6].  **Play the arms against each other**; 1000 games
 costs 23 minutes.
+
+`cons1` produced the cleanest worked example on record.  The contrast
+λ=0.970 vs λ=0.985, estimated three ways on the same two nets:
+
+| instrument | estimate |
+|---|---|
+| through the paired opponent (the seed) | +6.5 ± 8.8 |
+| through the foreign anchor (`classic_eval`) | −5.0 ± 10.0 |
+| **direct head-to-head, 2000 games** | **+9.7 ± 5.9** |
+
+The two subtractions disagree in SIGN, and the anchor's estimate excludes the
+direct measurement.  The direct match is also the tightest (±5.9 against ±8.8),
+because subtracting two ratings adds their errors while a head-to-head does not.
+**When a contrast matters, spend the games on the head-to-head.**  Twenty-five
+minutes of direct match here settled what four arms and roughly two hours of
+common-opponent rating had left ambiguous.
 
 **Never pool a decaying series.**  Pooling three points of a decaying transient
 gave a spurious 5.0σ [7.11.4].  Relatedly, **one early ladder point cannot
@@ -744,45 +886,19 @@ offline half, which is what item 2 and the composite-corpus programme are for.
 because R9 passed it on every leg, and 7.11.5 records R7 legs where dropping it
 hid exactly this drift.
 
-**2. The composite-corpus consolidation arms — is a periodic wide round worth
-running?**  Every `m260916` leg ran at `corpus_window: 0`, so each consolidation
-saw only its own million games, while four legs' dumps sit on disk.  A1 measured
-multi-corpus dilution at **+36 anchor / +45 paired** at identical rows, epochs
-and wall clock [Offline 2.4].  If the online half is decaying (item 1), this is
-where the remaining yield has to come from.
-
-Five one-epoch arms from the `5e6g` state, row-for-row matched
-(`run_consolidation_arms.py`; sampling rule in `SCRIPT_USE.md`):
-
-| arm | corpus | isolates |
-|---|---|---|
-| `null` | newest leg only, quota-sized to the same rows | the control |
-| `base` | four legs, quota 19 | game diversity + label age |
-| `bout` / `bcp` | `base`'s **exact** row file, `--bt-td-lambda` 0.9925 / 0.97 | the outcome-vs-cp target |
-| `leaf` | four legs, leaf rows, **same games** as base | row type (R8's corpus, first valid test) |
-
-Three design points carry the weight.  **The null is the reading**, not the
-baseline: `5e6g`'s own ladder says a third epoch on its own corpus costs
-**−12.7** (e2 +49.3 → e3 +36.6), so `base − null` prices diversity at matched
-dose and matched Adam steps — but that −12.7 is two matches against a common
-opponent, which §5 forbids subtracting, so the null is measured directly rather
-than assumed.  **`bout`/`bcp` reuse `base`'s row file byte for byte**, so they
-carry no sampling noise and are the cheap screen that **bounds `--bt-rescore`**
-(item 5): if the curve slopes toward the outcome, stale cp labels are hurting
-and rescoring earns its cost; if it peaks at or below the default, cp labels are
-not the binding constraint and the expensive arm cannot pay.  **`leaf` holds the
-game set fixed** — leaf rows survive in games whose root rows the quiet gate
-removed, so an unrestricted leaf sample draws ~45% more games at fewer rows
-each, and the row-type contrast would carry a game-count difference inside it.
-
-The quiet gate is deliberately NOT an arm.  It is the one knob that fights the
-matching rules — tightening to 20 cp drops root to 36.8 rows/game, so the quota
-stops filling and the effective game population shifts — and R8 changed leaf
-gating, not root.  If `leaf` wins, the gate returns in a better form, as
-`TDLEAF_LEAF_MATCH_CP`.
-
-(Supersedes the `--corpus-window` half of the old "deferred offline wins" item
-below.)
+**2. Sample WIDE WITHIN one leg — the one diversity manipulation `cons1` did
+not test.**  The composite-corpus programme answered its own question and closed
+it (§4): four legs at a matched dose is −9.2 ± 8.8 paired against the newest leg
+alone, and the staleness mechanism that would have explained a fix failed too.
+But every `cons1` arm confounded two things — more distinct GAMES and older
+LABELS — because more games could only come from older legs.  The clean
+separation is available and cheap: one leg holds ~1M games at 68.9 eligible rows
+each, so a quota of 17 over all 1M games draws the same dose from **4× the games
+at the same label age**.  If that also fails, diversity per se is not the lever
+and H's mature-chain +36/+45 was a label-age effect all along; if it wins, the
+wide window failed on staleness after all and the composite was simply the wrong
+way to buy diversity.  `sample_corpus.py --quota 17` over one leg is the whole
+experiment.
 
 **3. Rate the PV repairs (R8) IN ISOLATION.**  `m260916` runs R7 and R8 together
 and cannot attribute between them: the handoff fell from ~−130 to −13.5, but
@@ -800,14 +916,16 @@ A 5k-game arm at 98 steps is *not* sufficient — that mistake was made once
 already.  Note the residual mis-approximation is a Σ contributor, and Σ is the
 one lever 7.14 left standing and 7.15 showed pays.
 
-**4. ⚠️ `--bt-rescore` must be revisited, not merely re-run.**  It retargets a
-stored root label to its paired PV leaf, assuming the stored leaf is where the
-root score came from — false in ~45–55% of archived records.  7.7 measured it
-null (−2.5 ± 21.0) *without knowing this*, so the null now has a candidate
-explanation.  Under R8 new corpora carry pairs that are tight by construction, so
-`--bt-rescore` on a new corpus is a **different experiment** from the archives
-and results must not be pooled.  Either re-run it on a post-R8 corpus or retire
-it explicitly.  Details in `TODO.md`.
+**4. ⚠️ The quiet gate *tighter* than 60 cp — now the only untested offline
+knob.**  Was item 8.  `--bt-diag`'s negative ΔMSE_out below 40 cp hints that the
+near-quiet band is where the label information is, and this is the one offline
+lever `cons1` did not touch.  It was deliberately excluded there because it
+fights the matching rules — tightening to 20 cp drops root to 36.8 rows/game, so
+a fixed quota stops filling and the game population shifts — but at a quota of
+17 or below that objection disappears, because 80% of games still fill it.  With
+the window closed, the target flat and leaf rows answered, this is where the
+remaining offline yield would have to be.  (`--bt-rescore` moved to §4: the
+screen for it came back negative.)
 
 **5. Attack Σ directly, not through batch size.**  Batch size is a proxy: the
 mechanism is decorrelation, and B only buys it by averaging more whole games.  The
@@ -835,25 +953,16 @@ draw rate as a hard gate and buy decisiveness from the opening book rather than
 from depth [Offline A6].  Fixed-nodes generation gives phase-adaptive depth for
 free.
 
-**8. ⚠️ A quiet gate *tighter* than 60 cp.**  Partly overtaken by R8, which gates
-the dumped **leaf** rows at 10 cp — so on post-R8 corpora this is already answered
-for leaf rows and the open question is the **root** row gate, a different quantity
-(root quietness).  Never tested in either direction
-below 60, and `--bt-diag` reads **negative** ΔMSE_out for `|cp − gate| < 40`,
-which hints the optimum sits under 60.  The A2 arms had power for 28 Elo, not for
-5–10 [Offline 4.5].  Cheap: dumps are wide by default and the gate is now an
-offline filter, so this is one `--bt-quiet-cp` sweep over a corpus already on disk.
+**8. ⚠️ A1b — drop the STALEST corpus, not the whole window.**  The surviving
+fragment of the old "deferred offline wins" item; the rest is closed in §4.  A1b
+was never run: keep a wide window but drop its oldest leg, whose labels came
+from a generator 75 Elo weaker.  `cons1` gives it a reason to exist again — the
+composite lost, and if that loss is label age rather than diversity, then the
+window minus its stalest leg should sit between the two.  Cheap on the archives
+already on disk, and it reads directly against `cons1` base and null.  Do it
+after item 2, which separates the same two factors more sharply.
 
-**9. The remaining deferred offline win.**  Superseded in part by item 2.
-`--corpus-window` was
-turned down to 1 for R7 deliberately, giving up a measured **+36 anchor / +45
-paired** [Offline 2.4]; `--bt-rows root` is worth **+35.6 paired** [Offline 3.2].
-These are not retired, they are deferred, and the point of recording them here is
-that they get revisited rather than forgotten.  A1b — dropping the stalest corpus
-from the window, whose labels came from a generator 75 Elo weaker — was never run
-and bounds what label staleness costs.
-
-**10. Actor refresh cadence.**  The one clean A/B measured the wrong observable:
+**9. Actor refresh cadence.**  The one clean A/B measured the wrong observable:
 the learner's `--refresh-scores` means actor staleness never reaches the labels, so
 cadence acts only on the behaviour policy — which positions get played — while the
 measurement was weight displacement, downstream of the gradient [6.14.4].  Under
@@ -865,16 +974,15 @@ and costs no games, but it has **no repeat-run noise floor** — two identically
 configured runs were never compared, so its absolute scale is uncalibrated.  Build
 that floor first.
 
-**11. Leaf rows — settle the blend confound before dropping them.**  `--bt-rows
-root` won at the blend production actually uses, but every constant in
-`p = w·outcome + (1−w)·σ(cp/K)` was calibrated on the *mixture* and
-`--bt-leaf-lambda` has always sat at parity with the root ceiling.  A leaf row's
-bootstrap term is near-self-consistent, so its error collapses toward pure outcome
-regression at `w ≈ 0.30` [Offline 3.5].  Nobody should quote Part 3 as proof that
-leaf positions are worthless *in principle*.  Worth running only when deciding
-whether to keep *generating* leaf rows (54% of dump I/O).
+**10. Leaf rows as a SUPPLEMENT, not a substitute.**  Pure leaf against pure
+root is now answered twice and closed (§4): `cons1`'s `nleaf` reran it on an R8
+corpus at a fixed game set and got −3.8 ± 9.0 paired.  What remains is the
+question the old wording actually meant — leaf rows *added to* root rows at a
+matched total dose, where they might supply coverage rather than replace labels.
+Low priority: the two pure comparisons both came out negative, so a blend would
+have to beat its own better component.
 
-**12. The bias-growth canary.**  `fc0_b` ×15.9, `fc2_b` ×8.9, `ft_b` ×6.4,
+**11. The bias-growth canary.**  `fc0_b` ×15.9, `fc2_b` ×8.9, `ft_b` ×6.4,
 `fc1_b` ×3.3 across the chain, monotone and **still rising at 7M games** — `fc2_b`
 +28% in a leg whose total was +6.6 ± 8.2 [7.12.2].  These are the constant-capable
 channels `TRAINING.md` flags for outcome-imbalance absorption.  Self-play is
@@ -882,7 +990,7 @@ supposed to be immune, so this is unexplained rather than known-pathological.  I
 is nearly free to log per leg and, unlike the draw rate, not blind to uniform
 decay.  Carry it through the R7 chain from the start.
 
-**13. The root-vs-mix confound.**  `mix` carried 34 root rows/game against `root`'s
+**12. The root-vs-mix confound.**  `mix` carried 34 root rows/game against `root`'s
 76, so `root > mix` may be nothing more than "more root rows".  The discriminating
 arm is root-only at 86M rows, matching the root-row count *inside* `mix`: landing
 near +155 means the leaf rows were actively harmful, near +109 that `mix` was
