@@ -478,6 +478,10 @@ int nnue_batch_train(int argc, char *argv[])
     // ---- Options --------------------------------------------------------
     const char *files   = nullptr;
     const char *out_pfx = "bt";
+    // --bt-w-mean: target row-weighted mean outcome weight under
+    // TDLEAF_W_RELIABILITY.  Negative = match this corpus's own
+    // lambda^(N-ply) mean, making the default a pure redistribution.
+    float  w_target     = -1.0f;
     int   epochs   = 3;
     float lambda   = 1.0f;   // full lambda-return; td_lambda decay is the knob of record
     float K        = 220.0f;
@@ -520,6 +524,7 @@ int nnue_batch_train(int argc, char *argv[])
         else if ((v = next("--bt-leaf-lambda"))) leaf_lambda = (float)atof(v);
         else if ((v = next("--bt-td-lambda")))   { td_lambda = (float)atof(v); td_lambda_explicit = true; }
         else if ((v = next("--bt-quiet-cp"))) quiet_cp = atol(v);
+        else if ((v = next("--bt-w-mean")))   w_target = (float)atof(v);
         else if (strcmp(argv[i], "--bt-diag") == 0) diag_only = true;
         else if ((v = next("--bt-rescore"))) rescore_out = v;
         else if ((v = next("--bt-rows"))) {
@@ -618,9 +623,48 @@ int nnue_batch_train(int argc, char *argv[])
         for (int g = 0; g <= max_gap; g++)
             powtab[st][g] = powf(lam_st, (float)g);
     }
+    // Position-only outcome weight (TDLEAF_W_RELIABILITY).  w_b = c / T_b with
+    // c solved so the ROW-WEIGHTED MEAN weight equals w_target -- which
+    // defaults to the mean of lambda^(N-ply) on this very corpus, making the
+    // default a pure redistribution rather than a scale change.
+    std::vector<float> wtab(8, 0.0f);
+#if TDLEAF_W_RELIABILITY
+    {
+        std::vector<double> nb(8, 0.0);
+        double lam_sum = 0.0;
+        for (const BTRecord &r : recs) {
+            int g = (int)gid_N[r.gid] - (int)r.ply;
+            nb[bt_stack_for(r)] += 1.0;
+            lam_sum += powtab[bt_stack_for(r)][g < 0 ? 0 : g];
+        }
+        double Ntot = (double)recs.size();
+        double want = (w_target > 0.0f) ? (double)w_target : lam_sum / Ntot;
+        double denom = 0.0;
+        for (int st = 0; st < 8; st++) denom += nb[st] / TDLEAF_W_T_TAB[st];
+        double c = want * Ntot / denom;
+        double got = 0.0;
+        for (int st = 0; st < 8; st++) {
+            double w = c / TDLEAF_W_T_TAB[st];
+            wtab[st] = (float)(w > 1.0 ? 1.0 : w);
+            got += nb[st] * wtab[st];
+        }
+        fprintf(stderr, "batch-train: TDLEAF_W_RELIABILITY — position-only "
+                        "outcome weight, target mean %.4f (lambda^(N-ply) "
+                        "mean %.4f), c=%.5f, achieved %.4f\n",
+                want, lam_sum / Ntot, c, got / Ntot);
+        for (int st = 0; st < 8; st++)
+            fprintf(stderr, "  stack %d (%2d-%2d pieces) n=%9.0f  w=%.4f\n",
+                    st, st * 4 + 1, st * 4 + 4, nb[st], (double)wtab[st]);
+    }
+#endif
     auto decay = [&](const BTRecord &r) {
+#if TDLEAF_W_RELIABILITY
+        (void)gid_N;
+        return wtab[bt_stack_for(r)];
+#else
         int g = (int)gid_N[r.gid] - (int)r.ply;
         return powtab[bt_stack_for(r)][g < 0 ? 0 : g];
+#endif
     };
     {
         double dsum = 0.0;

@@ -165,6 +165,67 @@ static inline float tdleaf_lambda_for_stack(int stack, float lam_mean)
     return lam_mean;
 #endif
 }
+
+
+// ---------------------------------------------------------------------------
+// Position-only outcome weight (TDLEAF_W_RELIABILITY, default OFF) -- OFFLINE
+// ---------------------------------------------------------------------------
+// The offline target weights the game outcome by lambda^(N - ply), where N is
+// the length of the game that was actually played.  That conditions the LABEL
+// on the trajectory: two identical positions get weights differing by orders of
+// magnitude because one game mated quickly and the other ground on.  Measured
+// on the training population, the within-material sd of that weight is
+// 0.13-0.25 -- pure trajectory noise.
+//
+// Replace it with a weight that depends only on the POSITION.  Treating the
+// outcome and the eval as two noisy estimates of the position's true value V,
+// the variance-minimising blend is
+//
+//     w_b = sigma^2_eval / (sigma^2_eval + sigma^2_outcome,b)
+//
+// and what is measurable is their SUM, T_b = Var(outcome - ev) per material
+// stack.  Substituting gives w_b = c / T_b with c = sigma^2_eval -- the optimal
+// weight is inversely proportional to the measured total variance, and the one
+// unknown IS the free scale.  T_b over 4.07M quiet root positions of the
+// m260916 5e6g leg (scripts/calibrate_from_corpus.py section 3):
+//
+//   stack  pieces    T_b     corr(ev,outcome)
+//     0     1-4    0.0228    0.930   <- clamped to stack 1 below
+//     1     5-8    0.0398    0.848
+//     2     9-12   0.0557    0.826
+//     3    13-16   0.0850    0.741
+//     4    17-20   0.1147    0.631
+//     5    21-24   0.1452    0.494
+//     6    25-28   0.1727    0.331
+//     7    29-32   0.1915    0.181
+//
+// ⚠️ Stack 0 is CLAMPED to stack 1: fewest rows, and c would exceed T_0 and pin
+// it at the w <= 1 ceiling where a scale sweep cannot move it.
+//
+// c is not hardcoded -- the trainer solves it so the row-weighted mean weight
+// hits --bt-w-mean, which DEFAULTS to whatever lambda^(N-ply) averages on the
+// corpus being trained.  At the default this is therefore pure redistribution:
+// same total outcome weight, allocated by position instead of by trajectory.
+//
+// Two reference points on the 5e6g corpus, where lambda^(N-ply) averages 0.321:
+//   --bt-w-mean 0.321 : mean-preserving.  Sharpens the tilt main already has
+//                       (stack 7 0.198 -> 0.134, stack 0 0.605 -> 0.644).
+//   --bt-w-mean 0.498 : c = min T_b, i.e. the weights the measurement implies
+//                       with no rescale.  Leaves stacks 4-7 within 7% of main
+//                       and raises 0-2 by 1.65-2.38x -- "openings unchanged,
+//                       trust the outcome once the position simplifies".
+//
+// OFFLINE ONLY.  The online eligibility trace keeps lambda: it decays between
+// ADJACENT records, where the local material is the right key and no path
+// problem arises.  Changing both in one arm would make a null uninterpretable.
+#ifndef TDLEAF_W_RELIABILITY
+ #define TDLEAF_W_RELIABILITY 0
+#endif
+
+static const float TDLEAF_W_T_TAB[8] = {
+    0.0398f, 0.0398f, 0.0557f, 0.0850f,
+    0.1147f, 0.1452f, 0.1727f, 0.1915f
+};
 static const int   TDLEAF_MIN_PLIES       = 8;      // skip games shorter than this
 static const int   TDLEAF_MIN_PLIES_REP   = 40;     // skip 3-rep draws shorter than this
 // Horizon-noise mitigation 1 — TD error clipping.
