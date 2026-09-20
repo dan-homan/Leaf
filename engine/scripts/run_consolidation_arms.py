@@ -103,9 +103,18 @@ ARMS = {
     # them, at matched steps on repeated rather than fresh rows.
     "nboth": ("nullboth", "both", []),
     "null2": ("null", "root", [], 2),
+    # Elo-test the K calibration: 60k games fit K = 188-192 against the
+    # configured 220.  It LOST (-16.5 paired / -7.7 anchor), which is one of the
+    # seven results behind Learning_Investigation.md SS1 O.
+    "nK":    ("null", "root", ["--bt-K", "190"]),
 }
+# Arms that need compile flags living only on the `k-by-material` branch
+# (TDLEAF_K_SHAPE, TDLEAF_LAMBDA_SHAPE, TDLEAF_W_RELIABILITY) are NOT listed
+# here.  On main those flags are undefined, so the build would succeed and the
+# arm would silently be a duplicate of `null` -- a result that looks like an arm
+# and is not one.  See the guard in compile_binary().
 ORDER = ["null", "base", "bout", "bcp", "leaf",
-         "nout", "ncp", "nleaf", "ncp2", "nboth", "null2"]
+         "nout", "ncp", "nleaf", "ncp2", "nboth", "null2", "nK"]
 
 
 def log(msg):
@@ -137,7 +146,7 @@ def guard_run_dir():
             f"run/).  Training and rating binaries must run from learn/")
 
 
-def compile_binary(version, net, tdleaf, dest):
+def compile_binary(version, net, tdleaf, dest, extra_flags=()):
     """Build Leaf_v<version> against NET, and land it in DEST beside a copy.
 
     comp.pl compiles into the current directory AND resolves ../src/Leaf.cc
@@ -160,6 +169,19 @@ def compile_binary(version, net, tdleaf, dest):
     flags = ["NNUE=1", f"NNUE_NET={net.name}"]
     if tdleaf:
         flags.append("TDLEAF=1")
+        # Guard: comp.pl happily passes -D for a macro the source never reads,
+        # so an arm keyed on a flag from another branch would build clean and
+        # run as a duplicate of its control.  Refuse rather than measure that.
+        src = SCRIPT_DIR.parent / "src"
+        for f in extra_flags:
+            name = str(f).split("=", 1)[0]
+            hit = subprocess.run(["grep", "-rlq", name, str(src)],
+                                 capture_output=True)
+            if hit.returncode != 0:
+                die(f"--compile-flags {f}: {name} appears nowhere in {src}. "
+                    f"The build would succeed and the arm would be a silent "
+                    f"duplicate of its control. Wrong branch?")
+        flags += list(extra_flags)
     try:
         sh(["perl", "comp.pl", version] + flags + ["OVERWRITE"], cwd=str(LEARN))
     finally:
@@ -349,7 +371,8 @@ def train_arm(arm, corpus, n_rows, seed_nnue, seed_state, args, arms_dir):
     # Every arm starts from the identical net AND optimizer state.  The state
     # must sit beside the binary under the net's own name, or the trainer
     # starts from scratch Adam moments and the arms are not comparable.
-    bt = compile_binary(f"bt_{arm}", seed_nnue, tdleaf=True, dest=adir)
+    bt = compile_binary(f"bt_{arm}", seed_nnue, tdleaf=True, dest=adir,
+                        extra_flags=args.compile_flags)
     # The engine looks for <loaded-net-basename>.tdleaf.bin, so the state is
     # staged under the BASE net's name regardless of what it is called in
     # learn/.  Its FP32 shadow weights and Adam moments are the real starting
@@ -486,6 +509,10 @@ def main():
     ap.add_argument("--anchor", default="Leaf_vclassic_eval",
                     help="foreign anchor binary in learn/ (§5: family matches "
                          "are non-transitive, so never rate on paired alone)")
+    ap.add_argument("--compile-flags", nargs="*", default=[], metavar="F=V",
+                    help="extra comp.pl flags for the TRAINER build only (the "
+                         "rating binary stays stock).  Refused if the macro "
+                         "appears nowhere in src/")
     ap.add_argument("--only", nargs="+", choices=ORDER, default=None)
     ap.add_argument("--corpus-only", action="store_true",
                     help="build the corpora and stop")
