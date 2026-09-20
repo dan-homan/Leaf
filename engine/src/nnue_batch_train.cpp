@@ -657,18 +657,114 @@ int nnue_batch_train(int argc, char *argv[])
                     st, st * 4 + 1, st * 4 + 4, nb[st], (double)wtab[st]);
     }
 #endif
-    auto decay = [&](const BTRecord &r) {
-#if TDLEAF_W_RELIABILITY
+    // ---- Path-dependent outcome weight (TDLEAF_LAMBDA_SHAPE) -------------
+    // The lambda-return's weight on the outcome is the PRODUCT of lambda over
+    // the steps from this position to the end -- and with a material-dependent
+    // lambda those steps have different bases.  Using the position's OWN
+    // material for the whole span is wrong by ~25x for an opening row in a long
+    // game: it cannot know the game traded down into a stable endgame.
+    //
+    // So walk each game backward and accumulate.  Each gap contributes
+    // lambda(NEXT position)^gap; the tail from the last surviving row to
+    // termination uses that row's own lambda, the best available.  Rows the
+    // quiet gate removed are skipped over, their steps absorbed into the
+    // neighbouring gap -- an approximation, but one that tracks the actual
+    // material trajectory instead of ignoring it.
+    //
+    // Games are CONTIGUOUS in the dump and ply-ordered within, so this needs no
+    // sort -- and must not use one: gids collide across legs (~1800 per 4M), and
+    // sorting by gid would merge two unrelated games where a contiguous walk
+    // correctly treats them as separate runs.
+    std::vector<float> wpath;
+#if TDLEAF_LAMBDA_SHAPE
+    {
+        wpath.assign(recs.size(), 0.0f);
+        size_t anomalies = 0;
+        size_t i0 = 0;
+        while (i0 < recs.size()) {
+            size_t j0 = i0;
+            const uint32_t g = recs[i0].gid;
+            while (j0 < recs.size() && recs[j0].gid == g) {
+                if (j0 > i0 && recs[j0].ply < recs[j0 - 1].ply) anomalies++;
+                j0++;
+            }
+            // Accumulate EFFECTIVE PLIES, sum(gap x t_stack), not the weight
+            // itself.  w = lambda^(alpha * E) then costs one exp per record per
+            // solver iteration instead of re-walking every game, which is what
+            // makes the mean-matching solve below affordable at 69M rows.
+            float E = 0.0f;
+            int next_ply = (int)gid_N[g];
+            int next_stack = bt_stack_for(recs[j0 - 1]);
+            for (size_t k = j0; k-- > i0; ) {
+                const BTRecord &r = recs[k];
+                int gap = next_ply - (int)r.ply;
+                if (gap < 0) gap = 0;
+                E += (float)gap * TDLEAF_LAMBDA_SHAPE_TAB[next_stack];
+                wpath[k] = E;
+                next_ply   = (int)r.ply;
+                next_stack = bt_stack_for(r);
+            }
+            i0 = j0;
+        }
+        // alpha scales every decay rate together.  alpha = 1 is the shape
+        // exactly as measured; solving alpha so the mean weight matches
+        // --bt-w-mean (or the flat lambda^(N-ply) mean) makes the arm a PURE
+        // REDISTRIBUTION, separating "material-aware path decay" from "more
+        // outcome weight overall" -- which are otherwise confounded, since the
+        // as-measured shape nearly doubles the mean.
+        const double rmean = -log((double)td_lambda);
+        auto mean_at = [&](double alpha) {
+            double ssum = 0.0;
+            for (float E : wpath) ssum += exp(-rmean * alpha * (double)E);
+            return ssum / (double)std::max<size_t>(wpath.size(), 1);
+        };
+        double alpha = 1.0;
+        // main's reference, computed with the UNSHAPED lambda -- powtab is
+        // built per stack from the shaped one, so reading it here would report
+        // the flawed position-material-for-the-whole-span weight, not main's.
+        double flat = 0.0;
+        for (const BTRecord &r : recs) {
+            int g2 = (int)gid_N[r.gid] - (int)r.ply;
+            flat += pow((double)td_lambda, (double)(g2 < 0 ? 0 : g2));
+        }
+        flat /= (double)std::max<size_t>(recs.size(), 1);
+        if (w_target > 0.0f) {
+            double lo = 0.05, hi = 40.0;
+            for (int it = 0; it < 40 && hi - lo > 1e-4; it++) {
+                double mid = 0.5 * (lo + hi);
+                if (mean_at(mid) > (double)w_target) lo = mid; else hi = mid;
+            }
+            alpha = 0.5 * (lo + hi);
+        }
+        for (size_t k = 0; k < wpath.size(); k++)
+            wpath[k] = (float)exp(-rmean * alpha * (double)wpath[k]);
+        double ws = 0.0;
+        for (float w : wpath) ws += w;
+        fprintf(stderr, "batch-train: TDLEAF_LAMBDA_SHAPE — path-dependent "
+                        "outcome weight, alpha=%.4f mean %.4f (flat "
+                        "lambda^(N-ply) mean %.4f) over %zu positions",
+                alpha, ws / (double)std::max<size_t>(recs.size(), 1),
+                flat, recs.size());
+        if (anomalies)
+            fprintf(stderr, "  ⚠️ %zu out-of-order plies", anomalies);
+        fprintf(stderr, "\n");
+    }
+#endif
+    auto decay = [&](size_t i) {
+#if TDLEAF_LAMBDA_SHAPE
+        return wpath[i];
+#elif TDLEAF_W_RELIABILITY
         (void)gid_N;
-        return wtab[bt_stack_for(r)];
+        return wtab[bt_stack_for(recs[i])];
 #else
+        const BTRecord &r = recs[i];
         int g = (int)gid_N[r.gid] - (int)r.ply;
         return powtab[bt_stack_for(r)][g < 0 ? 0 : g];
 #endif
     };
     {
         double dsum = 0.0;
-        for (const BTRecord &r : recs) dsum += (double)decay(r);
+        for (size_t i = 0; i < recs.size(); i++) dsum += (double)decay(i);
         fprintf(stderr, "batch-train: result decay td_lambda=%.3f — mean "
                         "decay %.3f over %zu positions (max gap %d)\n",
                 (double)td_lambda, dsum / (double)recs.size(), recs.size(),
@@ -710,7 +806,7 @@ int nnue_batch_train(int argc, char *argv[])
             for (size_t k = lo; k < hi; k++) {
                 uint32_t i = val_idx[k];
                 float d  = bt_eval_record(recs[i], K, w.pos, w.acc, nullptr);
-                float tb = bt_target(recs[i], lambda, leaf_lambda, K, decay(recs[i]));
+                float tb = bt_target(recs[i], lambda, leaf_lambda, K, decay(i));
                 float to = 0.5f * (float)recs[i].result2;
                 w.se  += (double)(tb - d) * (tb - d);
                 w.se2 += (double)(to - d) * (to - d);
@@ -945,9 +1041,10 @@ int nnue_batch_train(int argc, char *argv[])
             int lo = (int)((long)tid * cur / threads);
             int hi = (int)((long)(tid + 1) * cur / threads);
             for (int j = lo; j < hi; j++) {
-                const BTRecord &r = recs[train_idx[base + j]];
+                const size_t ri = train_idx[base + j];
+                const BTRecord &r = recs[ri];
                 float d      = bt_eval_record(r, K, w.pos, w.acc, &w.act);
-                float target = bt_target(r, lambda, leaf_lambda, K, decay(r));
+                float target = bt_target(r, lambda, leaf_lambda, K, decay(ri));
                 float e      = target - d;
                 w.se += (double)e * e;
                 // Same descent-form gradient scale as tdleaf_accumulate_game;
