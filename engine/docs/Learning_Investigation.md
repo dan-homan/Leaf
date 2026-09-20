@@ -217,6 +217,20 @@ quiet gate is correct: 60/120/200 are flat and removing it costs **−27.9 ± 11
 the top bin) that a static evaluator cannot represent, because those labels are
 good precisely because search resolved a tactic.
 
+**Dose via leaf rows does not clear the bar either (2026-09-20).**  `nboth`
+trained on the newest leg's root rows AND all its leaf rows over the same ~1M
+games — 153.7M rows against the null's 68.9M, a 2.23× dose with the game set
+unchanged.  On the anchor: `null` −105.3 ± 6.9, `nboth` −114.6 ± 7.2, `nleaf`
+−123.6 ± 7.2.  **The ordering is monotone in how much of the corpus is leaf
+rows** — root only > root+leaf > leaf only — so leaf rows dilute roughly in
+proportion to their share, and 2.2× the dose does not buy past it.  (It won its
+direct head-to-head against the null by +17.9 ± 5.9; see §5 for why that does not
+decide the question.)  Note the confound that went unresolved because the anchor
+closed the question first: one epoch over 2.23× rows is also 2.23× the Adam
+steps, so "more data" and "more steps" were never separated here.  **Offline dose
+via EPOCHS is untouched by this** and remains available — the chain already ships
+`picked_epoch` 2 on six of eight legs.
+
 **M. The offline target sits in a broad λ optimum, and the slope above it is
 steep.**  `--bt-td-lambda` sets the outcome's weight as `λ^(N−ply)`; at the
 default 0.985 that is 0.08 at ply 0 of a 167-ply game and ~0.37 averaged.  Four
@@ -407,6 +421,8 @@ for one.
 | …and it costs on the composite too, so it is not a corpus artifact | `cons1` bout vs base | −10.3 ± 9.0 paired, −20.4 ± 10.2 anchor | R9 | SUPPORTED |
 | λ is FLAT across 0.970–0.985 | §1 M | spread ~5 Elo on the anchor at ±7; the two instruments rank the three points differently | R9 | SUPPORTED |
 | Leaf rows do not beat root rows, on an R8 corpus at a fixed game set | §1 H, `cons1` nleaf | −3.8 ± 9.0 paired, −18.4 ± 10.0 anchor | R9 | SUPPORTED |
+| …nor do they help as a SUPPLEMENT at 2.2× dose | §1 H, `cons1` nboth | anchor −9.4 ± 10.0 vs null; ordering root > root+leaf > leaf is monotone | R9 | SUPPORTED |
+| A family head-to-head can win while the anchor does not | §5 policy, `nboth` | direct +17.9 ± 5.9 (3.0σ) against anchor −9.4 ± 10.0 | R9 | **ESTABLISHED** |
 | The offline pipeline reproduces the chain's own epoch 1 | `cons1` null vs 5e6g ladder e1 | +21.0 ± 6.3 against +16.3 ± 8.9 (different host, book and n) | R9 | **ESTABLISHED** |
 | Online Δ has crossed zero at `6e6g` | §3 R9 BayesElo table | +39, +29, +14, +16, **−3** over the 1M legs; ±9–13 each | R9 | **ESTABLISHED** (the trend; the −3 itself is ~0) |
 | `--depth D --nodes N` makes D a FLOOR, not a ceiling | `selfplay.cpp:470`, `search.cpp:548` | node break gated on `max_ply >= min_search_depth` | — | **ESTABLISHED** (code) |
@@ -811,9 +827,13 @@ leaf rows came from the broken corpus, and the doc's own rule says leaf results
 must not be pooled across that boundary.  `cons1`'s `nleaf` is the clean rerun —
 R8 corpus, same games as the root arm, same 68.9M dose — and it agrees in sign
 at **−3.8 ± 9.0 paired / −18.4 ± 10.0 anchor**.  Smaller than 3.2 claimed, same
-direction.  **Reopens** only as a BLEND: pure-leaf-vs-pure-root is now answered
-twice, but no one has tested leaf rows as a *supplement* to root rows at matched
-total dose, which is a different question and the one §6's old item 11 meant.
+direction.  The BLEND reopening is now closed too: `nboth` added all 84.7M leaf rows on top
+of the root corpus over the same games (2.23× dose) and came in at −9.4 ± 10.0
+on the anchor, with the three arms ordering monotonically in leaf share.  **What
+would reopen it** is a mechanism, not another dose: leaf rows carry the
+generator's static eval at the PV leaf, so they can only help where that is the
+quantity of interest — a leaf-targeted auxiliary loss, say, rather than more
+rows in the same pool.
 
 **Outcome-weighted targets above the default, and with them the case for
 `--bt-rescore` (`cons1` closed both).**  λ = 0.9925 costs −20.5 ± 9.1 paired and
@@ -833,7 +853,43 @@ the sign.
 
 Each of these cost something to learn.  They are regime-independent.
 
-**Rate against a foreign anchor, and know that family matches are non-transitive
+**THE DECISION POLICY (D. Homan, 2026-09-20).  Read this before choosing an
+instrument, and before acting on any result in this document.**
+
+A single opponent is never the best basis for a decision.  The instruments here
+answer different questions and are not interchangeable:
+
+| instrument | answers | cost / precision |
+|---|---|---|
+| direct head-to-head between siblings | "is A stronger than B?" | cheap, tight (±6 at 2000 games) |
+| common-opponent subtraction (A−C via B) | the same question, badly | errors add; unreadable under ~20 Elo |
+| foreign anchor | "does this generalize past the family?" | the DECISION criterion |
+
+Computer-chess practice uses self-play against previous versions for quick
+discrimination, because a head-to-head is simple numbers where A-vs-B and
+C-vs-B needs far more games to do right.  **A-vs-C is efficient but sometimes
+wrong** — it rewards whatever A learned about positions B misjudges, which is
+family-specific and need not generalize.  A mix of both is what this setup runs,
+and it is a deliberate balance, not an accident.  Better still would be a POOL
+of several non-EXchess-derived opponents at similar strength; the testing cost
+is prohibitive, so it is not done.  ⚠️ Note also that `classic_eval` is Leaf's
+own classical evaluation and shares search code with everything it rates — it is
+"foreign" in eval only, which is a real limit on how independent the anchor is.
+
+**Consequence: when the tests do not show a clear win either way,
+elegance / simplicity / expected correctness is the discriminator.**  An increase
+in complexity must be *earned* by a clear win, not merely permitted by an
+ambiguous one.  This is a standing tiebreak, and it is why several entries in §4
+are closed on "not helpful" rather than on a measured regression.
+
+*Worked example — the `nboth` arm (2026-09-20).*  Root + leaf rows over the same
+games, 2.23× the dose, one epoch.  The direct head-to-head against the root-only
+null was **+17.9 ± 5.9 (3.0σ)** — a real, well-measured family win.  Against the
+anchor it was **−9.4 ± 10.0**, i.e. no win at all.  Both measurements are sound;
+they answer different questions.  The decision followed the anchor and the
+simplicity tiebreak, and the design stayed as it was.
+
+**Rate against a foreign anchor, and know that family matches are non-transitive**Rate against a foreign anchor, and know that family matches are non-transitive
 in both directions.**  Family matches *understate* real improvement — ~+65 of
 style-robust gain showed as +13 within the family [4.6] — and they can also read
 **zero on a real 28 Elo regression** [Offline 4.3], where the anchor replicated
@@ -871,9 +927,14 @@ own `[White]` header before believing it.
 The two subtractions disagree in SIGN, and the anchor's estimate excludes the
 direct measurement.  The direct match is also the tightest (±5.9 against ±8.8),
 because subtracting two ratings adds their errors while a head-to-head does not.
-**When a contrast matters, spend the games on the head-to-head.**  Twenty-five
-minutes of direct match here settled what four arms and roughly two hours of
-common-opponent rating had left ambiguous.
+**When a contrast matters, spend the games on the head-to-head** — but only when
+the question really is "is A stronger than B".  Twenty-five minutes of direct
+match here settled what four arms and roughly two hours of common-opponent
+rating had left ambiguous.  ⚠️ **A head-to-head does NOT substitute for the
+anchor on a design decision.**  `nboth` won its direct match by +17.9 ± 5.9 and
+still lost on the anchor by −9.4 ± 10.0 — see the decision policy at the head of
+this section.  Use the head-to-head to resolve a contrast; use the anchor to
+decide whether the contrast is worth acting on.
 
 **Never pool a decaying series.**  Pooling three points of a decaying transient
 gave a spurious 5.0σ [7.11.4].  Relatedly, **one early ladder point cannot
@@ -1094,13 +1155,10 @@ and costs no games, but it has **no repeat-run noise floor** — two identically
 configured runs were never compared, so its absolute scale is uncalibrated.  Build
 that floor first.
 
-**10. Leaf rows as a SUPPLEMENT, not a substitute.**  Pure leaf against pure
-root is now answered twice and closed (§4): `cons1`'s `nleaf` reran it on an R8
-corpus at a fixed game set and got −3.8 ± 9.0 paired.  What remains is the
-question the old wording actually meant — leaf rows *added to* root rows at a
-matched total dose, where they might supply coverage rather than replace labels.
-Low priority: the two pure comparisons both came out negative, so a blend would
-have to beat its own better component.
+**10. ~~Leaf rows as a supplement~~ — CLOSED 2026-09-20, see §4.**  `nboth`
+tested it directly (root + all leaf rows, same games, 2.23× dose) and it did not
+clear the anchor.  Retained here only as a pointer, because the item was listed
+as open in three previous revisions of this document.
 
 **11. The bias-growth canary.**  `fc0_b` ×15.9, `fc2_b` ×8.9, `ft_b` ×6.4,
 `fc1_b` ×3.3 across the chain, monotone and **still rising at 7M games** — `fc2_b`
