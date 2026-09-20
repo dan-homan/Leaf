@@ -195,6 +195,65 @@ the chain has been generating TD targets and corpus labels from a search ~373 El
 weaker than `d8/2000` of the same net.  Under G, that is the quantity that
 governs whether the bootstrap still has headroom.
 
+**O. CORPUS STATISTICS ARE NOT TRAINING HYPERPARAMETERS.  Seven arms, seven
+losses, and the losses track one thing.**  The single most decision-relevant
+result of the calibration programme (2026-09-20, `cons1`, all offline arms from
+the `5e6g` pre-offline seed, 2000 games each, rated against the seed and
+`classic_eval`).
+
+Every change derived from fitting the corpus lost on the anchor, across three
+different parameters, both scale and shape, and both directions:
+
+| arm | what the fit said to do | anchor vs `null` | paired |
+|---|---|---|---|
+| `npA` | path-dependent λ-return product, mean-preserving | **−5.7 ± 9.9** | −9.6 ± 8.7 |
+| `nK` | flat K 220 → 190 (fitted 188–192) | −7.7 ± 9.9 | −16.5 ± 8.8 |
+| `nshape` | K shaped by material (U), mean-preserving | −14.6 ± 9.7 | −7.3 ± 8.8 |
+| `nwB` | position-only outcome weight, as measured | −16.0 ± 10.1 | −4.9 ± 8.8 |
+| `nwA` | position-only outcome weight, mean-preserving | −19.0 ± 10.0 | −6.6 ± 8.9 |
+| `nout` | λ 0.985 → 0.9925 (toward the fitted 0.991) | −20.1 ± 9.9 | −20.5 ± 9.1 |
+| `npB` | path-dependent product, as measured | **−33.5 ± 10.0** | −22.1 ± 8.8 |
+
+And the control that moves AWAY from the fit was fine: `ncp`, λ → 0.970 against a
+fitted 0.991, read −5.0 ± 10.0 anchor / +6.5 ± 8.8 paired, with a direct
+head-to-head of **+9.7 ± 5.9**.  `ncp2` (0.9775) −3.8 ± 9.9.  So this is not
+"the loop is insensitive" — it is specifically that the fitted direction is the
+wrong one.
+
+**The losses are ordered by HOW MUCH OUTCOME WEIGHT MOVED, not by how cleverly
+it was allocated.**  `npB` doubles the mean outcome weight (0.63 against `main`'s
+0.32) and loses 33.5; `nout` raises it and loses 20.1; `bout` did the same on
+the composite corpus and lost 20.4; the mean-preserving arms cluster at −6 to
+−19.  Four independent measurements, one direction: **more outcome weight
+loses, roughly in proportion to how much is added.**
+
+**λ^(N−ply) is already close to optimal.**  `npA` is the correct λ-return —
+the product of a material-dependent λ walked along the game's real material
+trajectory, with α solved so the mean matches `main` exactly (0.3210 against
+0.3214 over 68.9M rows).  It reproduces `main` rather than beating it: −5.7 ±
+9.9, inside noise.  A materially more sophisticated construction recovers the
+constant that was already there.
+
+**But the trajectory carries real signal.**  Compare the three mean-preserving
+offline weightings:
+
+| weighting | anchor |
+|---|---|
+| trajectory + material-aware rate (`npA`) | **−5.7** |
+| position-only, matched mean (`nwA`) | −19.0 |
+| position-only, as measured (`nwB`) | −16.0 |
+
+Discarding the trajectory costs ~13 Elo relative to keeping it.  The
+within-material sd of `λ^(N−ply)` is 0.13–0.25, which looked like trajectory
+NOISE and is better read as information: the same position in a game that mated
+quickly is a different training example from one in a long grind.
+
+⚠️ **This closes the line, not the measurements.**  The per-bucket fits are real
+facts about chess and are kept in §4 — K is U-shaped in material (≈170 at 13–20
+pieces, ≈270 in bare endgames) and λ is monotone (20-ply half-life in the
+opening, 400+ in the endgame).  What is refuted is the inference from them to a
+training hyperparameter.
+
 **H. What the offline pass responds to is game diversity and row type — but the
 diversity half is REGIME-DEPENDENT and reverses on the young chain.**  On the
 mature `m260720` chain at 4× the present LR, drawing from 2.5M games instead of
@@ -423,6 +482,13 @@ for one.
 | Leaf rows do not beat root rows, on an R8 corpus at a fixed game set | §1 H, `cons1` nleaf | −3.8 ± 9.0 paired, −18.4 ± 10.0 anchor | R9 | SUPPORTED |
 | …nor do they help as a SUPPLEMENT at 2.2× dose | §1 H, `cons1` nboth | anchor −9.4 ± 10.0 vs null; ordering root > root+leaf > leaf is monotone | R9 | SUPPORTED |
 | A family head-to-head can win while the anchor does not | §5 policy, `nboth` | direct +17.9 ± 5.9 (3.0σ) against anchor −9.4 ± 10.0 | R9 | **ESTABLISHED** |
+| Calibration-derived changes lose: 7 arms, 3 parameters, both directions | §1 O | anchor −5.7 to −33.5 vs `null`; none positive | R9 | **ESTABLISHED** |
+| …while moving AWAY from the fitted λ is fine | §1 O | `ncp` λ 0.970: anchor −5.0 ± 10.0, direct head-to-head +9.7 ± 5.9 | R9 | SUPPORTED |
+| More outcome weight loses in proportion to how much is added | §1 O | `npB` (2× weight) −33.5; `nout` −20.1; `bout` −20.4; mean-preserving arms −6…−19 | R9 | **ESTABLISHED** |
+| `λ^(N−ply)` is already near-optimal | §1 O, `npA` | the correct λ-return product at matched mean reads −5.7 ± 9.9 | R9 | SUPPORTED |
+| The game trajectory carries signal, not just noise | §1 O | keeping it (`npA` −5.7) vs discarding it (`nwA` −19.0) at matched mean | R9 | SUPPORTED |
+| K is U-shaped in material; λ is monotone | §4 calibration entry | K 168.9@13–16 to 268.7@1–4; λ 0.966@29–32 to 0.998@5–8 | R9 | **ESTABLISHED** (as a fact about the corpus) |
+| Validation loss can improve while Elo worsens | §5 | `nshape` val MSE 0.010438 vs `null` 0.010465, NLL 0.5518 vs 0.5523, anchor −14.6 | R9 | **ESTABLISHED** |
 | The offline pipeline reproduces the chain's own epoch 1 | `cons1` null vs 5e6g ladder e1 | +21.0 ± 6.3 against +16.3 ± 8.9 (different host, book and n) | R9 | **ESTABLISHED** |
 | Online Δ has crossed zero at `6e6g` | §3 R9 BayesElo table | +39, +29, +14, +16, **−3** over the 1M legs; ±9–13 each | R9 | **ESTABLISHED** (the trend; the −3 itself is ~0) |
 | `--depth D --nodes N` makes D a FLOOR, not a ceiling | `selfplay.cpp:470`, `search.cpp:548` | node break gated on `max_ply >= min_search_depth` | — | **ESTABLISHED** (code) |
@@ -808,6 +874,51 @@ late chain).  d8→d10 regressed: −13.6 on the leg and a head-to-head loss to 
 parent.  **Reopens** — see §6; the d10 leg is confounded by a 52% draw rate and
 predates R4 and R6.
 
+**Calibrating K, λ or the outcome weight from the corpus (closed 2026-09-20,
+`cons1`).**  The measurements are sound and worth keeping; the inference from
+them to a hyperparameter is what failed.  Full result in §1 O.
+
+*What was measured* (`scripts/calibrate_from_corpus.py`, 60k games of the 5e6g
+leg, gated to the training population — the gate changes none of it):
+
+- **K is U-shaped in material.**  Per NNUE stack: 268.7 (1–4 pieces), 200.2,
+  175.9, **168.9** (13–16), 177.3, 190.2, 199.4, 185.0 (29–32).  Overall
+  maximum-likelihood K is **188–192** against the configured 220.  Mechanism is
+  plain: with ≤4 pieces a cp edge is often a dead draw, so the mapping must be
+  flatter; the 13–20 piece middlegame converts advantages most reliably.
+- **λ is MONOTONE in material**, measured as the decay of `corr(ev_t, ev_{t+k})`
+  — position to position, the result never entering: 0.99827 (5–8 pieces, 403-ply
+  half-life) falling to **0.96613** (29–32, **19 plies**).  The opening is
+  plastic; a simplified endgame is nearly static.  Keyed on material rather than
+  game ply on the cross-tab evidence (R² 0.855 vs 0.785; ply's residual effect
+  confined to the 25–32 piece rows).
+- **Outcome reliability**, `Var(outcome − ev)`, rises monotonically 0.0228 →
+  0.1915 across the same range, with `corr(ev, outcome)` falling 0.930 → 0.181.
+
+*Why acting on it failed.*  Seven arms, seven anchor losses (§1 O), while the
+one arm moving opposite to the fit was fine.  The likely reading: the sigmoid
+temperature and the trace decay are **gradient-shaping** parameters, not
+calibration parameters.  K = 220 being flatter than the fitted 190 compresses
+targets at large |cp|, shrinking gradients on already-decided positions and
+concentrating learning near equality — a training-dynamics property with no
+connection to how well the sigmoid predicts results.
+
+**Reopens if** the regime changes the gradient economics rather than the
+statistics — a much deeper search, a different loss (`--bt-loss-gamma` away from
+1.0), or an optimizer change.  Re-deriving the fits on a new chain is cheap and
+they will likely still hold; that is not evidence to act on them.  The branch
+`k-by-material` carries all of it behind compile flags defaulting off and
+byte-identical to `main` when off: `TDLEAF_K_SHAPE`, `TDLEAF_LAMBDA_SHAPE` (with
+the path-dependent λ-return walk), `TDLEAF_W_RELIABILITY`, plus `--bt-w-mean`.
+**It is deliberately unmerged.**
+
+⚠️ **One piece is untested and this harness cannot test it.**  The ONLINE half of
+`TDLEAF_LAMBDA_SHAPE` — per-material decay in the eligibility trace between
+adjacent records — never ran: `cons1` arms are offline-only (`--batch-train`),
+so `tdleaf.cpp`'s trace code is never executed.  It is a different mechanism
+from everything above (credit assignment, not target construction), and testing
+it needs a generation leg.
+
 **The wide consolidation window (A1 opened it at +36/+45; `cons1` closed it on
 R9).**  The single clearest reversal in the record.  A1 measured a four-corpus
 window worth **+36 anchor / +45 paired** on the mature chain at 4× the present
@@ -945,7 +1056,13 @@ distinguish "less damage" from "same damage, reached later"** — an arm that re
 three independent offline occasions [Offline 2.3, 3.3, 4] — twice **wrong-signed**,
 once ordering a 40 Elo difference backwards.  It is a smoke test for optimizer
 health and nothing more.  The one legitimate use is ranking two checkpoints on the
-same trajectory, where it merely detects overfitting [7.9.3].
+same trajectory, where it merely detects overfitting [7.9.3].  `cons1` added the sharpest single
+instance: `nshape` improved BOTH validation metrics against `null` — MSE 0.010438
+vs 0.010465, NLL 0.551829 vs 0.552343 — and lost 14.6 Elo on the anchor.  Better
+fit to held-out labels, worse play, within one arm.  Also note MSE is not
+comparable across arms that change the TARGET (the blend is one of the two things
+being differenced): `bout` reads 0.0358 against `base`'s 0.0103 purely because
+outcome labels are harder to fit than cp-derived ones.
 
 **`ΔMSE_out` prices label information, not usable signal.**  A label can know more
 about how the game ends and still be a worse thing to train on [Offline 4.4].
@@ -984,6 +1101,20 @@ reports a 95% interval — a factor of 1.96.
   cannot bind (`-tc 600+10 -c 6`).  The result transfers between machines
   unchanged, which a TC-based rating never does — and 600 games gives ±13, tight
   enough to separate rungs of a budget ladder (§1 N).
+- ⚠️ **Both sides of a loss must share the same K.**  Shaping K in `bt_target`
+  while `bt_eval_record` and the gradient's sigmoid Jacobian keep a flat one is
+  not a temperature change at all — training `sigmoid(score/K_flat)` toward a
+  target built with `sigmoid(cp/K_b)` drives the net's OUTPUT to
+  `score = cp·K_flat/K_b`, rescaling the eval per material bucket.  The
+  diagnostic that caught it: `MSE(outcome)` depends only on the net's prediction,
+  and it was bit-identical between the arm and its control.  When a flag is
+  supposed to change the target, check that the PREDICTION side moved too.
+- **Normalise a shape so the first arm is pure redistribution.**  Every shape
+  here preserved a mean, and the right mean differs by parameter: harmonic for K
+  (target sensitivity is `1/4K`), the row-weighted decay RATE for λ (rates, not
+  λ itself — a multiplicative shape on λ can exceed 1 and explode the trace), and
+  a solved scalar for the path weight.  Without it a shape arm silently carries a
+  scale change, and scale is what actually moved the Elo (§1 O).
 - ⚠️ **A node-only match does NOT reproduce a training config.**  `match.py
   --nodes1 N` sends `go nodes N`, and `uci.cpp:445` then leaves
   `min_search_depth = 0` — pure node limiting, no depth floor.  Self-play sets
