@@ -100,6 +100,71 @@ static inline float tdleaf_k_for_stack(int stack, float k_mean)
     return k_mean;
 #endif
 }
+
+
+// ---------------------------------------------------------------------------
+// Material-dependent eligibility-trace decay (TDLEAF_LAMBDA_SHAPE, default OFF)
+// ---------------------------------------------------------------------------
+// lambda is how fast the value signal decorrelates along the trajectory, and
+// that rate is strongly material-dependent.  Measuring it as the decay of
+// corr(ev_t, ev_{t+k}) -- position to position, the game RESULT never entering
+// -- over the m260916 5e6g leg gives a MONOTONE relation, in contrast to K's U:
+//
+//   stack  pieces   lambda   half-life
+//     0     1-4    0.99931     1004 ply   <- clamped below, see note
+//     1     5-8    0.99827      403
+//     2     9-12   0.99671      209
+//     3    13-16   0.99423      123
+//     4    17-20   0.99118       78
+//     5    21-24   0.98626       50
+//     6    25-28   0.97849       32
+//     7    29-32   0.96613       20
+//
+// The opening is plastic and forgets in ~20 ply; a simplified endgame is
+// nearly static.  Under the martingale property of a calibrated value function,
+// corr(ev_t, ev_{t+k}) = sqrt(Var(ev_t)/Var(ev_{t+k})), so this decorrelation
+// IS the rate at which new information arrives -- exactly what the trace should
+// discount by.
+//
+// Keyed on MATERIAL, not game ply: splitting the same measure both ways gives
+// near-identical marginal spreads (0.0332 each), but in a cross-tab material
+// explains more (R^2 0.855 vs 0.785) and ply's residual effect is confined to
+// the 25-32 piece rows.  Later plies usually mean fewer pieces; material is the
+// factor doing the work.
+//
+// ⚠️ Stack 0 is CLAMPED to stack 1.  Its raw 0.99931 is an upper bound, not a
+// measurement: fewest pairs of any bucket, and near the game end evals have
+// saturated toward 0/1 so high correlation is partly a ceiling effect.
+//
+// Parameterisation: lambda_b = lambda_mean ^ t_b, i.e. the DECAY RATE
+// -ln(lambda) scales by t_b.  Rates, not lambdas, because a multiplicative
+// shape on lambda itself can exceed 1 (an exploding trace) once lambda_mean is
+// swept up; lambda_mean^t_b is in (0,1) for every lambda_mean in (0,1).  t_b is
+// normalised to ROW-WEIGHTED MEAN 1, so at lambda_mean = TDLEAF_LAMBDA the
+// row-weighted mean decay rate is unchanged and the shape is pure
+// redistribution.  Unlike the K shape, the mean this preserves is one Elo has
+// effectively endorsed: the row-weighted fit is 0.9861 against the configured
+// 0.985, and 0.9925 measured -20 Elo while 0.970 was level.
+#ifndef TDLEAF_LAMBDA_SHAPE
+ #define TDLEAF_LAMBDA_SHAPE 0
+#endif
+
+static const float TDLEAF_LAMBDA_SHAPE_TAB[8] = {
+    0.1234f, 0.1234f, 0.2348f, 0.4123f,
+    0.6312f, 0.9858f, 1.5493f, 2.4551f
+};
+
+static inline float tdleaf_lambda_for_stack(int stack, float lam_mean)
+{
+#if TDLEAF_LAMBDA_SHAPE
+    if (stack < 0) stack = 0;
+    if (stack > 7) stack = 7;
+    return powf(lam_mean, TDLEAF_LAMBDA_SHAPE_TAB[stack]);
+#else
+    (void)stack;
+    return lam_mean;
+#endif
+}
 static const int   TDLEAF_MIN_PLIES       = 8;      // skip games shorter than this
 static const int   TDLEAF_MIN_PLIES_REP   = 40;     // skip 3-rep draws shorter than this
 // Horizon-noise mitigation 1 — TD error clipping.

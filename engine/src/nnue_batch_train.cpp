@@ -320,9 +320,17 @@ static bool bt_load_file(const char *path, std::vector<BTRecord> &out,
 // shaped K into the target while reading the net through a flat one does not
 // change the temperature at all -- it rescales the net's OUTPUT per material
 // bucket, which is the FC output-scale pathology docs/TRAINING.md warns about.
+static inline int bt_stack_for(const BTRecord &r)
+{
+    int pc = __builtin_popcountll(r.occ);
+    if (pc < 1)  pc = 1;
+    if (pc > 32) pc = 32;
+    return (pc - 1) / 4;
+}
+
 static inline float bt_K_for(const BTRecord &r, float K)
 {
-    return tdleaf_k_for_stack((__builtin_popcountll(r.occ) - 1) / 4, K);
+    return tdleaf_k_for_stack(bt_stack_for(r), K);
 }
 
 
@@ -600,12 +608,19 @@ int nnue_batch_train(int argc, char *argv[])
         int g = (int)gid_N[r.gid] - (int)r.ply;
         if (g > max_gap) max_gap = g;
     }
-    std::vector<float> powtab(max_gap + 1);
-    for (int g = 0; g <= max_gap; g++)
-        powtab[g] = powf(td_lambda, (float)g);
+    // One table PER MATERIAL STACK: with TDLEAF_LAMBDA_SHAPE the decay base
+    // varies by stack, so a single table cannot serve.  8 x a few hundred
+    // powf calls at startup, and the epoch loop still pays one table load.
+    std::vector<std::vector<float>> powtab(
+        8, std::vector<float>(max_gap + 1));
+    for (int st = 0; st < 8; st++) {
+        const float lam_st = tdleaf_lambda_for_stack(st, td_lambda);
+        for (int g = 0; g <= max_gap; g++)
+            powtab[st][g] = powf(lam_st, (float)g);
+    }
     auto decay = [&](const BTRecord &r) {
         int g = (int)gid_N[r.gid] - (int)r.ply;
-        return powtab[g < 0 ? 0 : g];
+        return powtab[bt_stack_for(r)][g < 0 ? 0 : g];
     };
     {
         double dsum = 0.0;

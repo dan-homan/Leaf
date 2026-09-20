@@ -165,6 +165,42 @@ def reliability(hist, K, edges):
     return out
 
 
+def acc_add(d, key, x, y):
+    a = d[key]
+    a[0] += 1; a[1] += x; a[2] += y
+    a[3] += x * x; a[4] += y * y; a[5] += x * y
+
+
+def acc_corr(a, minn=2000):
+    """Pearson r from running sums.  Using sums rather than stored pairs is
+    what lets every pair count: a per-cell cap would silently bias the sparse
+    cells (high material late, low material early) that the cross-tab exists
+    to compare."""
+    n = a[0]
+    if n < minn:
+        return float("nan"), int(n)
+    mx, my = a[1] / n, a[2] / n
+    vx, vy = a[3] / n - mx * mx, a[4] / n - my * my
+    cv = a[5] / n - mx * my
+    if vx <= 0 or vy <= 0:
+        return float("nan"), int(n)
+    return cv / math.sqrt(vx * vy), int(n)
+
+
+def acc_lambda(d, key_prefix, lags, minn=2000):
+    """Median lambda^(1/k) over lags for one cell."""
+    lams = []
+    nmax = 0
+    for k in lags:
+        r, n = acc_corr(d.get(key_prefix + (k,), [0.0] * 6), minn)
+        if r == r and r > 0:
+            lams.append(r ** (1.0 / k))
+            nmax = max(nmax, n)
+    if not lams:
+        return float("nan"), 0
+    return sorted(lams)[len(lams) // 2], nmax
+
+
 def corr(xs, ys):
     n = len(xs)
     if n < 50:
@@ -198,6 +234,10 @@ def main():
     by_pawns = defaultdict(newhist)
     npos = 0
     lag_pairs = defaultdict(lambda: ([], []))    # k -> (ev_t, ev_{t+k})
+    lag_stage = defaultdict(lambda: [0.0] * 6)   # (stack, k)
+    lag_ply   = defaultdict(lambda: [0.0] * 6)   # (plybucket, k)
+    lag_cross = defaultdict(lambda: [0.0] * 6)   # (stack, plybucket, k)
+    LAGS = []
     toend = defaultdict(lambda: ([], []))        # n bucket -> (ev, outcome)
     toend_stage = defaultdict(lambda: ([], []))  # (stage, n) -> (ev, outcome)
     ngames = 0
@@ -234,6 +274,16 @@ def main():
                 if len(a) < 200000:
                     a.append(evs[i])
                     b.append(evs[j])
+                # Same decorrelation, split by the material stage of the EARLIER
+                # position.  Unlike the (A) stage table this is not confounded
+                # with distance-to-end: it asks how fast the value signal decays
+                # from a position of given material, not how far that position
+                # happens to sit from the result.
+                st = min(max(rows[i][4] - 1, 0) // 4, 7)
+                pb = min(plies[i] // 20, 7)
+                acc_add(lag_stage, (st, k), evs[i], evs[j])
+                acc_add(lag_ply,   (pb, k), evs[i], evs[j])
+                acc_add(lag_cross, (st, pb, k), evs[i], evs[j])
 
     log(f"{ngames:,} games, {npos:,} positions")
 
@@ -323,6 +373,49 @@ def main():
         n_mid = b * 20 + 10
         print(f"      {b*20:>5}-{b*20+19:<8} "
               f"{args.lambda_current ** n_mid:>12.3f} {corr(ev, out):>13.3f}")
+
+    LAGS = [k for k in sorted(lag_pairs) if k > 0]
+
+    print(f"\n    (B2) lambda by MATERIAL STACK   [decay between NEARBY "
+          f"positions; the result never enters]")
+    print(f"      {'stack':>5} {'pieces':>9} {'n_pairs':>11} {'lambda':>8} "
+          f"{'vs current':>11}")
+    mat = {}
+    for st in range(8):
+        lam, n = acc_lambda(lag_stage, (st,), LAGS)
+        if lam == lam:
+            mat[st] = lam
+            print(f"      {st:>5} {st*4+1:>4}-{st*4+4:<4} {n:>11,} "
+                  f"{lam:>8.5f} {lam - args.lambda_current:>+11.5f}")
+
+    print(f"\n    (B3) lambda by GAME PLY   [same measure, split by progress "
+          f"instead of material]")
+    print(f"      {'ply':>10} {'n_pairs':>11} {'lambda':>8} {'vs current':>11}")
+    ply = {}
+    for pb in range(8):
+        lam, n = acc_lambda(lag_ply, (pb,), LAGS)
+        if lam == lam:
+            ply[pb] = lam
+            lab = f"{pb*20}-{pb*20+19}" if pb < 7 else "140+"
+            print(f"      {lab:>10} {n:>11,} {lam:>8.5f} "
+                  f"{lam - args.lambda_current:>+11.5f}")
+
+    if mat and ply:
+        sm = max(mat.values()) - min(mat.values())
+        sp = max(ply.values()) - min(ply.values())
+        print(f"\n      spread across material: {sm:.5f}")
+        print(f"      spread across ply:      {sp:.5f}")
+
+    print(f"\n    (B4) lambda CROSS-TAB: material stack (rows) x game ply "
+          f"(cols).  Which one does lambda actually track?")
+    print("      " + f"{'stack':>7}" + "".join(f"{pb*20:>9}+" for pb in range(8)))
+    for st in range(8):
+        cells = []
+        for pb in range(8):
+            lam, n = acc_lambda(lag_cross, (st, pb), LAGS, minn=3000)
+            cells.append(f"{lam:>10.4f}" if lam == lam else f"{'-':>10}")
+        if any(c.strip() != "-" for c in cells):
+            print(f"      {st*4+1:>3}-{st*4+4:<3}" + "".join(cells))
 
     print(f"\n    corr(ev_t, outcome) by STAGE x plies-to-end:")
     hdr = "      " + f"{'pieces':>8}" + "".join(

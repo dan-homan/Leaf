@@ -827,7 +827,12 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
         // against any out-of-order/duplicate ply.
         int dply = rec.plies[ix[t + 1]].game_ply - rec.plies[ix[t]].game_ply;
         if (dply < 1) dply = 1;
-        float trace_decay = (dply == 1) ? lambda : powf(lambda, (float)dply);
+        // Material-dependent lambda (TDLEAF_LAMBDA_SHAPE; identity when off),
+        // taken from the EARLIER record -- position t is the one receiving the
+        // credit, so its own material sets how far back the trace should reach.
+        const float lam_t =
+            tdleaf_lambda_for_stack(rec.plies[ix[t]].stack, lambda);
+        float trace_decay = (dply == 1) ? lam_t : powf(lam_t, (float)dply);
         e[t] = delta_d + trace_decay * e[t + 1];
     }
 
