@@ -138,6 +138,63 @@ d6 saturated around 2e6 games; d8 reopened it [4.6] and had saturated by ~5e6
 seed the offline pass converges to ~+151 across corpora differing in composition,
 coverage and labelling — a **2.7 Elo band over four arms** [7.7.4].
 
+**N. The search budget has a measured price list, and DEPTH IS A FLOOR.**  The
+single most useful planning artifact in this document, because it converts wall
+clock into label quality at a known exchange rate.
+
+Read `selfplay.cpp:470` first: `min_search_depth = cfg.nodes ? cfg.depth : 0`,
+and the node break at `search.cpp:548` fires only once `max_ply >=
+min_search_depth`.  **`--depth D --nodes N` means "search to at least D, then
+stop at the first iteration boundary past N nodes".**  Depth is a floor that
+must be paid in every position; the node budget only extends past it, and only
+where the position is cheap.  Two consequences that are easy to get backwards:
+raising `--nodes` alone barely moves a config whose depth floor already costs
+more than the budget, and a config with a LOW floor and a high budget searches
+deepest exactly where the position is simplest.
+
+Cost, measured as median nodes per move over 24 positions drawn from the `5e6g`
+corpus (n=24, so adjacent rows are within noise of each other):
+
+| config | median depth | median nodes | clock |
+|---|---|---|---|
+| `d6/800` (the chain to 6e6g) | 6 | 3029 | 1.00× |
+| `d6/2000` | 8 (adaptive) | 3341 | 1.10× |
+| `d8/2000` | 8 | 4914 | 1.62× |
+| `d7/2000` | 7 | 5008 | 1.65× |
+| `d8/4000` | 8 | 12013 | 3.97× |
+
+Strength, 600-game matches of one net against itself at two budgets, **fixed
+nodes under a non-binding clock (`-tc 600+10`), so these numbers are
+hardware-independent and transfer between machines**:
+
+| contrast | Elo |
+|---|---|
+| `d6/2000` vs `d6/800` | **+190.8 ± 13.4** |
+| `d8/2000` vs `d6/2000` | **+182.5 ± 13.1** |
+| `d8/4000` vs `d6/2000` | +268.4 ± 15.3 |
+| `d8/4000` vs `d8/2000` | **+71.6 ± 11.3** |
+
+Consistent to 14 Elo around the triangle (`E−B` measured 268.4 against `E−C` +
+`C−B` = 254.1), which is ordinary Elo non-additivity.  The resulting frontier,
+cumulative from the chain's own `d6/800`:
+
+| config | clock | Elo over `d6/800` | Elo per unit of ADDED clock |
+|---|---|---|---|
+| `d6/2000` | 1.10× | +191 | **1900** |
+| `d8/2000` | 1.62× | +373 | **351** |
+| `d8/4000` | 3.97× | +445…+459 | **31** |
+
+The exchange rate collapses by ~60× across the ladder.  **`d8/2000` is the knee**:
+it captures 72% of what `d8/4000` gains for 41% of its clock, and buys uniform
+depth 8 rather than the adaptive depth of `d6/2000` — which matters for learning,
+because adaptive depth searches deepest where positions are simplest and so makes
+label quality heteroscedastic across the corpus.
+
+⚠️ **The budget is a label-quality knob, not only a strength knob.**  At `d6/800`
+the chain has been generating TD targets and corpus labels from a search ~373 Elo
+weaker than `d8/2000` of the same net.  Under G, that is the quantity that
+governs whether the bootstrap still has headroom.
+
 **H. What the offline pass responds to is game diversity and row type — but the
 diversity half is REGIME-DEPENDENT and reverses on the young chain.**  On the
 mature `m260720` chain at 4× the present LR, drawing from 2.5M games instead of
@@ -351,6 +408,10 @@ for one.
 | λ is FLAT across 0.970–0.985 | §1 M | spread ~5 Elo on the anchor at ±7; the two instruments rank the three points differently | R9 | SUPPORTED |
 | Leaf rows do not beat root rows, on an R8 corpus at a fixed game set | §1 H, `cons1` nleaf | −3.8 ± 9.0 paired, −18.4 ± 10.0 anchor | R9 | SUPPORTED |
 | The offline pipeline reproduces the chain's own epoch 1 | `cons1` null vs 5e6g ladder e1 | +21.0 ± 6.3 against +16.3 ± 8.9 (different host, book and n) | R9 | **ESTABLISHED** |
+| Online Δ has crossed zero at `6e6g` | §3 R9 BayesElo table | +39, +29, +14, +16, **−3** over the 1M legs; ±9–13 each | R9 | **ESTABLISHED** (the trend; the −3 itself is ~0) |
+| `--depth D --nodes N` makes D a FLOOR, not a ceiling | `selfplay.cpp:470`, `search.cpp:548` | node break gated on `max_ply >= min_search_depth` | — | **ESTABLISHED** (code) |
+| The chain has been generating labels from a search ~373 Elo below `d8/2000` | §1 N | `d8/2000` vs `d6/800`, 600 games, fixed nodes | R9 | **ESTABLISHED** |
+| Search-budget Elo per unit clock collapses ~60× along the ladder | §1 N | 1900 → 351 → 31 across `d6/2000`, `d8/2000`, `d8/4000` | R9 | **ESTABLISHED** |
 
 ² Absent on a young net, or present and masked by concurrent learning gains?
 **Answered on R9: masked** — §1 K.  These older rows additionally sit in R1/R2 and
@@ -465,6 +526,36 @@ possible.  Its shallower search (d6/800n against d8/4000n) means throughput
 figures and absolute Elo levels do not compare with the `m260720` chain; the
 decomposition does.  Unlike R7, **`--gauntlet-tdleaf` was passed on every leg**,
 so the online/offline split is measured the same way from end to end.
+
+**The chain to 6e6g, on one BayesElo scale.**  A 38-PGN combined rating (38,000
+games, 20 players) puts every `-tdleaf` and `-final` net of the chain on a single
+scale, which is a better instrument than the per-leg paired matches below —
+those compare each leg only with its predecessor.  Online Δ = `tdleaf(N) −
+final(N−1)`, offline Δ = `final(N) − tdleaf(N)`:
+
+| leg | kgames | online Δ | offline Δ | leg total | online per 100k |
+|---|---:|---:|---:|---:|---:|
+| `2e5g` | 100 | +76 | +11 | +87 | +76.0 |
+| `5e5g` | 300 | +56 | +9 | +65 | +18.7 |
+| `1e6g` | 500 | +41 | +2 | +43 | +8.2 |
+| `2e6g` | 1000 | +39 | +31 | +70 | +3.9 |
+| `3e6g` | 1000 | +29 | +8 | +37 | +2.9 |
+| `4e6g` | 1000 | +14 | +42 | +56 | +1.4 |
+| `5e6g` | 1000 | +16 | +12 | +28 | +1.6 |
+| `6e6g` | 1000 | **−3** | +30 | +27 | **−0.3** |
+
+**The online phase has crossed zero, one leg earlier than §6 item 1 predicted**
+(that item said 7–8M games).  Per-leg BayesElo errors are ±9–13, so −3 is
+"indistinguishable from zero", not "significantly negative" — but the trend
+across eight legs is unambiguous and the per-100k column falls by two orders of
+magnitude.  Offline is unaffected and is now carrying the entire leg: +30 of the
++27 total.
+
+Under §1 G this is a search-margin failure, not necessarily saturation, and §1 N
+prices the fix: the chain generates at `d6/800`, which is ~373 Elo weaker than
+`d8/2000` of the same net.  The prediction on record is that restoring the margin
+returns online Δ to +20…+40; if it does not, saturation is real and generation
+should stop being funded.
 
 **The leg decomposition.**  Each leg is rated by a paired family match against
 the previous leg's final net: the online Δ is the post-generation `.tdleaf` state
@@ -760,6 +851,14 @@ arm was better by 24.3 ± 11.8, the anchor said the other by 10.4 ± 16.3, the d
 match said 0.7 ± 8.3 [7.10.6].  **Play the arms against each other**; 1000 games
 costs 23 minutes.
 
+**Check the engine name you pass to `pgn_score`.**  It matches by SUBSTRING, so
+a near-miss (`Leaf_N2000` for an engine named `Leaf_vN2000`) matches neither
+player, silently scores every game from Black's side, and returns a confident
+wrong number — in one case −23.3 ± 7.3 for a contrast whose true value was
++296.6 ± 13.3, a sign flip at over 3σ.  There is no error and no warning.  When a
+rating contradicts strong priors, re-score with the name copied from the PGN's
+own `[White]` header before believing it.
+
 `cons1` produced the cleanest worked example on record.  The contrast
 λ=0.970 vs λ=0.985, estimated three ways on the same two nets:
 
@@ -819,6 +918,17 @@ reports a 95% interval — a factor of 1.96.
   gauntlet time was spent.  **Any future optimizer arm should do this first.**
 - **Match Adam *steps*, not games**, whenever the knob touches aggregation — this
   is what separated 7.15 from 6.16.
+- **Fixed-node matches are hardware-independent, and they are how to price a
+  search budget.**  Play one net against itself at two budgets under a clock that
+  cannot bind (`-tc 600+10 -c 6`).  The result transfers between machines
+  unchanged, which a TC-based rating never does — and 600 games gives ±13, tight
+  enough to separate rungs of a budget ladder (§1 N).
+- ⚠️ **A node-only match does NOT reproduce a training config.**  `match.py
+  --nodes1 N` sends `go nodes N`, and `uci.cpp:445` then leaves
+  `min_search_depth = 0` — pure node limiting, no depth floor.  Self-play sets
+  the floor (`selfplay.cpp:470`).  Pass **both** `--depth` and `--nodes` or the
+  measurement answers a different question; §1 N's first attempt did exactly this
+  and had to be redone.
 - **Decompose every leg — it costs one flag.**  `--gauntlet-tdleaf` rates the
   post-generation `.tdleaf` state alongside the post-consolidation net, both as
   paired family matches against the previous leg's final.  Online Δ is the first,
@@ -871,20 +981,30 @@ Ranked by expected value per unit of compute.  `TODO.md` carries the checklist;
 this is the rationale.  Items marked ⚠️ were previously ruled out under a regime
 or criterion that has since changed.
 
-**1. The ONLINE DECLINE is real — decide what to do about it.**  `m260916` ran
-seven legs with the online phase productive on every one, which the mature chain
-never managed.  But across the four 1M legs online falls −14.9 ± 3.7/leg (4.1σ)
-while offline does not, and the obvious confound — the 2→4 epoch switch — is
-dismissed on timing and on `picked_epoch` (§3 R9).  Per 100k games the series is
-84 → 21 → 10 → 4.9 → 4.1 → 0.7 → 1.0, the shape of ordinary saturation.  With the
-handoff at ~−13 (§1 K), **online Δ crosses zero within 2–3 legs, around 7–8M
-games** — at which point generation is paying 13 Elo for rows and the loop
-inverts.  Two responses, not exclusive: make generation productive again (depth,
-which R9's d6/800n makes cheap to raise — item 7), or shift the yield to the
-offline half, which is what item 2 and the composite-corpus programme are for.
-**Method note:** keep passing `--gauntlet-tdleaf`; this decomposition exists only
-because R9 passed it on every leg, and 7.11.5 records R7 legs where dropping it
-hid exactly this drift.
+**1. RAISE THE SEARCH BUDGET TO `d8/2000` — the next leg, and the test of
+whether generation is worth funding at all.**  Online Δ crossed zero at `6e6g`
+(§3 R9): +39, +29, +14, +16, −3 across the 1M legs, with offline unaffected and
+now carrying the whole leg (+30 of the +27 total).  Under §1 G that is a
+search-margin failure before it is saturation, and §1 N prices the repair: the
+chain generates at `d6/800`, **~373 Elo weaker than `d8/2000` of the same net**.
+
+`d8/2000` is the knee of the frontier — 72% of what `d8/4000` gains for 41% of
+its clock, at 1.62× the current leg — and it keeps 1M games and the full ~69M-row
+corpus that the *working* half consumes.  Prefer it over `d8/4000` at 500k games
+(1.99× clock, half the corpus, and the extra label quality bought at the worst
+exchange rate on the ladder).  It also gives UNIFORM depth 8, where `d6/2000`
+would search deepest in the simplest positions and make label quality
+heteroscedastic.
+
+**Pre-committed reading.**  Online Δ should return to **+20…+40** — the early
+chain gave +39…+76 when the margin was large, less the ~13 handoff of §1 K.  If
+online stays near zero with 373 Elo of margin restored, the decline was never a
+search-margin problem, saturation is real, and the conclusion is to stop funding
+generation beyond corpus production and put the clock into the offline half.
+Either outcome is worth the leg.  **Canary: the draw rate**, not gradient norms —
+32–33% now, healthy is 35–40%, and the `d10` leg that regressed on the old chain
+ran at 52%.  **Method note:** keep passing `--gauntlet-tdleaf`; this whole
+decomposition exists only because R9 passed it on every leg.
 
 **2. Sample WIDE WITHIN one leg — the one diversity manipulation `cons1` did
 not test.**  The composite-corpus programme answered its own question and closed
