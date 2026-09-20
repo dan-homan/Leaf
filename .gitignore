@@ -39,6 +39,11 @@ engine/learn/*
 !engine/learn/training_openings.epd
 
 # Within engine/src/, ignore OS/editor artifacts and binary/backup files
+# Compiled binaries never belong in src/ -- comp.pl builds into the CURRENT
+# directory, so running it from src/ (easy to do by accident when a `cd` leaks
+# into a command) drops a Leaf_v* here and `git add engine/src` will take it.
+engine/src/Leaf_v*
+
 engine/src/.DS_Store
 engine/src/**/.DS_Store
 engine/src/*~
