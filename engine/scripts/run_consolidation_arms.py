@@ -75,7 +75,7 @@ from train import pgn_score          # noqa: E402  (pure function, no globals)
 LEARN = Path.cwd()
 T0 = time.time()
 
-# arm -> (corpus key, --bt-rows value, extra trainer flags)
+# arm -> (corpus key, --bt-rows value, extra trainer flags[, epochs=1])
 ARMS = {
     # Phase 1 -- is a wide consolidation window worth running?
     "null": ("null", "root", []),
@@ -94,9 +94,18 @@ ARMS = {
     # with the default (0.985), so the optimum, if the curve has one, lies
     # between 0.97 and 0.985.
     "ncp2":  ("null", "root", ["--bt-td-lambda", "0.9775"]),
+    # DOSE, not composition: the newest leg's root rows AND its leaf rows over
+    # the same games, ~2.2x the null's rows with the game count unchanged.
+    # This is the one arm that deliberately breaks dose-matching -- the question
+    # is whether a bigger corpus off the same games helps at all.  Note it also
+    # takes 2.2x the Adam steps, so "more data" and "more steps" are confounded
+    # here; `null2` (2 epochs on the null corpus) is the control that separates
+    # them, at matched steps on repeated rather than fresh rows.
+    "nboth": ("nullboth", "both", []),
+    "null2": ("null", "root", [], 2),
 }
 ORDER = ["null", "base", "bout", "bcp", "leaf",
-         "nout", "ncp", "nleaf", "ncp2"]
+         "nout", "ncp", "nleaf", "ncp2", "nboth", "null2"]
 
 
 def log(msg):
@@ -277,8 +286,50 @@ def build_corpora(args, arms_dir, needed):
         sys.stderr.write(r.stderr)
     corpora["nullleaf"], rows["nullleaf"] = nleaf, n
 
+    # Root AND leaf over the same games, both untrimmed: a DOSE arm.  Built by
+    # concatenating the null (all eligible root rows) with every eligible leaf
+    # row of the same games, so the game set is identical to the null's and only
+    # the row count changes.
+    nboth = arms_dir / "corpus_nullboth.tsv"
+    if "nullboth" in needed and not nboth.exists():
+        leaf_all = arms_dir / "corpus_nullleaf_all.tsv"
+        if not leaf_all.exists():
+            r = sh(["python3", SCRIPT_DIR / "sample_corpus.py",
+                    "--source", null_src, "--rows", "leaf",
+                    "--quiet-cp", args.quiet_cp, "--quota", 1 << 30,
+                    "--restrict-gids", null,
+                    "--seed", args.seed, "--out", leaf_all],
+                   capture_output=True, text=True)
+            sys.stderr.write(r.stderr)
+        log(f"concatenating {null.name} + {leaf_all.name} -> {nboth.name}")
+        tmp = nboth.with_suffix(".tmp")
+        with open(tmp, "w") as out:
+            with open(null) as fh:
+                shutil.copyfileobj(fh, out)
+            with open(leaf_all) as fh:
+                for line in fh:            # drop the second file's 2 header lines
+                    if line.startswith("#") or line.startswith("fen\t"):
+                        continue
+                    out.write(line)
+        tmp.rename(nboth)
+        lm = json.loads(leaf_all.with_suffix(".tsv.json").read_text())
+        nboth.with_suffix(".tsv.json").write_text(json.dumps({
+            "out": str(nboth), "rows_total": n + lm["rows_total"],
+            "rows_per_source": {"root": n, "leaf": lm["rows_total"]},
+            "games_per_source": lm["games_per_source"],
+            "row_type": "both", "quiet_cp": args.quiet_cp,
+            "note": "null root rows + all eligible leaf rows, same games",
+        }, indent=2) + "\n")
+    if nboth.exists():
+        m = json.loads(nboth.with_suffix(".tsv.json").read_text())
+        corpora["nullboth"], rows["nullboth"] = nboth, m["rows_total"]
+
     for k in needed:
         m = json.loads(corpora[k].with_suffix(".tsv.json").read_text())
+        if k == "nullboth":
+            log(f"{k}: {m['rows_total']:,} rows "
+                f"({m['rows_total'] / n:.2f}x the dose -- this arm tests DOSE)")
+            continue
         if m["rows_total"] != n:
             die(f"{k} corpus has {m['rows_total']:,} rows, dose is {n:,} -- "
                 f"the arms would not be dose-matched")
@@ -289,7 +340,8 @@ def build_corpora(args, arms_dir, needed):
 
 def train_arm(arm, corpus, n_rows, seed_nnue, seed_state, args, arms_dir):
     adir = arms_dir / arm
-    out_nnue = adir / f"{arm}_ep1.nnue"
+    ep = ARMS[arm][3] if len(ARMS[arm]) > 3 else 1
+    out_nnue = adir / f"{arm}_ep{ep}.nnue"
     if out_nnue.exists():
         log(f"{arm}: already trained ({out_nnue.name}) -- skipping")
         return out_nnue
@@ -305,9 +357,11 @@ def train_arm(arm, corpus, n_rows, seed_nnue, seed_state, args, arms_dir):
     shutil.copy2(seed_state, adir / f"{seed_nnue.stem}.tdleaf.bin")
     check_engine_state(bt, adir, expect_state=True)
 
-    corpus_key, rows_mode, extra = ARMS[arm]
+    spec = ARMS[arm]
+    corpus_key, rows_mode, extra = spec[0], spec[1], spec[2]
+    epochs = spec[3] if len(spec) > 3 else 1
     cmd = [f"./{bt.name}", "--batch-train", str(Path(corpus).resolve()),
-           "--bt-epochs", "1", "--bt-out", arm,
+           "--bt-epochs", str(epochs), "--bt-out", arm,
            "--bt-threads", str(args.threads),
            "--bt-lr", str(args.bt_lr), "--bt-lambda", str(args.bt_lambda),
            "--bt-K", str(args.bt_K), "--bt-batch", str(args.bt_batch),
@@ -315,7 +369,7 @@ def train_arm(arm, corpus, n_rows, seed_nnue, seed_state, args, arms_dir):
            "--bt-rows", rows_mode,
            "--bt-max", str(n_rows), "--bt-seed", "1000"] + extra
     with open(adir / "train.log", "w") as lf:
-        log(f"{arm}: training 1 epoch on {Path(corpus).name} "
+        log(f"{arm}: training {epochs} epoch(s) on {Path(corpus).name} "
             f"({n_rows:,} rows){' ' + ' '.join(extra) if extra else ''}")
         sh(cmd, cwd=str(adir), stdout=subprocess.DEVNULL, stderr=lf)
     if not out_nnue.exists():
