@@ -314,6 +314,18 @@ static bool bt_load_file(const char *path, std::vector<BTRecord> &out,
 // Fills act_out (forward activations + backprop fields) when non-null.
 // Returns d = sigmoid(white-POV score / K).
 // ---------------------------------------------------------------------------
+// Per-record sigmoid temperature.  K must be identical on BOTH sides of the
+// loss: the net's prediction d = sigmoid(score/K), the target's eval term
+// sigmoid(cp/K), and the gradient's sigmoid Jacobian d(1-d)/K.  Mixing a
+// shaped K into the target while reading the net through a flat one does not
+// change the temperature at all -- it rescales the net's OUTPUT per material
+// bucket, which is the FC output-scale pathology docs/TRAINING.md warns about.
+static inline float bt_K_for(const BTRecord &r, float K)
+{
+    return tdleaf_k_for_stack((__builtin_popcountll(r.occ) - 1) / 4, K);
+}
+
+
 static float bt_eval_record(const BTRecord &r, float K, position &pos,
                             NNUEAccumulator &acc, NNUEActivations *act_out,
                             float *score_out = nullptr)
@@ -329,7 +341,7 @@ static float bt_eval_record(const BTRecord &r, float K, position &pos,
 
     int score_stm = nnue_evaluate_acc_raw(acc.acc, acc.psqt, (int)pos.wtm, pc);
     float score_w = pos.wtm ? (float)score_stm : -(float)score_stm;
-    float d = 1.0f / (1.0f + expf(-score_w / K));
+    float d = 1.0f / (1.0f + expf(-score_w / bt_K_for(r, K)));
     if (score_out) *score_out = score_w;
 
     if (act_out) {
@@ -373,11 +385,9 @@ static inline float bt_target(const BTRecord &r, float lambda,
     // outcome-only).
     float w       = ((r.depth == 0) ? leaf_lambda : lambda) * decay;
     float outcome = 0.5f * (float)r.result2;
-    // Material-dependent K (TDLEAF_K_SHAPE; identity when off).  The row's own
-    // position supplies the stack -- popcount(occ) is the piece count the NNUE
-    // would bucket on, so offline and online agree on which K applies.
-    const int stack = (__builtin_popcountll(r.occ) - 1) / 4;
-    float ev = 1.0f / (1.0f + expf(-(float)r.cp / tdleaf_k_for_stack(stack, K)));
+    // Material-dependent K (TDLEAF_K_SHAPE; identity when off), from the same
+    // helper the prediction and the gradient use.
+    float ev = 1.0f / (1.0f + expf(-(float)r.cp / bt_K_for(r, K)));
     return w * outcome + (1.0f - w) * ev;
 }
 
@@ -693,7 +703,7 @@ int nnue_batch_train(int argc, char *argv[])
                 const BTRecord &r = recs[i];
                 float snet = 0.0f;
                 float dd = bt_eval_record(r, K, w.pos, w.acc, nullptr, &snet);
-                float pl = 1.0f / (1.0f + expf(-(float)r.cp / K));
+                float pl = 1.0f / (1.0f + expf(-(float)r.cp / bt_K_for(r, K)));
                 double out = 0.5 * (double)r.result2;
                 double rl = (double)pl - (double)dd;   // label residual
                 double ro = out - (double)dd;          // outcome residual
@@ -888,9 +898,10 @@ int nnue_batch_train(int argc, char *argv[])
                 // branch); γ=0 drops it → soft-label cross-entropy gradient
                 // (target-d)/K, which keeps full strength at the confident
                 // tails; γ=0.5 sits between.
+                const float Kr   = bt_K_for(r, K);
                 float sig_grad   = (loss_gamma == 1.0f)
-                                     ? d * (1.0f - d) / K
-                                     : powf(d * (1.0f - d), loss_gamma) / K;
+                                     ? d * (1.0f - d) / Kr
+                                     : powf(d * (1.0f - d), loss_gamma) / Kr;
                 float wtm_sign   = r.wtm ? -1.0f : 1.0f;
                 float grad_scale = e * sig_grad * cp_factor * wtm_sign;
                 if (grad_scale != 0.0f)

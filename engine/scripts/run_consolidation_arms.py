@@ -108,10 +108,14 @@ ARMS = {
     # training objective -- the same exercise favours a HIGHER td_lambda, and
     # nout measured that at -20 Elo.  So K gets tested, not adopted.
     "nK":    ("null", "root", ["--bt-K", "190"]),
+    # Material-dependent K at K_mean = 220: a PURE redistribution against
+    # `null`, because the shape is normalised to harmonic mean 1 so mean target
+    # sensitivity is unchanged.  Needs --compile-flags TDLEAF_K_SHAPE=1.
+    "nshape": ("null", "root", []),
     "null2": ("null", "root", [], 2),
 }
 ORDER = ["null", "base", "bout", "bcp", "leaf",
-         "nout", "ncp", "nleaf", "ncp2", "nboth", "null2", "nK"]
+         "nout", "ncp", "nleaf", "ncp2", "nboth", "null2", "nK", "nshape"]
 
 
 def log(msg):
@@ -143,7 +147,7 @@ def guard_run_dir():
             f"run/).  Training and rating binaries must run from learn/")
 
 
-def compile_binary(version, net, tdleaf, dest):
+def compile_binary(version, net, tdleaf, dest, extra_flags=()):
     """Build Leaf_v<version> against NET, and land it in DEST beside a copy.
 
     comp.pl compiles into the current directory AND resolves ../src/Leaf.cc
@@ -166,6 +170,8 @@ def compile_binary(version, net, tdleaf, dest):
     flags = ["NNUE=1", f"NNUE_NET={net.name}"]
     if tdleaf:
         flags.append("TDLEAF=1")
+        flags += list(extra_flags)     # trainer-only: the rating binary is
+                                       # inference and must stay stock
     try:
         sh(["perl", "comp.pl", version] + flags + ["OVERWRITE"], cwd=str(LEARN))
     finally:
@@ -355,7 +361,8 @@ def train_arm(arm, corpus, n_rows, seed_nnue, seed_state, args, arms_dir):
     # Every arm starts from the identical net AND optimizer state.  The state
     # must sit beside the binary under the net's own name, or the trainer
     # starts from scratch Adam moments and the arms are not comparable.
-    bt = compile_binary(f"bt_{arm}", seed_nnue, tdleaf=True, dest=adir)
+    bt = compile_binary(f"bt_{arm}", seed_nnue, tdleaf=True, dest=adir,
+                        extra_flags=args.compile_flags)
     # The engine looks for <loaded-net-basename>.tdleaf.bin, so the state is
     # staged under the BASE net's name regardless of what it is called in
     # learn/.  Its FP32 shadow weights and Adam moments are the real starting
@@ -492,6 +499,10 @@ def main():
     ap.add_argument("--anchor", default="Leaf_vclassic_eval",
                     help="foreign anchor binary in learn/ (§5: family matches "
                          "are non-transitive, so never rate on paired alone)")
+    ap.add_argument("--compile-flags", nargs="*", default=[], metavar="F=V",
+                    help="extra comp.pl flags for the TRAINER build only "
+                         "(e.g. TDLEAF_K_SHAPE=1).  The rating binary stays "
+                         "stock, since these change training, not inference")
     ap.add_argument("--only", nargs="+", choices=ORDER, default=None)
     ap.add_argument("--corpus-only", action="store_true",
                     help="build the corpora and stop")
