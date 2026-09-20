@@ -112,10 +112,26 @@ ARMS = {
     # `null`, because the shape is normalised to harmonic mean 1 so mean target
     # sensitivity is unchanged.  Needs --compile-flags TDLEAF_K_SHAPE=1.
     "nshape": ("null", "root", []),
+    # Material-dependent lambda at lambda_mean = TDLEAF_LAMBDA: pure
+    # redistribution, since the exponent shape preserves the row-weighted mean
+    # decay rate.  Needs --compile-flags TDLEAF_LAMBDA_SHAPE=1.
+    "nlam":   ("null", "root", []),
+    # Position-only outcome weight.  nwA = mean-preserving (pure
+    # redistribution); nwB = the weights the variance measurement implies with
+    # no rescale (c = min T_b), which leaves stacks 4-7 within 7% of main and
+    # raises 0-2 by 1.65-2.38x.  Both need --compile-flags TDLEAF_W_RELIABILITY=1.
+    "nwA":    ("null", "root", []),
+    "nwB":    ("null", "root", ["--bt-w-mean", "0.498"]),
+    # Path-dependent outcome weight: the lambda-return product walked along the
+    # game's actual material trajectory.  npA is mean-preserving (alpha solved
+    # to match main's 0.321), npB is the shape exactly as measured (alpha=1,
+    # mean ~0.64).  Both need --compile-flags TDLEAF_LAMBDA_SHAPE=1.
+    "npA":    ("null", "root", ["--bt-w-mean", "0.321"]),
+    "npB":    ("null", "root", []),
     "null2": ("null", "root", [], 2),
 }
 ORDER = ["null", "base", "bout", "bcp", "leaf",
-         "nout", "ncp", "nleaf", "ncp2", "nboth", "null2", "nK", "nshape"]
+         "nout", "ncp", "nleaf", "ncp2", "nboth", "null2", "nK", "nshape", "nlam", "nwA", "nwB", "npA", "npB"]
 
 
 def log(msg):

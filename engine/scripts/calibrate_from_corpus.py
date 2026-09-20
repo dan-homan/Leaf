@@ -187,6 +187,22 @@ def acc_corr(a, minn=2000):
     return cv / math.sqrt(vx * vy), int(n)
 
 
+def acc_var_diff(a):
+    """Var(y - x) and mean(y - x) from the running sums.
+
+    With x = ev and y = outcome this is the quantity the reliability weighting
+    needs: Var(outcome - ev) = sigma^2_outcome + sigma^2_eval, the two errors
+    around the position's true value.  The SUM is measurable; the split is not,
+    which is why the derived weights below state their assumption."""
+    n = a[0]
+    if n < 2:
+        return float("nan"), float("nan"), 0
+    mx, my = a[1] / n, a[2] / n
+    m = my - mx
+    v = (a[4] - 2.0 * a[5] + a[3]) / n - m * m
+    return v, m, int(n)
+
+
 def acc_lambda(d, key_prefix, lags, minn=2000):
     """Median lambda^(1/k) over lags for one cell."""
     lams = []
@@ -238,6 +254,9 @@ def main():
     lag_ply   = defaultdict(lambda: [0.0] * 6)   # (plybucket, k)
     lag_cross = defaultdict(lambda: [0.0] * 6)   # (stack, plybucket, k)
     LAGS = []
+    rel_mat   = defaultdict(lambda: [0.0] * 6)   # stack -> (ev, outcome)
+    rel_cp    = defaultdict(lambda: [0.0] * 6)   # |cp| bucket
+    rel_cross = defaultdict(lambda: [0.0] * 6)   # (stack, |cp| bucket)
     toend = defaultdict(lambda: ([], []))        # n bucket -> (ev, outcome)
     toend_stage = defaultdict(lambda: ([], []))  # (stage, n) -> (ev, outcome)
     ngames = 0
@@ -257,6 +276,13 @@ def main():
         res = rows[0][1]
         end = rows[0][3]
         for i, (cp, r, ply, endply, tot, pw) in enumerate(rows):
+            st_i = min(max(tot - 1, 0) // 4, 7)
+            acp = abs(cp)
+            cb = (0 if acp < 25 else 1 if acp < 50 else 2 if acp < 100 else
+                  3 if acp < 200 else 4 if acp < 400 else 5)
+            acc_add(rel_mat, st_i, evs[i], res)
+            acc_add(rel_cp, cb, evs[i], res)
+            acc_add(rel_cross, (st_i, cb), evs[i], res)
             n = end - ply
             nb = min(n // 20, 7)
             toend[nb][0].append(evs[i])
@@ -414,6 +440,51 @@ def main():
         for pb in range(8):
             lam, n = acc_lambda(lag_cross, (st, pb), LAGS, minn=3000)
             cells.append(f"{lam:>10.4f}" if lam == lam else f"{'-':>10}")
+        if any(c.strip() != "-" for c in cells):
+            print(f"      {st*4+1:>3}-{st*4+4:<3}" + "".join(cells))
+
+    print(f"\n(3) OUTCOME RELIABILITY  [position-only: no N, no trajectory]")
+    print(f"    Var(outcome-ev) = sigma^2_outcome + sigma^2_eval.  The sum is")
+    print(f"    measured; 'rel weight' assumes sigma^2_eval is uniform across")
+    print(f"    buckets, so w_b is proportional to 1/Var.")
+
+    print(f"\n    by MATERIAL STACK:")
+    print(f"      {'stack':>5} {'pieces':>9} {'n':>11} {'Var(o-ev)':>10} "
+          f"{'bias':>8} {'corr':>7} {'rel weight':>11}")
+    mv = {}
+    for st in range(8):
+        v, m, n = acc_var_diff(rel_mat.get(st, [0.0] * 6))
+        r, _ = acc_corr(rel_mat.get(st, [0.0] * 6))
+        if n >= 5000:
+            mv[st] = v
+    inv = {k: 1.0 / v for k, v in mv.items() if v > 0}
+    tot_n = sum(rel_mat[k][0] for k in inv)
+    norm = sum(rel_mat[k][0] * inv[k] for k in inv) / max(tot_n, 1)
+    for st in range(8):
+        if st not in mv:
+            continue
+        v, m, n = acc_var_diff(rel_mat[st])
+        r, _ = acc_corr(rel_mat[st])
+        print(f"      {st:>5} {st*4+1:>4}-{st*4+4:<4} {n:>11,} {v:>10.4f} "
+              f"{m:>+8.4f} {r:>7.3f} {inv[st]/norm:>11.3f}")
+
+    print(f"\n    by |cp| (the competing explanation):")
+    print(f"      {'|cp|':>10} {'n':>11} {'Var(o-ev)':>10} {'bias':>8} "
+          f"{'corr':>7}")
+    for cb, lab in enumerate(['0-24', '25-49', '50-99', '100-199', '200-399', '400+']):
+        v, m, n = acc_var_diff(rel_cp.get(cb, [0.0] * 6))
+        r, _ = acc_corr(rel_cp.get(cb, [0.0] * 6))
+        if n >= 5000:
+            print(f"      {lab:>10} {n:>11,} {v:>10.4f} {m:>+8.4f} {r:>7.3f}")
+
+    print(f"\n    Var(outcome-ev) CROSS-TAB: material (rows) x |cp| (cols)")
+    print("      " + f"{'stack':>7}" + "".join(
+        f"{l:>10}" for l in ['0-24', '25-49', '50-99', '100-199', '200-399', '400+']))
+    for st in range(8):
+        cells = []
+        for cb in range(6):
+            v, m, n = acc_var_diff(rel_cross.get((st, cb), [0.0] * 6))
+            cells.append(f"{v:>10.4f}" if n >= 3000 else f"{'-':>10}")
         if any(c.strip() != "-" for c in cells):
             print(f"      {st*4+1:>3}-{st*4+4:<3}" + "".join(cells))
 

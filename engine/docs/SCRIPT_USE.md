@@ -240,6 +240,44 @@ games whose root rows the quiet gate removed entirely, so an unrestricted leaf
 sample draws ~45% more games at correspondingly fewer rows each, and the
 row-type contrast would carry a game-set difference inside it.
 
+## calibrate_from_corpus.py
+
+Fit the sigmoid temperature **K** and the trace decay **λ** straight from a
+leg's raw root dump, split by **game stage** (material remaining).
+
+```sh
+cd engine/learn
+python3 calibrate_from_corpus.py --source m260916-5e6g_work \
+    --games 60000 --max-lag 60 --quiet-cp 60
+```
+
+Not to be confused with `analyze_calibration.py`, whose `--stage` means
+*training* stage (net maturity), which needs a PGN-derived parquet, and whose
+constants predate the current recipe (K=290, λ 0.8/0.5 per *record*).  This one
+reads the raw `*.root.tsv.gz` dumps — `cp`, `result`, `ply`, `endply` and the
+FEN are all there — and needs no intermediate file.
+
+| Section | Measures |
+|---|---|
+| (1) | K by maximum likelihood, plus a reliability table, by material stack and by pawn count |
+| (2A) | `corr(ev, outcome)` by plies-to-end — outcome informativeness |
+| (2B) | `corr(ev_t, ev_{t+k})` by lag → λ.  **Position to position; the result never enters** |
+| (2B2/B3/B4) | λ by material stack, by game ply, and the cross-tab that decides which one λ tracks |
+| (3) | `Var(outcome − ev)` by material and by \|cp\|, the input to a reliability-based outcome weight |
+
+**What is and isn't identified.**  K is a straight calibration and is identified.
+**λ is not** — the outcome and the eval estimate the same unobserved value, so
+choosing between them needs a bias/variance assumption; each measurement states
+the assumption that turns it into a λ.  §5 of `Learning_Investigation.md` says
+why (2B) is the right one: under the martingale property of a calibrated value
+function, `corr(ev_t, ev_{t+k}) = sqrt(Var_t/Var_{t+k})`, so the decorrelation
+*is* the rate new information arrives.
+
+⚠️ **The results of this tool are not a guide to training hyperparameters.**
+Seven arms derived from these fits all lost on the foreign anchor — see
+`Learning_Investigation.md` §1 O and the §4 closure.  The measurements are real
+facts about the corpus; the inference to a hyperparameter is refuted.
+
 ## run_consolidation_arms.py
 
 Drives the **composite-corpus consolidation arms**: five one-epoch offline runs

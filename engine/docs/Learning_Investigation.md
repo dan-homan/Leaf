@@ -878,8 +878,18 @@ predates R4 and R6.
 `cons1`).**  The measurements are sound and worth keeping; the inference from
 them to a hyperparameter is what failed.  Full result in §1 O.
 
-*What was measured* (`scripts/calibrate_from_corpus.py`, 60k games of the 5e6g
-leg, gated to the training population — the gate changes none of it):
+*What was measured.*  Raw outputs are not committed — they regenerate in ~8
+minutes and the numbers that matter are here.  From `engine/learn/`:
+
+```sh
+python3 calibrate_from_corpus.py --source m260916-5e6g_work \
+    --games 60000 --max-lag 60 --quiet-cp 60
+```
+
+60k games of the 5e6g leg, gated to the training population — and the gate
+changes none of it (overall K 188.5 gated against 191.6 ungated, λ 0.9913
+against 0.9915), which is itself worth knowing: the quiet gate does not select
+positions whose cp→score mapping differs.
 
 - **K is U-shaped in material.**  Per NNUE stack: 268.7 (1–4 pieces), 200.2,
   175.9, **168.9** (13–16), 177.3, 190.2, 199.4, 185.0 (29–32).  Overall
