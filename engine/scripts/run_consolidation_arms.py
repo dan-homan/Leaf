@@ -77,13 +77,26 @@ T0 = time.time()
 
 # arm -> (corpus key, --bt-rows value, extra trainer flags)
 ARMS = {
+    # Phase 1 -- is a wide consolidation window worth running?
     "null": ("null", "root", []),
     "base": ("base", "root", []),
     "bout": ("base", "root", ["--bt-td-lambda", "0.9925"]),
     "bcp":  ("base", "root", ["--bt-td-lambda", "0.97"]),
     "leaf": ("leaf", "leaf", []),
+    # Phase 2 -- target and row type on the SHIPPING corpus (one leg).  Added
+    # once phase 1 found base below null: tuning the target on a corpus we
+    # would not use answers the wrong question, and these reuse corpus_null
+    # byte for byte, so they carry no sampling noise against the null.
+    "nout":  ("null", "root", ["--bt-td-lambda", "0.9925"]),
+    "ncp":   ("null", "root", ["--bt-td-lambda", "0.97"]),
+    "nleaf": ("nullleaf", "leaf", []),
+    # Interior point: nout (0.9925) is clearly worse and ncp (0.97) is level
+    # with the default (0.985), so the optimum, if the curve has one, lies
+    # between 0.97 and 0.985.
+    "ncp2":  ("null", "root", ["--bt-td-lambda", "0.9775"]),
 }
-ORDER = ["null", "base", "bout", "bcp", "leaf"]
+ORDER = ["null", "base", "bout", "bcp", "leaf",
+         "nout", "ncp", "nleaf", "ncp2"]
 
 
 def log(msg):
@@ -181,7 +194,7 @@ def check_engine_state(binary, cwd, expect_state=False):
                     f"{out.strip()[:700]}")
 
 
-def build_corpora(args, arms_dir):
+def build_corpora(args, arms_dir, needed):
     """The DOSE is one leg's full eligible corpus, and every arm matches it.
 
     The null must be "another epoch on the newest leg alone", so the cleanest
@@ -213,7 +226,7 @@ def build_corpora(args, arms_dir):
             f"{have:,} rows, short of the {n:,} dose -- raise --quota")
 
     base = arms_dir / "corpus_base.tsv"
-    if not base.exists():
+    if "base" in needed and not base.exists():
         r = sh(["python3", SCRIPT_DIR / "sample_corpus.py",
                 "--source", *args.sources, "--rows", "root",
                 "--quiet-cp", args.quiet_cp, "--quota", args.quota,
@@ -223,7 +236,7 @@ def build_corpora(args, arms_dir):
     corpora["base"], rows["base"] = base, n
 
     null = arms_dir / "corpus_null.tsv"
-    if not null.exists():
+    if "null" in needed and not null.exists():
         # No per-game cap: the null IS the leg's corpus.  A quota here would
         # cost rows to the right tail of a skewed length distribution and the
         # leg could not reach its own row count.
@@ -236,7 +249,7 @@ def build_corpora(args, arms_dir):
     corpora["null"], rows["null"] = null, n
 
     leaf = arms_dir / "corpus_leaf.tsv"
-    if not leaf.exists():
+    if "leaf" in needed and not leaf.exists():
         # Same GAMES as base, not merely the same row count.  Leaf rows survive
         # in games whose root rows the quiet gate removed entirely, so an
         # unrestricted leaf sample draws ~45% more games at correspondingly
@@ -251,7 +264,20 @@ def build_corpora(args, arms_dir):
         sys.stderr.write(r.stderr)
     corpora["leaf"], rows["leaf"] = leaf, n
 
-    for k in ("base", "null", "leaf"):
+    # Single-leg leaf: the same GAMES as the null, so nleaf - null is a pure
+    # row-type contrast on the corpus we would actually ship.
+    nleaf = arms_dir / "corpus_nullleaf.tsv"
+    if "nullleaf" in needed and not nleaf.exists():
+        r = sh(["python3", SCRIPT_DIR / "sample_corpus.py",
+                "--source", null_src, "--rows", "leaf",
+                "--quiet-cp", args.quiet_cp, "--quota", 1 << 30,
+                "--restrict-gids", null,
+                "--target-rows", n, "--seed", args.seed, "--out", nleaf],
+               capture_output=True, text=True)
+        sys.stderr.write(r.stderr)
+    corpora["nullleaf"], rows["nullleaf"] = nleaf, n
+
+    for k in needed:
         m = json.loads(corpora[k].with_suffix(".tsv.json").read_text())
         if m["rows_total"] != n:
             die(f"{k} corpus has {m['rows_total']:,} rows, dose is {n:,} -- "
@@ -428,7 +454,11 @@ def main():
     arms_dir = LEARN / f"{args.tag}_arms"
     arms_dir.mkdir(exist_ok=True)
 
-    corpora, rows = build_corpora(args, arms_dir)
+    selected = args.only or ORDER
+    needed = {ARMS[a][0] for a in selected}
+    if args.corpus_only:
+        needed = {ARMS[a][0] for a in ORDER}
+    corpora, rows = build_corpora(args, arms_dir, needed)
     if args.corpus_only:
         log("--corpus-only: stopping after corpus assembly")
         return

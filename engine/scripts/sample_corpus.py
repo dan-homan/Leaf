@@ -172,15 +172,16 @@ def plan(counts, quota, n_games, target_rows, rng, keep_gids=None):
     """Decide how many rows to take from each game.
 
     Games are chosen uniformly (n_games of them), each contributing
-    min(eligible, quota).  If that overshoots target_rows the surplus is shed
-    one row at a time from randomly chosen games, which keeps game weights
-    within one row of each other -- far gentler than dropping whole games.
+    min(eligible, quota).  If that overshoots target_rows, the surplus comes off
+    by lowering the effective per-game CAP -- binary-searched -- with the last
+    few rows shed one at a time so the total lands exactly.
 
-    ⚠️ This is for trimming a SMALL surplus (a few percent).  Shedding a large
-    one flattens the quota down past the short games and leaves only the long
-    ones -- at quota 100000 against a 3.9% target it kept 121 games of 1244,
-    destroying property (2).  To take a small fraction of a corpus, lower the
-    QUOTA (--count-only sizes it) instead of leaning on --target-rows."""
+    Capping rather than subtracting a constant is what makes this safe for large
+    trims as well as small ones.  Subtracting a constant takes as many rows from
+    a 10-row game as from a 300-row one, so short games lose a far larger
+    fraction and the sample skews toward long games -- reintroducing the very
+    game-length bias the quota exists to prevent.  Under a cap a game keeps
+    everything it has until the cap falls below its row count."""
     idx = list(range(len(counts)))
     if keep_gids is not None:
         idx = [i for i in idx if counts[i][0] in keep_gids]
@@ -194,25 +195,30 @@ def plan(counts, quota, n_games, target_rows, rng, keep_gids=None):
     if target_rows is None or total <= target_rows:
         return take, total
 
-    surplus = total - target_rows
-    # Shed uniformly first (O(n)), then distribute what is left one row at a
-    # time (O(remainder) < n).  Shedding one row at a time from the start would
-    # be O(surplus), which is minutes when the overshoot is millions of rows.
-    while surplus > 0:
-        donors = [i for i, t in take.items() if t > 0]
-        if not donors:
-            die("cannot reach --target-rows: every sampled game is exhausted; "
-                "raise --quota or --games-per-source")
-        flat = surplus // len(donors)
-        if flat:
-            for i in donors:
-                d = min(flat, take[i])
-                take[i] -= d
-                surplus -= d
+    # Reduce by lowering the per-game CAP, not by subtracting a constant from
+    # every game.  Subtracting a constant takes the same absolute number of
+    # rows from a 10-row game as from a 300-row one, so short games lose a far
+    # larger fraction and the sample skews toward long games -- exactly the
+    # game-length bias the quota exists to prevent.  Capping takes rows only
+    # from games that have them to spare.  Binary-search the smallest cap that
+    # still meets the target, then shed the small remainder one row at a time.
+    elig = dict(take)
+    lo, hi = 1, max(elig.values())
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if sum(min(e, mid) for e in elig.values()) >= target_rows:
+            hi = mid
         else:
-            for i in rng.sample(donors, surplus):
-                take[i] -= 1
-                surplus -= 1
+            lo = mid + 1
+    take = {i: min(e, lo) for i, e in elig.items()}
+    take = {i: t for i, t in take.items() if t > 0}
+    surplus = sum(take.values()) - target_rows
+    if surplus > 0:
+        donors = [i for i, t in take.items() if t > 0]
+        if surplus > len(donors):
+            die(f"internal: surplus {surplus} exceeds {len(donors)} donors")
+        for i in rng.sample(donors, surplus):
+            take[i] -= 1
     take = {i: t for i, t in take.items() if t > 0}
     return take, target_rows
 
