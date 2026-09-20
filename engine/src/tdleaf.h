@@ -42,6 +42,64 @@ static const float TDLEAF_LAMBDA           = 0.985f;  // per game ply
 // Also the loss anchor for absolute eval scale under pure-PSQT — see the
 // material-representation note below.
 static const float TDLEAF_K               = 220.0f;
+
+// ---------------------------------------------------------------------------
+// Material-dependent sigmoid temperature (TDLEAF_K_SHAPE, default OFF)
+// ---------------------------------------------------------------------------
+// K converts a centipawn score to an expected game score, and that conversion
+// is NOT material-invariant.  Fitting K per NNUE material stack over 4.07M
+// quiet root positions from the m260916 5e6g leg (scripts/calibrate_from_corpus.py,
+// quiet_cp=60) gives a U: bare endgames need a much flatter sigmoid because a
+// cp edge there is frequently a dead draw, while the 13-20 piece middlegame
+// converts advantages most reliably.
+//
+//   stack  pieces   n        K_fit
+//     0     1-4     110,884  268.7
+//     1     5-8     744,831  200.2
+//     2     9-12    597,428  175.9
+//     3    13-16    429,680  168.9
+//     4    17-20    383,856  177.3
+//     5    21-24    396,165  190.2
+//     6    25-28    492,025  199.4
+//     7    29-32    918,687  185.0
+//
+// The table below is those fits divided by their ROW-WEIGHTED HARMONIC MEAN
+// (187.2 cp).  Harmonic, not arithmetic, because K enters as cp/K and the
+// target's sensitivity at equality is d(ev)/d(cp) = 1/(4K); holding
+// sum(n_b/K_b) fixed keeps the MEAN TARGET SENSITIVITY unchanged.  So running
+// the shape at K_mean = TDLEAF_K is a pure redistribution against flat
+// TDLEAF_K, with no scale change smuggled in -- which is what makes the first
+// A/B interpretable.
+//
+// ⚠️ The shape comes from calibration; the SCALE must not.  Two
+// calibration-derived changes have already been measured and both lost:
+// lambda toward the fitted 0.991 cost -20 Elo on two instruments, and flat
+// K = 190 (the fitted value) cost -16.5 paired / -7.7 anchor against K = 220.
+// A calibration fits "what predicts the final result", which is not the
+// training objective.  Sweep K_mean on Elo, starting at 220 and going UP.
+#ifndef TDLEAF_K_SHAPE
+ #define TDLEAF_K_SHAPE 0
+#endif
+
+static const float TDLEAF_K_SHAPE_TAB[8] = {
+    1.4350f, 1.0692f, 0.9394f, 0.9020f,
+    0.9469f, 1.0158f, 1.0649f, 0.9880f
+};
+
+// K for a position in NNUE material stack STACK = (piece_count-1)/4.
+// At TDLEAF_K_SHAPE = 0 this returns k_mean unchanged, so the build is
+// byte-identical to main.
+static inline float tdleaf_k_for_stack(int stack, float k_mean)
+{
+#if TDLEAF_K_SHAPE
+    if (stack < 0) stack = 0;
+    if (stack > 7) stack = 7;
+    return k_mean * TDLEAF_K_SHAPE_TAB[stack];
+#else
+    (void)stack;
+    return k_mean;
+#endif
+}
 static const int   TDLEAF_MIN_PLIES       = 8;      // skip games shorter than this
 static const int   TDLEAF_MIN_PLIES_REP   = 40;     // skip 3-rep draws shorter than this
 // Horizon-noise mitigation 1 — TD error clipping.

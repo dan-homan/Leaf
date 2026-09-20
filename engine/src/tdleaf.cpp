@@ -789,11 +789,18 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
     // 1. Convert scores to White-POV sigmoid values d[t] ∈ (0,1)
     static float d[MAX_GAME_PLY];
     static float score_w_cp[MAX_GAME_PLY];
+    static float k_of[MAX_GAME_PLY];     // per-record K (TDLEAF_K_SHAPE)
     for (int t = 0; t < T; t++) {
         score_w_cp[t] = rec.plies[ix[t]].wtm
                         ?  (float)rec.plies[ix[t]].score_stm
                         : -(float)rec.plies[ix[t]].score_stm;
-        d[t] = 1.0f / (1.0f + expf(-score_w_cp[t] / TDLEAF_K));
+        // Material-dependent K (TDLEAF_K_SHAPE; identity when off).  The stack
+        // is the LEAF position's, which is the position whose value d[t] is --
+        // and it is recomputed by tdleaf_rebuild_record, so the learner agrees
+        // with the actor without a new .tdg field.
+        const float K_t = tdleaf_k_for_stack(rec.plies[ix[t]].stack, TDLEAF_K);
+        k_of[t] = K_t;
+        d[t] = 1.0f / (1.0f + expf(-score_w_cp[t] / K_t));
     }
 
     // 2. Compute TD errors backward
@@ -841,7 +848,9 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
     }
 
     for (int t = 0; t < T; t++) {
-        float sig_grad = d[t] * (1.0f - d[t]) / TDLEAF_K;
+        // Same K as built d[t]: the sigmoid derivative must match its own
+        // temperature or the gradient is inconsistent with the target.
+        float sig_grad = d[t] * (1.0f - d[t]) / k_of[t];
         // wtm_sign converts ∂d_t/∂w (white-POV utility we want to ascend)
         // into the descent-form gradient expected by nnue_apply_gradients
         // (which does w -= LR × step on the supplied "loss" gradient).

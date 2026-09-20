@@ -102,10 +102,16 @@ ARMS = {
     # here; `null2` (2 epochs on the null corpus) is the control that separates
     # them, at matched steps on repeated rather than fresh rows.
     "nboth": ("nullboth", "both", []),
+    # Elo-test the K calibration.  60k games of the 5e6g dump fit K = 188-192
+    # against the configured 220, with or without the quiet gate.  But a
+    # calibration fits "what predicts the final result", which is not the
+    # training objective -- the same exercise favours a HIGHER td_lambda, and
+    # nout measured that at -20 Elo.  So K gets tested, not adopted.
+    "nK":    ("null", "root", ["--bt-K", "190"]),
     "null2": ("null", "root", [], 2),
 }
 ORDER = ["null", "base", "bout", "bcp", "leaf",
-         "nout", "ncp", "nleaf", "ncp2", "nboth", "null2"]
+         "nout", "ncp", "nleaf", "ncp2", "nboth", "null2", "nK"]
 
 
 def log(msg):

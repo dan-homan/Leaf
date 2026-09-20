@@ -373,7 +373,11 @@ static inline float bt_target(const BTRecord &r, float lambda,
     // outcome-only).
     float w       = ((r.depth == 0) ? leaf_lambda : lambda) * decay;
     float outcome = 0.5f * (float)r.result2;
-    float ev = 1.0f / (1.0f + expf(-(float)r.cp / K));
+    // Material-dependent K (TDLEAF_K_SHAPE; identity when off).  The row's own
+    // position supplies the stack -- popcount(occ) is the piece count the NNUE
+    // would bucket on, so offline and online agree on which K applies.
+    const int stack = (__builtin_popcountll(r.occ) - 1) / 4;
+    float ev = 1.0f / (1.0f + expf(-(float)r.cp / tdleaf_k_for_stack(stack, K)));
     return w * outcome + (1.0f - w) * ev;
 }
 
