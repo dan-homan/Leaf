@@ -36,6 +36,29 @@ STM + game-ply λ^Δ), and **Phases D and E have since landed:**
   write — **also landed** (Phase 3, `docs/history/SIMPLIFICATION_PLAN.md`), validated
   byte-exact.  Nothing in this section is outstanding.
 
+### Search (not learning) — candidates from the PV-resolution work
+
+- [ ] **S1 — does the root window fix help COMPETITIVE search?**  The
+      aspiration loop collapses `root_alpha = root_beta` on a fail-high and
+      `root_beta = root_alpha` on a fail-low.  Not collapsing either took
+      resolved iterations 45.67% → 88.45% and is now default for learning play
+      (gated on `pv_learning_mode`).  The learning-play numbers hint it may be
+      worth something as plain search too, but that is **not measured**: the
+      hint is 15.8 ± 17.3 (0.9σ) from two separate matches against a common
+      opponent, which §5 says do not subtract.  **Arm:** build with
+      `PV_NO_ALPHA_RAISE`/`PV_NO_BETA_LOWER` UNGATED (remove the
+      `pv_learning_mode` test) and play it directly against an unmodified build
+      — plain `NNUE=1`, no TDLEAF, so no PV repairs are in play — at a real time
+      control as well as fixed depth.  **Precondition:** re-read the
+      `search.cpp:423` warning first.  The narrow window is documented as
+      load-bearing for strength via futility pruning, the singular-extension
+      guard and the non-first-move re-search guard, with `(-MATE,+MATE)`
+      measured at ~6:1 against.  This change is far milder than that, but it is
+      the same coupling, and it costs ~1.45× clock in learning play — under a
+      **clock** rather than fixed depth that cost buys less depth, which fixed-
+      depth arms cannot see.  A time-control match is therefore the one that
+      decides it, and the fixed-depth result may well not survive.
+
 ### Generation sharpness and depth (2026-09-21)
 
 Rationale: `Learning_Investigation.md` §1 M and §6 item 7.  Self-play sharpens

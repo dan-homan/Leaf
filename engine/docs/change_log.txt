@@ -53,9 +53,13 @@ Changes since 2017_12_24
                  no alpha raise (fallback still on)   +181.59 +/- 10.42
                  no alpha + no beta (fallback on)     +246.72 +/- 11.27
                  FINAL (all four defaults)            +298.45 +/- 12.36
-               The final config beats merely removing the fallback, so the
-               symmetric window fix is worth ~16 Elo of real search quality on
-               top of eliminating the move substitution.
+               ⚠️ The final config reads 15.8 Elo above merely removing the
+               fallback, but those are two SEPARATE matches against a common
+               opponent: 15.8 +/- 17.3 is 0.9 sigma, and SS5 forbids subtracting
+               two matches against a common opponent anyway.  Whether the
+               symmetric window fix is worth anything as SEARCH (as opposed to
+               as label plumbing) is UNMEASURED -- it needs a direct match.
+               See TODO S1.
 
                RESULT: every recorded label is now a genuine depth-8 result --
                mean recorded depth 8.00, 0.00% below floor, verified on a

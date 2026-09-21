@@ -501,6 +501,7 @@ for one.
 | Collapsing the root window is the cause; it is root-only | search.cpp:494/498 vs :1080 | no alpha raise → 74.71% resolved; + no beta lower → 88.45% | R8 | **ESTABLISHED** |
 | `PV_LAST_RESOLVED` cost 283 Elo of LEARNING play, not "slightly" | 4000 games, fixed d8 | +282.63 ± 12.06 to remove it | R8 | **ESTABLISHED** |
 | The combined fix is worth ~298 Elo of generation strength at 1.45× clock | 4000 games, fixed d8 | +298.45 ± 12.36; mean recorded depth 6.83 → 8.00 | R8 | **ESTABLISHED** |
+| Whether the window fix helps SEARCH, beyond removing the substitution, is open | two matches vs a common opponent | 15.8 ± 17.3 (0.9σ), and §5 forbids subtracting them | R8 | **UNMEASURED** — see TODO S1 |
 | Dropping Houdart's fail-high depth reduction HURTS | five paired arms | +2.7 pts alone at 1.15×; removing it from the all-three arm *improved* both resolution and speed | R8 | **ESTABLISHED** |
 | Stub rows are worse than resolved rows and the quiet gate cannot filter them | derived I−J, 4000 games | mean \|cp−gate\| 130.7 vs 111.6 cp; gate-60 pass 39.4% vs 49.1% | R8 | **ESTABLISHED** |
 
