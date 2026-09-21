@@ -28,6 +28,8 @@ game_rec::game_rec() {
 	timeleft[1] = 500.0;
         learn_bk = 0;
 	knowledge_scale = 100;
+	eval_noise = 0;
+	eval_noise_salt = 0;
 	searching = 0;
 	process_move = 0;
 	terminate_search = 0;

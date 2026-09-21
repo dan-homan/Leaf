@@ -215,6 +215,19 @@
  #define KNOWLEDGE 100
 #endif
 
+// Compile-time default for eval_noise / game.eval_noise (centipawns, 0 = off).
+// Positional-uncertainty perturbation: a zero-mean offset keyed on the PAWN
+// STRUCTURE ONLY, so it is constant across every move that leaves the pawns
+// alone and therefore never perturbs tactics or piece trades.  See
+// position::eval_noise_cp() in score.cpp.  Entirely independent of KNOWLEDGE
+// above -- it never touches knowledge_scale and so can never trip the
+// move-dropping "oversight" path at knowledge_scale < 50 (search.cpp:974).
+// Normally set at play time via --eval-noise / UCI "EvalNoise"; this default
+// exists only so a binary can be pinned to a level for automated testing.
+#ifndef EVAL_NOISE
+ #define EVAL_NOISE 0
+#endif
+
 // define 64 bit integers and zero values for unsigned long long
 #if MSVC 
  #define ZERO 0ui64

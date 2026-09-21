@@ -67,6 +67,13 @@ void set_search_param()
  game.knowledge_scale = engine_cfg.chess_skill;
  if(game.knowledge_scale < 1) game.knowledge_scale = 1;
  if(game.knowledge_scale > 100) game.knowledge_scale = 100;
+ // Positional-uncertainty perturbation (score.cpp).  Independent of
+ // knowledge_scale above: nothing here can move knowledge_scale, so the
+ // move-dropping "oversight" path at knowledge_scale < 50 stays unreachable.
+ game.eval_noise = engine_cfg.eval_noise;
+ if(game.eval_noise < 0) game.eval_noise = 0;
+ if(game.eval_noise > 500) game.eval_noise = 500;
+ game.eval_noise_salt = engine_cfg.eval_noise_salt;
 }
 
 /* Function to generate check tables */

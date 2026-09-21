@@ -252,6 +252,8 @@ static void uci_send_options()
     printf("option name UCI_AnalyseMode type check default false\n");
     printf("option name UCI_Chess960 type check default false\n");
     printf("option name Skill type spin default %d min 1 max 100\n", game.knowledge_scale);
+    printf("option name EvalNoise type spin default %d min 0 max 500\n", game.eval_noise);
+    printf("option name EvalNoiseSalt type spin default %u min 0 max 2000000000\n", game.eval_noise_salt);
     fflush(stdout);
 }
 
@@ -292,6 +294,22 @@ static void uci_setoption(const std::string &line)
         if (v < 1) v = 1;
         if (v > 100) v = 100;
         game.knowledge_scale = v;
+    } else if (name_str == "EvalNoise") {
+        // Positional-uncertainty perturbation (score.cpp).  Independent of
+        // Skill: it never writes knowledge_scale, so the move-dropping
+        // "oversight" path below knowledge_scale 50 stays unreachable.
+        int v = atoi(val_str.c_str());
+        if (v < 0) v = 0;
+        if (v > 500) v = 500;
+        // Cached evals in the score hash carry the OLD sigma, so drop them.
+        // Must be tested BEFORE the assignment.
+        if (v != game.eval_noise) clear_hash();
+        game.eval_noise = v;
+        engine_cfg.eval_noise = v;
+    } else if (name_str == "EvalNoiseSalt") {
+        game.eval_noise_salt = (unsigned int)strtoul(val_str.c_str(), NULL, 10);
+        engine_cfg.eval_noise_salt = game.eval_noise_salt;
+        clear_hash();   // the whole perturbation field just changed
     }
     // UCI_AnalyseMode handled per "go infinite"
 }

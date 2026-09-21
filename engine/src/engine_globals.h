@@ -52,6 +52,8 @@ struct EngineConfig {
     int gambit_score   = 80;
     int book_learning  = 0;
     int chess_skill    = KNOWLEDGE;  // compile-time default; see define.h
+    int eval_noise     = EVAL_NOISE; // positional-uncertainty sigma in cp (0 = off)
+    unsigned int eval_noise_salt = 0;// per-process perturbation field selector
     int hash_size      = 128;
 };
 

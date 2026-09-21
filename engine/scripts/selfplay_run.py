@@ -76,6 +76,23 @@ def main():
                          "at ~1.8x the wall clock -- fixed depth lets trivial "
                          "positions finish cheaply, a node budget spends the "
                          "full allowance on them (reaching d20-30) instead")
+    ap.add_argument("--eval-noise", type=int, default=0, metavar="CP",
+                    help="Positional-uncertainty perturbation for the ACTORS "
+                         "(0 = off, the default).  A zero-mean offset of sd CP "
+                         "centipawns added to the static eval, keyed on the "
+                         "pawn structure alone, so it is constant across every "
+                         "non-pawn move and perturbs which pawn structure the "
+                         "engine steers toward rather than its tactics.  "
+                         "Diversifies the position distribution: at 5cp every "
+                         "game already diverges from the unperturbed line by "
+                         "ply 1.  Free below ~10cp (0 +/- 10 Elo at 4000 games) "
+                         "and costly above (-17 at 15, -66 at 40), because a "
+                         "choice compares two structures so the distortion has "
+                         "sd CP*sqrt(2).  Gradients are UNAFFECTED: the learner "
+                         "never calls score_pos, and --refresh-scores re-derives "
+                         "every label from clean weights.  Measured NOT to move "
+                         "draw rate or quiet fraction -- this is a diversity "
+                         "knob, not a fix for the sharpness drift.")
     ap.add_argument("--games-per-actor", type=int, default=1000,
                     help="Actor respawn cadence = weight refresh interval")
     ap.add_argument("--total-games", type=int, required=True,
@@ -185,6 +202,16 @@ def main():
                *(["--nodes", str(args.nodes)] if args.nodes else []),
                "--epd-shuffle", str(seed),
                "--epd-offset", str(slot), "--epd-stride", str(args.actors),
+               # Each actor process draws its OWN perturbation field, so a leg
+               # samples a population of slightly different evaluators rather
+               # than one global distortion.  Safe per PROCESS but not per
+               # game: the score hash caches perturbed evals and outlives a
+               # game (clear_hash() is skipped under TDLEAF_FREEZE), so the
+               # salt must be fixed for the process -- which it is, since a
+               # respawn is a new process with a fresh hash.
+               *(["--eval-noise", str(args.eval_noise),
+                  "--eval-noise-salt", str(seed + slot)]
+                 if args.eval_noise else []),
                "--games", str(args.games_per_actor),
                "--depth", str(args.depth),
                "--traj-out", str(traj)]

@@ -26,6 +26,62 @@ inline int position::pawn_guard(int tsq, int side, pawn_data *pawn_record) {
   else return 0;
 }
 
+//-------------------------------------------------------------------
+//
+// eval_noise_cp -- positional-uncertainty perturbation
+//
+// Returns a WHITE-POV centipawn offset that is a pure function of the
+// PAWN STRUCTURE (plus a per-process salt).  Three deliberate choices:
+//
+//  * Keyed on the pawns ALONE, so the offset is identical across every
+//    move that leaves the pawn structure untouched.  A whole quiet
+//    subtree is therefore shifted by the SAME constant and move ordering
+//    inside it is unchanged -- the engine keeps playing its normal
+//    tactics, and what varies is only its opinion of which pawn
+//    structure to steer toward.  Structural diversification, not
+//    blunders.
+//
+//  * gstage is deliberately EXCLUDED.  The pawn hash `pcode` folds it in,
+//    which is exactly why pcode is not used here: including it would
+//    re-draw the offset on every piece capture and so put random noise on
+//    material trades -- tactical noise, the opposite of the intent.
+//
+//  * Computed from the pawn lists rather than from `pcode`, because pcode
+//    is path-dependent: gen_code() folds in the non-pawn pieces as they
+//    stood at setboard time and the incremental updates in exec_move
+//    never revisit them, so the same board reached in two different games
+//    can carry two different pcodes.  A board-pure key keeps the offset
+//    consistent with the hcode-keyed score hash, which outlives an
+//    individual game in the self-play driver (selfplay_new_game_reset()
+//    skips clear_hash() under TDLEAF_FREEZE).
+//
+// Distribution: a 64-bit Zobrist XOR has uniform bits, so popcount is
+// Binomial(64, 1/2) and g = popcount - 32 has mean 0, sd 4.  Hence
+// (noise*g)/4 is zero-mean with sd exactly `noise` cp.  Clamped at 3
+// sigma.  Pawnless positions carry no structural opinion and get zero,
+// which also keeps the last-pawn trade unbiased.
+//
+// Vary `salt` to draw a different field: a salt fixed for a process (e.g.
+// per self-play actor) gives a population of slightly different
+// evaluators without ever making the score hash inconsistent.
+//
+//-------------------------------------------------------------------
+
+static inline int eval_noise_cp(const int8_t plist[2][7][10],
+                                int noise, unsigned int salt)
+{
+  if(!(plist[WHITE][PAWN][0] + plist[BLACK][PAWN][0])) return 0;
+  h_code k = (h_code)salt * 0x9E3779B97F4A7C15ULL;
+  for(int i = 1; i <= plist[WHITE][PAWN][0]; i++)
+    Or(k, hval[HASH_ID(WPAWN)][plist[WHITE][PAWN][i]]);
+  for(int i = 1; i <= plist[BLACK][PAWN][0]; i++)
+    Or(k, hval[HASH_ID(BPAWN)][plist[BLACK][PAWN][i]]);
+  int g = __builtin_popcountll((unsigned long long)k) - 32;
+  if(g >  12) g =  12;
+  if(g < -12) g = -12;
+  return (noise * g) / 4;
+}
+
 /*--------------------------- Score position ------------------------*/
 // Position is scored from point of view of white to move.  Score is
 // currently based on a number of factors: Open files, king proximity,
@@ -111,6 +167,17 @@ int position::score_pos(game_rec *gr, ts_thread_data *tdata NNUE_ACC_DEF)
        if (pcode & 4) nscore -= int(float(score) * (100.0 - float(gr->knowledge_scale)) / 100.0);
        else           nscore += int(float(score) * (100.0 - float(gr->knowledge_scale)) / 100.0);
        score = nscore;
+       if (score > 9999)  score = 9999;
+       if (score < -9999) score = -9999;
+     }
+     // Positional-uncertainty perturbation.  `score` is stm POV on this path
+     // (nnue_evaluate returns stm POV) while eval_noise_cp is white POV, so it
+     // must be sign-flipped for black: an offset added in stm POV would read as
+     // +d for one side and -d for the other at the SAME pawn structure, i.e. a
+     // phantom 2d tempo bonus for making any quiet move.
+     if (gr->eval_noise > 0) {
+       int d = eval_noise_cp(plist, gr->eval_noise, gr->eval_noise_salt);
+       score += wtm ? d : -d;
        if (score > 9999)  score = 9999;
        if (score < -9999) score = -9999;
      }
@@ -794,6 +861,15 @@ int position::score_pos(game_rec *gr, ts_thread_data *tdata NNUE_ACC_DEF)
      if(pcode&4) nscore -= int(float(score)*(100.0-float(gr->knowledge_scale))/100.0);
      else nscore += int(float(score)*(100.0-float(gr->knowledge_scale))/100.0);
      score = nscore;
+     if(score > 9999) score = 9999;
+     if(score < -9999) score = -9999;
+   }
+
+   // Positional-uncertainty perturbation.  `score` is already WHITE POV on the
+   // classical path (it is converted to stm POV only on return), so the offset
+   // is added directly -- no sign flip, unlike the NNUE path above.
+   if(gr->eval_noise > 0) {
+     score += eval_noise_cp(plist, gr->eval_noise, gr->eval_noise_salt);
      if(score > 9999) score = 9999;
      if(score < -9999) score = -9999;
    }

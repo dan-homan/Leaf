@@ -194,6 +194,8 @@ void parse_command()
       cout << "feature myname=\"Leaf v" << VERS << VERS2 << "\"\n";
       snprintf(outstring, sizeof(outstring), "feature option=\"Playing Strength -slider %i 1 100\n", game.knowledge_scale);
       cout << outstring;
+      snprintf(outstring, sizeof(outstring), "feature option=\"Eval Noise -spin %i 0 500\n", game.eval_noise);
+      cout << outstring;
       cout << "feature done=1\n";
       cout.flush();
     }
@@ -205,6 +207,18 @@ void parse_command()
       if(!strcmp(options, " Playing Strength")) {
 	options = strtok(NULL,"\n");
 	game.knowledge_scale = atoi(options);
+      }
+      else if(!strcmp(options, " Eval Noise")) {
+	// Positional-uncertainty perturbation (score.cpp).  Separate from
+	// Playing Strength: it never writes knowledge_scale, so it cannot
+	// reach the move-dropping path at knowledge_scale < 50.
+	options = strtok(NULL,"\n");
+	int v = atoi(options);
+	if(v < 0) v = 0;
+	if(v > 500) v = 500;
+	if(v != game.eval_noise) clear_hash();   // cached evals carry the old sigma
+	game.eval_noise = v;
+	engine_cfg.eval_noise = v;
       }
     }
   }

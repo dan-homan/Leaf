@@ -94,6 +94,8 @@ The `.nnue` network file and `.tdleaf.bin` weights file must reside in the same 
 | `--xboard` | Force xboard/CECP protocol mode |
 | `--log` | Enable logging to `run.log` (default: off) |
 | `--no-pv-learning` | Disable the learning-only PV repairs, restoring competitive search behaviour.  For rating a TDLEAF binary; plain `NNUE=1` binaries never enable them |
+| `--eval-noise <cp>` | Positional-uncertainty perturbation: a zero-mean offset of sd `<cp>` added to the static eval, keyed on the **pawn structure alone** so it is constant across every non-pawn move (tactics and piece trades are untouched).  Diversifies structural play during generation.  Default 0 = off (verified no-op).  Also `EvalNoise` (UCI) / `Eval Noise` (xboard).  **Independent of `Skill`/`knowledge_scale`** — it cannot reach the move-dropping "oversight" path below `knowledge_scale` 50 |
+| `--eval-noise-salt <n>` | Selects which perturbation field `--eval-noise` draws.  Hold it fixed per process (e.g. per self-play actor) for a population of slightly different evaluators; do **not** vary it per game — the score hash outlives a game under `TDLEAF_FREEZE` |
 | `hash <MB>` | Set hash table size |
 | `cores <N>` | Set thread count |
 

@@ -1,5 +1,128 @@
 Changes since 2017_12_24
 
+2026_09_20a -- eval_noise: positional-uncertainty perturbation for generation.
+
+               A runtime-settable, zero-mean centipawn offset added to the static
+               eval, keyed on the PAWN STRUCTURE ALONE.  Purpose: diversify the
+               engine's positional (structural) choices during self-play
+               generation without degrading its tactics, so the corpus stops
+               being confined to the structures the net's own preferences drive
+               it into.  Motivation: every sharpness indicator on the m260916
+               chain drifted monotonically over 9 legs -- self-play draw rate
+               30.9% -> 22.5%, per-ply eval volatility +77%, plies swinging
+               >=50cp 9.6% -> 22.8%, balanced positions 29.3% -> 23.1%, and the
+               fraction of root rows passing the 60cp quiet gate 0.562 -> 0.499
+               at constant search depth.  Piece values are flat over the same
+               span (P 110->117, N 375->377, Q 1194->1199), so this is not eval
+               scale inflation.
+
+               NEW AND SEPARATE FROM knowledge_scale.  It never writes
+               knowledge_scale, so the move-dropping "oversight" path that
+               activates below knowledge_scale 50 (search.cpp:974, :1849) stays
+               unreachable no matter how eval_noise is set.
+
+               Design (position::eval_noise_cp, score.cpp):
+                 - Keyed on the pawns only, so the offset is IDENTICAL across
+                   every move that leaves the pawn structure alone.  A whole
+                   quiet subtree is shifted by the same constant, move ordering
+                   inside it is unchanged, and tactics are untouched.  Verified:
+                   four piece moves AND a piece removed from the board all
+                   return the same offset; only pawn moves re-draw it.
+                 - gstage deliberately EXCLUDED (which is why the existing pawn
+                   hash `pcode` is not used): including it would re-draw the
+                   offset on every capture and put random noise on trades.
+                 - Computed from the pawn lists, not `pcode`, because pcode is
+                   path-dependent -- gen_code() folds in the non-pawn pieces as
+                   they stood at setboard time and exec_move never revisits
+                   them, so the same board can carry different pcodes in two
+                   games.  A board-pure key stays consistent with the
+                   hcode-keyed score hash, which outlives a game in the
+                   self-play driver (clear_hash() is skipped under FREEZE).
+                 - popcount of a 64-bit Zobrist XOR is Binomial(64,1/2), so
+                   g = popcount-32 has mean 0 / sd 4 and (sigma*g)/4 is
+                   zero-mean with sd exactly sigma cp.  Clamped at 3 sigma.
+                   Pawnless positions get zero, keeping the last-pawn trade
+                   unbiased.  Measured over 1198 corpus positions: sigma 25 ->
+                   mean +0.26, sd 24.76; sigma 50 -> mean +0.55, sd 49.95.
+                 - Applied WHITE POV.  The NNUE path holds a stm-POV score so
+                   the offset is sign-flipped there; the classical path is
+                   already white POV and adds it directly.  Adding it in stm POV
+                   would read +d for one side and -d for the other at the same
+                   structure -- a phantom 2d tempo bonus on any quiet move.
+                 - eval_noise_salt selects which field is drawn.  Held fixed for
+                   a process (e.g. per self-play actor) it gives a population of
+                   slightly different evaluators with no score-hash
+                   inconsistency; varying it per GAME would not, since the hash
+                   outlives the game.
+
+               TDLeaf gradients are unaffected with no new code: the learner
+               never calls score_pos.  Under --refresh-scores (which train.py
+               passes unconditionally) tdleaf_rebuild_record re-evaluates the
+               leaf via nnue_evaluate_acc_raw, shifts score_root_stm by the leaf
+               delta -- which cancels the offset exactly when the root score is
+               the propagated PV leaf -- and recomputes root_static clean.
+               leaf_ok is then recomputed clean-vs-clean, and its value is
+               unchanged by the refresh, so the gate keeps testing the PV in the
+               space the search actually operated in.
+
+               Interfaces (play time): --eval-noise <cp> / --eval-noise-salt <n>
+               (scanned before the arg loop so they work after --selfplay),
+               UCI "EvalNoise" / "EvalNoiseSalt", xboard "Eval Noise".
+               Compile-time default EVAL_NOISE=0.  Changing either option clears
+               the score hash, whose entries carry the old offset.
+
+               Default 0 is a verified no-op: identical best move, depth and
+               solve count on a 6-position suite at depth 12 against a HEAD
+               build, and byte-identical static evals over 1198 corpus
+               positions.  No measurable throughput cost (5.60 vs 5.63 games/s
+               over 40 self-play games).
+
+               CALIBRATION SWEEP (scripts/arms/eval_noise_sweep.sh and
+               eval_noise_quiet.sh; 7 sigma arms x 30,000 self-play games, plus
+               4,000-game strength matches and 4 quiet-fraction arms x 8,000
+               games, all d6/800 from the m260916 7e6 endpoint, weights frozen,
+               arms paired on openings).  RESULT: the mechanism works exactly as
+               designed, is FREE below sigma 10, and DOES NOT MOVE EITHER
+               SYMPTOM OF THE DRIFT.
+
+                 sigma   draw%   meanply   q@60    Elo vs clean
+                     0   22.20     132.8   0.440        --
+                     5   22.07     133.1     --    +2.0 +/- 9.6
+                    10   22.30     132.8   0.439    -0.7 +/- 9.7
+                    15   21.84     132.3     --   -17.0 +/- 9.6
+                    20   21.83     132.4   0.432   -19.4 +/- 9.4
+                    30   21.67     131.4     --   -45.6 +/- 9.6
+                    40   21.50     130.6   0.412   -66.0 +/- 9.9
+
+               Draw rate resolves to +/-0.24% at 30k games.  The target was to
+               recover the drift (22.5% -> 24.2%, q@60 0.499 -> 0.562); instead
+               everything is flat where it is free and drifts the WRONG way,
+               tiny, where it is not (sigma 0->40 is -0.70 points of draw rate,
+               ~2 sigma, at a cost of 66 Elo).
+
+               The informative part is the contrast with a divergence check:
+               at sigma 5 -- a 7cp choice-distortion sd -- 100% of games diverge
+               from the paired control and the MEDIAN divergence is at ply 1.
+               So the perturbation completely changes WHICH games are played
+               while leaving their tactical character and their quiet-position
+               yield unchanged.  Sharpness and quiet fraction look like
+               properties of the evaluation function itself, not of which pawn
+               structures the net prefers; displacing it in structure space
+               samples a different set of games with the same temperature.
+               That is consistent with the drift having saturated by ~5e6 games
+               while leg yield kept decaying.
+
+               The strength threshold lands exactly where the arithmetic says.
+               A move choice compares two structures drawn independently, so the
+               distortion has sd sigma*sqrt(2): P(>50cp) is 0.04% at sigma 10 and
+               1.8% at sigma 15, and the Elo cost turns on between them.
+
+               KEPT, defaulted OFF.  It is a verified-free knob (sigma 10 = 0
+               +/- 10 Elo) that gives full position-distribution displacement,
+               which is worth having if coverage of structures the net's own
+               policy never reaches turns out to matter.  It is NOT a fix for
+               the sharpness drift, and should not be described as one.
+
 2026_09_15d -- Comment hygiene: fix comments that had gone FALSE, and rewrite
                tdleaf.h rule-first.  No behaviour change -- verified by building
                before and after at an identical VERS string and byte-comparing

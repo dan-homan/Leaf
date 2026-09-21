@@ -547,6 +547,8 @@ struct game_rec {
   float base;              // base amount of time (seconds)
   float timeleft[2];       // total time left (centi-seconds)
   int knowledge_scale;     // variable to weaken EXchess (up to 100 for full strength)
+  int eval_noise;          // positional-uncertainty sigma in cp (0 = off); see score.cpp
+  unsigned int eval_noise_salt;  // selects which perturbation field eval_noise draws
 
  /* search structure for searches */ 
   tree_search ts;

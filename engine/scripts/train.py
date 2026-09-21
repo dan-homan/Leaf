@@ -824,6 +824,22 @@ def main():
     ap.add_argument("--nodes", type=int, default=0,
                     help="Node budget per move for generation (0 = fixed depth). "
                          "--depth becomes a ceiling; see selfplay_run.py --nodes")
+    ap.add_argument("--eval-noise", type=int, default=0, metavar="CP",
+                    help="Positional-uncertainty perturbation during generation "
+                         "(0 = off, the default).  Zero-mean offset of sd CP cp "
+                         "on the static eval, keyed on the PAWN STRUCTURE alone "
+                         "so it is constant across every non-pawn move: it "
+                         "changes which pawn structure the engine steers "
+                         "toward, not its tactics.  Each actor draws its own "
+                         "field.  Free below ~10cp (measured 0 +/- 10 Elo at "
+                         "sigma 10), costly above (-17 at 15, -45 at 30, -66 at "
+                         "40).  TDLeaf gradients are unaffected -- the learner "
+                         "never calls score_pos and --refresh-scores re-derives "
+                         "labels on clean weights.  It is a POSITION-DIVERSITY "
+                         "knob: at sigma 5 every game diverges by ply 1, but "
+                         "draw rate and quiet fraction are unchanged, so it is "
+                         "not a remedy for the sharpness drift (see "
+                         "docs/Learning_Investigation.md).")
     ap.add_argument("--ladder", type=int, default=0, metavar="N",
                     help="During generation, bake a stamped .nnue every N games "
                          "into <tag>_work/ as <tag>-ladder-<games>g.nnue.  Gives "
@@ -1240,6 +1256,7 @@ def main():
               if args.ladder else []),
             *(["--opt-reset"] if args.opt_reset else []),
             *(["--grad-norm"] if args.grad_norm else []),
+            *(["--eval-noise", args.eval_noise] if args.eval_noise else []),
             "--seed", seed],
            cwd=LEARN_DIR, env=env)
 
@@ -1719,6 +1736,7 @@ def main():
         "gen_mode": ("skip-online" if args.skip_online else "actor-learner"),
         "depth": args.depth,
         "nodes": args.nodes,
+        "eval_noise": args.eval_noise,
         "lr_scale": args.lr_scale,
         "seed": (args.seed if args.seed is not None
                  else zlib.crc32(args.tag.encode()) & 0x7FFFFFFF),

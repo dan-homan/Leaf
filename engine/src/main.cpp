@@ -417,11 +417,45 @@ int main(int argc, char *argv[])
     }
   }
 
+  // ---------------------------------------------------------------------
+  // Positional-uncertainty perturbation (score.cpp eval_noise_cp).  Scanned
+  // HERE rather than only in the arg loop below because `--selfplay` and
+  // `test` consume the rest of the command line and return, so a flag placed
+  // after them would be silently ignored -- the same trap the "any hash/cores
+  // args must precede --selfplay" comment warns about.  Scanning up front
+  // makes the flag order-independent.  set_search_param() has already copied
+  // engine_cfg into `game`, so both are updated.
+  // ---------------------------------------------------------------------
+  for (int ai = 1; ai + 1 < argc; ai++) {
+    if (strcmp(argv[ai], "--eval-noise") == 0) {
+      int v = atoi(argv[ai + 1]);
+      if (v < 0) v = 0;
+      if (v > 500) v = 500;
+      engine_cfg.eval_noise = v;
+      game.eval_noise = v;
+    } else if (strcmp(argv[ai], "--eval-noise-salt") == 0) {
+      unsigned int s = (unsigned int)strtoul(argv[ai + 1], NULL, 10);
+      engine_cfg.eval_noise_salt = s;
+      game.eval_noise_salt = s;
+    }
+  }
+  if (game.eval_noise > 0)
+    fprintf(stderr, "Eval noise: sigma %d cp on pawn structure (salt %u) -- "
+                    "play only; TDLeaf gradients are unaffected\n",
+            game.eval_noise, game.eval_noise_salt);
+
   //-----------------------------------
   // parsing command line args
   //  -- virtually no error checking!
   //-----------------------------------
   for(int argi = 1; argi < argc; argi++) {
+    // positional-uncertainty perturbation -- already applied by the pre-scan
+    // above; consumed here so the value token is not read as a command
+    if(!strcmp(argv[argi], "--eval-noise") ||
+       !strcmp(argv[argi], "--eval-noise-salt")) {
+      argi += 1;
+      continue;
+    }
     // turn on UCI mode via command-line flag
     if(!strcmp(argv[argi], "--uci")) {
       proto.uci_mode = 1;

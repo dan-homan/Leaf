@@ -68,7 +68,7 @@ they disagree about status, `TODO.md` is the one to fix.
 
 ## 1. The model
 
-Twelve statements.  Each is tagged with its strongest evidence; grades and effect
+Thirteen statements.  Each is tagged with its strongest evidence; grades and effect
 sizes are in §2.  Statement I is explicitly an interpretation, not a mechanism.
 **All of it describes a mature net** — see the scope box above; K is the statement
 about young ones, and it is mostly a statement about what is not known.
@@ -196,6 +196,27 @@ the early and late figures were not measured the same way.  The shape of the
 observation is D. Homan's from running the chains; the numbers that would settle it
 do not exist yet.
 
+**M. Self-play sharpens its own games, and DEPTH sets where that stops.**  Both
+chains drift the same way while young: draw rate, game length and quiet fraction
+all fall monotonically.  `m260720` at d6 went 34.5% -> 26.6% draws over 2M games
+and 176 -> 142 ply; `m260916` at d6/800 went 30.9% -> 22.5% and 159 -> 136.  The
+drift is a **transient that saturates** by roughly 2-4M games -- `m260916` is flat
+at 22.5% from 4M with no depth change -- and what depth sets is the LEVEL it
+saturates at: **d6 ~22-27%, d8 ~36%, d10 43%**.  `m260720`'s d8 phase is flat
+across 4.8M games (35.31 -> 36.07 -> 35.83, range +/-0.4) and its quiet fraction
+decays ~7x slower than at d6.  Two consequences.  First, `TRAINING.md`'s healthy
+band (35-40% at d8) is where `m260720` sat for its whole productive life and
+where `m260916` has **never been** -- a canary that went unread because it is
+specified for d8 and the chain ran at d6.  Second, d10's 43% draws and its -33.1
+leg say this is an optimum, not a monotone: too many draws starves the outcome
+channel.  WARNING: confounded in `m260720` alone, where d6 *is* the young phase
+and d8 *is* the mature phase; `m260916` breaks that confound only partially (it
+ran d6 to 6M and flattened anyway).  Causation from depth to *Elo* is NOT
+established: `m260720` ended 113 Elo higher on the same anchor after the same 7M
+games, but it also had `--corpus-window` from 5.5e6 (worth +36/+45 by itself), 4x
+the online LR, 500k legs against 1M, and no PV repairs.
+
+
 ---
 
 ## 2. Evidence ledger
@@ -255,6 +276,19 @@ for one.
 | Epoch 2 is harmful from an undamaged seed | 7.7.4, 7.9.3; Offline 2.5 | −14 and −20; replicated sign, individually <2σ | R5 | SUPPORTED |
 | Retargeting root labels to a rescored PV leaf is worth nothing | 7.7.3 | −2.5 ± 21.0 (95%); refresh between epochs −6.0 ± 20.8 | R5 | SUPPORTED |
 | Corpus size returns are flat between 12M and 20M rows | 7.14.4 | identical nets and identical handoff | R6 | SUPPORTED |
+
+### Generation character — how sharp the self-play games are
+
+| claim | evidence | effect | regime | grade |
+|---|---|---|---|---|
+| Self-play sharpens monotonically at d6 and is flat at d8 | m260720 actor logs; m260916 gen PGNs (the two methods agree to 0.01%) | d6 34.5→26.6% draws over 2M; d8 35.3→35.8% over 4.8M | R3–R7 | **ESTABLISHED** |
+| The drift is a young-net transient; depth sets its saturation LEVEL | both chains | d6 ~22–27%, d8 ~36%, d10 43% | R3–R7 | SUPPORTED |
+| m260916 has run its entire life outside the healthy draw band | m260916, all nine d6 legs | 22–25% against `TRAINING.md`'s 35–40% | R7 | **ESTABLISHED** |
+| Depth is an optimum, not a monotone | m260720 5.5e6 | d10 = 43% draws and −33.1 on the leg | R4 | SUPPORTED |
+| A node budget adds depth in the ENDGAME only | m260720 7e6 root dump, 4M rows | mean depth 8.14 at 32 pieces → 14.10 at 3 | R5 | **ESTABLISHED** |
+| The node budget costs no quiet rows — its quiet-fraction dip is the denominator | m260720 6e6 vs 6.5e6/7e6 | rows/game −0.5%, mean ply +1.9%, phase composition shift <0.25 pp | R5 | **ESTABLISHED** |
+| `eval_noise` displaces the position distribution completely, at zero Elo cost | §4 entry | 100% of games diverge by ply 1 at σ=5; 0 ± 10 Elo at σ=10 | R8 | **ESTABLISHED** |
+| `eval_noise` does NOT move sharpness or quiet fraction | 7 arms × 30k games | draw 22.20→21.50 over σ 0→40 (wrong sign, ~2σ); q@60 0.440→0.412 | R8 | **ESTABLISHED** |
 
 ### The loop as a whole
 
@@ -518,6 +552,31 @@ search resolved a tactic.  **Reopens for a gate *tighter* than 60**, which was n
 tested, and which `--bt-diag`'s negative ΔMSE_out below 40 cp actively hints at
 (§6).
 
+**Positional-uncertainty perturbation — `eval_noise` (2026-09-20/21).**  A
+zero-mean cp offset on the static eval keyed on the **pawn structure alone**, so
+it is constant across every non-pawn move: it perturbs which structure the engine
+steers toward, never its tactics or its material trades.  Built to break the
+sharpness drift by diversifying structural play.  The rescoring half needed no
+code — the learner never calls `score_pos`, and `--refresh-scores` already
+re-evaluates the leaf, shifts the root score by the leaf delta (which cancels the
+offset exactly), and recomputes `leaf_ok` clean-vs-clean.  Seven arms × 30,000
+self-play games plus 4,000-game strength matches: **it works, it is free below
+σ 10 (0 ± 10 Elo), and it moves neither symptom.**  Draw rate 22.20 → 21.50
+across σ 0→40 (wrong sign, ~2σ) and q@60 0.440 → 0.412, against a target of
+recovering 22.5→24.2% and 0.499→0.562.  The informative part is the contrast with
+a divergence check: at σ=5 **100% of games diverge from the paired control, median
+divergence at ply 1** — the perturbation completely changes WHICH games are played
+while leaving their character untouched.  Sharpness and quiet yield are properties
+of the evaluation function, not of the net's structural preferences, which is
+consistent with M.  **Kept, defaulted off** (`train.py --eval-noise CP`, each
+actor drawing its own field) as the only knob that diversifies the position
+distribution without varying openings.  **Reopens if:** coverage of structures the
+net's own policy never reaches is shown to be worth something — Offline 2.4's
++36/+45 is about distinct *games*, not distributional coverage, so it does not
+transfer.  Strength cost turns on exactly where the arithmetic says: a choice
+compares two independently drawn structures, so the distortion has sd σ√2, and
+P(>50 cp) goes 0.04% at σ=10 to 1.8% at σ=15.
+
 **Depth as the lever (4.5/4.6 established it; Offline 1.1 closed it at d10).**
 d6→d8 reopened the bootstrap decisively (the first positive consolidation of the
 late chain).  d8→d10 regressed: −13.6 on the leg and a head-to-head loss to its own
@@ -681,13 +740,28 @@ evidence is a real reason to expect rbar not to.  But they were closed on an
 observable now known to be the wrong one, and the 5k-game protocol makes the
 re-read cost ~50 minutes each rather than a full iteration.
 
-**7. ⚠️ Depth, on the new chain.**  d10 was rejected on a single leg (−13.6) that
-was confounded by a 52% draw rate — cutting outcome information ~25% — and that
-predates R4 (corpus window, root rows) and R6.  `E ← search_d(E)` remains the only
-mechanism known to restore headroom by construction.  **Precondition:** treat the
-draw rate as a hard gate and buy decisiveness from the opening book rather than
-from depth [Offline A6].  Fixed-nodes generation gives phase-adaptive depth for
-free.
+**7. Depth, on the new chain — PROMOTED to the top of the list (2026-09-21).**
+§1 M is the reason: `m260916` has spent its entire 7M games at d6/800, at a
+22–25% draw rate, **outside `TRAINING.md`'s own 35–40% healthy band**, while
+`m260720` sat inside that band for its whole productive life and ended 113 Elo
+higher on the same anchor after the same number of games.  The chain's one d8
+leg (6e6→7e6, at 2000 nodes) moved the draw rate 22.5 → 29.9 — the same direction
+and roughly the same size as `m260720`'s 26.6 → 35.3 step at its own d6→d8
+switch, and short of 36% because 2000 nodes is short of true d8.  That reads as
+the first leg of a regime transition, not a verdict on depth, and its small
++15.6 leg total should not be quoted as one.  **Arm:** a second d8 leg, and read
+the draw rate first.  **Reading:** landing near 36% says the transition
+completed and the earlier leg was paying for it; staying near 30% says d8/2000
+has its own lower equilibrium and the budget or the floor needs raising.
+**Node budget: drop it for this arm.**  It adds depth in the endgame only (8.14
+at 32 pieces → 14.10 at 3), costs no quiet rows (rows/game −0.5%, composition
+shift <0.25 pp — the quiet-fraction dip is games getting 1.9% longer), does
+nothing to the draw rate (35.88 without, 35.96/35.83 with), and costs ~1.8×
+wall clock to deepen the part of the corpus already measured as *cleanest*
+(bucket-0 MSE 0.011 against the opening's 0.207 [3.3]).  Dropping it also makes
+the leg directly comparable to `m260720`'s six-leg d8 reference series.
+**Still true:** depth is an optimum, not a monotone — d10 gave 43% draws and
+−33.1 — so treat the draw rate as a hard gate in both directions.
 
 **8. ⚠️ A quiet gate *tighter* than 60 cp.**  Partly overtaken by R8, which gates
 the dumped **leaf** rows at 10 cp — so on post-R8 corpora this is already answered

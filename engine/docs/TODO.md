@@ -36,6 +36,36 @@ STM + game-ply λ^Δ), and **Phases D and E have since landed:**
   write — **also landed** (Phase 3, `docs/history/SIMPLIFICATION_PLAN.md`), validated
   byte-exact.  Nothing in this section is outstanding.
 
+### Generation sharpness and depth (2026-09-21)
+
+Rationale: `Learning_Investigation.md` §1 M and §6 item 7.  Self-play sharpens
+its own games while the net is young and then saturates; **depth sets the level
+it saturates at** (d6 ~22–27% draws, d8 ~36%, d10 43%).  `m260916` has run all
+7M of its games at d6/800 and so has spent its entire life at 22–25% — outside
+the 35–40% healthy band `TRAINING.md` already specifies, unnoticed because the
+canary is written for d8.
+
+- [ ] **D1 — second d8 leg, no node budget.**  Read the DRAW RATE first, before
+      Elo.  Near 36% = the 6e6→7e6 leg was paying for a regime transition and
+      its +15.6 should not be read as "depth bought nothing"; near 30% = d8/2000
+      has its own lower equilibrium.  Drop the node budget: it adds depth in the
+      endgame only, costs no quiet rows, does nothing to the draw rate, and
+      costs ~1.8× wall clock to improve the labels already measured cleanest.
+      Dropping it also matches `m260720`'s six-leg d8 reference series.
+- [ ] **D2 — an `eval_noise` leg of its own, after D1.**  `--eval-noise 10`
+      (free at 0 ± 10 Elo; ≥15 costs real strength).  It is a POSITION-DIVERSITY
+      knob, not a sharpness fix — measured not to move draw rate or quiet
+      fraction, but at σ=5 every game already diverges from the unperturbed line
+      by ply 1, which is diversity previously only obtainable by varying
+      openings.  Keep it strictly separate from D1: one variable per leg.
+      Untested question it would answer: whether covering structures the net's
+      own policy never reaches is worth anything.
+- [ ] **D3 — carry the draw rate as a per-leg canary.**  Nearly free: the actor
+      logs already carry `+W =D -L` and agree with the generation PGN to 0.01%.
+      `scripts/arms/eval_noise_scan.awk` scores a PGN; the actor-log route needs
+      no PGN at all.
+
+
 ### Offline-phase plateau — ranked experiment plan (2026-09-02)
 
 Evidence and measurements: `docs/history/Offline_Learning_Investigation.md` Part 1.  The
