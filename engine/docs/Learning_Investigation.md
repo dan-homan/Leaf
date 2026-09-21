@@ -391,7 +391,9 @@ Caveats: 8 points at ±9 each resolve a 13 Elo offset but not a 10 Elo dip, so
 7.11.9's ~26 Elo arm-to-arm variance applies to any single ladder point; only
 the pooled means are tight.
 
-**M. Self-play sharpens its own games, and DEPTH sets where that stops.**  Both
+**M. Self-play sharpens its own games, and DEPTH sets where that stops.**
+(Companion to N, which prices the same lever in Elo and clock; M is what the
+*games* do.)  Both
 chains drift the same way while young: draw rate, game length and quiet fraction
 all fall monotonically.  `m260720` at d6 went 34.5% -> 26.6% draws over 2M games
 and 176 -> 142 ply; `m260916` at d6/800 went 30.9% -> 22.5% and 159 -> 136.  The
@@ -1264,7 +1266,13 @@ search-margin problem, saturation is real, and the conclusion is to stop funding
 generation beyond corpus production and put the clock into the offline half.
 Either outcome is worth the leg.  **Canary: the draw rate**, not gradient norms —
 32–33% now, healthy is 35–40%, and the `d10` leg that regressed on the old chain
-ran at 52%.  **Method note:** keep passing `--gauntlet-tdleaf`; this whole
+ran at 52%.  ⚠️ **The "32–33%" is unreconciled.**  A direct count of the
+generation games — actor logs and generation PGNs independently, agreeing to
+0.01% over 1M games per leg — puts `m260916`'s self-play at **22.5%** at `6e6g`
+and 29.9% at the `d8/2000` `7e6g` leg, never above 31% after the first 100k
+(series in §1 M).  Whichever is right the sign of the recommendation is
+unchanged, but the two numbers measure different things and the difference
+should be tracked down before either is quoted.  **Method note:** keep passing `--gauntlet-tdleaf`; this whole
 decomposition exists only because R9 passed it on every leg.
 
 **2. Sample WIDE WITHIN one leg — the one diversity manipulation `cons1` did
@@ -1326,28 +1334,38 @@ evidence is a real reason to expect rbar not to.  But they were closed on an
 observable now known to be the wrong one, and the 5k-game protocol makes the
 re-read cost ~50 minutes each rather than a full iteration.
 
-**7. Depth, on the new chain — PROMOTED to the top of the list (2026-09-21).**
-§1 M is the reason: `m260916` has spent its entire 7M games at d6/800, at a
-22–25% draw rate, **outside `TRAINING.md`'s own 35–40% healthy band**, while
-`m260720` sat inside that band for its whole productive life and ended 113 Elo
-higher on the same anchor after the same number of games.  The chain's one d8
-leg (6e6→7e6, at 2000 nodes) moved the draw rate 22.5 → 29.9 — the same direction
-and roughly the same size as `m260720`'s 26.6 → 35.3 step at its own d6→d8
-switch, and short of 36% because 2000 nodes is short of true d8.  That reads as
-the first leg of a regime transition, not a verdict on depth, and its small
-+15.6 leg total should not be quoted as one.  **Arm:** a second d8 leg, and read
-the draw rate first.  **Reading:** landing near 36% says the transition
-completed and the earlier leg was paying for it; staying near 30% says d8/2000
-has its own lower equilibrium and the budget or the floor needs raising.
-**Node budget: drop it for this arm.**  It adds depth in the endgame only (8.14
-at 32 pieces → 14.10 at 3), costs no quiet rows (rows/game −0.5%, composition
-shift <0.25 pp — the quiet-fraction dip is games getting 1.9% longer), does
-nothing to the draw rate (35.88 without, 35.96/35.83 with), and costs ~1.8×
-wall clock to deepen the part of the corpus already measured as *cleanest*
-(bucket-0 MSE 0.011 against the opening's 0.207 [3.3]).  Dropping it also makes
-the leg directly comparable to `m260720`'s six-leg d8 reference series.
-**Still true:** depth is an optimum, not a monotone — d10 gave 43% draws and
-−33.1 — so treat the draw rate as a hard gate in both directions.
+**7. Generation sharpness — the evidence from `m260720` that backs item 1.**
+Not a separate line of work: §1 M is the *game-level* half of item 1's case, and
+this entry records what the old chain shows.  `m260916` has spent all 7M of its
+games at d6/800 and therefore its whole life at a **22–25% draw rate, outside
+`TRAINING.md`'s own 35–40% band** — a canary that went unread because it is
+written for d8 and the chain ran at d6.  `m260720` sat *inside* that band for its
+entire productive life: flat at 35.3→36.1% across 4.8M games of d8, against
+34.5→26.6% over its own 2M games of d6.  Its quiet fraction decayed ~7× slower at
+d8 than at d6.  The `m260916` `7e6g` leg at d8/2000 moved the draw rate
+22.5 → 29.9, the same direction and roughly the same size as `m260720`'s
+26.6 → 35.3 at its own d6→d8 switch — which is why that leg's small **+15.6
+total must not be quoted as "depth bought nothing"**: it was the leg that started
+paying for the transition.
+
+**On the node budget, which item 1 sets at 2000.**  Measured on `m260720`'s
+`d8/4000` legs: the budget adds depth **in the endgame only** (mean achieved
+depth 8.14 at 32 pieces rising monotonically to 14.10 at 3), costs **no quiet
+rows** (rows/game −0.5% across the introduction, phase composition shift
+<0.25 pp — the quiet-fraction dip is games getting 1.9% longer, not rows being
+lost), and does **nothing to the draw rate** (35.88 without, 35.96/35.83 with).
+So the budget is not a risk to the corpus, and the earlier worry that it was
+gating out endgame rows is disproved.  Whether to run it at all is then purely
+§1 N's exchange-rate question, and N's price list is the better guide than the
+composition argument: at a d8 floor, 2000 nodes is *below* the median 4914 that
+d8 itself costs, so it binds only in cheap positions and `d8/2000` is close to
+plain fixed d8.  **The leg launched 2026-09-21 runs `--depth 8 --nodes 0`** —
+fixed d8, no extension — which for the draw-rate reading is immaterial (the
+budget does not move it) but gives up the endgame extension `d8/2000` would buy.
+Worth knowing when setting the config for the leg after it.
+
+**Still true:** depth is an optimum, not a monotone — `m260720`'s d10 leg gave
+43% draws and −33.1 — so treat the draw rate as a hard gate in both directions.
 
 **8. ⚠️ A1b — drop the STALEST corpus, not the whole window.**  The surviving
 fragment of the old "deferred offline wins" item; the rest is closed in §4.  A1b

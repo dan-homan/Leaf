@@ -45,13 +45,19 @@ it saturates at** (d6 ~22–27% draws, d8 ~36%, d10 43%).  `m260916` has run all
 the 35–40% healthy band `TRAINING.md` already specifies, unnoticed because the
 canary is written for d8.
 
-- [ ] **D1 — second d8 leg, no node budget.**  Read the DRAW RATE first, before
-      Elo.  Near 36% = the 6e6→7e6 leg was paying for a regime transition and
-      its +15.6 should not be read as "depth bought nothing"; near 30% = d8/2000
-      has its own lower equilibrium.  Drop the node budget: it adds depth in the
-      endgame only, costs no quiet rows, does nothing to the draw rate, and
-      costs ~1.8× wall clock to improve the labels already measured cleanest.
-      Dropping it also matches `m260720`'s six-leg d8 reference series.
+- [ ] **D1 — the d8 leg (LAUNCHED 2026-09-21 as `m260916-8e6g`, `--depth 8
+      --nodes 0`).**  Read the DRAW RATE first, before Elo.  Near 36% = the
+      6e6→7e6 leg was paying for a regime transition and its +15.6 should not be
+      read as "depth bought nothing"; near 30% = d8/2000 has its own lower
+      equilibrium.  Note this runs with NO node budget while §6 item 1
+      recommends `d8/2000`; the difference is the endgame extension only, which
+      does not move the draw rate, so the leg still answers the question — but
+      see §6 item 7 before choosing the config for the leg after it.
+- [ ] **D1a — reconcile the draw-rate discrepancy.**  §6 item 1 says the chain
+      is at "32–33%"; a direct count of generation games (actor logs and
+      generation PGNs, agreeing to 0.01% over 1M games/leg) says 22.5% at
+      `6e6g`.  The two measure different things.  Find out which before either
+      is quoted again.
 - [ ] **D2 — an `eval_noise` leg of its own, after D1.**  `--eval-noise 10`
       (free at 0 ± 10 Elo; ≥15 costs real strength).  It is a POSITION-DIVERSITY
       knob, not a sharpness fix — measured not to move draw rate or quiet
