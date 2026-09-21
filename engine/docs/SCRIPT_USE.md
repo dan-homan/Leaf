@@ -191,6 +191,141 @@ and env, `--learn-stream` over an online run's trajectories reproduces that run'
 `.tdleaf.bin` byte-for-byte.  `train.py`'s generation phase wraps this driver with
 the safe defaults.
 
+## sample_corpus.py
+
+Build a **game-stratified composite corpus** from several legs' raw TSV dumps —
+for offline experiments that span more than one leg's generation window.
+
+```sh
+# four legs, 19 rows per game, root rows at the gate-60 cut
+python3 sample_corpus.py --source m260916-{2,3,4,5}e6g_work \
+    --rows root --quiet-cp 60 --quota 19 --out arms/corpus_base.tsv
+```
+
+Build from the **raw** `<tag>.<pid>.{root,leaf}.tsv.gz` dumps, not the assembled
+`corpus.tsv`.  The latter carries only the row type and gate its leg happened to
+use, so a wider gate or the leaf rows cannot be recovered from it; and its `gid`
+column is **renumbered per leg from 0**, so game 5 of one leg and game 5 of
+another are indistinguishable — which breaks both cross-leg game stratification
+and root↔leaf pairing.
+
+The sampling rule holds two properties at once that the obvious approaches
+each destroy.  Uniform over rows gives an exact row count and weights games by
+length (mean 77 rows/game at gate 60, sd 47, min 2, max 389 — a 195:1 spread);
+uniform over games gives equal weight and a variable row count.  So: a fixed
+**quota of rows per game**, drawn uniformly within the game.  At quota 19 about
+98.8% of games fill it, so game weights are equal to ~1% and the total is
+quota × games to the same tolerance; `--target-rows` then trims the residual
+exactly.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--source` | — | work directories (or explicit `.tsv[.gz]` files) |
+| `--rows` | `root` | which raw dump to sample |
+| `--quiet-cp` | 60 | load-time gate `\|cp − gate\|`, matching `--bt-quiet-cp` |
+| `--quota` | 19 | rows drawn per game |
+| `--games-per-source` | min across sources | so no leg dominates |
+| `--target-rows` | natural total | exact total; for matching an earlier run |
+| `--restrict-gids` | — | file (or corpus TSV) of game ids to restrict to |
+| `--count-only` | off | pass 1 only; print `{games, eligible_rows}` as JSON |
+
+⚠️ `--target-rows` is for trimming a **small** surplus.  Shedding a large one
+flattens the quota past the short games and leaves only the long ones (at quota
+100000 against a 3.9% target it kept 121 games of 1244).  To take a small
+fraction of a corpus, lower the **quota** — `--count-only` sizes it — rather
+than leaning on `--target-rows`.
+
+Use `--restrict-gids` whenever an arm changes `--rows`: leaf rows survive in
+games whose root rows the quiet gate removed entirely, so an unrestricted leaf
+sample draws ~45% more games at correspondingly fewer rows each, and the
+row-type contrast would carry a game-set difference inside it.
+
+## calibrate_from_corpus.py
+
+Fit the sigmoid temperature **K** and the trace decay **λ** straight from a
+leg's raw root dump, split by **game stage** (material remaining).
+
+```sh
+cd engine/learn
+python3 calibrate_from_corpus.py --source m260916-5e6g_work \
+    --games 60000 --max-lag 60 --quiet-cp 60
+```
+
+Not to be confused with `analyze_calibration.py`, whose `--stage` means
+*training* stage (net maturity), which needs a PGN-derived parquet, and whose
+constants predate the current recipe (K=290, λ 0.8/0.5 per *record*).  This one
+reads the raw `*.root.tsv.gz` dumps — `cp`, `result`, `ply`, `endply` and the
+FEN are all there — and needs no intermediate file.
+
+| Section | Measures |
+|---|---|
+| (1) | K by maximum likelihood, plus a reliability table, by material stack and by pawn count |
+| (2A) | `corr(ev, outcome)` by plies-to-end — outcome informativeness |
+| (2B) | `corr(ev_t, ev_{t+k})` by lag → λ.  **Position to position; the result never enters** |
+| (2B2/B3/B4) | λ by material stack, by game ply, and the cross-tab that decides which one λ tracks |
+| (3) | `Var(outcome − ev)` by material and by \|cp\|, the input to a reliability-based outcome weight |
+
+**What is and isn't identified.**  K is a straight calibration and is identified.
+**λ is not** — the outcome and the eval estimate the same unobserved value, so
+choosing between them needs a bias/variance assumption; each measurement states
+the assumption that turns it into a λ.  §5 of `Learning_Investigation.md` says
+why (2B) is the right one: under the martingale property of a calibrated value
+function, `corr(ev_t, ev_{t+k}) = sqrt(Var_t/Var_{t+k})`, so the decorrelation
+*is* the rate new information arrives.
+
+⚠️ **The results of this tool are not a guide to training hyperparameters.**
+Seven arms derived from these fits all lost on the foreign anchor — see
+`Learning_Investigation.md` §1 O and the §4 closure.  The measurements are real
+facts about the corpus; the inference to a hyperparameter is refuted.
+
+## run_consolidation_arms.py
+
+Drives the **composite-corpus consolidation arms**: five one-epoch offline runs
+from one seed, matched row-for-row, each rated against the seed and a foreign
+anchor.  Answers whether a periodic consolidation round over several legs'
+games beats another epoch over the newest leg alone.
+
+```sh
+cd engine/learn
+python3 run_consolidation_arms.py --tag cons1 \
+    --seed-net m260916.nnue --seed-state m260916-5e6g_final.tdleaf.bin \
+    --sources m260916-{2,3,4,5}e6g_work
+```
+
+| arm | corpus | differs from `base` by |
+|---|---|---|
+| `null` | newest leg only, quota-sized to the same rows | — (it is the control) |
+| `base` | four legs, quota 19 | game diversity + label age |
+| `bout` | base's **exact** row file | `--bt-td-lambda 0.9925` (more outcome) |
+| `bcp` | base's **exact** row file | `--bt-td-lambda 0.97` (more cp) |
+| `leaf` | four legs, leaf rows, **same games** as base | row type |
+
+`bout`/`bcp` reuse `base`'s row file byte for byte, so those three differ only
+in the target and carry no sampling noise between them.  They also **bound**
+what `--bt-rescore` could buy: if the target curve slopes toward the outcome,
+stale cp labels are hurting and rescoring is worth its cost; if it peaks at or
+below the default, cp labels are not the binding constraint.
+
+⚠️ **`--seed-net` must be the chain's BASE `.nnue`** (the constant one, e.g.
+`m260916.nnue`), never a baked `<tag>_final.nnue` export.  A `.tdleaf.bin`
+records the content hash of the net it was trained against; hand the trainer
+the wrong one and it **refuses the state with a warning and a zero exit**, then
+trains from the base net with no learned weights and no Adam moments.  Every
+arm still "works" and none of them means anything.  The driver runs each
+binary once before use and dies on that warning, and on the matching
+silent failure where a missing `.nnue` falls back to classical eval.
+
+⚠️ **Time control.**  `--tc` (default `1+0.01`) applies to every arm and both
+opponents, so the programme is internally consistent — but `classic_eval` is a
+classical-eval engine with a different nps profile, so its column cannot be
+compared against anchor Elos recorded at another TC (the chain's
+`final_gauntlet` figures are `3+0.05`).  The paired column, against the seed, is
+the primary reading and is unaffected.
+
+Everything is resumable: an arm whose `_ep1.nnue` exists is not retrained, a
+match whose PGN exists is not replayed, and pass-1 corpus counts are cached.
+`--only` runs a subset, `--corpus-only` stops after assembly.
+
 ## match.py
 
 Run a head-to-head match or gauntlet between chess engines using a tournament

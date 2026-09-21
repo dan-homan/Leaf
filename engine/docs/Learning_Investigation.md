@@ -36,17 +36,22 @@ front page survived contact with its own Part 7.
 >    still gains real Elo and the leg total is the *sum* of a handoff loss and a
 >    learning gain.  Only once learning saturates does the loss show up naked.
 >
-> Reading 2 is the more conservative one and fits the handoff model without
-> modification.  Nothing in either document discriminates them, because the
-> instrument that would — a within-leg checkpoint ladder over the first few
-> thousand games [7.11.4] — was only ever pointed at mature states.  §6 item 2
-> makes this a first-class arm on the new chain, where young states exist again
-> for the first time since the records begin.
+> **ANSWERED 2026-09-17 on the `m260916` chain (R9) — reading 2, and smaller than
+> either party expected.**  Two 50k-game ladders from an early and a late
+> offline-trained state give a weighted mean of **−0.70 ± 3.23 (early)** against
+> **−13.46 ± 3.23 (late)**, a difference of +12.70 ± 4.57 (2.8σ).  So the cost is
+> masked early and visible later, but at ~13 Elo rather than the ~130 a mature
+> `m260720` net paid.  Full numbers and caveats in §1 K.
 >
-> Read every "−120 to −150 Elo" in this document as **a mature-net number of
-> unknown applicability to a young one**, and treat the §4 graveyard the same way:
-> a knob that bought nothing on a saturated net has not been tested on a growing
-> one.
+> **The offline half was measured separately on 2026-09-19** (`cons1`, §3): a
+> wide consolidation window is NOT the answer on this chain — four legs at a
+> matched dose lose −9.2 ± 8.8 to the newest leg alone — and the target and row
+> type are both at or past their optimum.  §4 gained three closures.
+>
+> Read every "−120 to −150 Elo" in this document as **a mature-net number at the
+> pre-2026-09-15 LR**, superseded for current work by §1 K.  Treat the §4
+> graveyard the same way: a knob that bought nothing on a saturated net at 4× the
+> present learning rate has not been tested on a growing one.
 
 ---
 
@@ -70,8 +75,9 @@ they disagree about status, `TODO.md` is the one to fix.
 
 Thirteen statements.  Each is tagged with its strongest evidence; grades and effect
 sizes are in §2.  Statement I is explicitly an interpretation, not a mechanism.
-**All of it describes a mature net** — see the scope box above; K is the statement
-about young ones, and it is mostly a statement about what is not known.
+**Most of it describes a mature net at the pre-restart LR** — see the scope box;
+K is the statement about young nets under the current recipe, and it is now
+measured rather than open.
 
 **A. The loop.**  Actor/learner self-play generates games with online TDLeaf
 learning on, dumping a quiet-gated corpus; `--batch-train` then consolidates that
@@ -132,15 +138,186 @@ d6 saturated around 2e6 games; d8 reopened it [4.6] and had saturated by ~5e6
 seed the offline pass converges to ~+151 across corpora differing in composition,
 coverage and labelling — a **2.7 Elo band over four arms** [7.7.4].
 
-**H. What the offline pass responds to is game diversity and row type.**  At
-identical rows, epochs, optimizer steps and wall clock, drawing from 2.5M games
-instead of 500k is worth **+36 anchor / +45 paired** [Offline 2.4].  At a fixed
-row budget, root rows (search labels) beat leaf rows (the generator's own static
-eval) by **+35.6 ± 11.0 paired** [Offline 3.2].  The 60 cp quiet gate is correct:
-60/120/200 are flat and removing it costs **−27.9 ± 11.3** [Offline 4.3] — the
-discarded tail carries label *information* (ΔMSE_out +52% in the top bin) that a
-static evaluator cannot represent, because those labels are good precisely because
-search resolved a tactic.
+**N. The search budget has a measured price list, and DEPTH IS A FLOOR.**  The
+single most useful planning artifact in this document, because it converts wall
+clock into label quality at a known exchange rate.
+
+Read `selfplay.cpp:470` first: `min_search_depth = cfg.nodes ? cfg.depth : 0`,
+and the node break at `search.cpp:548` fires only once `max_ply >=
+min_search_depth`.  **`--depth D --nodes N` means "search to at least D, then
+stop at the first iteration boundary past N nodes".**  Depth is a floor that
+must be paid in every position; the node budget only extends past it, and only
+where the position is cheap.  Two consequences that are easy to get backwards:
+raising `--nodes` alone barely moves a config whose depth floor already costs
+more than the budget, and a config with a LOW floor and a high budget searches
+deepest exactly where the position is simplest.
+
+Cost, measured as median nodes per move over 24 positions drawn from the `5e6g`
+corpus (n=24, so adjacent rows are within noise of each other):
+
+| config | median depth | median nodes | clock |
+|---|---|---|---|
+| `d6/800` (the chain to 6e6g) | 6 | 3029 | 1.00× |
+| `d6/2000` | 8 (adaptive) | 3341 | 1.10× |
+| `d8/2000` | 8 | 4914 | 1.62× |
+| `d7/2000` | 7 | 5008 | 1.65× |
+| `d8/4000` | 8 | 12013 | 3.97× |
+
+Strength, 600-game matches of one net against itself at two budgets, **fixed
+nodes under a non-binding clock (`-tc 600+10`), so these numbers are
+hardware-independent and transfer between machines**:
+
+| contrast | Elo |
+|---|---|
+| `d6/2000` vs `d6/800` | **+190.8 ± 13.4** |
+| `d8/2000` vs `d6/2000` | **+182.5 ± 13.1** |
+| `d8/4000` vs `d6/2000` | +268.4 ± 15.3 |
+| `d8/4000` vs `d8/2000` | **+71.6 ± 11.3** |
+
+Consistent to 14 Elo around the triangle (`E−B` measured 268.4 against `E−C` +
+`C−B` = 254.1), which is ordinary Elo non-additivity.  The resulting frontier,
+cumulative from the chain's own `d6/800`:
+
+| config | clock | Elo over `d6/800` | Elo per unit of ADDED clock |
+|---|---|---|---|
+| `d6/2000` | 1.10× | +191 | **1900** |
+| `d8/2000` | 1.62× | +373 | **351** |
+| `d8/4000` | 3.97× | +445…+459 | **31** |
+
+The exchange rate collapses by ~60× across the ladder.  **`d8/2000` is the knee**:
+it captures 72% of what `d8/4000` gains for 41% of its clock, and buys uniform
+depth 8 rather than the adaptive depth of `d6/2000` — which matters for learning,
+because adaptive depth searches deepest where positions are simplest and so makes
+label quality heteroscedastic across the corpus.
+
+⚠️ **The budget is a label-quality knob, not only a strength knob.**  At `d6/800`
+the chain has been generating TD targets and corpus labels from a search ~373 Elo
+weaker than `d8/2000` of the same net.  Under G, that is the quantity that
+governs whether the bootstrap still has headroom.
+
+**O. CORPUS STATISTICS ARE NOT TRAINING HYPERPARAMETERS.  Seven arms, seven
+losses, and the losses track one thing.**  The single most decision-relevant
+result of the calibration programme (2026-09-20, `cons1`, all offline arms from
+the `5e6g` pre-offline seed, 2000 games each, rated against the seed and
+`classic_eval`).
+
+Every change derived from fitting the corpus lost on the anchor, across three
+different parameters, both scale and shape, and both directions:
+
+| arm | what the fit said to do | anchor vs `null` | paired |
+|---|---|---|---|
+| `npA` | path-dependent λ-return product, mean-preserving | **−5.7 ± 9.9** | −9.6 ± 8.7 |
+| `nK` | flat K 220 → 190 (fitted 188–192) | −7.7 ± 9.9 | −16.5 ± 8.8 |
+| `nshape` | K shaped by material (U), mean-preserving | −14.6 ± 9.7 | −7.3 ± 8.8 |
+| `nwB` | position-only outcome weight, as measured | −16.0 ± 10.1 | −4.9 ± 8.8 |
+| `nwA` | position-only outcome weight, mean-preserving | −19.0 ± 10.0 | −6.6 ± 8.9 |
+| `nout` | λ 0.985 → 0.9925 (toward the fitted 0.991) | −20.1 ± 9.9 | −20.5 ± 9.1 |
+| `npB` | path-dependent product, as measured | **−33.5 ± 10.0** | −22.1 ± 8.8 |
+
+And the control that moves AWAY from the fit was fine: `ncp`, λ → 0.970 against a
+fitted 0.991, read −5.0 ± 10.0 anchor / +6.5 ± 8.8 paired, with a direct
+head-to-head of **+9.7 ± 5.9**.  `ncp2` (0.9775) −3.8 ± 9.9.  So this is not
+"the loop is insensitive" — it is specifically that the fitted direction is the
+wrong one.
+
+**The losses are ordered by HOW MUCH OUTCOME WEIGHT MOVED, not by how cleverly
+it was allocated.**  `npB` doubles the mean outcome weight (0.63 against `main`'s
+0.32) and loses 33.5; `nout` raises it and loses 20.1; `bout` did the same on
+the composite corpus and lost 20.4; the mean-preserving arms cluster at −6 to
+−19.  Four independent measurements, one direction: **more outcome weight
+loses, roughly in proportion to how much is added.**
+
+**λ^(N−ply) is already close to optimal.**  `npA` is the correct λ-return —
+the product of a material-dependent λ walked along the game's real material
+trajectory, with α solved so the mean matches `main` exactly (0.3210 against
+0.3214 over 68.9M rows).  It reproduces `main` rather than beating it: −5.7 ±
+9.9, inside noise.  A materially more sophisticated construction recovers the
+constant that was already there.
+
+**But the trajectory carries real signal.**  Compare the three mean-preserving
+offline weightings:
+
+| weighting | anchor |
+|---|---|
+| trajectory + material-aware rate (`npA`) | **−5.7** |
+| position-only, matched mean (`nwA`) | −19.0 |
+| position-only, as measured (`nwB`) | −16.0 |
+
+Discarding the trajectory costs ~13 Elo relative to keeping it.  The
+within-material sd of `λ^(N−ply)` is 0.13–0.25, which looked like trajectory
+NOISE and is better read as information: the same position in a game that mated
+quickly is a different training example from one in a long grind.
+
+⚠️ **This closes the line, not the measurements.**  The per-bucket fits are real
+facts about chess and are kept in §4 — K is U-shaped in material (≈170 at 13–20
+pieces, ≈270 in bare endgames) and λ is monotone (20-ply half-life in the
+opening, 400+ in the endgame).  What is refuted is the inference from them to a
+training hyperparameter.
+
+**H. What the offline pass responds to is game diversity and row type — but the
+diversity half is REGIME-DEPENDENT and reverses on the young chain.**  On the
+mature `m260720` chain at 4× the present LR, drawing from 2.5M games instead of
+500k at identical rows, epochs, optimizer steps and wall clock was worth **+36
+anchor / +45 paired** [Offline 2.4].  On the young R9 chain the same manipulation
+is **negative**: the `cons1` arms (below) put a four-leg composite at **−9.2 ±
+8.8 paired / −12.1 ± 9.9 anchor** against the newest leg alone, at a matched
+68.9M-row dose.  Neither cons1 figure reaches 2σ, so the honest statement is
+"not helpful, plausibly ~10 Elo harmful" — but the sign is consistent across two
+instruments and opposite the mature-chain result.  **Do not carry the +36/+45
+into current work.**
+
+The row-type half survives intact and has now been re-measured on a corpus whose
+leaf rows are trustworthy.  At a fixed row budget root rows beat leaf rows by
+**+35.6 ± 11.0 paired** [Offline 3.2] pre-R8; `cons1`'s `nleaf`, which is the
+first test on an R8 corpus and holds the GAME SET fixed, agrees in sign at
+**−3.8 ± 9.0 paired / −18.4 ± 10.0 anchor**.  Smaller, same direction.  The 60 cp
+quiet gate is correct: 60/120/200 are flat and removing it costs **−27.9 ± 11.3**
+[Offline 4.3] — the discarded tail carries label *information* (ΔMSE_out +52% in
+the top bin) that a static evaluator cannot represent, because those labels are
+good precisely because search resolved a tactic.
+
+**Dose via leaf rows does not clear the bar either (2026-09-20).**  `nboth`
+trained on the newest leg's root rows AND all its leaf rows over the same ~1M
+games — 153.7M rows against the null's 68.9M, a 2.23× dose with the game set
+unchanged.  On the anchor: `null` −105.3 ± 6.9, `nboth` −114.6 ± 7.2, `nleaf`
+−123.6 ± 7.2.  **The ordering is monotone in how much of the corpus is leaf
+rows** — root only > root+leaf > leaf only — so leaf rows dilute roughly in
+proportion to their share, and 2.2× the dose does not buy past it.  (It won its
+direct head-to-head against the null by +17.9 ± 5.9; see §5 for why that does not
+decide the question.)  Note the confound that went unresolved because the anchor
+closed the question first: one epoch over 2.23× rows is also 2.23× the Adam
+steps, so "more data" and "more steps" were never separated here.  **Offline dose
+via EPOCHS is untouched by this** and remains available — the chain already ships
+`picked_epoch` 2 on six of eight legs.
+
+**M. The offline target sits in a broad λ optimum, and the slope above it is
+steep.**  `--bt-td-lambda` sets the outcome's weight as `λ^(N−ply)`; at the
+default 0.985 that is 0.08 at ply 0 of a 167-ply game and ~0.37 averaged.  Four
+points on the single-leg corpus, one epoch each, 2000 games each:
+
+| td_λ | vs seed | vs classic_eval |
+|---|---|---|
+| 0.9925 | +0.5 ± 6.5 | −125.4 ± 7.1 |
+| **0.9850** (default) | **+21.0 ± 6.3** | **−105.3 ± 6.9** |
+| 0.9775 | +13.0 ± 6.1 | −109.1 ± 7.1 |
+| 0.9700 | **+27.5 ± 6.1** | −110.2 ± 7.2 |
+
+**Only one of these is a real result: 0.9925 is worse, by −20.5 ± 9.1 paired and
+−20.1 ± 9.9 anchor, agreeing to within 0.4 Elo on two independent instruments.**
+Everything in 0.970–0.985 is flat within resolution, and the two instruments do
+not even agree on the ordering there (paired ranks 0.970 > 0.985 > 0.9775, anchor
+ranks 0.985 > 0.9775 > 0.970).  The 0.9775 interior point came in *below both its
+neighbours* on the paired column — a shape no smooth curve produces, and the
+clearest sign that this interval is noise.  The one trustworthy comparison inside
+it is a DIRECT match, 0.970 vs 0.985 = **+9.7 ± 5.9 (1.6σ)**, which hints at the
+lower value without establishing it.
+
+Two consequences.  **More outcome weight is the wrong direction**, confirmed
+independently on both corpora (−20.5 on the single leg, −10.3 ± 9.0 on the
+composite).  And because the cp channel is carrying more of the useful signal
+than the default λ credits it with, **this bounds `--bt-rescore` downward**: the
+cheap screen that was supposed to license the expensive arm has come back
+negative.
 
 **I. FRAMING, not mechanism — online play as hypothesis generation.**  Batch-Adam
 steps revalue features on the evidence of a handful of games, far too little to be
@@ -181,20 +358,38 @@ the error *scale* is maturity-invariant (sd 63–72 across 1e5→7e6 games) even
 though the exact-match spike grows 38%→55%, which is what makes a single
 threshold implementable.
 
-**K. Everything above is a mature-net statement, and the young-net case is
-unmeasured.**  The handoff becomes apparent only after ~1M games of learning,
-sometimes longer; the chain's own decomposition read +18 / +7 / −2 / −1 at
-100k–1M games and only turned clearly negative at 2.2M [6.1].  Whether the
-excursion is *absent* on a young net or merely *masked* by concurrent learning
-gains is the open question of §6 item 2 — and B's "minimise handoffs" follows from
-the mature case either way, since a masked cost is still a cost.  Two further
-cautions on reading the early numbers: they sit in R1/R2 (multi-writer merge, and
-the FRC castle bug that corrupted every pre-2026-07-18 online gradient), and 7.11.5
-independently warns that **"the online damage grew across the chain" is
-unestablished** because `--gauntlet-tdleaf` stopped being passed after `3e6`, so
-the early and late figures were not measured the same way.  The shape of the
-observation is D. Homan's from running the chains; the numbers that would settle it
-do not exist yet.
+**K. On a young net under the current recipe the handoff is small, and what
+remains scales with maturity.**  This was the open question of the scope box and
+it is now measured on the `m260916` chain (R7+R8, d6/800 nodes).  Two 50,000-game
+TDLeaf ladders — 1000 Adam steps at batch 50, so past the ~300-step equilibration
+— run from an EARLY offline-trained state (`1e6g_final`) and a LATE one
+(`5e6g_final`), each point a direct 1000-game match against its own starting net:
+
+| | weighted mean over 8 points | vs zero | χ² vs a constant |
+|---|---|---|---|
+| early seed (1e6g) | **−0.70 ± 3.23** | 0.2σ | 13.5 / 7 dof, p > 0.05 |
+| late seed (5e6g) | **−13.46 ± 3.23** | **4.2σ** | 8.1 / 7 dof, p > 0.05 |
+| early − late | **+12.70 ± 4.57** | **2.8σ** | |
+
+Three readings.  **The excursion is an order of magnitude smaller** than the
+−123…−150 of Parts 7.10–7.13 — the worst single point anywhere is −29.  **At the
+early seed it is statistically absent**, and at the late seed it is real but
+small.  So "masked early, naked later" is the right description, with the caveat
+that the late-seed cost is 13 Elo rather than the ~130 the mature `m260720`
+chain paid.  And **neither ladder shows a dip-then-recovery shape**: χ² against a
+constant is non-significant for both, so this is a flat offset from the moment
+the net leaves the offline optimum, held through 1000 steps — an equilibrium in
+the sense of C, at a tenth the radius, not a transient.
+
+How much of the shrinkage is the 4× LR cut (damage ∝ η, 7.13.1, predicts ~−32
+from −130) and how much is R8 is **not separated** — the restart moved both at
+once.  The measured −13.5 is below even the η-scaling prediction, which is
+suggestive but not attributable.
+
+Caveats: 8 points at ±9 each resolve a 13 Elo offset but not a 10 Elo dip, so
+"no excursion shape" is a statement about what this instrument can see.  And
+7.11.9's ~26 Elo arm-to-arm variance applies to any single ladder point; only
+the pooled means are tight.
 
 **M. Self-play sharpens its own games, and DEPTH sets where that stops.**  Both
 chains drift the same way while young: draw rate, game length and quiet fraction
@@ -307,11 +502,37 @@ for one.
 | Its scale is maturity-invariant | same, m260720 ladder 1e5→7e6 | sd 63–72, ≤10 cp band 78–82% | R7 | **ESTABLISHED** |
 | Six candidate causes of the residual are excluded | same | aspiration clamping, score hash, leaf quiescence, off-by-one, accumulator rebuild, fail-hard clamping | R7 | **ESTABLISHED** |
 | Batch 50 from a fresh `--init-nnue` chain: 500k games in, ahead of `m260720` at the same point | D. Homan, current run | not clearly significant | **R7** | SUPPORTED |
+| On a young net under R7+R8 the handoff is statistically absent | §1 K, `m260916` 1e6g ladder | −0.70 ± 3.23 over 8 points | R9 | **ESTABLISHED** |
+| It reappears with maturity, but at ~13 Elo not ~130 | §1 K, `m260916` 5e6g ladder | −13.46 ± 3.23 (4.2σ); early−late +12.70 ± 4.57 (2.8σ) | R9 | **ESTABLISHED** |
+| The residual is a flat offset, not an excursion-and-return | §1 K | χ² vs constant 13.5 and 8.1 on 7 dof, both p > 0.05 | R9 | SUPPORTED |
+| Under R7+R8 the online phase is PRODUCTIVE on every leg | `m260916` decomposition | online Δ +84, +64, +50, +49, +41, +7, +10 — never negative | R9 | **ESTABLISHED** |
+| …but the online contribution falls across the four 1M legs while the offline one does not | §3 R9 table | online −14.9 ± 3.7/leg (4.1σ); total −13.2 ± 3.7 (3.5σ); offline +1.6 ± 5.2 (0.3σ) | R9 | **ESTABLISHED** (the decline itself) |
+| The 2→4 epoch switch does NOT explain the decline | §3 R9 | `epochs(N)` postdates `online Δ(N)`; onset leg `4e6g` starts from a 2-epoch net; `picked_epoch` = 2 on six of eight legs | R9 | **ESTABLISHED** |
+| Offline gain peaks at epoch 2 and decays after | `5e6g` epoch ladder | e1 +16.3, e2 +49.3, e3 +36.6, e4 +26.8 | R9 | SUPPORTED (one leg) |
+| ⚠️ A WIDE consolidation window is not helpful on the young chain — it reverses A1 | §1 H, `cons1` base vs null | −9.2 ± 8.8 paired, −12.1 ± 9.9 anchor, at a matched 68.9M-row dose | R9 | SUPPORTED (1.0σ, 1.2σ; consistent in sign) |
+| Outcome weight above the default costs ~20 Elo | §1 M, `cons1` nout vs null | −20.5 ± 9.1 paired, −20.1 ± 9.9 anchor — two instruments within 0.4 Elo | R9 | **ESTABLISHED** |
+| …and it costs on the composite too, so it is not a corpus artifact | `cons1` bout vs base | −10.3 ± 9.0 paired, −20.4 ± 10.2 anchor | R9 | SUPPORTED |
+| λ is FLAT across 0.970–0.985 | §1 M | spread ~5 Elo on the anchor at ±7; the two instruments rank the three points differently | R9 | SUPPORTED |
+| Leaf rows do not beat root rows, on an R8 corpus at a fixed game set | §1 H, `cons1` nleaf | −3.8 ± 9.0 paired, −18.4 ± 10.0 anchor | R9 | SUPPORTED |
+| …nor do they help as a SUPPLEMENT at 2.2× dose | §1 H, `cons1` nboth | anchor −9.4 ± 10.0 vs null; ordering root > root+leaf > leaf is monotone | R9 | SUPPORTED |
+| A family head-to-head can win while the anchor does not | §5 policy, `nboth` | direct +17.9 ± 5.9 (3.0σ) against anchor −9.4 ± 10.0 | R9 | **ESTABLISHED** |
+| Calibration-derived changes lose: 7 arms, 3 parameters, both directions | §1 O | anchor −5.7 to −33.5 vs `null`; none positive | R9 | **ESTABLISHED** |
+| …while moving AWAY from the fitted λ is fine | §1 O | `ncp` λ 0.970: anchor −5.0 ± 10.0, direct head-to-head +9.7 ± 5.9 | R9 | SUPPORTED |
+| More outcome weight loses in proportion to how much is added | §1 O | `npB` (2× weight) −33.5; `nout` −20.1; `bout` −20.4; mean-preserving arms −6…−19 | R9 | **ESTABLISHED** |
+| `λ^(N−ply)` is already near-optimal | §1 O, `npA` | the correct λ-return product at matched mean reads −5.7 ± 9.9 | R9 | SUPPORTED |
+| The game trajectory carries signal, not just noise | §1 O | keeping it (`npA` −5.7) vs discarding it (`nwA` −19.0) at matched mean | R9 | SUPPORTED |
+| K is U-shaped in material; λ is monotone | §4 calibration entry | K 168.9@13–16 to 268.7@1–4; λ 0.966@29–32 to 0.998@5–8 | R9 | **ESTABLISHED** (as a fact about the corpus) |
+| Validation loss can improve while Elo worsens | §5 | `nshape` val MSE 0.010438 vs `null` 0.010465, NLL 0.5518 vs 0.5523, anchor −14.6 | R9 | **ESTABLISHED** |
+| The offline pipeline reproduces the chain's own epoch 1 | `cons1` null vs 5e6g ladder e1 | +21.0 ± 6.3 against +16.3 ± 8.9 (different host, book and n) | R9 | **ESTABLISHED** |
+| Online Δ has crossed zero at `6e6g` | §3 R9 BayesElo table | +39, +29, +14, +16, **−3** over the 1M legs; ±9–13 each | R9 | **ESTABLISHED** (the trend; the −3 itself is ~0) |
+| `--depth D --nodes N` makes D a FLOOR, not a ceiling | `selfplay.cpp:470`, `search.cpp:548` | node break gated on `max_ply >= min_search_depth` | — | **ESTABLISHED** (code) |
+| The chain has been generating labels from a search ~373 Elo below `d8/2000` | §1 N | `d8/2000` vs `d6/800`, 600 games, fixed nodes | R9 | **ESTABLISHED** |
+| Search-budget Elo per unit clock collapses ~60× along the ladder | §1 N | 1900 → 351 → 31 across `d6/2000`, `d8/2000`, `d8/4000` | R9 | **ESTABLISHED** |
 
-² Absent on a young net, or present and masked by concurrent learning gains?  No
-measurement discriminates them — §1 K, §6 item 2.  The early rows additionally sit
-in R1/R2 and were not measured the same way as the late ones (7.11.5), so they
-support the *shape* of the observation, not a number.
+² Absent on a young net, or present and masked by concurrent learning gains?
+**Answered on R9: masked** — §1 K.  These older rows additionally sit in R1/R2 and
+were not measured the same way as the late ones (7.11.5), so they support the
+*shape* of the observation, not a number; the numbers to quote are §1 K's.
 
 ¹ 6.2's evidence was half Elo and half "validation MSE rose at every epoch"; 7.4
 subsequently disqualified val MSE as a ranking instrument, so the d8 half now
@@ -398,23 +619,152 @@ handoff on the new chain should be roughly a quarter the size before Σ is count
 — and η and Σ moved *at the same time*, so the restart cannot attribute between
 them.
 
-**R8 — the PV repairs (branch `tdleaf-pv-telemetry`, not yet on `main`).**
+**R8 — the PV repairs (merged to `main` 2026-09-17).**
 `PV_NO_TT_CUTOFF=1`, `PV_LAST_RESOLVED=1` (both gated to TDLeaf learning play;
 competitive search verified node-identical) and `TDLEAF_LEAF_MATCH_CP=10`, which
 gates both the online trace and the dumped **leaf** rows on
 `|leaf_static − propagated root search| ≤ 10 cp`.  Root rows are untouched — they
 are gated on root *quietness*, a different quantity.  Effect on label quality:
 coherent bias **−24.88 → +0.15 cp**, sd **185.9 → 79.7**, records reaching full
-depth **42% → 86%**, ~74% of records retained.  **No Elo measured.**  When this
-merges it becomes a regime boundary: corpora generated before it contain
-fail-high stubs and 60 cp-gated leaf rows; corpora after it do not, so leaf-row
-results must not be pooled across the merge.
+depth **42% → 86%**, ~74% of records retained.  This is a regime boundary for
+corpora: those generated before it contain fail-high stubs and 60 cp-gated leaf
+rows, those after do not, so **leaf-row results must not be pooled across it**.
+No isolated Elo measurement exists — the `m260916` chain (R9) runs R7 and R8
+together and cannot attribute between them.
 
-Two narrower confounds worth remembering: **hash 16** applies only to the `6e6g`
-leg (everything else ran at 128, and generation has reverted); and
-**`--gauntlet-tdleaf` stopped being passed after `3e6`**, so "the online damage
-grew across the chain" was never measured the same way at both ends and should be
-treated as unestablished [7.11.5].
+**R9 — the `m260916` chain (current).**  A fresh material-only seed carried to
+5M+ games at **depth 6 with an 800-node budget**, batch 50, one LR set at scale
+1.0 both phases, PV repairs on, `--corpus-window 0`, `--bt-rows root`,
+`--bt-quiet-cp 60`, 2 offline epochs (**4 at the `4e6g` and `5e6g` legs** — see
+the confound below).  It is the first chain to combine R7 and R8, and the first
+young chain since the records begin, which is what makes the ladders in §1 K
+possible.  Its shallower search (d6/800n against d8/4000n) means throughput
+figures and absolute Elo levels do not compare with the `m260720` chain; the
+decomposition does.  Unlike R7, **`--gauntlet-tdleaf` was passed on every leg**,
+so the online/offline split is measured the same way from end to end.
+
+**The chain to 6e6g, on one BayesElo scale.**  A 38-PGN combined rating (38,000
+games, 20 players) puts every `-tdleaf` and `-final` net of the chain on a single
+scale, which is a better instrument than the per-leg paired matches below —
+those compare each leg only with its predecessor.  Online Δ = `tdleaf(N) −
+final(N−1)`, offline Δ = `final(N) − tdleaf(N)`:
+
+| leg | kgames | online Δ | offline Δ | leg total | online per 100k |
+|---|---:|---:|---:|---:|---:|
+| `2e5g` | 100 | +76 | +11 | +87 | +76.0 |
+| `5e5g` | 300 | +56 | +9 | +65 | +18.7 |
+| `1e6g` | 500 | +41 | +2 | +43 | +8.2 |
+| `2e6g` | 1000 | +39 | +31 | +70 | +3.9 |
+| `3e6g` | 1000 | +29 | +8 | +37 | +2.9 |
+| `4e6g` | 1000 | +14 | +42 | +56 | +1.4 |
+| `5e6g` | 1000 | +16 | +12 | +28 | +1.6 |
+| `6e6g` | 1000 | **−3** | +30 | +27 | **−0.3** |
+
+**The online phase has crossed zero, one leg earlier than §6 item 1 predicted**
+(that item said 7–8M games).  Per-leg BayesElo errors are ±9–13, so −3 is
+"indistinguishable from zero", not "significantly negative" — but the trend
+across eight legs is unambiguous and the per-100k column falls by two orders of
+magnitude.  Offline is unaffected and is now carrying the entire leg: +30 of the
++27 total.
+
+Under §1 G this is a search-margin failure, not necessarily saturation, and §1 N
+prices the fix: the chain generates at `d6/800`, which is ~373 Elo weaker than
+`d8/2000` of the same net.  The prediction on record is that restoring the margin
+returns online Δ to +20…+40; if it does not, saturation is real and generation
+should stop being funded.
+
+**The leg decomposition.**  Each leg is rated by a paired family match against
+the previous leg's final net: the online Δ is the post-generation `.tdleaf` state
+against that opponent, the leg total is the post-consolidation net against the
+same opponent, and offline is the difference.  Recomputed from the `_final.json`
+sidecars:
+
+| leg | games | epochs | online Δ | leg total | offline Δ |
+|-----|------:|-------:|---------:|----------:|----------:|
+| `2e5g` | 100k | 2 | +84.3 ± 8.7 | +104.1 ± 8.8 | +19.8 ± 12.4 |
+| `5e5g` | 300k | 2 | +63.6 ± 8.6 | +92.5 ± 8.3 | +28.9 ± 12.0 |
+| `1e6g` | 500k | 2 | +50.4 ± 8.3 | +65.4 ± 8.5 | +15.0 ± 11.9 |
+| `2e6g` | 1M | 2 | +49.0 ± 8.1 | +90.2 ± 8.6 | +41.3 ± 11.8 |
+| `3e6g` | 1M | 2 | +41.2 ± 8.2 | +54.3 ± 8.1 | +13.1 ± 11.6 |
+| `4e6g` | 1M | **4** | +6.9 ± 8.5 | +66.1 ± 8.5 | +59.2 ± 12.0 |
+| `5e6g` | 1M | **4** | +10.4 ± 8.3 | +41.9 ± 8.1 | +31.5 ± 11.6 |
+
+Three readings, in descending order of confidence.
+
+*The online phase is productive on every leg.*  This is the headline, and it is
+the thing that was **not** true of the mature `m260720` chain, where online legs
+came in flat or negative and §4's graveyard entries were closed on that basis.
+Under R7+R8 on a young net, generation adds Elo every time.
+
+*Across the four 1M legs the online contribution falls and the offline one does
+not.*  Weighted least squares on the four equal-size legs: online **−14.9 ± 3.7
+per leg (4.1σ)**, leg total **−13.2 ± 3.7 (3.5σ)**, offline **+1.6 ± 5.2
+(0.3σ)**.  The offline fit has χ²/dof = 7.9/2, i.e. real leg-to-leg scatter
+beyond match error, so "flat" means "no trend resolvable through large noise",
+not "steady".
+
+*The epoch change does NOT explain it — checked and dismissed.*  The two legs
+where online collapsed are also the two that extended the offline ladder from 2
+epochs to 4, which looks like a confound and is not one, for two reasons.
+**Timing:** leg *N*'s online phase runs *before* leg *N*'s consolidation, from leg
+*N−1*'s final net, so `epochs(N)` cannot reach `online Δ(N)`.  The relevant
+quantity is `epochs(N−1)`, and the **onset** of the collapse — `3e6g` +41.2 →
+`4e6g` +6.9 — starts from a 2-epoch net on both sides.  **Selection:** `train.py`
+ships the best-rated epoch, not the last, and `picked_epoch` is 2 on six of the
+eight legs including `5e6g` (whose ladder peaks at e2 +49.3 and *decays* to e4
++26.8).  Only `4e6g` shipped an epoch-4 net (+45.1, within 1σ of its own e2
++41.2).  So the offline dose was effectively constant across the chain.
+
+The one residue is second-order: picking the max of four noisy ladder points
+instead of two carries a selection bias of order +4 Elo, which inflates
+`final(4e6g)` and therefore deflates `online Δ(5e6g)` — the last point only, by
+roughly 4 of its 34-Elo shortfall.  The decline stands.
+
+**The `cons1` consolidation arms (2026-09-19), run within R9.**  Offline-only:
+no new games, seven one-epoch arms from a single seed, each rated over 2000
+games at 1+0.01 on `holdout_openings.epd` against two opponents — the seed
+itself (paired) and `classic_eval` (foreign anchor).  Driver
+`run_consolidation_arms.py`, sampler `sample_corpus.py`; both documented in
+`SCRIPT_USE.md`.
+
+Three design choices carry the results.  **The seed is the PRE-offline state**
+(`m260916-5e6g_work/train/m260916.tdleaf.bin`, exported as
+`m260916-5e6g-tdleaf.nnue`), not `5e6g_final`: seeding from the post-offline net
+would have made the control measure over-consolidation on data it had already
+seen twice, and left the target arms nothing to learn against.  **The dose is one
+leg's entire eligible corpus**, 68,934,511 rows, so the control is that corpus
+unsampled — the composite at any useful quota is larger than a single leg
+(four legs at quota 19 is 75.8M rows), so the dose had to be set by the smaller
+side.  **Every arm matches it row for row**, with the composite quota-sampled at
+19 rows/game over 4M games and trimmed by lowering the per-game cap.
+
+| arm | corpus | td_λ | vs seed | vs classic_eval |
+|---|---|---|---|---|
+| `null` | 5e6g alone, unsampled | 0.985 | +21.0 ± 6.3 | −105.3 ± 6.9 |
+| `base` | 4 legs, quota 19 | 0.985 | +11.8 ± 6.2 | −117.4 ± 7.1 |
+| `bout` | 4 legs | 0.9925 | +1.6 ± 6.5 | −137.8 ± 7.4 |
+| `nout` | 5e6g | 0.9925 | +0.5 ± 6.5 | −125.4 ± 7.1 |
+| `ncp2` | 5e6g | 0.9775 | +13.0 ± 6.1 | −109.1 ± 7.1 |
+| `ncp` | 5e6g | 0.970 | +27.5 ± 6.1 | −110.2 ± 7.2 |
+| `nleaf` | 5e6g leaf, same games as `null` | 0.985 | +17.2 ± 6.4 | −123.6 ± 7.2 |
+
+Plus one direct head-to-head, `ncp` vs `null` = +9.7 ± 5.9 (745/689/566).
+Conclusions in §1 H and §1 M; three lines closed in §4.
+
+**The pipeline validates against the chain's own numbers.**  `null` is one epoch
+on the 5e6g corpus from the 5e6g pre-offline state — exactly what the leg's own
+epoch 1 did, rated against the same opponent at the same time control.  The leg
+recorded **+16.3 ± 8.9**; `cons1` got **+21.0 ± 6.3**.  The two corpora differ by
+three rows out of 68.9M.  Remaining differences are host (Linux vs this Mac, so
+different nps at a fixed clock), opening book (`training` vs `holdout`) and n
+(1000 vs 2000), which is why the agreement is "consistent", not "reproduced".
+
+Two narrower confounds worth remembering: per-leg Δ is **not normalised per
+game** — the early legs are 100k–500k games, so the online yield *per 100k games*
+falls far faster than the table's per-leg column (84 → 21 → 10 → 4.9 → 4.1 → 0.7
+→ 1.0), which is the shape of an ordinary saturation curve; and **hash 16**
+applies only to the `6e6g` leg (everything else ran at 128, and generation has
+since reverted).
 
 ---
 
@@ -583,13 +933,143 @@ late chain).  d8→d10 regressed: −13.6 on the leg and a head-to-head loss to 
 parent.  **Reopens** — see §6; the d10 leg is confounded by a 52% draw rate and
 predates R4 and R6.
 
+**Calibrating K, λ or the outcome weight from the corpus (closed 2026-09-20,
+`cons1`).**  The measurements are sound and worth keeping; the inference from
+them to a hyperparameter is what failed.  Full result in §1 O.
+
+*What was measured.*  Raw outputs are not committed — they regenerate in ~8
+minutes and the numbers that matter are here.  From `engine/learn/`:
+
+```sh
+python3 calibrate_from_corpus.py --source m260916-5e6g_work \
+    --games 60000 --max-lag 60 --quiet-cp 60
+```
+
+60k games of the 5e6g leg, gated to the training population — and the gate
+changes none of it (overall K 188.5 gated against 191.6 ungated, λ 0.9913
+against 0.9915), which is itself worth knowing: the quiet gate does not select
+positions whose cp→score mapping differs.
+
+- **K is U-shaped in material.**  Per NNUE stack: 268.7 (1–4 pieces), 200.2,
+  175.9, **168.9** (13–16), 177.3, 190.2, 199.4, 185.0 (29–32).  Overall
+  maximum-likelihood K is **188–192** against the configured 220.  Mechanism is
+  plain: with ≤4 pieces a cp edge is often a dead draw, so the mapping must be
+  flatter; the 13–20 piece middlegame converts advantages most reliably.
+- **λ is MONOTONE in material**, measured as the decay of `corr(ev_t, ev_{t+k})`
+  — position to position, the result never entering: 0.99827 (5–8 pieces, 403-ply
+  half-life) falling to **0.96613** (29–32, **19 plies**).  The opening is
+  plastic; a simplified endgame is nearly static.  Keyed on material rather than
+  game ply on the cross-tab evidence (R² 0.855 vs 0.785; ply's residual effect
+  confined to the 25–32 piece rows).
+- **Outcome reliability**, `Var(outcome − ev)`, rises monotonically 0.0228 →
+  0.1915 across the same range, with `corr(ev, outcome)` falling 0.930 → 0.181.
+
+*Why acting on it failed.*  Seven arms, seven anchor losses (§1 O), while the
+one arm moving opposite to the fit was fine.  The likely reading: the sigmoid
+temperature and the trace decay are **gradient-shaping** parameters, not
+calibration parameters.  K = 220 being flatter than the fitted 190 compresses
+targets at large |cp|, shrinking gradients on already-decided positions and
+concentrating learning near equality — a training-dynamics property with no
+connection to how well the sigmoid predicts results.
+
+**Reopens if** the regime changes the gradient economics rather than the
+statistics — a much deeper search, a different loss (`--bt-loss-gamma` away from
+1.0), or an optimizer change.  Re-deriving the fits on a new chain is cheap and
+they will likely still hold; that is not evidence to act on them.  The branch
+`k-by-material` carries all of it behind compile flags defaulting off and
+byte-identical to `main` when off: `TDLEAF_K_SHAPE`, `TDLEAF_LAMBDA_SHAPE` (with
+the path-dependent λ-return walk), `TDLEAF_W_RELIABILITY`, plus `--bt-w-mean`.
+**It is deliberately unmerged.**
+
+⚠️ **One piece is untested and this harness cannot test it.**  The ONLINE half of
+`TDLEAF_LAMBDA_SHAPE` — per-material decay in the eligibility trace between
+adjacent records — never ran: `cons1` arms are offline-only (`--batch-train`),
+so `tdleaf.cpp`'s trace code is never executed.  It is a different mechanism
+from everything above (credit assignment, not target construction), and testing
+it needs a generation leg.
+
+**The wide consolidation window (A1 opened it at +36/+45; `cons1` closed it on
+R9).**  The single clearest reversal in the record.  A1 measured a four-corpus
+window worth **+36 anchor / +45 paired** on the mature chain at 4× the present
+LR; `cons1` ran the same manipulation on the young R9 chain at a matched 68.9M
+row dose and got **−9.2 ± 8.8 paired / −12.1 ± 9.9 anchor**.  Both cons1 figures
+are ~1σ, so this closes on "not helpful", not on "harmful".  What makes it a
+closure rather than a null is that the *mechanism* proposed for it also failed:
+if old legs' rows hurt because their cp labels are stale, raising outcome weight
+(which is age-proof) should rescue them, and instead it cost a further
+−10.3 ± 9.0.  **Reopens if** a leg is run at a depth or LR that moves the regime
+again, or if someone finds a diversity manipulation that does not also age the
+labels — sampling wide *within* one leg, for instance, which cons1 did not test.
+
+**Leaf rows as a training corpus (Offline 3.2 closed it pre-R8; `cons1` closed
+it again post-R8).**  3.2's −35.6 ± 11.0 was confounded: it predates R8, so its
+leaf rows came from the broken corpus, and the doc's own rule says leaf results
+must not be pooled across that boundary.  `cons1`'s `nleaf` is the clean rerun —
+R8 corpus, same games as the root arm, same 68.9M dose — and it agrees in sign
+at **−3.8 ± 9.0 paired / −18.4 ± 10.0 anchor**.  Smaller than 3.2 claimed, same
+direction.  The BLEND reopening is now closed too: `nboth` added all 84.7M leaf rows on top
+of the root corpus over the same games (2.23× dose) and came in at −9.4 ± 10.0
+on the anchor, with the three arms ordering monotonically in leaf share.  **What
+would reopen it** is a mechanism, not another dose: leaf rows carry the
+generator's static eval at the PV leaf, so they can only help where that is the
+quantity of interest — a leaf-targeted auxiliary loss, say, rather than more
+rows in the same pool.
+
+**Outcome-weighted targets above the default, and with them the case for
+`--bt-rescore` (`cons1` closed both).**  λ = 0.9925 costs −20.5 ± 9.1 paired and
+−20.1 ± 9.9 anchor — two independent instruments within 0.4 Elo of each other,
+the most replicated single number in this document.  It costs on the composite
+corpus too (−10.3 ± 9.0), so it is not an artifact of which rows were used.  The
+screen was built so that a slope toward the outcome would license the expensive
+rescoring arm; the slope runs the other way, meaning the cp labels carry more
+usable signal than the default λ credits.  **Reopens if** a future regime makes
+cp labels demonstrably worse — a much deeper search, or a corpus deliberately
+aged beyond four legs — since staleness is the only mechanism that would flip
+the sign.
+
 ---
 
 ## 5. Measurement manual
 
 Each of these cost something to learn.  They are regime-independent.
 
-**Rate against a foreign anchor, and know that family matches are non-transitive
+**THE DECISION POLICY (D. Homan, 2026-09-20).  Read this before choosing an
+instrument, and before acting on any result in this document.**
+
+A single opponent is never the best basis for a decision.  The instruments here
+answer different questions and are not interchangeable:
+
+| instrument | answers | cost / precision |
+|---|---|---|
+| direct head-to-head between siblings | "is A stronger than B?" | cheap, tight (±6 at 2000 games) |
+| common-opponent subtraction (A−C via B) | the same question, badly | errors add; unreadable under ~20 Elo |
+| foreign anchor | "does this generalize past the family?" | the DECISION criterion |
+
+Computer-chess practice uses self-play against previous versions for quick
+discrimination, because a head-to-head is simple numbers where A-vs-B and
+C-vs-B needs far more games to do right.  **A-vs-C is efficient but sometimes
+wrong** — it rewards whatever A learned about positions B misjudges, which is
+family-specific and need not generalize.  A mix of both is what this setup runs,
+and it is a deliberate balance, not an accident.  Better still would be a POOL
+of several non-EXchess-derived opponents at similar strength; the testing cost
+is prohibitive, so it is not done.  ⚠️ Note also that `classic_eval` is Leaf's
+own classical evaluation and shares search code with everything it rates — it is
+"foreign" in eval only, which is a real limit on how independent the anchor is.
+
+**Consequence: when the tests do not show a clear win either way,
+elegance / simplicity / expected correctness is the discriminator.**  An increase
+in complexity must be *earned* by a clear win, not merely permitted by an
+ambiguous one.  This is a standing tiebreak, and it is why several entries in §4
+are closed on "not helpful" rather than on a measured regression.
+
+*Worked example — the `nboth` arm (2026-09-20).*  Root + leaf rows over the same
+games, 2.23× the dose, one epoch.  The direct head-to-head against the root-only
+null was **+17.9 ± 5.9 (3.0σ)** — a real, well-measured family win.  Against the
+anchor it was **−9.4 ± 10.0**, i.e. no win at all.  Both measurements are sound;
+they answer different questions.  The decision followed the anchor and the
+simplicity tiebreak, and the design stayed as it was.
+
+**Rate against a foreign anchor, and know that family matches are non-transitive**Rate against a foreign anchor, and know that family matches are non-transitive
 in both directions.**  Family matches *understate* real improvement — ~+65 of
 style-robust gain showed as +13 within the family [4.6] — and they can also read
 **zero on a real 28 Elo regression** [Offline 4.3], where the anchor replicated
@@ -607,6 +1087,35 @@ arm was better by 24.3 ± 11.8, the anchor said the other by 10.4 ± 16.3, the d
 match said 0.7 ± 8.3 [7.10.6].  **Play the arms against each other**; 1000 games
 costs 23 minutes.
 
+**Check the engine name you pass to `pgn_score`.**  It matches by SUBSTRING, so
+a near-miss (`Leaf_N2000` for an engine named `Leaf_vN2000`) matches neither
+player, silently scores every game from Black's side, and returns a confident
+wrong number — in one case −23.3 ± 7.3 for a contrast whose true value was
++296.6 ± 13.3, a sign flip at over 3σ.  There is no error and no warning.  When a
+rating contradicts strong priors, re-score with the name copied from the PGN's
+own `[White]` header before believing it.
+
+`cons1` produced the cleanest worked example on record.  The contrast
+λ=0.970 vs λ=0.985, estimated three ways on the same two nets:
+
+| instrument | estimate |
+|---|---|
+| through the paired opponent (the seed) | +6.5 ± 8.8 |
+| through the foreign anchor (`classic_eval`) | −5.0 ± 10.0 |
+| **direct head-to-head, 2000 games** | **+9.7 ± 5.9** |
+
+The two subtractions disagree in SIGN, and the anchor's estimate excludes the
+direct measurement.  The direct match is also the tightest (±5.9 against ±8.8),
+because subtracting two ratings adds their errors while a head-to-head does not.
+**When a contrast matters, spend the games on the head-to-head** — but only when
+the question really is "is A stronger than B".  Twenty-five minutes of direct
+match here settled what four arms and roughly two hours of common-opponent
+rating had left ambiguous.  ⚠️ **A head-to-head does NOT substitute for the
+anchor on a design decision.**  `nboth` won its direct match by +17.9 ± 5.9 and
+still lost on the anchor by −9.4 ± 10.0 — see the decision policy at the head of
+this section.  Use the head-to-head to resolve a contrast; use the anchor to
+decide whether the contrast is worth acting on.
+
 **Never pool a decaying series.**  Pooling three points of a decaying transient
 gave a spurious 5.0σ [7.11.4].  Relatedly, **one early ladder point cannot
 distinguish "less damage" from "same damage, reached later"** — an arm that read
@@ -616,11 +1125,29 @@ distinguish "less damage" from "same damage, reached later"** — an arm that re
 three independent offline occasions [Offline 2.3, 3.3, 4] — twice **wrong-signed**,
 once ordering a 40 Elo difference backwards.  It is a smoke test for optimizer
 health and nothing more.  The one legitimate use is ranking two checkpoints on the
-same trajectory, where it merely detects overfitting [7.9.3].
+same trajectory, where it merely detects overfitting [7.9.3].  `cons1` added the sharpest single
+instance: `nshape` improved BOTH validation metrics against `null` — MSE 0.010438
+vs 0.010465, NLL 0.551829 vs 0.552343 — and lost 14.6 Elo on the anchor.  Better
+fit to held-out labels, worse play, within one arm.  Also note MSE is not
+comparable across arms that change the TARGET (the blend is one of the two things
+being differenced): `bout` reads 0.0358 against `base`'s 0.0103 purely because
+outcome labels are harder to fit than cp-derived ones.
 
 **`ΔMSE_out` prices label information, not usable signal.**  A label can know more
 about how the game ends and still be a worse thing to train on [Offline 4.4].
 Never read `--bt-diag` as a training recommendation.
+
+**An anchor Elo is only comparable at the SAME time control.**  `classic_eval`
+and an NNUE net differ in nodes per second, so the gap between them moves with
+the clock: a number measured at `3+0.05` cannot be read against one measured at
+`1+0.01`.  This binds the chain's recorded `final_gauntlet` anchors (3+0.05,
+`train.py`'s `--tc` default) against anything rated at the epoch-ladder default
+(1+0.01) — including the composite-corpus arms.  Within one programme it costs
+nothing as long as every arm *and its control* are rated identically; across
+programmes it is a trap.  The same caveat applies to `5e6g`'s e2→e3 ladder step
+(−12.7): same TC as the arms, but a different opponent (the pre-offline net,
+not the seed), which is why §6 item 2 measures its null directly instead of
+importing that number.
 
 **Mind the ± convention** (R5): `pgn_score` reports one sigma, fastchess's own line
 reports a 95% interval — a factor of 1.96.
@@ -638,6 +1165,49 @@ reports a 95% interval — a factor of 1.96.
   gauntlet time was spent.  **Any future optimizer arm should do this first.**
 - **Match Adam *steps*, not games**, whenever the knob touches aggregation — this
   is what separated 7.15 from 6.16.
+- **Fixed-node matches are hardware-independent, and they are how to price a
+  search budget.**  Play one net against itself at two budgets under a clock that
+  cannot bind (`-tc 600+10 -c 6`).  The result transfers between machines
+  unchanged, which a TC-based rating never does — and 600 games gives ±13, tight
+  enough to separate rungs of a budget ladder (§1 N).
+- ⚠️ **Both sides of a loss must share the same K.**  Shaping K in `bt_target`
+  while `bt_eval_record` and the gradient's sigmoid Jacobian keep a flat one is
+  not a temperature change at all — training `sigmoid(score/K_flat)` toward a
+  target built with `sigmoid(cp/K_b)` drives the net's OUTPUT to
+  `score = cp·K_flat/K_b`, rescaling the eval per material bucket.  The
+  diagnostic that caught it: `MSE(outcome)` depends only on the net's prediction,
+  and it was bit-identical between the arm and its control.  When a flag is
+  supposed to change the target, check that the PREDICTION side moved too.
+- **Normalise a shape so the first arm is pure redistribution.**  Every shape
+  here preserved a mean, and the right mean differs by parameter: harmonic for K
+  (target sensitivity is `1/4K`), the row-weighted decay RATE for λ (rates, not
+  λ itself — a multiplicative shape on λ can exceed 1 and explode the trace), and
+  a solved scalar for the path weight.  Without it a shape arm silently carries a
+  scale change, and scale is what actually moved the Elo (§1 O).
+- ⚠️ **A node-only match does NOT reproduce a training config.**  `match.py
+  --nodes1 N` sends `go nodes N`, and `uci.cpp:445` then leaves
+  `min_search_depth = 0` — pure node limiting, no depth floor.  Self-play sets
+  the floor (`selfplay.cpp:470`).  Pass **both** `--depth` and `--nodes` or the
+  measurement answers a different question; §1 N's first attempt did exactly this
+  and had to be redone.
+- **Decompose every leg — it costs one flag.**  `--gauntlet-tdleaf` rates the
+  post-generation `.tdleaf` state alongside the post-consolidation net, both as
+  paired family matches against the previous leg's final.  Online Δ is the first,
+  leg total the second, offline Δ the difference.  R9's entire decomposition (§3)
+  exists only because the flag was passed on every leg; R7 dropped it partway and
+  the corresponding question there is unanswerable [7.11.5].  Recompute from the
+  `<tag>_final.json` sidecars rather than from notes — the sidecars carry W/L/D
+  and the match error for each entry.
+- **The handoff ladder, as run for §1 K**: build a TDLEAF binary per rung, seed it
+  from the offline-trained state under test, run 50k self-play games at batch 50
+  (≈1000 Adam steps, well past the ~300-step equilibration), stamp a net every
+  ~6k games, and rate each stamp in a 1000-game match **against its own starting
+  net**.  Two traps, both paid for: the `.nnue` must travel with the binary into
+  the scratch directory — a missing net does **not** error, the engine silently
+  falls back to classical eval and the whole ladder rates a different program —
+  so guard the load and abort on `NNUE: not found`.  And build in `learn/`, never
+  `run/`, or `main_bk.dat` feeds book moves into the ladder.  Driver scripts are
+  in `scripts/arms/`.
 
 **Pre-commit the reading of an arm** (6.7, 6.12.5, 6.17.4 all did) so the
 interpretation is not chosen after the fact.  And state the arm-validity checks
@@ -672,38 +1242,52 @@ Ranked by expected value per unit of compute.  `TODO.md` carries the checklist;
 this is the rationale.  Items marked ⚠️ were previously ruled out under a regime
 or criterion that has since changed.
 
-**1. Batch 50 on a full leg — does the damage reduction survive as leg yield?**
-7.15 rates damage, not yield, and 6.16's batch-16 arm cut damage 4× while making
-the loop *worse* (offline recovery +27.0 against +84.6).  The R7 chain has adopted
-batch 50 ahead of this test, and is currently 500k games in and ahead of `m260720`
-at the same point — encouraging, not yet significant.  **Arm:** the chain is the
-arm; the missing measurement is a decomposed leg (`--gauntlet-tdleaf` on *every*
-leg, which stopped being passed after `3e6` and is how the online drift went
-unseen).  **Reading:** if recovery falls in proportion to damage, Σ bought
-nothing at the loop level and the line returns to 6.16's warning.
+**1. RAISE THE SEARCH BUDGET TO `d8/2000` — the next leg, and the test of
+whether generation is worth funding at all.**  Online Δ crossed zero at `6e6g`
+(§3 R9): +39, +29, +14, +16, −3 across the 1M legs, with offline unaffected and
+now carrying the whole leg (+30 of the +27 total).  Under §1 G that is a
+search-margin failure before it is saturation, and §1 N prices the repair: the
+chain generates at `d6/800`, **~373 Elo weaker than `d8/2000` of the same net**.
 
-**2. ⚠️ Does the handoff happen on a YOUNG net?  Absent, or masked?**  The scope
-box states the problem: the damage is only *apparent* after ~1M games of learning,
-and the chain's own decomposition read +18 / +7 / −2 / −1 at 100k–1M before turning
-negative at 2.2M [6.1].  Either the excursion does not occur on an unsaturated net,
-or it occurs every time and is netted out by concurrent learning gains.  **The
-distinction decides whether "minimise handoffs" is a rule for the whole chain or
-only for its late life** — and therefore how often the restart should alternate
-online and offline phases.  **Arm:** the 5k-game damage protocol [7.11.8] plus a
-within-leg checkpoint ladder [7.11.4] applied at several young states of the R7
-chain — 100k, 500k, 1M, 2M cumulative games — each rated against its own starting
-net.  The R7 chain is the first opportunity since these records begin: every state
-in them is already mature.  **Reading:** a ladder that dips and recovers means the
-excursion is present and masked, and the leg total is a sum of two effects that
-should be optimised separately; a ladder that never dips means the excursion is a
-property of a converged optimum, and handoff cost is a late-chain concern only.
-**Cost:** ~50 min per state, and the states are produced by the chain anyway.
-Cheap enough that not running it is the expensive choice.
+`d8/2000` is the knee of the frontier — 72% of what `d8/4000` gains for 41% of
+its clock, at 1.62× the current leg — and it keeps 1M games and the full ~69M-row
+corpus that the *working* half consumes.  Prefer it over `d8/4000` at 500k games
+(1.99× clock, half the corpus, and the extra label quality bought at the worst
+exchange rate on the ladder).  It also gives UNIFORM depth 8, where `d6/2000`
+would search deepest in the simplest positions and make label quality
+heteroscedastic.
 
-**3. Rate the PV repairs (R8).**  The label-quality case is strong — bias
-essentially eliminated, variance halved, and the residual filtered rather than
-trained on — and the mechanism is one that can be pointed at in the source rather
-than inferred statistically.  But nothing is measured in Elo, and four prior
+**Pre-committed reading.**  Online Δ should return to **+20…+40** — the early
+chain gave +39…+76 when the margin was large, less the ~13 handoff of §1 K.  If
+online stays near zero with 373 Elo of margin restored, the decline was never a
+search-margin problem, saturation is real, and the conclusion is to stop funding
+generation beyond corpus production and put the clock into the offline half.
+Either outcome is worth the leg.  **Canary: the draw rate**, not gradient norms —
+32–33% now, healthy is 35–40%, and the `d10` leg that regressed on the old chain
+ran at 52%.  **Method note:** keep passing `--gauntlet-tdleaf`; this whole
+decomposition exists only because R9 passed it on every leg.
+
+**2. Sample WIDE WITHIN one leg — the one diversity manipulation `cons1` did
+not test.**  The composite-corpus programme answered its own question and closed
+it (§4): four legs at a matched dose is −9.2 ± 8.8 paired against the newest leg
+alone, and the staleness mechanism that would have explained a fix failed too.
+But every `cons1` arm confounded two things — more distinct GAMES and older
+LABELS — because more games could only come from older legs.  The clean
+separation is available and cheap: one leg holds ~1M games at 68.9 eligible rows
+each, so a quota of 17 over all 1M games draws the same dose from **4× the games
+at the same label age**.  If that also fails, diversity per se is not the lever
+and H's mature-chain +36/+45 was a label-age effect all along; if it wins, the
+wide window failed on staleness after all and the composite was simply the wrong
+way to buy diversity.  `sample_corpus.py --quota 17` over one leg is the whole
+experiment.
+
+**3. Rate the PV repairs (R8) IN ISOLATION.**  `m260916` runs R7 and R8 together
+and cannot attribute between them: the handoff fell from ~−130 to −13.5, but
+damage ∝ η alone predicts ~−32 from the 4× LR cut, so R8's share is the gap
+between −32 and −13.5 — suggestive, not attributed.  The label-quality case is
+strong on its own terms — bias essentially eliminated, variance halved, residual
+filtered rather than trained on — and the mechanism is visible in the source
+rather than inferred statistically.  But no isolated Elo exists, and four prior
 interventions in this investigation (alpha 6.10, rbar 6.13, `fc0_w` 7.12, root
 fallback) were correct at the label level and bought nothing.  **Arm:** `both`
 against `base` from a state with known handoff damage, **matched Adam steps**
@@ -713,14 +1297,16 @@ A 5k-game arm at 98 steps is *not* sufficient — that mistake was made once
 already.  Note the residual mis-approximation is a Σ contributor, and Σ is the
 one lever 7.14 left standing and 7.15 showed pays.
 
-**4. ⚠️ `--bt-rescore` must be revisited, not merely re-run.**  It retargets a
-stored root label to its paired PV leaf, assuming the stored leaf is where the
-root score came from — false in ~45–55% of archived records.  7.7 measured it
-null (−2.5 ± 21.0) *without knowing this*, so the null now has a candidate
-explanation.  Under R8 new corpora carry pairs that are tight by construction, so
-`--bt-rescore` on a new corpus is a **different experiment** from the archives
-and results must not be pooled.  Either re-run it on a post-R8 corpus or retire
-it explicitly.  Details in `TODO.md`.
+**4. ⚠️ The quiet gate *tighter* than 60 cp — now the only untested offline
+knob.**  Was item 8.  `--bt-diag`'s negative ΔMSE_out below 40 cp hints that the
+near-quiet band is where the label information is, and this is the one offline
+lever `cons1` did not touch.  It was deliberately excluded there because it
+fights the matching rules — tightening to 20 cp drops root to 36.8 rows/game, so
+a fixed quota stops filling and the game population shifts — but at a quota of
+17 or below that objection disappears, because 80% of games still fill it.  With
+the window closed, the target flat and leaf rows answered, this is where the
+remaining offline yield would have to be.  (`--bt-rescore` moved to §4: the
+screen for it came back negative.)
 
 **5. Attack Σ directly, not through batch size.**  Batch size is a proxy: the
 mechanism is decorrelation, and B only buys it by averaging more whole games.  The
@@ -763,24 +1349,16 @@ the leg directly comparable to `m260720`'s six-leg d8 reference series.
 **Still true:** depth is an optimum, not a monotone — d10 gave 43% draws and
 −33.1 — so treat the draw rate as a hard gate in both directions.
 
-**8. ⚠️ A quiet gate *tighter* than 60 cp.**  Partly overtaken by R8, which gates
-the dumped **leaf** rows at 10 cp — so on post-R8 corpora this is already answered
-for leaf rows and the open question is the **root** row gate, a different quantity
-(root quietness).  Never tested in either direction
-below 60, and `--bt-diag` reads **negative** ΔMSE_out for `|cp − gate| < 40`,
-which hints the optimum sits under 60.  The A2 arms had power for 28 Elo, not for
-5–10 [Offline 4.5].  Cheap: dumps are wide by default and the gate is now an
-offline filter, so this is one `--bt-quiet-cp` sweep over a corpus already on disk.
+**8. ⚠️ A1b — drop the STALEST corpus, not the whole window.**  The surviving
+fragment of the old "deferred offline wins" item; the rest is closed in §4.  A1b
+was never run: keep a wide window but drop its oldest leg, whose labels came
+from a generator 75 Elo weaker.  `cons1` gives it a reason to exist again — the
+composite lost, and if that loss is label age rather than diversity, then the
+window minus its stalest leg should sit between the two.  Cheap on the archives
+already on disk, and it reads directly against `cons1` base and null.  Do it
+after item 2, which separates the same two factors more sharply.
 
-**9. Restore the deferred offline wins on the new chain.**  `--corpus-window` was
-turned down to 1 for R7 deliberately, giving up a measured **+36 anchor / +45
-paired** [Offline 2.4]; `--bt-rows root` is worth **+35.6 paired** [Offline 3.2].
-These are not retired, they are deferred, and the point of recording them here is
-that they get revisited rather than forgotten.  A1b — dropping the stalest corpus
-from the window, whose labels came from a generator 75 Elo weaker — was never run
-and bounds what label staleness costs.
-
-**10. Actor refresh cadence.**  The one clean A/B measured the wrong observable:
+**9. Actor refresh cadence.**  The one clean A/B measured the wrong observable:
 the learner's `--refresh-scores` means actor staleness never reaches the labels, so
 cadence acts only on the behaviour policy — which positions get played — while the
 measurement was weight displacement, downstream of the gradient [6.14.4].  Under
@@ -792,16 +1370,12 @@ and costs no games, but it has **no repeat-run noise floor** — two identically
 configured runs were never compared, so its absolute scale is uncalibrated.  Build
 that floor first.
 
-**11. Leaf rows — settle the blend confound before dropping them.**  `--bt-rows
-root` won at the blend production actually uses, but every constant in
-`p = w·outcome + (1−w)·σ(cp/K)` was calibrated on the *mixture* and
-`--bt-leaf-lambda` has always sat at parity with the root ceiling.  A leaf row's
-bootstrap term is near-self-consistent, so its error collapses toward pure outcome
-regression at `w ≈ 0.30` [Offline 3.5].  Nobody should quote Part 3 as proof that
-leaf positions are worthless *in principle*.  Worth running only when deciding
-whether to keep *generating* leaf rows (54% of dump I/O).
+**10. ~~Leaf rows as a supplement~~ — CLOSED 2026-09-20, see §4.**  `nboth`
+tested it directly (root + all leaf rows, same games, 2.23× dose) and it did not
+clear the anchor.  Retained here only as a pointer, because the item was listed
+as open in three previous revisions of this document.
 
-**12. The bias-growth canary.**  `fc0_b` ×15.9, `fc2_b` ×8.9, `ft_b` ×6.4,
+**11. The bias-growth canary.**  `fc0_b` ×15.9, `fc2_b` ×8.9, `ft_b` ×6.4,
 `fc1_b` ×3.3 across the chain, monotone and **still rising at 7M games** — `fc2_b`
 +28% in a leg whose total was +6.6 ± 8.2 [7.12.2].  These are the constant-capable
 channels `TRAINING.md` flags for outcome-imbalance absorption.  Self-play is
@@ -809,7 +1383,7 @@ supposed to be immune, so this is unexplained rather than known-pathological.  I
 is nearly free to log per leg and, unlike the draw rate, not blind to uniform
 decay.  Carry it through the R7 chain from the start.
 
-**13. The root-vs-mix confound.**  `mix` carried 34 root rows/game against `root`'s
+**12. The root-vs-mix confound.**  `mix` carried 34 root rows/game against `root`'s
 76, so `root > mix` may be nothing more than "more root rows".  The discriminating
 arm is root-only at 86M rows, matching the root-row count *inside* `mix`: landing
 near +155 means the leaf rows were actively harmful, near +109 that `mix` was
