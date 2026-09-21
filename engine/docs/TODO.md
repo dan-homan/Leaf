@@ -76,6 +76,18 @@ canary is written for d8.
       recommends `d8/2000`; the difference is the endgame extension only, which
       does not move the draw rate, so the leg still answers the question — but
       see §6 item 7 before choosing the config for the leg after it.
+- [ ] **D0 — the m260916 leg-yield decay is CONFOUNDED with the PV defect.**
+      `scripts/leg_summary.py m260916` shows the fraction of recorded results
+      below the depth floor grew monotonically across the chain — 6.5% at 1e5,
+      16.7% at 2e5, 24.7% at 1e6, 28.9% at 3e6, 33.4% at 6e6, 44.6% at 7e6 —
+      alongside the leg yield falling 1041 → 308 → 131 → 90 → 54 → 42 → 35
+      Elo/Mgame.  Both are monotone over the same span, so "d6 saturated" and
+      "the defect got worse" are not separated by anything on disk.  The early
+      legs are only lightly contaminated, which is why m260921 vs m260916 is a
+      fair comparison at 1e5/2e5 — but **the late-chain decay must not be
+      quoted as evidence of saturation** until m260921 reaches the same depth
+      on a clean engine.  Why severity grew with maturity is itself unexplained
+      and worth a look.
 - [ ] **D1b — RERUN the d8 leg on the fixed engine.**  The leg killed on
       2026-09-21 generated with the PV-resolution defect live (mean recorded
       depth 6.86, 55.8% of rows below the d8 floor, play ~298 Elo below the
