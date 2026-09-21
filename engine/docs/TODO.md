@@ -53,6 +53,13 @@ canary is written for d8.
       recommends `d8/2000`; the difference is the endgame extension only, which
       does not move the draw rate, so the leg still answers the question — but
       see §6 item 7 before choosing the config for the leg after it.
+- [ ] **D1b — RERUN the d8 leg on the fixed engine.**  The leg killed on
+      2026-09-21 generated with the PV-resolution defect live (mean recorded
+      depth 6.86, 55.8% of rows below the d8 floor, play ~298 Elo below the
+      same binary now).  Its 29.67% draw rate at 164k games is therefore NOT a
+      reading of what d8 does on this chain, and neither is the 7e6g leg's
+      29.89%.  Re-read the draw rate against `m260720`'s d8 band (35.3–36.1%)
+      only on a leg generated with the current defaults.
 - [ ] **D1a — reconcile the draw-rate discrepancy.**  §6 item 1 says the chain
       is at "32–33%"; a direct count of generation games (actor logs and
       generation PGNs, agreeing to 0.01% over 1M games/leg) says 22.5% at

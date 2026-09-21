@@ -135,8 +135,14 @@
 // Strictly better than TDLEAF_SKIP_STUB_PV: same condition, but keeps the record
 // instead of discarding ~35% of them.  Set both and the fallback wins (nothing
 // is left for the skip to drop).
+// DEFAULT 0 since 2026-09-21.  Measured: the substitution costs 282.6 +/- 12.1
+// Elo of LEARNING play (4000 games, fixed d8) -- it hands back a shallower
+// iteration's MOVE, not just its PV, and it fired on 54.3% of searches.  The
+// comment in search.cpp calling it "slightly WEAKER" was badly wrong.  With
+// PV_NO_ALPHA_RAISE + PV_NO_BETA_LOWER only 11.9% of iterations fail to
+// resolve, and those plies are dropped by TDLEAF_SKIP_STUB_PV instead.
 #ifndef PV_LAST_RESOLVED
- #define PV_LAST_RESOLVED 1
+ #define PV_LAST_RESOLVED 0
 #endif
 
 // Skip TDLeaf recording for plies whose PV did not come from a RESOLVED root
@@ -155,8 +161,17 @@
 // (-24.88 -> +3.80 cp) and halves its variance.  Set to 0 to restore the
 // historical behaviour.  NOTE it discards ~35% of plies -- fewer records per
 // game, same number of Adam steps (the batch is counted in GAMES).
+// DEFAULT 1 since 2026-09-21, now that PV_LAST_RESOLVED is off: without it the
+// fail-high stubs come back into the corpus, and their id_depth reads the full
+// depth (nothing substitutes any more) while their SCORE is a bound.  The quiet
+// gate cannot filter them -- it tests |root_static - root_search|, and a bound
+// sitting near the static eval passes while still understating the true value.
+// Measured against the rows that are kept: mean |cp-gate| 130.7 vs 111.6 cp,
+// gate-60 pass rate 39.4% vs 49.1%.  Costs 12.4% of rows (139.1 -> 121.9 per
+// game), which is ~60M per 1M-game leg, well above the 12-20M where corpus-size
+// returns are already flat [7.14.4].
 #ifndef TDLEAF_SKIP_STUB_PV
- #define TDLEAF_SKIP_STUB_PV 0
+ #define TDLEAF_SKIP_STUB_PV 1
 #endif
 
 // Diagnostic: force every score-hash probe to miss, so score_pos() always
@@ -226,6 +241,42 @@
 // exists only so a binary can be pinned to a level for automated testing.
 #ifndef EVAL_NOISE
  #define EVAL_NOISE 0
+#endif
+
+// PV_NO_FAILHIGH_REDUCTION: drop Houdart's fail-high depth reduction during
+// LEARNING play only (gated on pv_learning_mode, like the other PV repairs).
+// The re-search after a root fail-high normally runs one ply SHALLOWER
+// (search.cpp: `max_ply-1-fail_high`), and a shallower search often comes back
+// at or below the raised alpha -- which hits the `} else break;` sequential
+// fail-high/fail-low exit with the iteration UNRESOLVED.  That is the suspected
+// dominant source of records whose id_depth lands below the --depth floor
+// (44.9% at d8/2000, 55.8% at d8/0 on m260916).  Searching the re-search at the
+// SAME depth should confirm the fail-high instead of undercutting it.
+// Default 0 = unchanged behaviour; measure before defaulting on.
+#ifndef PV_NO_FAILHIGH_REDUCTION
+ #define PV_NO_FAILHIGH_REDUCTION 0
+#endif
+
+// PV_NO_ALPHA_RAISE: on a root fail-high during LEARNING play, widen beta but
+// do NOT raise alpha to the old beta.  Measured mechanism: 100% of unresolved
+// iterations at d8/0 are the sequential fail-high-then-fail-low break, and
+// `root_alpha = root_beta` is what makes the fail-low likely -- futility
+// pruning keys on alpha (`premove_score+MARGIN<alpha`), so an alpha raised to
+// the just-exceeded bound prunes away the very line that caused the fail-high
+// and the re-search comes back at or below it.  Keeping alpha where it was
+// leaves the re-search room to resolve.  Costs a wider (but still bounded)
+// re-search window; gated on pv_learning_mode so competitive play is untouched.
+#ifndef PV_NO_ALPHA_RAISE
+ #define PV_NO_ALPHA_RAISE 1
+#endif
+
+// PV_NO_BETA_LOWER: the mirror of PV_NO_ALPHA_RAISE on the fail-LOW side.
+// `root_beta = root_alpha` collapses beta down onto the bound just undershot,
+// which can provoke the opposite sequential break (fail-low then fail-high).
+// Root-only: internal nodes are textbook PVS and never collapse the window
+// (search.cpp:1080 re-searches with the SAME alpha).  Learning play only.
+#ifndef PV_NO_BETA_LOWER
+ #define PV_NO_BETA_LOWER 1
 #endif
 
 // define 64 bit integers and zero values for unsigned long long

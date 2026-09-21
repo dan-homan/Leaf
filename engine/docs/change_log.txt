@@ -1,5 +1,92 @@
 Changes since 2017_12_24
 
+2026_09_21a -- PV resolution: the root aspiration window was collapsing, and
+               PV_LAST_RESOLVED was costing 283 Elo of generation strength.
+
+               FOUND BY: --depth 8 --nodes 0 should guarantee depth-8 results,
+               but m260916-8e6g recorded mean depth 6.86 with 55.8% of rows
+               BELOW the floor (44.9% at d8/2000 on the 7e6g leg).  m260720,
+               which predates the PV repairs, has 0.00% below floor.  The floor
+               was never broken: the SEARCH reached depth 8 every time, but
+               PV_LAST_RESOLVED replaced the recorded PV, SCORE and DEPTH with
+               the last resolved iteration's when the final one did not resolve
+               (search.cpp: g_last and last_depth are overwritten, and main.cpp
+               feeds both straight into tdleaf_record_ply).
+
+               DIAGNOSIS.  PVTRUNC_DIAG over 4000 games at d8/0: 45.67%
+               resolved, 0.00% interrupted, 54.33% sequential fail-high/
+               fail-low -- one mechanism, no interrupts, no first-iteration
+               stubs.  The break needs a fail-low after a fail-high, and
+               `root_alpha = root_beta` is what makes that likely: futility
+               pruning keys on alpha, so raising alpha to the bound just
+               exceeded prunes away the very line that caused the fail-high and
+               the re-search returns at or below it.  `root_beta = root_alpha`
+               on the fail-low side is the untouched mirror.  Root-only --
+               internal nodes are textbook PVS and re-search with the SAME
+               alpha (search.cpp:1080), and they undo their LMR reduction where
+               the root kept one.
+
+               FIX (learning play only, gated on pv_learning_mode):
+                 PV_NO_ALPHA_RAISE=1  do not collapse alpha on a root fail-high
+                 PV_NO_BETA_LOWER=1   do not collapse beta  on a root fail-low
+                 PV_LAST_RESOLVED=0   the fallback is no longer needed
+                 TDLEAF_SKIP_STUB_PV=1 drop the plies that still do not resolve
+
+               MEASURED, 4000 games/arm at fixed d8, paired openings:
+
+                 arm                               resolved  meandepth  clock
+                 baseline                            45.67%       6.83  1.00x
+                 no fail-high depth reduction        48.40%       6.99  1.15x
+                 no alpha raise                      74.71%       7.65  1.09x
+                 no alpha raise + no depth reduction 70.46%       7.60  1.46x
+                 all three                           87.34%       7.84  1.71x
+                 no alpha raise + no beta lower      88.45%       7.85  1.45x  <- kept
+
+               Dropping Houdart'"'"'s fail-high depth reduction HURTS in every
+               combination and is NOT adopted (PV_NO_FAILHIGH_REDUCTION stays
+               0): +2.7 points alone for 15% clock, and removing it from the
+               all-three arm improved BOTH resolution (87.34 -> 88.45%) and
+               speed (1.71x -> 1.45x).
+
+               STRENGTH of learning play, 4000 games each at fixed d8:
+                 PV_LAST_RESOLVED off only            +282.63 +/- 12.06
+                 no alpha raise (fallback still on)   +181.59 +/- 10.42
+                 no alpha + no beta (fallback on)     +246.72 +/- 11.27
+                 FINAL (all four defaults)            +298.45 +/- 12.36
+               The final config beats merely removing the fallback, so the
+               symmetric window fix is worth ~16 Elo of real search quality on
+               top of eliminating the move substitution.
+
+               RESULT: every recorded label is now a genuine depth-8 result --
+               mean recorded depth 8.00, 0.00% below floor, verified on a
+               default build.  Cost ~1.45x generation clock.
+
+               TDLEAF_SKIP_STUB_PV is required with the fallback off, not
+               optional: the stubs would otherwise return to the corpus with
+               id_depth reading the full depth (nothing substitutes any more)
+               while their SCORE is a BOUND.  The quiet gate cannot filter them
+               -- it tests |root_static - root_search|, and a bound near the
+               static eval passes while understating the true value.  Measured,
+               the discarded rows are worse: mean |cp-gate| 130.7 vs 111.6 cp,
+               gate-60 pass 39.4% vs 49.1%.  Cost 12.4% of rows (139.1 -> 121.9
+               per game), ~60M per 1M-game leg, well above the 12-20M where
+               corpus-size returns are flat [7.14.4].
+
+               ALSO FIXED: PVTRUNC_DIAG=1 with PV_LAST_RESOLVED=0 never linked
+               -- selfplay.cpp reads pv_fallback_used/_unavail unconditionally
+               while search.cpp defined them inside #if PV_LAST_RESOLVED.  Now
+               defined unconditionally.
+
+               TWO COMMENTS CORRECTED in search.cpp, both disproved here:
+               "slightly WEAKER" (it was 283 Elo), and "UCI/xboard play in a
+               TDLEAF build is bit-for-bit unaffected" (main.cpp sets
+               pv_learning_mode in every TDLEAF build regardless of protocol --
+               which is what made these matches measurable at all).
+
+               NOT MEASURED: any of this in Elo per LEG.  Four prior
+               interventions in this investigation were correct at the label
+               level and bought nothing.
+
 2026_09_20a -- eval_noise: positional-uncertainty perturbation for generation.
 
                A runtime-settable, zero-mean centipawn offset added to the static

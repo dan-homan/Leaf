@@ -393,7 +393,12 @@ the pooled means are tight.
 
 **M. Self-play sharpens its own games, and DEPTH sets where that stops.**
 (Companion to N, which prices the same lever in Elo and clock; M is what the
-*games* do.)  Both
+*games* do.  ⚠️ Every `m260916` number below was generated with the PV-resolution
+defect live — see the §2 "PV resolution" rows: its "d8" play was ~298 Elo below
+what the same binary reaches now, and 45–56% of its labels came from a shallower
+iteration.  The `m260720` figures predate the PV repairs entirely and are
+unaffected.  The cross-chain *level* comparison is therefore confounded; the
+within-chain d6→d8 step in each chain separately is not.)  Both
 chains drift the same way while young: draw rate, game length and quiet fraction
 all fall monotonically.  `m260720` at d6 went 34.5% -> 26.6% draws over 2M games
 and 176 -> 142 ply; `m260916` at d6/800 went 30.9% -> 22.5% and 159 -> 136.  The
@@ -486,6 +491,18 @@ for one.
 | The node budget costs no quiet rows — its quiet-fraction dip is the denominator | m260720 6e6 vs 6.5e6/7e6 | rows/game −0.5%, mean ply +1.9%, phase composition shift <0.25 pp | R5 | **ESTABLISHED** |
 | `eval_noise` displaces the position distribution completely, at zero Elo cost | §4 entry | 100% of games diverge by ply 1 at σ=5; 0 ± 10 Elo at σ=10 | R8 | **ESTABLISHED** |
 | `eval_noise` does NOT move sharpness or quiet fraction | 7 arms × 30k games | draw 22.20→21.50 over σ 0→40 (wrong sign, ~2σ); q@60 0.440→0.412 | R8 | **ESTABLISHED** |
+
+### PV resolution (2026-09-21)
+
+| claim | evidence | effect | regime | grade |
+|---|---|---|---|---|
+| `--depth D` never guaranteed depth-D LABELS; `PV_LAST_RESOLVED` overwrote score AND depth | search.cpp / main.cpp:816 | 44.9% of rows below floor at d8/2000, 55.8% at d8/0; m260720 (pre-repair) 0.00% | R8 | **ESTABLISHED** (code + corpus) |
+| Every unresolved iteration is the sequential fail-high/fail-low break | PVTRUNC_DIAG, 4000 games d8/0 | resolved 45.67%, interrupted 0.00%, seq 54.33% | R8 | **ESTABLISHED** |
+| Collapsing the root window is the cause; it is root-only | search.cpp:494/498 vs :1080 | no alpha raise → 74.71% resolved; + no beta lower → 88.45% | R8 | **ESTABLISHED** |
+| `PV_LAST_RESOLVED` cost 283 Elo of LEARNING play, not "slightly" | 4000 games, fixed d8 | +282.63 ± 12.06 to remove it | R8 | **ESTABLISHED** |
+| The combined fix is worth ~298 Elo of generation strength at 1.45× clock | 4000 games, fixed d8 | +298.45 ± 12.36; mean recorded depth 6.83 → 8.00 | R8 | **ESTABLISHED** |
+| Dropping Houdart's fail-high depth reduction HURTS | five paired arms | +2.7 pts alone at 1.15×; removing it from the all-three arm *improved* both resolution and speed | R8 | **ESTABLISHED** |
+| Stub rows are worse than resolved rows and the quiet gate cannot filter them | derived I−J, 4000 games | mean \|cp−gate\| 130.7 vs 111.6 cp; gate-60 pass 39.4% vs 49.1% | R8 | **ESTABLISHED** |
 
 ### The loop as a whole
 

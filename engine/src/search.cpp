@@ -37,21 +37,33 @@
 // update leaves it at 1.
 int tdleaf_pv_is_stub = 1;
 
-// PV_NO_TT_CUTOFF and PV_LAST_RESOLVED both make the engine slightly WEAKER in
-// competitive play -- the first spends nodes re-searching PV nodes the TT could
-// have cut off, the second hands back a shallower iteration's move when the
-// deepest one did not resolve.  They exist to give TDLeaf a trustworthy leaf
-// position, which is worth nothing outside learning.  So both are gated on this
-// flag, set only by the self-play and learner drivers; UCI/xboard play in a
-// TDLEAF build is bit-for-bit unaffected.
+// The PV repairs make the engine weaker in LEARNING play; they exist to give
+// TDLeaf a trustworthy leaf position, which is worth nothing outside learning.
+//
+// ⚠️ TWO CORRECTIONS (2026-09-21), both measured, both to claims this comment
+// used to make:
+//   1. "slightly WEAKER" was wrong about PV_LAST_RESOLVED.  Handing back a
+//      shallower iteration's MOVE cost 282.6 +/- 12.1 Elo at fixed d8 over
+//      4000 games, and it fired on 54.3% of searches.  It is now OFF by
+//      default; PV_NO_ALPHA_RAISE + PV_NO_BETA_LOWER take the unresolved rate
+//      to 11.9% and TDLEAF_SKIP_STUB_PV drops what remains.
+//   2. "UCI/xboard play in a TDLEAF build is bit-for-bit unaffected" was wrong.
+//      main.cpp sets pv_learning_mode = 1 in EVERY TDLEAF build regardless of
+//      protocol (deliberately -- the record/update hooks fire under UCI too),
+//      so only a non-TDLEAF build or --no-pv-learning is unaffected.  Rating
+//      matches normally use plain NNUE=1 binaries, where the flag is never set.
 int pv_learning_mode = 0;
+
+// Fallback telemetry.  Defined UNCONDITIONALLY: the PVTRUNC_DIAG report in
+// selfplay.cpp reads these whether or not the fallback is compiled in, so
+// PVTRUNC_DIAG=1 with PV_LAST_RESOLVED=0 used to fail to link.
+unsigned long long pv_fallback_used = 0, pv_fallback_unavail = 0;
 
 #if PV_LAST_RESOLVED
 // Snapshot of the last RESOLVED root iteration: its PV, score and depth.  Used
 // to replace the fail-high stub when an iteration ends without resolving.
 static move pv_saved[MAXD];
 static int  pv_saved_score = 0, pv_saved_depth = 0, pv_saved_valid = 0;
-unsigned long long pv_fallback_used = 0, pv_fallback_unavail = 0;
 #endif
 
 #if PVTRUNC_DIAG
@@ -478,16 +490,33 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
     //------------------------------------------
     fail_low = 0; fail_high = 0;
     while(1) {
-      g = search_threads(root_alpha, root_beta, max_ply-1-fail_high, thread_cfg.threads);
+#if PV_NO_FAILHIGH_REDUCTION
+      // Learning play only: re-search the fail-high at FULL depth so it can
+      // confirm rather than undercut, and the iteration can resolve.
+      const int fh_reduction = pv_learning_mode ? 0 : fail_high;
+#else
+      const int fh_reduction = fail_high;
+#endif
+      g = search_threads(root_alpha, root_beta, max_ply-1-fh_reduction, thread_cfg.threads);
 #if PVTRUNC_DIAG
       if(g == -TIME_FLAG) asp_last_exit = 1;
 #endif
       if(g == -TIME_FLAG) break;
       if(g <= root_alpha && !fail_high) {
-	root_beta = root_alpha; fail_low = 1;
+#if PV_NO_BETA_LOWER
+	if (!pv_learning_mode) root_beta = root_alpha;
+#else
+	root_beta = root_alpha;
+#endif
+	fail_low = 1;
 	root_alpha = MAX(-MATE,g+1.5*(root_alpha-g_last));
       } else if(g >= root_beta && !fail_low) { 
-	root_alpha = root_beta; fail_high = 1;
+#if PV_NO_ALPHA_RAISE
+	if (!pv_learning_mode) root_alpha = root_beta;
+#else
+	root_alpha = root_beta;
+#endif
+	fail_high = 1;
 	// resort root moves if we changed our mind
         //  about the best move.
 	if(tdata[0].pc[0][0].t != root_moves.mv[0].m.t) {
