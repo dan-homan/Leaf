@@ -17,11 +17,19 @@ sidecar JSON, the actor logs and the generation PGN.  Run it after each leg.
 
 COLUMNS
 
-  Elo/Mg      Leg gain against the PARENT net, per million games.  The direct
-              paired match, which is the most reliable Elo the chain produces.
-              This is the number that decides the d6 -> d8 handover: m260720
-              switched when it fell to ~+116/Mgame at 2M cumulative and the
-              first d8 leg returned ~+187/Mgame.  Trigger: ~120.
+  anc/Mg      ⭐ Leg gain on the FOREIGN ANCHOR, per million games.  THIS is
+              the handover trigger, because §5 designates the foreign anchor as
+              the figure of merit and says family matches are non-transitive in
+              BOTH directions.  m260720 switched to d8 when this fell to **73**
+              (2M cumulative) and its next two legs returned 122 and 177.
+              Single readings are noisy (±10 per anchor match, so ±28/Mg on a
+              500k leg) -- read the TREND over three or more legs.
+
+  par/Mg      The same thing measured against the PARENT net.  Kept because it
+              is tighter per leg, but it is NOT the trigger: at m260921's
+              1.5e6 leg it read 166 while the anchor read 33.  A family match
+              one leg apart shares blind spots and rewards style differences
+              that do not transfer.  When the two disagree, the anchor wins.
 
   on / off    Online (tdleaf) and offline contributions to the leg, both
               measured against the parent.  ⚠️ These are two matches against a
@@ -167,10 +175,10 @@ def main():
         if not legs:
             print(f"\n{chain}: no sidecars found"); continue
         print(f"\n=== {chain} ===")
-        print(f"{'leg':>7} {'cum':>9} {'d/nodes':>8} {'anchor':>9} {'leg':>8} "
-              f"{'Elo/Mg':>8} {'on':>7} {'off':>7} {'draw%':>7} {'ply':>6} "
+        print(f"{'leg':>7} {'cum':>9} {'d/nod':>7} {'anchor':>9} {'anc/Mg':>7} "
+              f"{'par/Mg':>7} {'on':>7} {'off':>7} {'draw%':>7} {'ply':>6} "
               f"{'depth':>6} {'<floor':>7} {'quiet':>6}")
-        prev_tag = None
+        prev_tag = None; prev_anc = None
         for j in legs:
             tag, cum = j["tag"], j.get("cumulative_games", 0)
             gi = j.get("games_this_iter", 0) or 0
@@ -178,6 +186,8 @@ def main():
             tot, _ = vs(j.get("final_gauntlet"), prev_tag) if prev_tag else (None, None)
             onl, _ = vs(j.get("tdleaf_gauntlet"), prev_tag) if prev_tag else (None, None)
             perM = (tot / (gi / 1e6)) if (tot is not None and gi) else None
+            dan = (anc - prev_anc) if (anc is not None and prev_anc is not None) else None
+            ancM = (dan / (gi / 1e6)) if (dan is not None and gi) else None
             off = (tot - onl) if (tot is not None and onl is not None) else None
             dr, _ = draw_rate(tag)
             ply, dep, blw = pgn_stats(tag, sample)
@@ -185,12 +195,15 @@ def main():
             quiet = (rr / gi / ply) if (rr and gi and ply) else None
             f = lambda v, w, p=1, s="": f"{v:>{w}.{p}f}{s}" if v is not None else f"{'--':>{w}}"
             print(f"{tag.split('-')[-1]:>7} {cum:>9,} "
-                  f"{str(j.get('depth'))+'/'+str(j.get('nodes')):>8} "
-                  f"{f(anc,9)} {f(tot,8)} {f(perM,8,0)} {f(onl,7)} {f(off,7)} "
+                  f"{str(j.get('depth'))+'/'+str(j.get('nodes')):>7} "
+                  f"{f(anc,9)} {f(ancM,7,0)} {f(perM,7,0)} {f(onl,7)} {f(off,7)} "
                   f"{f(dr,7,2)} {f(ply,6,1)} {f(dep,6,2)} {f(blw,6,1,'%')} {f(quiet,6,3)}")
             prev_tag = tag
-        print("  Elo/Mg trigger for d6->d8: ~120 (m260720 switched at ~+116 and "
-              "the first d8 leg returned ~+187).  <floor MUST be 0.0%.")
+            if anc is not None: prev_anc = anc
+        print("  TRIGGER is anc/Mg, not par/Mg: m260720 switched d6->d8 at 73 "
+              "and its next two legs gave 122 and 177.")
+        print("  <floor MUST be 0.0% — anything else means results are recorded "
+              "from an iteration other than the one searched.")
 
 
 if __name__ == "__main__":
