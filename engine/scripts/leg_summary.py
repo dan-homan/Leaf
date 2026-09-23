@@ -40,6 +40,13 @@ COLUMNS
               offline share means the online phase is excursion-dominated,
               which is statements B and C.
 
+  on@a        Online contribution on the FOREIGN ANCHOR: the tdleaf (pre-
+              offline) net vs classic, minus the parent's final vs classic.
+              Same footing as anc/Mg (a difference of two anchor ratings,
+              +/- ~14 one-sigma).  Read this, not `on`, for whether the online
+              phase is learning: at 2.5e6 `on` read +1.4 against the parent
+              while on@a read +15.2.
+
   draw%       Self-play draw rate over the whole leg, from the actor logs
               (exact, free, and verified to agree with the generation PGN to
               0.01%).  The health canary: healthy is 35-40% at d8, and the
@@ -176,7 +183,7 @@ def main():
             print(f"\n{chain}: no sidecars found"); continue
         print(f"\n=== {chain} ===")
         print(f"{'leg':>7} {'cum':>9} {'d/nod':>7} {'anchor':>9} {'anc/Mg':>7} "
-              f"{'par/Mg':>7} {'on':>7} {'off':>7} {'draw%':>7} {'ply':>6} "
+              f"{'par/Mg':>7} {'on':>7} {'on@a':>7} {'off':>7} {'draw%':>7} {'ply':>6} "
               f"{'depth':>6} {'<floor':>7} {'quiet':>6}")
         prev_tag = None; prev_anc = None
         for j in legs:
@@ -185,6 +192,8 @@ def main():
             anc, _ = vs(j.get("final_gauntlet"), "classic")
             tot, _ = vs(j.get("final_gauntlet"), prev_tag) if prev_tag else (None, None)
             onl, _ = vs(j.get("tdleaf_gauntlet"), prev_tag) if prev_tag else (None, None)
+            tda, _ = vs(j.get("tdleaf_gauntlet"), "classic")
+            ona = (tda - prev_anc) if (tda is not None and prev_anc is not None) else None
             perM = (tot / (gi / 1e6)) if (tot is not None and gi) else None
             dan = (anc - prev_anc) if (anc is not None and prev_anc is not None) else None
             ancM = (dan / (gi / 1e6)) if (dan is not None and gi) else None
@@ -196,7 +205,7 @@ def main():
             f = lambda v, w, p=1, s="": f"{v:>{w}.{p}f}{s}" if v is not None else f"{'--':>{w}}"
             print(f"{tag.split('-')[-1]:>7} {cum:>9,} "
                   f"{str(j.get('depth'))+'/'+str(j.get('nodes')):>7} "
-                  f"{f(anc,9)} {f(ancM,7,0)} {f(perM,7,0)} {f(onl,7)} {f(off,7)} "
+                  f"{f(anc,9)} {f(ancM,7,0)} {f(perM,7,0)} {f(onl,7)} {f(ona,7)} {f(off,7)} "
                   f"{f(dr,7,2)} {f(ply,6,1)} {f(dep,6,2)} {f(blw,6,1,'%')} {f(quiet,6,3)}")
             prev_tag = tag
             if anc is not None: prev_anc = anc
