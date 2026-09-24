@@ -118,6 +118,13 @@ def main():
                          "side A alternating colour over paired openings -- "
                          "the outcome scores the hypothesis against the current "
                          "net.  anti: +eps vs -eps, the antithetic pair")
+    ap.add_argument("--pair-openings", action="store_true",
+                    help="two-sided --psqt-opponent only: play each opening "
+                         "twice with side A on either colour, for a pentanomial "
+                         "Elo of the hypothesis (the measurement arms use it).  "
+                         "Off by default, so a learning leg keeps exactly the "
+                         "opening sequence of an unperturbed leg with the same "
+                         "--seed")
     ap.add_argument("--psqt-noise-ref", default=None, metavar="FILE",
                     help="usage-weighted PSQT material reference for --psqt-noise, "
                          "from scripts/psqt_decomp.py --write-ref")
@@ -250,7 +257,8 @@ def main():
                   "--psqt-noise-seed", str((args.seed if args.psqt_noise_seed is None
                                             else args.psqt_noise_seed) + generation[slot]),
                   "--psqt-noise-ref", args.psqt_noise_ref,
-                  "--psqt-opponent", args.psqt_opponent]
+                  "--psqt-opponent", args.psqt_opponent,
+                  *(["--pair-openings"] if args.pair_openings else [])]
                  if args.psqt_noise > 0 else []),
                "--games", str(args.games_per_actor),
                "--depth", str(args.depth),

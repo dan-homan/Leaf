@@ -1,5 +1,19 @@
 Changes since 2017_12_24
 
+2026_09_24b -- Two-sided PSQT hypotheses: one opening per game by default.
+
+               The measurement arms played each opening twice with colours
+               swapped, for a pentanomial Elo of side A.  In a learning leg that
+               halves the distinct openings (~250k vs ~500k over 500k games) and
+               shares only half of a seed-paired sibling's openings -- a second
+               variable next to the hypotheses.  Pairing is now --pair-openings
+               (selfplay, selfplay_run.py; psqt_noise_tderr.sh passes it); by
+               default side A still alternates colour game by game but every
+               game gets its own opening.  Verified: unpaired two-sided opening
+               sequence identical to an unperturbed run with the same seed and
+               stripe; --pair-openings = each of those openings twice; no-flags
+               dumps still bit-identical to the pre-PSQT binary.
+
 2026_09_24a -- PSQT hypotheses: directional exploration in parameter space,
                psqt_decomp.py, and two-sided (clean / antithetic) self-play.
 

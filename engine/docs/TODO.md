@@ -138,7 +138,9 @@ canary is written for d8.
         `OPP=clean FRAC=0.25` arm (`scripts/arms/psqt_noise_tderr.sh`, ~35 min)
         prices it before the leg.
       - Compare on the FOREIGN ANCHOR against the repeated leg's own result
-        (and seed-pair it: `--seed` of that leg), not the family ladder.
+        (and seed-pair it: `--seed` of that leg), not the family ladder.  Legs
+        play one opening per game (no `--pair-openings`), so the seed-paired
+        sibling sees the identical opening sequence.
       - Canaries: draw rate, `<floor`, and side A's score in the actor logs
         (should sit near 50%).
       - What the frozen arms could and could not show: the TD gradient

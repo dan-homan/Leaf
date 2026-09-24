@@ -57,6 +57,8 @@ struct SelfplayConfig {
     int      traj_max_pending; // backpressure: sleep while this many .tdg await the learner
     const char *pgn_out;      // --pgn-out: append played games here (NULL = off)
     const char *pgn_name;     // --pgn-name: White/Black tag text
+    bool     pair_openings;   // --pair-openings: two-sided hypotheses play each
+                              // opening twice, colours swapped (measurement arms)
 };
 
 struct SelfplayStats {
@@ -612,6 +614,7 @@ int selfplay_main(int argc, char *argv[])
     cfg.traj_max_pending = 500;
     cfg.pgn_out    = nullptr;
     cfg.pgn_name   = nullptr;
+    cfg.pair_openings = false;
     snprintf(cfg.tdleaf_out, sizeof(cfg.tdleaf_out), "%s%s",
              engine_cfg.exec_path, NNUE_TDLEAF_BIN);
 
@@ -636,6 +639,7 @@ int selfplay_main(int argc, char *argv[])
         else if (!strcmp(argv[ai], "--pgn-name") && ai + 1 < argc) cfg.pgn_name = argv[++ai];
         else if (!strcmp(argv[ai], "--no-adjudication")) cfg.adjudicate = false;
         else if (!strcmp(argv[ai], "--verbose"))         cfg.verbose    = true;
+        else if (!strcmp(argv[ai], "--pair-openings"))   cfg.pair_openings = true;
     }
     if (cfg.traj_dir) {
         struct stat stbuf;
@@ -690,9 +694,14 @@ int selfplay_main(int argc, char *argv[])
             cfg.pgn_out ? ", writing PGN" : "");
 
     // Two-sided PSQT hypotheses: the second TT/score hash is allocated here,
-    // after the argument loop's `hash <MB>` has sized the primary set.  Each
-    // opening is played twice with side A on either colour, so a hypothesis is
-    // never scored on one colour of an opening only.
+    // after the argument loop's `hash <MB>` has sized the primary set.  Side A
+    // alternates colour game by game.  With --pair-openings each opening is
+    // played twice, A on either colour, so a hypothesis is never scored on one
+    // colour of an opening only -- what the measurement arms need for a
+    // pentanomial Elo.  Without it (the default, and what a learning leg wants)
+    // every game gets its own opening, so the opening sequence is exactly that
+    // of an unperturbed run with the same seed and the hypotheses are the only
+    // variable.
     const bool dual = nnue_psqt_dual;
     int a_score2 = 0, a_games = 0;           // side A's score in half-points
     if (dual) {
@@ -701,8 +710,9 @@ int selfplay_main(int argc, char *argv[])
             return 1;
         }
         hash_dual_open();
-        fprintf(stderr, "selfplay: two-sided PSQT hypotheses -- side A alternates colour, "
-                        "each opening played twice\n");
+        fprintf(stderr, "selfplay: two-sided PSQT hypotheses -- side A alternates colour, %s\n",
+                cfg.pair_openings ? "each opening played twice (--pair-openings)"
+                                  : "one opening per game");
     }
 
     SelfplayPgn pgn;
@@ -713,7 +723,7 @@ int selfplay_main(int argc, char *argv[])
     int start_time = GetTime();
 
     for (int g = 0; g < total_games; g++) {
-        int og = dual ? g / 2 : g;               // opening index (pairs when dual)
+        int og = (dual && cfg.pair_openings) ? g / 2 : g;   // opening index
         size_t idx = (size_t)cfg.epd_offset +
                      (size_t)((og % slice_count)) * (size_t)cfg.epd_stride;
         int a_white = dual ? ((g & 1) == 0) : -1;

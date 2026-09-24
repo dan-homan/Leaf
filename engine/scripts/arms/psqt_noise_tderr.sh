@@ -65,6 +65,7 @@ for ns in $NSEEDS; do
             --refresh-scores --delete-consumed --seed "$SEED" \
             --psqt-noise "$FRAC" --psqt-noise-seed "$ns" --psqt-noise-ref "$REF" \
             --psqt-opponent "$OPP" --pgn-dir "$out/pgn" \
+            $( [ "$OPP" != same ] && echo --pair-openings ) \
             > "$out/run.log" 2>&1
     grep -h "PSQT noise eps" "$out"/traj/actor_0.log > "$out/eps.txt"
     touch "$out.done"

@@ -1067,7 +1067,7 @@ code: the statics include the perturbation and `--refresh-scores` removes it.
 Verified to 0.37 cp mean against an independent prediction.  `--psqt-opponent`
 chooses who plays it: `same` (both sides), `clean` (+ε vs the current net) or
 `anti` (+ε vs −ε), the two-sided modes with per-side PSQT tables and per-side
-TT/score hash, each opening played twice with colours swapped.
+TT/score hash, side A alternating colour (`--pair-openings`, used by the arms, plays each opening twice; legs default to one opening per game so a seed-paired sibling keeps the identical opening sequence).
 
 *Measurement* (`scripts/arms/psqt_noise_tderr.sh` + `psqt_noise_coherence.py`;
 frozen m260921-2.5e6g, 8,000 d8 games per arm, FRAC 0.5, paired openings).  The
