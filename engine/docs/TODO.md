@@ -119,6 +119,35 @@ canary is written for d8.
       no PGN at all.
 
 
+### Antithetic PSQT hypotheses — a learning leg (2026-09-24)
+
+- [ ] **H1 — one leg with `--psqt-noise 0.25 --psqt-opponent anti`, otherwise a
+      repeat of the most recent m260921 leg — run it once the chain's learning
+      slows.**  Actors play two slightly weaker nets whose positional
+      understanding is displaced in OPPOSITE directions (PSQT positional part
+      scaled by 1±ε per piece type and bucket, one draw per refresh generation);
+      the learner sees every game through the clean net.  The bet: games shaped
+      by different kinds of chess understanding put the learner in positions
+      where its own judgment is tested, and it turns the consequences into
+      gradients anywhere in the net.
+      - Why anti: shared-field self-play only ENACTS a hypothesis (trace follows
+        ε, z ≈ +27); against a clean opponent the enactment vanishes but the
+        cost is one-sided; anti keeps outcomes balanced by construction.
+      - Why 0.25: at 0.5 one-sided cost was −68 / −88 Elo vs the clean net —
+        past the ~50 Elo budget.  **Unmeasured at 0.25** — a frozen
+        `OPP=clean FRAC=0.25` arm (`scripts/arms/psqt_noise_tderr.sh`, ~35 min)
+        prices it before the leg.
+      - Compare on the FOREIGN ANCHOR against the repeated leg's own result
+        (and seed-pair it: `--seed` of that leg), not the family ladder.
+      - Canaries: draw rate, `<floor`, and side A's score in the actor logs
+        (should sit near 50%).
+      - What the frozen arms could and could not show: the TD gradient
+        projected on the 48 PSQT pattern directions does not track hypothesis
+        quality in any design, while the outcome separates hypotheses to ±3.4
+        Elo per 8k games.  The consequences of a PSQT hypothesis can land in
+        FC/FT gradients the instrument never looked at (FC holds ~83% of
+        quiet-move positional variance), so only a learning leg answers it.
+
 ### Offline-phase plateau — ranked experiment plan (2026-09-02)
 
 Evidence and measurements: `docs/history/Offline_Learning_Investigation.md` Part 1.  The

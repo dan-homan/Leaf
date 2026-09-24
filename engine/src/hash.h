@@ -165,6 +165,8 @@ struct cmove_rec
 void open_hash();
 void close_hash();
 void clear_hash();
+void hash_dual_open();          // second TT + score hash for two-sided PSQT hypotheses
+void hash_dual_select(int h);
 void set_hash_size(unsigned int Mbytes);
 void put_hash(h_code *h_key, int score, int alpha, int beta, int depth, int hmove, int h_id, int ply);
 int get_hash(h_code *h_key, int *hflag, int *hdepth, move *gmove, int ply, int *singular);

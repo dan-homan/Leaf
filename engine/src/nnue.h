@@ -125,6 +125,17 @@ void nnue_print_diag_info();
 // output when called automatically after each training batch.
 void nnue_extract_piece_values(bool verbose = true);
 
+// PSQT pattern perturbation for self-play ACTORS (see nnue.cpp).  Scales the
+// POSITIONAL part of every PSQT entry by (1 + eps), one eps per (piece type,
+// PSQT bucket), leaving material exactly as the reference file defines it.
+// Returns false (and changes nothing) on a bad reference file.
+bool nnue_psqt_perturb(double frac, unsigned long long seed, const char *ref_path);
+// Two-sided: side A +eps, side B clean (opp 1) or -eps (opp 2); the self-play
+// driver selects per move.  nnue_psqt_dual is set once the tables exist.
+bool nnue_psqt_dual_setup(double frac, unsigned long long seed, const char *ref_path, int opp);
+void nnue_psqt_select(int h);
+extern bool nnue_psqt_dual;
+
 // Load from an in-memory buffer (for embedded nets via incbin).
 bool nnue_load_from_memory(const uint8_t *data, size_t size);
 

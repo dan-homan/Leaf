@@ -1,5 +1,49 @@
 Changes since 2017_12_24
 
+2026_09_24a -- PSQT hypotheses: directional exploration in parameter space,
+               psqt_decomp.py, and two-sided (clean / antithetic) self-play.
+
+               psqt_decomp.py (scripts/, SCRIPT_USE).  Usage-weighted split of a
+               net's PSQT into material and positional parts on real positions,
+               and of the static into PSQT vs FC; several nets on one position
+               set for composition over time; --write-ref for the engine.
+               m260921-2.5e6g: quiet-move positional variance 17% PSQT / 83% FC,
+               uncorrelated.  Plain-mean material misses usage-weighted by 18.5
+               cp rms (max 69), Adam counts by 6.3 (max 35).  Two-pass loader:
+               a full 34M-row leg corpus in ~75 s.
+
+               ENGINE.  --psqt-noise FRAC --psqt-noise-seed N --psqt-noise-ref
+               FILE: one eps ~ N(0, FRAC) per (piece type, PSQT bucket), scaling
+               the group's positional part by (1+eps) about its usage-weighted
+               material (nnue.cpp psqt_build).  Actors only: a TDLEAF build
+               refuses it without TDLEAF_FREEZE.  --psqt-opponent same|clean|anti
+               builds two tables (A: +eps; B: clean or -eps, eps clamped to
+               [-1,1] in anti so no side inverts) and the self-play driver
+               selects the side-to-move's table AND its own main TT + score hash
+               per move (hash_dual_open/select; pawn + cmove tables are
+               weight-independent and shared); each opening twice, colours
+               swapped; PGN names hypA/hypB; side A's score in the actor log.
+               selfplay_run.py / train.py pass it through (train.py: default
+               opponent anti, reference auto-built from the --continue parent).
+               Verified: no flags bit-identical to the pre-PSQT binary, single
+               mode bit-identical to its first build; static change vs an
+               independent Python prediction 0.37 cp mean (max 1.94); two-sided
+               per-side statics correct in 252/252 (clean) and 214/214 (anti)
+               games, side B matching an independent -eps prediction.
+
+               MEASUREMENT (psqt_noise_tderr.sh, psqt_noise_coherence.py; frozen
+               m260921-2.5e6g, 8k d8 games per arm, FRAC 0.5).  The TD gradient
+               along the 48 pattern directions is exact from the leaf dump.
+                 same  101/202: align with eps z +27.5 / +26.2 -- ENACTED
+                 clean 101/202: side A -67.8 / -87.5 Elo; align +0.6 / -2.1
+                 anti  101/202: side A +9.0 / -19.8 Elo; align -7.6 / -6.8,
+                                regardless of which side won
+               The PSQT-projected gradient tracks hypothesis quality in no
+               design, while the outcome separates hypotheses to +-3.4 Elo.  FC
+               holds 83% of positional variance, so the response may land in
+               gradients this instrument does not project on; the test is a
+               learning leg (TODO H1: anti, FRAC 0.25).
+
 2026_09_23a -- eval_noise: the root search score was never de-noised.  Fixed,
                and the learning-signal question measured.
 

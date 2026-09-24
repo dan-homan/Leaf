@@ -797,6 +797,177 @@ int nnue_evaluate(const NNUEAccumulator &acc, int stm, int piece_count)
     return score;
 }
 // ---------------------------------------------------------------------------
+// nnue_psqt_perturb -- directional exploration in PARAMETER space, for actors.
+//
+// eval_noise perturbs the eval by a hash of the pawn structure: every diverted
+// game goes somewhere unrelated, so errors the clean net makes there are
+// one-offs that average away.  This instead perturbs along directions the net
+// can itself represent and the learner can move along: for each (piece type,
+// PSQT bucket) the POSITIONAL part of its PSQT entries -- each entry's
+// deviation from that piece's material value in that bucket -- is scaled by
+// (1 + eps), eps ~ N(0, frac), one draw per group, applied to the own- and
+// enemy-perspective planes alike ("in bucket 3, be 50% more sure about where
+// knights belong").  48 draws in all.  Every actor sharing a seed plays the
+// same hypotheses, so their games push the learner's gradient coherently.
+//
+// MATERIAL is left exactly alone: w' = m + (1 + eps)(w - m), where m is the
+// USAGE-weighted mean of the group over (king bucket, square).  A plain mean
+// over entries misses it by 18.5 cp rms (up to 69), and Adam step counts by
+// 6.3 rms (up to 35) -- at eps 0.5 either would leak real piece value -- so m
+// comes from a reference file written by scripts/psqt_decomp.py --write-ref,
+// computed on positions the net actually plays.
+//
+// eps is clamped to [-1, 3*frac]: at -1 the group's positional opinion is
+// switched off; below that it would be INVERTED, which is not a hypothesis
+// the net would hold.  Labels stay clean with no special handling: the
+// perturbation lives in the weights, so the actor's recorded statics include
+// it and the learner's --refresh-scores removes it exactly (it shifts the root
+// by clean-minus-perturbed leaf).  Only a frozen actor may carry it -- the
+// weights it perturbs must never be saved.
+// ---------------------------------------------------------------------------
+static bool psqt_load_ref(const char *ref_path, double ref[11][NNUE_PSQT_BKTS])
+{
+    bool have[11][NNUE_PSQT_BKTS] = {};
+    FILE *f = fopen(ref_path, "r");
+    if (!f) { fprintf(stderr, "PSQT noise: cannot open reference %s\n", ref_path); return false; }
+    char line[256];
+    while (fgets(line, sizeof line, f)) {
+        int pl, b; double m;
+        if (line[0] == '#') continue;
+        if (sscanf(line, "%d %d %lf", &pl, &b, &m) == 3 &&
+            pl >= 0 && pl < 11 && b >= 0 && b < NNUE_PSQT_BKTS) {
+            ref[pl][b] = m; have[pl][b] = true;
+        }
+    }
+    fclose(f);
+    for (int pl = 0; pl < 11; pl++)
+        for (int b = 0; b < NNUE_PSQT_BKTS; b++)
+            if (!have[pl][b]) {
+                fprintf(stderr, "PSQT noise: reference %s lacks plane %d bucket %d\n",
+                        ref_path, pl, b);
+                return false;
+            }
+    return true;
+}
+
+// eps[piece 0..5 = P N B R Q K][bucket] ~ N(0, frac): splitmix64 -> Box-Muller,
+// clamped to [lo, hi].
+static void psqt_draw_eps(double frac, unsigned long long seed, double lo, double hi,
+                          double eps[6][NNUE_PSQT_BKTS])
+{
+    unsigned long long st = seed ^ 0x5053515450455254ULL;   // "PSQTPERT"
+    auto next = [&]() {
+        unsigned long long z = (st += 0x9E3779B97F4A7C15ULL);
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+        return (double)((z ^ (z >> 31)) >> 11) * (1.0 / 9007199254740992.0);
+    };
+    for (int p = 0; p < 6; p++)
+        for (int b = 0; b < NNUE_PSQT_BKTS; b++) {
+            double u1 = next(), u2 = next();
+            if (u1 < 1e-300) u1 = 1e-300;
+            double e = frac * sqrt(-2.0 * log(u1)) * cos(6.283185307179586 * u2);
+            eps[p][b] = e < lo ? lo : e > hi ? hi : e;
+        }
+}
+
+// dst[i] = m + (1 + sign*eps)(w - m), from the CLEAN weights (the FP32 shadow
+// when there is one, so repeated builds do not compound rounding).
+static void psqt_build(const double ref[11][NNUE_PSQT_BKTS], const double eps[6][NNUE_PSQT_BKTS],
+                       double sign, int32_t *dst, float *dst_f32)
+{
+    for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
+        int pl = (fi % 704) / 64;             // 0..9 own/enemy P..Q, 10 kings
+        int p  = (pl == 10) ? 5 : pl / 2;
+        for (int b = 0; b < NNUE_PSQT_BKTS; b++) {
+            size_t i = (size_t)fi * NNUE_PSQT_BKTS + b;
+            double m = ref[pl][b], k = 1.0 + sign * eps[p][b];
+            double w = psqt_weights_f32 ? (double)psqt_weights_f32[i] : (double)psqt_weights[i];
+            double wn = m + k * (w - m);
+            dst[i] = (int32_t)lround(wn);
+            if (dst_f32) dst_f32[i] = (float)wn;
+        }
+    }
+}
+
+// label "" -> "PSQT noise eps P: ..." (side A / single; parsed by the arm
+// scripts); "side-B" -> "PSQT noise side-B eps P: ..." (deliberately NOT
+// prefixed "PSQT noise eps", so those parsers skip it and the bishop line
+// "eps B:" is never ambiguous).
+static void psqt_log_eps(const char *label, const double eps[6][NNUE_PSQT_BKTS], double sign)
+{
+    static const char *pn = "PNBRQK";
+    for (int p = 0; p < 6; p++) {
+        if (*label) fprintf(stderr, "PSQT noise %s eps %c:", label, pn[p]);
+        else        fprintf(stderr, "PSQT noise eps %c:", pn[p]);
+        for (int b = 0; b < NNUE_PSQT_BKTS; b++) fprintf(stderr, " %+.3f", sign * eps[p][b]);
+        fprintf(stderr, "\n");
+    }
+}
+
+bool nnue_psqt_perturb(double frac, unsigned long long seed, const char *ref_path)
+{
+    if (!psqt_weights || frac <= 0.0) return false;
+    double ref[11][NNUE_PSQT_BKTS], eps[6][NNUE_PSQT_BKTS];
+    if (!psqt_load_ref(ref_path, ref)) return false;
+    psqt_draw_eps(frac, seed, -1.0, 3.0 * frac, eps);
+    // In place: psqt_build reads each entry before writing it.
+    psqt_build(ref, eps, 1.0, psqt_weights, psqt_weights_f32);
+    fprintf(stderr, "PSQT noise: frac %.2f seed %llu ref %s -- play only; the learner "
+                    "never carries it\n", frac, seed, ref_path);
+    psqt_log_eps("", eps, 1.0);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Two-sided variant: one hypothesis per SIDE of a self-play game.  Shared-field
+// self-play only ENACTS a hypothesis -- both players hold it, so a pattern is
+// worth about (1 + eps) in their games and the trace learns exactly that
+// (measured: the TD gradient follows eps for both signs, z ~ +27).  To TEST
+// one, it must meet a player who does not hold it:
+//   opp = 1 (clean): side A plays +eps, side B the unperturbed net.  The
+//                    outcome scores the hypothesis against the current net.
+//   opp = 2 (anti):  side A +eps, side B -eps -- the antithetic pair.  Both
+//                    sides equally weakened, so outcomes are balanced by
+//                    construction, the enacted bias cancels to first order,
+//                    and the outcome difference is doubled.  eps is clamped
+//                    to [-1, 1] here so that neither side is ever INVERTED.
+// Tables psqt_hyp[0] (A) and psqt_hyp[1] (B) are built once; the self-play
+// driver selects one per move with nnue_psqt_select (the root accumulator is
+// rebuilt from scratch at every search, so the swap is exact) and swaps the
+// weight-dependent caches with hash_dual_select.  The FP32 shadow stays clean.
+// ---------------------------------------------------------------------------
+static int32_t *psqt_hyp[2] = {nullptr, nullptr};
+bool nnue_psqt_dual = false;
+
+bool nnue_psqt_dual_setup(double frac, unsigned long long seed, const char *ref_path, int opp)
+{
+    if (!psqt_weights || frac <= 0.0 || (opp != 1 && opp != 2)) return false;
+    double ref[11][NNUE_PSQT_BKTS], eps[6][NNUE_PSQT_BKTS];
+    if (!psqt_load_ref(ref_path, ref)) return false;
+    if (opp == 2) psqt_draw_eps(frac, seed, -1.0, 1.0, eps);
+    else          psqt_draw_eps(frac, seed, -1.0, 3.0 * frac, eps);
+    size_t n = (size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS;
+    for (int h = 0; h < 2; h++) psqt_hyp[h] = new int32_t[n];
+    psqt_build(ref, eps, 1.0, psqt_hyp[0], nullptr);
+    if (opp == 2) psqt_build(ref, eps, -1.0, psqt_hyp[1], nullptr);
+    else          memcpy(psqt_hyp[1], psqt_weights, n * sizeof(int32_t));
+    psqt_weights = psqt_hyp[0];
+    nnue_psqt_dual = true;
+    fprintf(stderr, "PSQT noise: frac %.2f seed %llu ref %s -- TWO-SIDED, side A +eps vs "
+                    "side B %s; play only, the learner never carries it\n",
+            frac, seed, ref_path, opp == 2 ? "-eps (antithetic)" : "clean");
+    psqt_log_eps("", eps, 1.0);
+    if (opp == 2) psqt_log_eps("side-B", eps, -1.0);
+    return true;
+}
+
+void nnue_psqt_select(int h)
+{
+    if (nnue_psqt_dual) psqt_weights = psqt_hyp[h ? 1 : 0];
+}
+
+// ---------------------------------------------------------------------------
 // nnue_extract_piece_values — derive cp values from loaded PSQT and write
 // into value[1..5] (score.h global), replacing the hardcoded constants.
 //

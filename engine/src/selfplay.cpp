@@ -269,6 +269,8 @@ static bool selfplay_write_traj(const SelfplayConfig &cfg, const TDGameRecord &r
 struct SelfplayPgn {
     FILE       *f;           // NULL = export off
     const char *name;        // White/Black tag text
+    const char *white;       // per-game override (two-sided PSQT hypotheses); NULL = name
+    const char *black;
     const char *budget;      // SearchBudget tag text
     char        date[16];    // "YYYY.MM.DD", stamped once at open
     char        fen[160];    // start position of the current game
@@ -314,6 +316,8 @@ static bool selfplay_pgn_open(SelfplayPgn &pgn, const SelfplayConfig &cfg,
 {
     pgn.f       = nullptr;
     pgn.name    = "Leaf";
+    pgn.white   = nullptr;
+    pgn.black   = nullptr;
     pgn.budget  = budget;
     pgn.col     = 0;
     pgn.plies   = 0;
@@ -430,7 +434,8 @@ static void selfplay_pgn_finish(SelfplayPgn &pgn, SelfplayTerm term,
             "[TimeControl \"-\"]\n"
             "[SearchBudget \"%s\"]\n"
             "[NetHash \"%08x\"]\n\n",
-            pgn.date, round, pgn.name, pgn.name, res, pgn.fen,
+            pgn.date, round, pgn.white ? pgn.white : pgn.name,
+            pgn.black ? pgn.black : pgn.name, res, pgn.fen,
             pgn.plies, why, pgn.budget, nnue_get_content_hash());
     selfplay_pgn_token(pgn, res);
     fputs(pgn.moves.c_str(), pgn.f);
@@ -452,8 +457,10 @@ static void selfplay_pgn_close(SelfplayPgn &pgn)
 // Play one game from an opening.  Returns the termination reason; result_w is
 // the white-POV outcome (undefined for SP_TERM_ERROR).
 // ---------------------------------------------------------------------------
+// a_white: two-sided PSQT hypotheses only -- 1 if side A (the +eps
+// hypothesis) plays White this game, 0 if Black; -1 = one net for both sides.
 static SelfplayTerm selfplay_play_game(const SelfplayEpdLine &op, const SelfplayConfig &cfg,
-                                       float &result_w, SelfplayPgn &pgn)
+                                       float &result_w, SelfplayPgn &pgn, int a_white)
 {
     selfplay_new_game_reset();
     game.setboard(op.board, op.ms, op.castle, op.ep);
@@ -495,6 +502,16 @@ static SelfplayTerm selfplay_play_game(const SelfplayEpdLine &op, const Selfplay
         // vDSO read (~25 ns), so it is cheaper than branching around it.
         struct timeval mv_t0, mv_t1;
         gettimeofday(&mv_t0, nullptr);
+        if (a_white >= 0) {
+            // The side to move searches with ITS hypothesis and ITS caches.
+            // Exact: search() rebuilds the root accumulator from scratch, and
+            // tdleaf_record_ply walks the PV under the same table, so the
+            // recorded statics are this side's -- which --refresh-scores then
+            // replaces with clean ones in the learner.
+            int h = ((int)game.pos.wtm == a_white) ? 0 : 1;
+            nnue_psqt_select(h);
+            hash_dual_select(h);
+        }
         game.best = game.ts.search(game.pos, MAXT, game.T, &game);
         gettimeofday(&mv_t1, nullptr);
 
@@ -672,6 +689,22 @@ int selfplay_main(int argc, char *argv[])
             getenv("TDLEAF_DUMP_TSV") ? ", dumping TSV" : "",
             cfg.pgn_out ? ", writing PGN" : "");
 
+    // Two-sided PSQT hypotheses: the second TT/score hash is allocated here,
+    // after the argument loop's `hash <MB>` has sized the primary set.  Each
+    // opening is played twice with side A on either colour, so a hypothesis is
+    // never scored on one colour of an opening only.
+    const bool dual = nnue_psqt_dual;
+    int a_score2 = 0, a_games = 0;           // side A's score in half-points
+    if (dual) {
+        if (!tdleaf_frozen()) {
+            fprintf(stderr, "selfplay: two-sided PSQT hypotheses require TDLEAF_FREEZE=1\n");
+            return 1;
+        }
+        hash_dual_open();
+        fprintf(stderr, "selfplay: two-sided PSQT hypotheses -- side A alternates colour, "
+                        "each opening played twice\n");
+    }
+
     SelfplayPgn pgn;
     if (!selfplay_pgn_open(pgn, cfg, budget)) return 1;
 
@@ -680,10 +713,16 @@ int selfplay_main(int argc, char *argv[])
     int start_time = GetTime();
 
     for (int g = 0; g < total_games; g++) {
+        int og = dual ? g / 2 : g;               // opening index (pairs when dual)
         size_t idx = (size_t)cfg.epd_offset +
-                     (size_t)((g % slice_count)) * (size_t)cfg.epd_stride;
+                     (size_t)((og % slice_count)) * (size_t)cfg.epd_stride;
+        int a_white = dual ? ((g & 1) == 0) : -1;
+        if (dual) {
+            pgn.white = a_white ? "hypA" : "hypB";
+            pgn.black = a_white ? "hypB" : "hypA";
+        }
         float result_w = 0.5f;
-        SelfplayTerm term = selfplay_play_game(openings[idx], cfg, result_w, pgn);
+        SelfplayTerm term = selfplay_play_game(openings[idx], cfg, result_w, pgn, a_white);
 
         // Every game reaches the PGN, including the ones dropped below: an
         // already-terminal opening, an early 3-rep the learner never sees, and
@@ -712,6 +751,11 @@ int selfplay_main(int argc, char *argv[])
         }
 
         st.played++;
+        if (dual) {
+            float ra = a_white ? result_w : 1.0f - result_w;
+            a_score2 += (int)lroundf(2.0f * ra);
+            a_games++;
+        }
         if (result_w > 0.75f)      st.white_wins++;
         else if (result_w < 0.25f) st.black_wins++;
         else                       st.draws++;
@@ -744,6 +788,9 @@ int selfplay_main(int argc, char *argv[])
             fprintf(stderr, "selfplay: %d/%d games  +%d =%d -%d  (%.2f games/s)\n",
                     g + 1, total_games, st.white_wins, st.draws, st.black_wins,
                     el > 0 ? st.played / el : 0.0f);
+            if (dual && a_games)
+                fprintf(stderr, "selfplay: side A (+eps) %.1f/%d = %.2f%%\n",
+                        a_score2 / 2.0, a_games, 50.0 * a_score2 / a_games);
         }
     }
 

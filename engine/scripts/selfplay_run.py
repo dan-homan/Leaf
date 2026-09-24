@@ -95,6 +95,32 @@ def main():
                          "Measured NOT to move draw rate, and at 20-30cp NOT to "
                          "raise the TD error the trace carries -- a diversity "
                          "knob, not a fix for the sharpness drift.")
+    ap.add_argument("--psqt-noise", type=float, default=0.0, metavar="FRAC",
+                    help="PSQT pattern perturbation for the ACTORS (0 = off, the "
+                         "default): the POSITIONAL part of each (piece type, PSQT "
+                         "bucket) group of PSQT entries is scaled by (1+eps), "
+                         "eps ~ N(0, FRAC), material left exactly alone.  "
+                         "Directional where --eval-noise is not: every actor of "
+                         "one refresh generation shares the SAME draw (seed = "
+                         "--psqt-noise-seed + generation), so a batch of games tests the same "
+                         "48 hypotheses.  Needs --psqt-noise-ref.  Labels stay "
+                         "clean: the learner never carries it and "
+                         "--refresh-scores removes it exactly")
+    ap.add_argument("--psqt-noise-seed", type=int, default=None, metavar="N",
+                    help="base seed for the --psqt-noise draws (default: --seed); "
+                         "generation g draws with N + g.  Set it to vary the "
+                         "hypotheses while keeping the openings paired")
+    ap.add_argument("--psqt-opponent", choices=("same", "clean", "anti"), default="anti",
+                    help="who the --psqt-noise hypothesis plays against (default "
+                         "anti).  same: both sides hold it -- measured to ENACT "
+                         "the hypothesis, the trace follows eps whatever its "
+                         "sign.  clean: side A +eps vs the unperturbed net, "
+                         "side A alternating colour over paired openings -- "
+                         "the outcome scores the hypothesis against the current "
+                         "net.  anti: +eps vs -eps, the antithetic pair")
+    ap.add_argument("--psqt-noise-ref", default=None, metavar="FILE",
+                    help="usage-weighted PSQT material reference for --psqt-noise, "
+                         "from scripts/psqt_decomp.py --write-ref")
     ap.add_argument("--games-per-actor", type=int, default=1000,
                     help="Actor respawn cadence = weight refresh interval")
     ap.add_argument("--total-games", type=int, required=True,
@@ -153,6 +179,9 @@ def main():
                          "(d8t-3al collapsed this way: 60%%→97%% resignations, "
                          "27-ply games, entry net lost 400/400).")
     args = ap.parse_args()
+
+    if args.psqt_noise > 0 and not args.psqt_noise_ref:
+        sys.exit("--psqt-noise needs --psqt-noise-ref (scripts/psqt_decomp.py --write-ref)")
 
     binary = Path(args.binary)
     if not binary.is_file():
@@ -214,6 +243,15 @@ def main():
                *(["--eval-noise", str(args.eval_noise),
                   "--eval-noise-salt", str(seed + slot)]
                  if args.eval_noise else []),
+               # PSQT pattern perturbation: one draw per GENERATION, shared by
+               # every actor of that generation (not salted by slot), so the
+               # games a learner batch mixes all test the same hypotheses.
+               *(["--psqt-noise", str(args.psqt_noise),
+                  "--psqt-noise-seed", str((args.seed if args.psqt_noise_seed is None
+                                            else args.psqt_noise_seed) + generation[slot]),
+                  "--psqt-noise-ref", args.psqt_noise_ref,
+                  "--psqt-opponent", args.psqt_opponent]
+                 if args.psqt_noise > 0 else []),
                "--games", str(args.games_per_actor),
                "--depth", str(args.depth),
                "--traj-out", str(traj)]

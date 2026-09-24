@@ -840,6 +840,30 @@ def main():
                          "draw rate and quiet fraction are unchanged, so it is "
                          "not a remedy for the sharpness drift (see "
                          "docs/Learning_Investigation.md).")
+    ap.add_argument("--psqt-noise", type=float, default=0.0, metavar="FRAC",
+                    help="PSQT hypothesis play for the ACTORS (0 = off, the "
+                         "default): the POSITIONAL part of each (piece type, "
+                         "PSQT bucket) group of PSQT entries is scaled by "
+                         "(1+eps), eps ~ N(0, FRAC), material untouched; one "
+                         "draw per actor refresh generation, shared by all "
+                         "actors.  The learner never carries it and "
+                         "--refresh-scores removes it from every label.  "
+                         "Measured one-sided cost at 0.5: -68 / -88 Elo vs the "
+                         "clean net, so ~0.25 is the planned starting point.  "
+                         "See --psqt-opponent and docs/Learning_Investigation.md")
+    ap.add_argument("--psqt-opponent", choices=("anti", "clean", "same"), default="anti",
+                    help="What the hypothesis plays against (default anti): "
+                         "anti = +eps vs -eps, the antithetic pair (balanced "
+                         "outcomes by construction); clean = +eps vs the current "
+                         "net; same = both sides hold it, which only ENACTS the "
+                         "hypothesis -- the trace then follows eps whatever its "
+                         "sign (z ~ +27), so it is kept for reproduction only")
+    ap.add_argument("--psqt-noise-ref", default=None, metavar="FILE",
+                    help="Usage-weighted PSQT material reference for --psqt-noise. "
+                         "Default: built automatically from the --continue "
+                         "parent's final .nnue and root corpus into "
+                         "<tag>_work/psqt_ref.txt (scripts/psqt_decomp.py "
+                         "--write-ref, ~75 s)")
     ap.add_argument("--ladder", type=int, default=0, metavar="N",
                     help="During generation, bake a stamped .nnue every N games "
                          "into <tag>_work/ as <tag>-ladder-<games>g.nnue.  Gives "
@@ -1232,6 +1256,29 @@ def main():
         seed = (args.seed if args.seed is not None
                 else zlib.crc32(args.tag.encode()) & 0x7FFFFFFF)
         n_actors = max(1, int(args.concurrency) - 1)
+        psqt_ref = None
+        if args.psqt_noise > 0:
+            psqt_ref = args.psqt_noise_ref
+            if psqt_ref is None:
+                # The material reference must come from positions the net
+                # actually plays: the parent leg's root corpus, weighted by
+                # usage, against the parent's final weights (the actors' start).
+                if not args.continue_tag:
+                    die("--psqt-noise without --psqt-noise-ref needs --continue "
+                        "(the reference is built from the parent leg's corpus)")
+                pnet = LEARN_DIR / f"{args.continue_tag}_final.nnue"
+                pdir = LEARN_DIR / f"{args.continue_tag}_work"
+                if not pnet.is_file() or not list(pdir.glob("*root.tsv*")):
+                    die(f"--psqt-noise: need {pnet.name} and {pdir.name}/*root.tsv* "
+                        f"to build the material reference, or pass --psqt-noise-ref")
+                psqt_ref = str(work / "psqt_ref.txt")
+                log(f"building PSQT material reference from {args.continue_tag} "
+                    f"-> {psqt_ref}")
+                sh(["python3", SCRIPT_DIR / "psqt_decomp.py", pnet,
+                    "--positions", str(pdir / "*root.tsv*"),
+                    "--write-ref", psqt_ref], cwd=LEARN_DIR)
+            log(f"PSQT hypotheses: frac {args.psqt_noise}, opponent "
+                f"{args.psqt_opponent}, reference {psqt_ref}")
         traj_dir = work / "traj"
         traj_dir.mkdir(exist_ok=True)
         log(f"actor/learner generation: {n_actors} actors + 1 learner "
@@ -1257,6 +1304,8 @@ def main():
             *(["--opt-reset"] if args.opt_reset else []),
             *(["--grad-norm"] if args.grad_norm else []),
             *(["--eval-noise", args.eval_noise] if args.eval_noise else []),
+            *(["--psqt-noise", args.psqt_noise, "--psqt-opponent", args.psqt_opponent,
+               "--psqt-noise-ref", psqt_ref] if args.psqt_noise > 0 else []),
             "--seed", seed],
            cwd=LEARN_DIR, env=env)
 
@@ -1737,6 +1786,8 @@ def main():
         "depth": args.depth,
         "nodes": args.nodes,
         "eval_noise": args.eval_noise,
+        "psqt_noise": args.psqt_noise,
+        "psqt_opponent": args.psqt_opponent if args.psqt_noise > 0 else None,
         "lr_scale": args.lr_scale,
         "seed": (args.seed if args.seed is not None
                  else zlib.crc32(args.tag.encode()) & 0x7FFFFFFF),

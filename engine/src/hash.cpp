@@ -184,6 +184,37 @@ void open_hash()
 
 
 //--------------------------------------------
+// Two-sided PSQT hypotheses (nnue_psqt_dual_setup): the two sides of a
+// self-play game evaluate with DIFFERENT weights, so the weight-dependent
+// caches -- the main TT (search scores) and the score hash (cached evals) --
+// must not be shared, or one side would reuse the other's values.  A second
+// set is allocated at the current sizes and selected per move alongside the
+// PSQT table.  The pawn hash (classical pawn data) and the countermove table
+// (move ordering only) are weight-independent and stay shared.  Allocate only
+// AFTER the last resize: set_hash_size() rebuilds the primary set alone.
+//--------------------------------------------
+static hash_bucket *hash_set[2]  = {nullptr, nullptr};
+static score_rec   *score_set[2] = {nullptr, nullptr};
+
+void hash_dual_open()
+{
+ hash_set[0]  = hash_table;
+ score_set[0] = score_table;
+ hash_set[1]  = (hash_bucket*)hash_alloc(TAB_SIZE  * sizeof(hash_bucket), "main hash (side B)");
+ score_set[1] = (score_rec*)  hash_alloc(SCORE_SIZE* sizeof(score_rec),   "score hash (side B)");
+ hash_table = hash_set[1]; score_table = score_set[1];
+ clear_hash();            // also re-clears the shared pawn/cmove tables: harmless at start
+ hash_table = hash_set[0]; score_table = score_set[0];
+}
+
+void hash_dual_select(int h)
+{
+ if(!hash_set[1]) return;
+ hash_table  = hash_set[h ? 1 : 0];
+ score_table = score_set[h ? 1 : 0];
+}
+
+//--------------------------------------------
 // function to close the hash table 
 //--------------------------------------------
 void close_hash()

@@ -13,6 +13,7 @@ since engines, `.nnue` files, and `.tdleaf.bin` files live there.
 | [`match.py`](#matchpy) | Runs head-to-head or gauntlet matches between engines via fastchess/cutechess, interactively or from the CLI. |
 | [`make_training_epd.py`](#make_training_epdpy) | Generates a combined FRC + Polyglot-book opening EPD file for TDLeaf training. |
 | [`compare_nnue_learning.py`](#compare_nnue_learningpy) | Visualises NNUE weight changes between a baseline `.nnue` and a trained `.tdleaf.bin`. |
+| [`psqt_decomp.py`](#psqt_decomppy) | Decomposes a net's PSQT into material and positional parts on real positions (and the static into PSQT vs FC); tracks net composition across nets; writes the `--psqt-noise` material reference. |
 | [`verify_fc0.py`](#verify_fc0py) | Debugging tool that recomputes FC0 outputs from a manually specified input vector to verify the forward pass. |
 | [`bayeselo_ratings.py`](#bayeselo_ratingspy) | Computes a Bayesian Elo rating list for all players in a PGN file. |
 | [`pgn_dedup.py`](#pgn_deduppy) | Removes duplicate games from one or more PGN files. |
@@ -106,6 +107,7 @@ pruning for one run. A failed run's `<tag>_work/` is never touched. See
 | `--depth N`                                  | 8                                                      | Fixed search depth for generation                            |
 | `--nodes N`                                  | 0 (off)                                                | Node budget per move for generation.  `--depth` becomes the **floor**, so the search is never shallower than the fixed-depth run it replaces.  Adapts effort like a clock (extends on a failing-low root, halves on a singular reply) but deterministic.  `--depth 8 --nodes 4000` → mean d8.87, min d8, at ~1.85× the wall clock — see `docs/TRAINING.md` |
 | `--lr-scale K`                               | 1.0                                                    | Uniform multiplier on every **online** TDLeaf step during generation (all six weight categories).  The offline phase is unaffected — that is `--bt-lr`.  Recorded in the sidecar as `lr_scale`; **not** inherited through `--continue`.  `K=0` does not mean "no generation": actors are frozen either way, so it means generating from a net that stops drifting (`history/Online_Learning_Investigation.md` 7.9.5) |
+| `--psqt-noise FRAC` / `--psqt-opponent` / `--psqt-noise-ref FILE` | 0 (off) / `anti` / auto | PSQT hypothesis play for the actors (see `selfplay_run.py` below).  Without `--psqt-noise-ref` the material reference is built from the `--continue` parent's final `.nnue` and root corpus into `<tag>_work/psqt_ref.txt` (~75 s).  Recorded in the sidecar as `psqt_noise` / `psqt_opponent` |
 | `--concurrency N`                            | 9                                                      | Concurrent games                                             |
 | `--hash N`                                   | 128                                                    | Per-actor hash size (MB) for generation.  16 MB is ~25% faster at depth 8 but measured **+8.9 ± 11.4 Elo weaker at fixed depth** (`history/Online_Learning_Investigation.md` 7.5), so the default reverted to 128.  See `docs/history/Generation_Throughput.md` |
 | `--openings FILE`                            | `training_openings.epd`                                | Opening set (FRC)                                            |
@@ -183,6 +185,11 @@ python3 selfplay_run.py --binary Leaf_vtrain_hl_a --epd training_openings.epd \
 | `--seed N` / `--delete-consumed` | 1 / archive | Shuffle seed base / delete instead of archive |
 | `--refresh-scores` | off (**always pass it for online runs**) | Learner re-evaluates leaf statics with current weights at consume time. Without it, trajectory scores lag the learner by a refresh cycle and online TD drifts toward extreme decisiveness (d8t-3al2: 37%→12% draws by 40k games) |
 | `--lr-scale K` | 1.0 | Multiplier on every online Adam/RMSProp step, mirroring `--bt-lr` offline.  Range-checked to `0 <= K <= 4`.  At 1.0 no flag reaches the learner and the step is bit-identical to previous behaviour |
+| `--eval-noise CP` | 0 (off) | Actors only: zero-mean offset of sd CP on the static eval, keyed on the pawn structure (salt = seed + slot).  A diversity knob; measured not to add TD signal at 20–30 cp (`Learning_Investigation.md`).  Needs a binary built on or after 2026_09_23a for clean labels |
+| `--psqt-noise FRAC` | 0 (off) | Actors only: scale the **positional** part of each (piece type, PSQT bucket) group of PSQT entries by (1+ε), ε ~ N(0, FRAC) clamped to [−1, 3·FRAC], material untouched.  One draw per refresh **generation**, shared by every actor.  Requires `TDLEAF_FREEZE` (forced on actors) and `--psqt-noise-ref`.  Labels stay clean: the actor's statics include the perturbation and `--refresh-scores` removes it exactly |
+| `--psqt-opponent MODE` | `anti` | What the hypothesis plays against: `anti` = +ε vs −ε (antithetic; outcomes balanced by construction), `clean` = +ε vs the current net (side A alternates colour over paired openings), `same` = both sides hold it (only **enacts** the hypothesis — reproduction only).  Two-sided modes keep a second TT/score hash per actor |
+| `--psqt-noise-seed N` | `--seed` | Base seed for the draws; generation g uses N + g.  Vary it to change the hypotheses while keeping openings paired |
+| `--psqt-noise-ref FILE` | — | Usage-weighted material reference from `psqt_decomp.py --write-ref` |
 | `--adjudicate` | off | Enable actor resign/draw adjudication. Leave OFF for online learning — adjudication + learning is a runaway spiral (d8t-3al: 97% resignations, 27-ply games, dead net) |
 
 The learner inherits the parent env (e.g. set `TDLEAF_DUMP_TSV` to have the
@@ -579,6 +586,63 @@ python3 compare_nnue_learning.py baseline.nnue weights.tdleaf.bin --save out_pre
 # Include full FT weight arrays (slow; requires ~92 MB of memory per perspective)
 python3 compare_nnue_learning.py baseline.nnue weights.tdleaf.bin --ft-weights
 ```
+
+---
+
+## psqt_decomp.py
+
+Decompose a net's PSQT into **material** and **positional** parts, measured on
+positions the net actually plays.  Each PSQT entry belongs to a (plane, PSQT
+bucket) group; the group's **usage-weighted** mean over (king bucket, square) is
+that piece's material value in that bucket, and each entry's deviation from it
+is positional — split further into a king-independent part (per-square mean
+over king buckets) and a king-dependent remainder.  Weighting by how often each
+entry is active keeps unreachable and never-trained entries from distorting
+anything.  Runs in ~10 s on 330k positions.
+
+```sh
+# One net, with the static split into PSQT vs FC (the TSV must be this net's dump)
+python3 scripts/psqt_decomp.py learn/m260921-2.5e6g_final.nnue \
+    --positions 'learn/tderr_noise/td_s0/dump.*.root.tsv' --fc
+
+# Composition over time: several nets, on one common position set
+python3 scripts/psqt_decomp.py learn/m260921-1e6g_final.nnue \
+    learn/m260921-2e6g_final.nnue learn/m260921-2.5e6g_final.nnue \
+    --positions 'learn/m260921-2.5e6g_work/*root.tsv*'
+
+# Write the material reference the engine's --psqt-noise needs
+python3 scripts/psqt_decomp.py learn/<net>_final.nnue \
+    --positions '<that net's root dump>' --write-ref psqt_ref.txt
+```
+
+| Option | Default | Meaning |
+|--------|---------|---------|
+| `nets...` | required | One or more `.nnue` files |
+| `--positions GLOB...` | required | Root-row TSVs (`TDLEAF_DUMP_TSV` / `train.py` corpus format, `.tsv` or `.tsv.gz`) |
+| `--games N` | 2500 | Whole games sampled (consecutive plies are needed for the per-move numbers) |
+| `--fc` | off | Also split the whole static into PSQT and FC.  Column 8 of a root row is the **dumping net's** root static, so this is valid only for the single net that dumped the TSV |
+| `--detail` | single net: on | Per-(plane, bucket) table: uses, material cp, positional sd, king-independent sd, and the plain-mean error |
+| `--write-ref FILE` | — | Write the 88-line usage-weighted material reference (raw PSQT units) for `--psqt-noise-ref` |
+
+**Output.**  Per net: material per piece (usage-weighted over buckets); how far a
+*plain* mean over reachable entries misses the usage-weighted material (the
+error an in-engine perturbation would leak into piece values); and for each
+component the sd across positions, per move, and per **quiet** move (material
+unchanged — a proxy for the sibling-move differences that decide move choice).
+With `--fc`, the quiet-move positional variance split between PSQT and FC and
+their correlation.
+
+**Reading (m260921-2.5e6g, 2026-09-24).**  PSQT positional sd 88 cp across
+positions and 35 cp per quiet move; FC 78 cp per quiet move; the two
+uncorrelated (−0.001), so quiet-move positional variance is **17% PSQT / 83%
+FC**.  Positional spread per (piece, bucket) mostly 15–70 cp.  Plain-mean
+material misses usage-weighted material by 18.5 cp rms (max 69), and Adam
+update counts by 6.3 rms (max 35) — hence the reference file.
+
+**Monitoring.**  Given several nets it reports each on the same positions, so
+material drift, the growth of the positional part, and the king-dependent share
+can be followed across a chain.  Without `--fc` every number is a pure function
+of the weights and the position sample, valid for any net.
 
 ---
 

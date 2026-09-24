@@ -444,6 +444,48 @@ int main(int argc, char *argv[])
                     "play only; TDLeaf gradients are unaffected\n",
             game.eval_noise, game.eval_noise_salt);
 
+#if NNUE
+  // PSQT pattern perturbation (nnue.cpp nnue_psqt_perturb).  Scanned up front
+  // for the same reason as --eval-noise, and applied here: after the net and
+  // the .tdleaf.bin are loaded, before any accumulator is built.  Actors only:
+  // in a TDLEAF build the process must be TDLEAF_FREEZE=1, because a learning
+  // process would save the perturbed weights.
+  {
+    double pfrac = 0.0; unsigned long long pseed = 0; const char *pref = nullptr;
+    int popp = 0;   // --psqt-opponent: 0 same (shared field), 1 clean, 2 anti
+    for (int ai = 1; ai + 1 < argc; ai++) {
+      if      (strcmp(argv[ai], "--psqt-noise") == 0)      pfrac = atof(argv[ai + 1]);
+      else if (strcmp(argv[ai], "--psqt-noise-seed") == 0) pseed = strtoull(argv[ai + 1], NULL, 10);
+      else if (strcmp(argv[ai], "--psqt-noise-ref") == 0)  pref  = argv[ai + 1];
+      else if (strcmp(argv[ai], "--psqt-opponent") == 0)
+        popp = !strcmp(argv[ai + 1], "clean") ? 1 : !strcmp(argv[ai + 1], "anti") ? 2
+             : !strcmp(argv[ai + 1], "same")  ? 0 : -1;
+    }
+    if (popp < 0) {
+      fprintf(stderr, "--psqt-opponent must be same, clean or anti\n");
+      return 1;
+    }
+    if (pfrac > 0.0) {
+#if TDLEAF
+      const char *fz = getenv("TDLEAF_FREEZE");
+      if (!(fz && *fz && atoi(fz) != 0)) {
+        fprintf(stderr, "--psqt-noise requires TDLEAF_FREEZE=1 (a learning process "
+                        "would save the perturbed weights)\n");
+        return 1;
+      }
+#endif
+      bool ok = pref && nnue_available &&
+                (popp ? nnue_psqt_dual_setup(pfrac, pseed, pref, popp)
+                      : nnue_psqt_perturb(pfrac, pseed, pref));
+      if (!ok) {
+        fprintf(stderr, "--psqt-noise needs a loaded net and --psqt-noise-ref <file> "
+                        "(scripts/psqt_decomp.py --write-ref)\n");
+        return 1;
+      }
+    }
+  }
+#endif
+
   //-----------------------------------
   // parsing command line args
   //  -- virtually no error checking!
@@ -452,7 +494,11 @@ int main(int argc, char *argv[])
     // positional-uncertainty perturbation -- already applied by the pre-scan
     // above; consumed here so the value token is not read as a command
     if(!strcmp(argv[argi], "--eval-noise") ||
-       !strcmp(argv[argi], "--eval-noise-salt")) {
+       !strcmp(argv[argi], "--eval-noise-salt") ||
+       !strcmp(argv[argi], "--psqt-noise") ||
+       !strcmp(argv[argi], "--psqt-noise-seed") ||
+       !strcmp(argv[argi], "--psqt-noise-ref") ||
+       !strcmp(argv[argi], "--psqt-opponent")) {
       argi += 1;
       continue;
     }

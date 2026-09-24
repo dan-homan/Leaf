@@ -491,6 +491,8 @@ for one.
 | The node budget costs no quiet rows — its quiet-fraction dip is the denominator | m260720 6e6 vs 6.5e6/7e6 | rows/game −0.5%, mean ply +1.9%, phase composition shift <0.25 pp | R5 | **ESTABLISHED** |
 | `eval_noise` displaces the position distribution completely, at zero Elo cost | §4 entry | 100% of games diverge by ply 1 at σ=5; 0 ± 10 Elo at σ=10 | R8 | **ESTABLISHED** |
 | `eval_noise` does NOT move sharpness or quiet fraction | 7 arms × 30k games | draw 22.20→21.50 over σ 0→40 (wrong sign, ~2σ); q@60 0.440→0.412 (q@60 biased by the pre-fix gate) | R8 | **ESTABLISHED** |
+| Shared-field PSQT hypotheses are ENACTED, not tested: the TD gradient follows ε for both signs | 2 arms × 8k d8 games, frozen, FRAC 0.5 | alignment z +27.5 / +26.2; 19/20 significant patterns follow sign(ε) | R8 | **MEASURED** |
+| One-sided PSQT hypotheses at FRAC 0.5 cost −68 / −88 Elo; enactment vanishes; PSQT-projected gradient does not track quality in any design | 4 two-sided arms × 8k d8 games, frozen | clean align +0.6 / −2.1; anti −7.6 / −6.8 regardless of winner | R8 | **MEASURED** |
 | `eval_noise` σ 20–30 adds no TD error to the trace; adds ~11–16 cp label jitter and a slope bias toward the noisy player's values | 3 arms × 8k d8 games, frozen, post-fix | rms e −0.9% / −0.5% (±0.4%); rms δ +20% / +37% uniform pawn/other; slope −3σ / −6σ | R8 | **MEASURED** |
 
 ### PV resolution (2026-09-21)
@@ -1040,6 +1042,74 @@ after 2026_09_23a.  **Reopens if:** structural coverage is shown to be worth
 something (Offline 2.4's +36/+45 is about distinct *games*, not distributional
 coverage, so it does not transfer), or a σ is found where rms e rises while the
 slope bias stays small.
+
+**PSQT hypotheses — directional exploration in parameter space (2026-09-24).**
+
+*Why.*  eval_noise is non-directional: its offsets hash the pawn structure, so
+each diverted game lands somewhere unrelated and any misjudgment it exposes is a
+one-off.  A perturbation of the WEIGHTS is a hypothesis the net itself could
+hold; an actor holding it steers consistently toward a class of positions, and
+the correction is something the learner can express.
+
+*What the PSQT holds* (`scripts/psqt_decomp.py`, m260921-2.5e6g, 334k positions,
+usage-weighted).  Per (plane, bucket) group, the usage-weighted mean over (king
+bucket, square) is material; deviations are positional.  PSQT positional sd
+88 cp across positions and 35 cp per quiet move, half king-relative; FC 78 cp
+per quiet move; the two uncorrelated (−0.001), so **quiet-move positional
+variance is 17% PSQT / 83% FC**.  A plain mean over entries misses the material
+by 18.5 cp rms (max 69) and Adam counts by 6.3 (max 35), so the engine takes
+usage-weighted material from a reference file.
+
+*Mechanism* (`--psqt-noise FRAC`, change_log 2026_09_24a).  One ε ~ N(0, FRAC) per
+(piece type, PSQT bucket), 48 in all, scaling that group's positional part by
+(1+ε) on own and enemy planes; material exact.  Labels stay clean with no special
+code: the statics include the perturbation and `--refresh-scores` removes it.
+Verified to 0.37 cp mean against an independent prediction.  `--psqt-opponent`
+chooses who plays it: `same` (both sides), `clean` (+ε vs the current net) or
+`anti` (+ε vs −ε), the two-sided modes with per-side PSQT tables and per-side
+TT/score hash, each opening played twice with colours swapped.
+
+*Measurement* (`scripts/arms/psqt_noise_tderr.sh` + `psqt_noise_coherence.py`;
+frozen m260921-2.5e6g, 8,000 d8 games per arm, FRAC 0.5, paired openings).  The
+derivative of the eval with respect to a pattern's scale is exactly its
+positional PSQT contribution, so the learner's TD gradient along all 48 pattern
+directions is exact from the leaf dump.  All 200 paired games diverge from clean
+play, median at ply 1.
+
+| design | seed | side A Elo | align with own ε (z) | corr(Ḡ, ε) | χ²/48 |
+|---|---|---|---|---|---|
+| clean self-play | — | — | null ±0.2 | — | 1.85 |
+| same | 101 / 202 | — | **+27.5 / +26.2** | +0.62 / +0.70 | 23.0 / 25.7 |
+| clean | 101 / 202 | **−67.8 / −87.5** (±3.3) | +0.61 / −2.07 | ±0.09 | 5.6 / 9.9 |
+| anti | 101 / 202 | +9.0 / −19.8 (±3.4) | **−7.61 / −6.83** | −0.46 / −0.47 | 5.0 / 4.5 |
+
+(Elo 1σ, pentanomial over opening pairs.  χ²/48 is heavy-tail-deflated; compare
+between arms, not with 1.)  Trace error rms e is flat in every design; one-step
+δ rises +34–40% uniformly, as with eval_noise.
+
+- **Shared-field play only ENACTS a hypothesis.**  In 19 of the 20 patterns
+  shifted >3σ the gradient follows ε's sign, for both signs: when both players
+  value a pattern at (1+ε) it is worth about that *in their games*, and TD
+  learns values under the policy that played.  The hypothesis is never tested.
+- **Against a clean opponent the enactment vanishes** (≈ 0, not the half
+  expected), and the cost becomes visible: 50% is −68 / −88 Elo — the shared
+  arms hid it because the opponent shared the hypothesis.
+- **Antithetic play keeps outcomes balanced** (+9 / −20) and the outcome
+  separates the hypotheses sharply (2.6σ, 5.8σ, opposite directions).  The
+  PSQT-projected gradient pushes against +ε in BOTH arms regardless of which
+  side won, and against the other arm's nearly orthogonal ε too (−2.6 / −4.1,
+  cos 0.045) — a property of the antithetic design, not of hypothesis quality.
+  Plausible cause, unconfirmed: A-as-White and B-as-Black both prefer the
+  positions where they disagree most, so c·ε is tied to A's colour.
+- **What this does and does not show.**  In no design does the gradient
+  *projected on the 48 PSQT pattern directions* track hypothesis quality.  That
+  is a statement about one subspace.  Every parameter's gradient is the same TD
+  error times that parameter's sensitivity, so the question is what the errors
+  correlate with — and the consequences of a PSQT hypothesis (weak squares, a
+  slow attack, king safety) are FC-encoded features, not the pattern's own PSQT
+  entries.  The response can land in FC/FT gradients the instrument never
+  looked at.  Only a learning leg answers it: TODO **H1** (`anti`, FRAC 0.25,
+  a repeat of the latest leg once the chain slows).
 
 **Depth as the lever (4.5/4.6 established it; Offline 1.1 closed it at d10).**
 d6→d8 reopened the bootstrap decisively (the first positive consolidation of the
