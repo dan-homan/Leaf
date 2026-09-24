@@ -923,67 +923,123 @@ search resolved a tactic.  **Reopens for a gate *tighter* than 60**, which was n
 tested, and which `--bt-diag`'s negative ΔMSE_out below 40 cp actively hints at
 (§6).
 
-**Positional-uncertainty perturbation — `eval_noise` (2026-09-20/21).**  A
-zero-mean cp offset on the static eval keyed on the **pawn structure alone**, so
-it is constant across every non-pawn move: it perturbs which structure the engine
-steers toward, never its tactics or its material trades.  Built to break the
-sharpness drift by diversifying structural play.  ⚠️ **The rescoring half was
-believed to need no code, and it did** (fixed 2026-09-23, change_log
-2026_09_23a).  The actor records its leaf and root STATICS clean
-(`nnue_evaluate`), so `--refresh-scores` shifts the root by (clean − clean) = 0
-and the root SEARCH score kept the PV leaf's offset: `leaf_ok` compared clean
-against noisy and deleted ~half the records at σ 20 (66 vs 128 per game), and the
-offline root labels carried noise of sd ~σ.  No production leg ever ran with
-eval_noise, so no chain was affected.  The actor now subtracts the leaf's offset
-from the root score before anything uses it.  Seven arms × 30,000
-self-play games plus 4,000-game strength matches: **it works, it is free below
-σ 10 (0 ± 10 Elo), and it moves neither symptom.**  Draw rate 22.20 → 21.50
-across σ 0→40 (wrong sign, ~2σ) and q@60 0.440 → 0.412 (⚠️ q@60 was measured
-through the defective clean-static-vs-noisy-search gate and is biased DOWN under
-noise; draw rate, game length and Elo are unaffected), against a target of
-recovering 22.5→24.2% and 0.499→0.562.  The informative part is the contrast with
-a divergence check: at σ=5 **100% of games diverge from the paired control, median
-divergence at ply 1** — the perturbation completely changes WHICH games are played
-while leaving their character untouched.  Sharpness and quiet yield are properties
-of the evaluation function, not of the net's structural preferences, which is
-consistent with M.  **Kept, defaulted off** (`train.py --eval-noise CP`, each
-actor drawing its own field) as the only knob that diversifies the position
-distribution without varying openings.  **Reopens if:** coverage of structures the
-net's own policy never reaches is shown to be worth something — Offline 2.4's
-+36/+45 is about distinct *games*, not distributional coverage, so it does not
-transfer.  Strength cost turns on exactly where the arithmetic says: a choice
-compares two independently drawn structures, so the distortion has sd σ√2, and
-P(>50 cp) goes 0.04% at σ=10 to 1.8% at σ=15.
+**Positional-uncertainty perturbation — `eval_noise` (2026-09-20 → 09-23).**
 
-**Does the noise buy learning signal? (2026-09-23, after the fix.)**  The design
-argument: labels are clean, so a perturbed move the net already understands is
-priced into the clean label of the leaf it chose and produces no TD error; only
-unforeseen consequences do, and those are what it can learn from.  Measured
-directly (`scripts/arms/eval_noise_tderr.sh`): 3 arms × 8,000 d8 games from the
-frozen m260921-2.5e6g net through the real actor/learner pipeline, learner frozen
-and dumping every leaf_ok record, TD recursion reconstructed offline.
+*What it is.*  A zero-mean cp offset on the static eval, keyed on the **pawn
+structure alone** plus a per-process salt, so it is constant across every
+non-pawn move: it perturbs which structure the engine steers toward, never its
+tactics or its material trades.  Actors only (`train.py --eval-noise CP`, each
+actor drawing its own field, salt = seed + slot); the learner never carries it.
+Two properties matter for learning.  The field is **fixed per actor process**, so
+an actor makes the same structural bet ("structure X is worth +12") game after
+game — a consistent, repeatable misjudgment rather than per-node noise.  And both
+sides of a self-play game **share** the field: it is not one side blundering
+against a clean opponent, both misjudge the same structures and the consequences
+surface only as the true value asserts itself later.
 
-| σ | rec/g | rms e (trace) | rms δ (one-step) | δ pawn / other | calib. slope |
-|---|---|---|---|---|---|
-| 0 | 128.3 | 0.1291 | 0.0272 | 0.0306 / 0.0260 | +0.0423 ± 0.0015 |
-| 20 | 128.7 | 0.1279 (−0.9%) | 0.0327 (+20%) | +20.5% / +20.0% | +0.0347 ± 0.0020 |
-| 30 | 127.1 | 0.1285 (−0.5%) | 0.0373 (+37%) | +37.6% / +36.9% | +0.0275 ± 0.0018 |
+*The design argument (why it could teach anything).*  Play is perturbed, labels
+are not.  The label for a record is the CLEAN value of the leaf of the PV the
+noisy search chose, so a perturbed move the net already understands is priced
+into that label and produces **no TD error**; only consequences the clean net did
+not foresee do, and those are what it can learn from.  σ must be large enough
+that the diverted choices have consequences, and small enough that they do not
+swamp the gradient's ability to discriminate.  That balance has two costs, both
+growing with how often and how badly the noise diverts play: **variance** (label
+jitter) and **bias** — with λ = 0.985 per ply each target blends the next ~60–70
+plies of the game actually played, which contain further noisy choices, so the
+trace learns the value of the σ-player, not of the position.  Self-play symmetry
+cancels that on average but not position by position.  The phase-2 Elo cost
+counts every consequential mistake, foreseen or not, so it **overcounts** the
+useful part; the useful part is measured directly below.
 
-(rms errors ±0.4% one-sigma.)  **The trace error that multiplies every gradient
-does not rise** — the pre-committed reading is that at σ 20–30 the noise buys
-mistakes the net already prices, not new signal.  The one-step delta DOES rise,
-but **uniformly on pawn and non-pawn steps**, so it is label jitter from choice
-distortion (each record is the clean value of a line a noisy search chose:
-~11 cp sd per record at σ 20, ~16 at σ 30), not structural consequences — and it
-telescopes away under λ = 0.985.  (A pre-fix run appeared to localise the rise to
-pawn steps; that was the defective gate's record selection.)  The calibration
-slope — regression of e on (d − 0.5) — falls 3σ at σ 20 and 6σ at σ 30.  Label
-jitter alone predicts −0.002 / −0.004 of that (errors-in-variables); the
-residual −0.005 / −0.011 is the bias side: the trace pulls values toward what the
-NOISY player achieves.  Caveat: rms e measures the quantity of TD error, not its
-information — the arms visit different positions, so equal magnitude does not
-prove equal content.  It does mean the mechanism's signature (extra error where
-the net was wrong) is not visible at a resolution of ~0.4%.
+*Implementation defect (2026-09-20 → 09-23, change_log 2026_09_23a).*  The
+"labels are clean" half was believed to need no code, and it did.  The actor
+records its leaf and root STATICS clean (`nnue_evaluate` bypasses `score_pos`),
+but the root SEARCH score carried the PV leaf's offset, and `--refresh-scores`
+could not remove it — it shifts the root by (refreshed leaf − recorded leaf),
+both clean, so by 0.  `leaf_ok` therefore compared clean against noisy and
+deleted ~half the records (128 → 66 per game at σ 20, → 44 at σ 30), keeping
+exactly those whose leaf drew near-zero noise; the offline root labels carried
+noise of sd ~σ.  **No production leg ever ran with eval_noise.**  Fix: the actor
+subtracts the PV leaf's offset from the root score (root-STM POV, mates
+untouched) before the gate, the dump or the `.tdg` see it; σ 0 is bit-identical.
+Still noisy, second order: the per-iteration `id_scores` behind the ID-variance
+weight.
+
+*Calibration (m260916-7e6g, d6/800, frozen; 30k self-play games per arm, 4k-game
+noisy-vs-clean matches, fastchess 95% CI).*
+
+| σ (cp) | draw % | mean ply | Elo vs clean |
+|---|---|---|---|
+| 0 | 22.20 | 132.8 | — |
+| 5 | 22.07 | 133.1 | +2.0 ± 9.6 |
+| 10 | 22.30 | 132.8 | −0.7 ± 9.7 |
+| 15 | 21.84 | 132.3 | −17.0 ± 9.6 |
+| 20 | 21.83 | 132.4 | −19.4 ± 9.4 |
+| 30 | 21.67 | 131.4 | −45.6 ± 9.6 |
+| 40 | 21.50 | 130.6 | −66.0 ± 9.9 |
+
+**Free up to σ 10; the cost turns on exactly where the arithmetic says** — a move
+choice compares two independently drawn structures, so the distortion has sd
+σ√2 and P(>50 cp) goes 0.04% at σ 10 to 1.8% at σ 15.  **It displaces the
+position distribution completely:** at σ 5, 100% of games diverge from the
+paired control, median divergence at ply 1.  **It does not move sharpness:** draw
+rate 22.20 → 21.50 over σ 0→40 (wrong sign, ~2σ), against the target of
+recovering 22.5 → 24.2%.  It changes WHICH games are played while leaving their
+character untouched — sharpness is a property of the evaluation function, not
+of the net's structural preferences, consistent with M.  (The quiet-fraction
+arm, q@60 0.440 → 0.412, went through the defective gate and is biased DOWN
+under noise; do not quote it.)  Note that σ 40 cost 66 Elo against a clean
+opponent yet moved the self-play draw rate only 0.7 points: the structural
+consequences are real but small next to the outcome variance already in these
+games.  The costs are d6 figures; deeper search cannot correct a pawn-structure
+misjudgment (the structure persists to the leaves), so they should not shrink
+much at d8 — unmeasured.
+
+*Does it buy learning signal? (2026-09-23, post-fix,
+`scripts/arms/eval_noise_tderr.sh`.)*  3 arms × 8,000 d8 games from the frozen
+m260921-2.5e6g net through the real actor/learner pipeline, learner frozen with
+`--refresh-scores` and dumping every leaf_ok record, the learner's TD recursion
+replayed offline (K, λ, 100 cp clip, terminal term; the ID-variance weight is not
+dumped and scales the gradient, not e).  Errors one-sigma from 20 game blocks;
+rms errors ±0.4%.
+
+| σ | rec/g | rms e (trace) | rms δ (one-step) | δ pawn / other steps | calib. slope | root rows @60 |
+|---|---|---|---|---|---|---|
+| 0 | 128.3 | 0.1291 | 0.0272 | 0.0306 / 0.0260 | +0.0423 ± 0.0015 | 0.531 |
+| 20 | 128.7 | 0.1279 (−0.9%) | 0.0327 (+20%) | +20.5% / +20.0% | +0.0347 ± 0.0020 | 0.514 |
+| 30 | 127.1 | 0.1285 (−0.5%) | 0.0373 (+37%) | +37.6% / +36.9% | +0.0275 ± 0.0018 | 0.497 |
+
+- **The trace error that multiplies every gradient does not rise.**  The
+  pre-committed reading: at σ 20–30 the noise buys mistakes the net already
+  prices, not new signal.  Caveat — rms e measures the *quantity* of TD error,
+  not its information; the arms visit different positions, so equal magnitude
+  does not prove equal content.  But the mechanism's signature (extra error where
+  the net misjudged a structure) is not visible at ~0.4% resolution.
+- **The one-step delta rises uniformly on pawn and non-pawn steps**, so it is
+  label jitter from choice distortion — each record is the clean value of a line
+  a noisy search chose, off by ~11 cp sd at σ 20 and ~16 cp at σ 30 — not
+  structural consequences, and it telescopes away under λ.  (A pre-fix run
+  appeared to localise the rise to pawn steps; that was the defective gate's
+  record selection.)
+- **The bias is measurable.**  The slope of e on (d − 0.5) is positive at σ 0
+  (games end more decisively than the net predicts) and falls 3σ at σ 20, 6σ at
+  σ 30.  Label jitter alone predicts −0.002 / −0.004 (errors-in-variables); the
+  residual −0.005 / −0.011 is the trace learning what the NOISY player achieves —
+  about a quarter of the net's existing calibration pull at σ 30.
+- **The offline corpus thins slightly** (root rows passing 60 cp −3% / −6%),
+  because the clean value of a noisily chosen line disagrees more with the root
+  static.
+
+*Status.*  **Kept, defaulted off** — the only knob that diversifies the position
+distribution without varying openings.  A leg at σ 20–30 would test
+**diversity** (whether reaching structures the net's own policy never visits is
+worth anything), not learning from unforeseen mistakes, and would pay the Elo
+cost plus the calibration bias to do it; any such leg needs a binary built on or
+after 2026_09_23a.  **Reopens if:** structural coverage is shown to be worth
+something (Offline 2.4's +36/+45 is about distinct *games*, not distributional
+coverage, so it does not transfer), or a σ is found where rms e rises while the
+slope bias stays small.
 
 **Depth as the lever (4.5/4.6 established it; Offline 1.1 closed it at d10).**
 d6→d8 reopened the bootstrap decisively (the first positive consolidation of the
