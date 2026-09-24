@@ -88,10 +88,12 @@ def main():
                          "ply 1.  Free below ~10cp (0 +/- 10 Elo at 4000 games) "
                          "and costly above (-17 at 15, -66 at 40), because a "
                          "choice compares two structures so the distortion has "
-                         "sd CP*sqrt(2).  Gradients are UNAFFECTED: the learner "
-                         "never calls score_pos, and --refresh-scores re-derives "
-                         "every label from clean weights.  Measured NOT to move "
-                         "draw rate or quiet fraction -- this is a diversity "
+                         "sd CP*sqrt(2).  Labels are CLEAN: statics are recorded "
+                         "without the offset and the actor subtracts the PV "
+                         "leaf's offset from the root search score (fixed "
+                         "2026-09-23; before that the root score stayed noisy). "
+                         "Measured NOT to move draw rate, and at 20-30cp NOT to "
+                         "raise the TD error the trace carries -- a diversity "
                          "knob, not a fix for the sharpness drift.")
     ap.add_argument("--games-per-actor", type=int, default=1000,
                     help="Actor respawn cadence = weight refresh interval")

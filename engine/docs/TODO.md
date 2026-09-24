@@ -108,6 +108,11 @@ canary is written for d8.
       openings.  Keep it strictly separate from D1: one variable per leg.
       Untested question it would answer: whether covering structures the net's
       own policy never reaches is worth anything.
+      ⚠️ Any eval_noise leg needs a binary built on or after 2026_09_23a -- before
+      that the root labels were noisy and leaf_ok deleted ~half the records.
+      At σ 20-30 the trace's TD error does not rise (Learning_Investigation,
+      "Does the noise buy learning signal?"), so a leg there would test
+      diversity, not the unforeseen-mistake mechanism.
 - [ ] **D3 — carry the draw rate as a per-leg canary.**  Nearly free: the actor
       logs already carry `+W =D -L` and agree with the generation PGN to 0.01%.
       `scripts/arms/eval_noise_scan.awk` scores a PGN; the actor-log route needs

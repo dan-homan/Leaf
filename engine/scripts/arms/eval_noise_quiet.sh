@@ -10,11 +10,14 @@
 # |root_static - root_search| <= 60cp, so as the net sharpens its own games it
 # deletes a growing share of its own quiet corpus.
 #
-# WHY THIS IS MEASURABLE UNDER PERTURBATION.  The gate compares the root's
-# static eval against the propagated search score.  Both carry the eval_noise
-# offset, and whenever the PV contains no pawn move the offset is IDENTICAL on
-# both sides and cancels exactly.  It only fails to cancel on PVs that move a
-# pawn, so the gate is far less contaminated than the raw score metrics.
+# ⚠️ CONTAMINATED BEFORE 2026-09-23 (change_log 2026_09_23a).  This header
+# used to claim the root static and the search score both carry the offset and
+# cancel.  They did not: the static is recorded CLEAN (nnue_evaluate), the
+# search score was noisy, so the gate compared clean against noisy and every
+# q@ figure this produced is biased DOWN under noise.  Since the fix the actor
+# subtracts the PV leaf's offset from the root score, so the gate now compares
+# clean static against the clean value of the line the noisy search chose --
+# which is the quantity that actually becomes the offline label.
 #
 # WIDE DUMP.  TDLEAF_DUMP_QUIET_CP is left at its default (1000, effectively
 # open) instead of production's 60, so every row lands with its `gate` column

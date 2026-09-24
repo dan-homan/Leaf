@@ -545,6 +545,24 @@ void tdleaf_record_ply(TDGameRecord &rec,
     // (The propagated search score includes quiescence and may differ.)
     int leaf_score_stm = nnue_evaluate(acc_a, (int)leaf_wtm, pc);
 
+    // eval_noise: put the root SEARCH score on the same clean footing as the
+    // static evals recorded here.  Both statics above are clean (nnue_evaluate
+    // bypasses score_pos), but the search that produced score_root_stm saw
+    // every leaf through the perturbation, so its backed-up value carries the
+    // PV leaf's offset.  Left in, that offset breaks the design promise that
+    // the perturbation changes play but not labels, three ways: the leaf-match
+    // gate compares clean vs noisy and deletes ~half the records at sigma 20
+    // (and keeps exactly those whose leaf drew near-zero noise), the root-row
+    // labels of the offline corpus carry noise of sd ~sigma, and the learner's
+    // --refresh-scores cannot remove it, because it shifts the root by
+    // (refreshed leaf - recorded leaf) and both of those are clean.  The offset
+    // is white POV and a pure function of the leaf's pawns, so it is exact to
+    // subtract it in root-STM POV.  Mate scores are not evaluations.
+    if (game.eval_noise > 0 && score_root_stm > -MATE / 2 && score_root_stm < MATE / 2) {
+        int dn = eval_noise_cp(cur.plist, game.eval_noise, game.eval_noise_salt);
+        score_root_stm -= root_pos.wtm ? dn : -dn;
+    }
+
     int root_static_diag = INT_MIN;
 #if PVTRUNC_DIAG
     {   int pcr = 0;

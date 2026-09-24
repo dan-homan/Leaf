@@ -490,7 +490,8 @@ for one.
 | A node budget adds depth in the ENDGAME only | m260720 7e6 root dump, 4M rows | mean depth 8.14 at 32 pieces → 14.10 at 3 | R5 | **ESTABLISHED** |
 | The node budget costs no quiet rows — its quiet-fraction dip is the denominator | m260720 6e6 vs 6.5e6/7e6 | rows/game −0.5%, mean ply +1.9%, phase composition shift <0.25 pp | R5 | **ESTABLISHED** |
 | `eval_noise` displaces the position distribution completely, at zero Elo cost | §4 entry | 100% of games diverge by ply 1 at σ=5; 0 ± 10 Elo at σ=10 | R8 | **ESTABLISHED** |
-| `eval_noise` does NOT move sharpness or quiet fraction | 7 arms × 30k games | draw 22.20→21.50 over σ 0→40 (wrong sign, ~2σ); q@60 0.440→0.412 | R8 | **ESTABLISHED** |
+| `eval_noise` does NOT move sharpness or quiet fraction | 7 arms × 30k games | draw 22.20→21.50 over σ 0→40 (wrong sign, ~2σ); q@60 0.440→0.412 (q@60 biased by the pre-fix gate) | R8 | **ESTABLISHED** |
+| `eval_noise` σ 20–30 adds no TD error to the trace; adds ~11–16 cp label jitter and a slope bias toward the noisy player's values | 3 arms × 8k d8 games, frozen, post-fix | rms e −0.9% / −0.5% (±0.4%); rms δ +20% / +37% uniform pawn/other; slope −3σ / −6σ | R8 | **MEASURED** |
 
 ### PV resolution (2026-09-21)
 
@@ -926,13 +927,20 @@ tested, and which `--bt-diag`'s negative ΔMSE_out below 40 cp actively hints at
 zero-mean cp offset on the static eval keyed on the **pawn structure alone**, so
 it is constant across every non-pawn move: it perturbs which structure the engine
 steers toward, never its tactics or its material trades.  Built to break the
-sharpness drift by diversifying structural play.  The rescoring half needed no
-code — the learner never calls `score_pos`, and `--refresh-scores` already
-re-evaluates the leaf, shifts the root score by the leaf delta (which cancels the
-offset exactly), and recomputes `leaf_ok` clean-vs-clean.  Seven arms × 30,000
+sharpness drift by diversifying structural play.  ⚠️ **The rescoring half was
+believed to need no code, and it did** (fixed 2026-09-23, change_log
+2026_09_23a).  The actor records its leaf and root STATICS clean
+(`nnue_evaluate`), so `--refresh-scores` shifts the root by (clean − clean) = 0
+and the root SEARCH score kept the PV leaf's offset: `leaf_ok` compared clean
+against noisy and deleted ~half the records at σ 20 (66 vs 128 per game), and the
+offline root labels carried noise of sd ~σ.  No production leg ever ran with
+eval_noise, so no chain was affected.  The actor now subtracts the leaf's offset
+from the root score before anything uses it.  Seven arms × 30,000
 self-play games plus 4,000-game strength matches: **it works, it is free below
 σ 10 (0 ± 10 Elo), and it moves neither symptom.**  Draw rate 22.20 → 21.50
-across σ 0→40 (wrong sign, ~2σ) and q@60 0.440 → 0.412, against a target of
+across σ 0→40 (wrong sign, ~2σ) and q@60 0.440 → 0.412 (⚠️ q@60 was measured
+through the defective clean-static-vs-noisy-search gate and is biased DOWN under
+noise; draw rate, game length and Elo are unaffected), against a target of
 recovering 22.5→24.2% and 0.499→0.562.  The informative part is the contrast with
 a divergence check: at σ=5 **100% of games diverge from the paired control, median
 divergence at ply 1** — the perturbation completely changes WHICH games are played
@@ -946,6 +954,36 @@ net's own policy never reaches is shown to be worth something — Offline 2.4's
 transfer.  Strength cost turns on exactly where the arithmetic says: a choice
 compares two independently drawn structures, so the distortion has sd σ√2, and
 P(>50 cp) goes 0.04% at σ=10 to 1.8% at σ=15.
+
+**Does the noise buy learning signal? (2026-09-23, after the fix.)**  The design
+argument: labels are clean, so a perturbed move the net already understands is
+priced into the clean label of the leaf it chose and produces no TD error; only
+unforeseen consequences do, and those are what it can learn from.  Measured
+directly (`scripts/arms/eval_noise_tderr.sh`): 3 arms × 8,000 d8 games from the
+frozen m260921-2.5e6g net through the real actor/learner pipeline, learner frozen
+and dumping every leaf_ok record, TD recursion reconstructed offline.
+
+| σ | rec/g | rms e (trace) | rms δ (one-step) | δ pawn / other | calib. slope |
+|---|---|---|---|---|---|
+| 0 | 128.3 | 0.1291 | 0.0272 | 0.0306 / 0.0260 | +0.0423 ± 0.0015 |
+| 20 | 128.7 | 0.1279 (−0.9%) | 0.0327 (+20%) | +20.5% / +20.0% | +0.0347 ± 0.0020 |
+| 30 | 127.1 | 0.1285 (−0.5%) | 0.0373 (+37%) | +37.6% / +36.9% | +0.0275 ± 0.0018 |
+
+(rms errors ±0.4% one-sigma.)  **The trace error that multiplies every gradient
+does not rise** — the pre-committed reading is that at σ 20–30 the noise buys
+mistakes the net already prices, not new signal.  The one-step delta DOES rise,
+but **uniformly on pawn and non-pawn steps**, so it is label jitter from choice
+distortion (each record is the clean value of a line a noisy search chose:
+~11 cp sd per record at σ 20, ~16 at σ 30), not structural consequences — and it
+telescopes away under λ = 0.985.  (A pre-fix run appeared to localise the rise to
+pawn steps; that was the defective gate's record selection.)  The calibration
+slope — regression of e on (d − 0.5) — falls 3σ at σ 20 and 6σ at σ 30.  Label
+jitter alone predicts −0.002 / −0.004 of that (errors-in-variables); the
+residual −0.005 / −0.011 is the bias side: the trace pulls values toward what the
+NOISY player achieves.  Caveat: rms e measures the quantity of TD error, not its
+information — the arms visit different positions, so equal magnitude does not
+prove equal content.  It does mean the mechanism's signature (extra error where
+the net was wrong) is not visible at a resolution of ~0.4%.
 
 **Depth as the lever (4.5/4.6 established it; Offline 1.1 closed it at d10).**
 d6→d8 reopened the bootstrap decisively (the first positive consolidation of the
