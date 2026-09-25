@@ -398,6 +398,7 @@ etc.) without manual `dir=` configuration.
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--srand SEED` | off | Seed fastchess's opening-book order (`-srand`).  Matches given the same seed play the same openings, so comparisons between them are paired (e.g. several nets against one anchor).  fastchess only |
 | `--driver` | `fastchess` | Tournament driver: `fastchess` or `cutechess` |
 | `-n`, `--games` | 100 | Games per iteration per opponent |
 | `-i`, `--iterations` | 1 | Iterations per opponent; engines restart between each |

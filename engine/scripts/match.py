@@ -332,6 +332,12 @@ def main():
                              "this does not guarantee opening uniqueness by itself — "
                              "fastchess cycles a shuffled book order, so openings "
                              "recycle once total games exceed the book size.")
+    parser.add_argument("--srand", type=int, default=None, metavar="SEED",
+                        help="Seed the opening-book order (fastchess -srand).  "
+                             "Unseeded, every match draws its own random order; "
+                             "give several matches the same seed and they play "
+                             "the SAME openings, so comparisons between them are "
+                             "paired.  fastchess only")
     parser.add_argument("--no-adjudication", action="store_true", default=False,
                         help="Disable score-based early adjudication (-draw / -resign).  "
                              "Games end only on natural conditions: mate, stalemate, "
@@ -514,6 +520,11 @@ def main():
                     args.fischer_random = True
             fmt = "epd" if args.openings.lower().endswith(".epd") else "pgn"
             openings_args = ["-openings", f"file={args.openings}", f"format={fmt}", "order=random"]
+            if args.srand is not None:
+                if args.driver != "fastchess":
+                    print("Error: --srand needs --driver=fastchess.", file=sys.stderr)
+                    sys.exit(1)
+                openings_args += ["-srand", str(args.srand)]
 
     name1    = args.name1 or os.path.basename(args.engine1)
     gauntlet = len(args.opponents) > 1
