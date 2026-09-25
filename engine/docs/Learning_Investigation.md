@@ -418,6 +418,117 @@ established: `m260720` ended 113 Elo higher on the same anchor after the same 7M
 games, but it also had `--corpus-window` from 5.5e6 (worth +36/+45 by itself), 4x
 the online LR, 500k legs against 1M, and no PV repairs.
 
+**P. FIXED DEPTH IS AN EVAL INSTRUMENT, NOT A STRENGTH MEASUREMENT — and its
+scale is depth-dependent.**  (Companion to N, which prices a search budget for
+*generation*; P is about the budget used to *rate*.)  Measured 2026-09-25 on an
+M5 Pro (6 P-cores, 18 logical), `m260720` binaries, `training_openings.epd`,
+the standard gauntlet adjudication.
+
+*Why the instrument differs from a clock.*  `classic_eval` is within the family
+— same search, only the eval differs — but "only the eval" still moves two
+search economics.  Measured over 20 midgame corpus positions at depth 12:
+`classic_eval` runs **2.48 M nps** against the NNUE net's **1.40 M nps**, yet
+needs **1.31× more nodes per ply** (132,952 vs 101,618 median).  At a clock the
+two nearly cancel — in-game at `3+0.05` both reached mean depth 13.24
+(classical) / 13.42 (NNUE) at the same time per move.  Fixed depth removes both
+and strips classical of the ~1.8× node budget the clock was handing it.  The
+same channel exists *inside* the NNUE family: nps is flat (1.32–1.40 M across
+four chain checkpoints) but nodes-to-depth is not — `1e5g` needs 114,843 median
+nodes for depth 12 where `7e6g` needs 101,618 (−12% median, −22% total).
+Trained nets prune better, a clock pays them for it, and a fixed depth does not.
+**That is the point of the instrument, not a defect**: what survives fixed depth
+is how good the evaluation is at a fixed search.
+
+*The anchor moves ~85 Elo.*  Same binary, same opponent, same openings:
+
+| contrast | 3+0.05 | fixed depth 12 |
+|---|---|---|
+| `2.5e6g-final` vs `classic_eval` | **+16.7 ± 19** (n=1000) | **+101.5 ± 26.8** (n=500) |
+| `2.5e6g-final` vs `2.2e6g-final` | **+38.0 ± 16.6** (n=1000) | **+18.1 ± 20.2** (n=634) |
+
+(95% throughout; note `pgn_score`/sidecar `err` is ONE sigma — ×1.96 before
+comparing with a fastchess line.)
+
+*The scale is depth-dependent, not a fixed offset.*  The same family pair, only
+the limit varying:
+
+| condition | n | Elo (95%) | engine-s/game | draw% | SNR | SNR²/min |
+|---|---|---|---|---|---|---|
+| d6 | 4000 | +12.25 ± 9.5 | 0.22 | 22.3% | 1.29 | 1.35 |
+| **d8** | **4000** | **+20.26 ± 9.0** | **1.10** | **30.2%** | **2.25** | **1.13** |
+| d10 | 1818 | +34.32 ± 12.7 | 5.04 | 36.7% | 2.70 | 0.73 |
+| d12 | 634 | +18.10 ± 19.8 | 11.15 | 46.2% | 0.91 | — |
+| 3+0.05 (~d13) | 1000 | +38.0 ± 16.6 | 11.05 | 43.1% | 2.29 | 0.24 |
+
+d12 is the weakest point (widest bar) and is compatible with the trend; what is
+left is roughly linear in depth.  **A d8 reading is ~0.5× the TC reading on this
+leg**, and the ratio against `classic_eval` runs 0.25–1.00 along the chain (below),
+so the two scales are NOT convertible — re-baseline once and never mix.
+
+*It is calibrated at the null.*  `off-g200-final` vs `7e6g-final`, the offline
+leg the TC gauntlet called flat: `3+0.05` +0.7 ± 15.3 (n=1000, ~22 min) against
+**d8 −0.35 ± 8.9 (n=4000, 4 min 14 s)**.  Same answer, 1.7× tighter, 5× less
+wall clock.  The instrument does not manufacture signal.
+
+*The chain ladder keeps its order but not its scale.*  All checkpoints vs
+`classic_eval`, d8/1000 games (~1 min each) against the recorded `3+0.05` column:
+−348.6/−175.0 (100k), −198.8/−50.0 (500k), −134.1/−12.5 (1M), −60.7/+33.8 (2M),
+−36.3/+43.3 (2.2M), +16.7/+39.8 (2.5M), +180.8/+182.2 (7M).  Monotone and
+order-preserving; ratio 0.50 → 0.25 → 1.00.  ⚠️ Also note 2.2M→2.5M reads as
+*nothing* by anchor differencing (+43.3 → +39.8) where the direct head-to-head
+says +20.3 ± 9.0.  Elo is not additive across anchors; keep using paired family
+matches for leg deltas.
+
+*What it buys.*  Cost is ~10× lower per game at d8, and because a fixed-depth
+result is reproducible and load-immune, concurrency is free: measured aggregate
+throughput 70 pos/s at c=8, 95 at c=12, **130 at c=18 (1.84×)**, saturating past
+18.  A clock cannot use those cores — per-process nps falls 1.40 M → 1.15 M
+(c=8) → 0.94 M (c=18), silently rewriting the effective time control.  Be
+precise about what the precision gain is, though: 4000 games at d8 reaches the
+*same* confidence as 1000 games at `3+0.05` (SNR 2.25 vs 2.29), because the
+effect is half the size.  What you buy is the fifth of the wall clock.  d6 is
+nominally the most efficient per minute but halves the effect again and drops
+the draw rate to 22%; **d8 is the operating point** — efficient, and still
+clearly eval-decided.
+
+*Reproducibility, and why NOT nodes.*  Repeat runs over the same 20 positions:
+
+| binary | limit | positions differing / 20 |
+|---|---|---|
+| `2.5e6g-final` | `depth 12` | **0** (also 0 under 16-way CPU load) |
+| `2.5e6g-final` | `nodes 115000` | **5–8** (one changed the best move; under load, swings to 7× in node count — d11/45,925 vs d16/343,485 on one position) |
+| `classic_eval` | `nodes 115000` | 0 |
+
+So `go nodes` is not reproducible in the **NNUE** build, which contradicts the
+claim at `uci.cpp:452` ("Deterministic (single-threaded) and load-independent")
+and bears on any fixed-node measurement in this record, §1 N's budget ladder
+included.  Likely suspect, unconfirmed: under a node budget
+`search_cfg.check_inter` is pinned to 1023 (`search.cpp:592`), so
+`SEARCH_INTERRUPT_CHECK` → `inter()` → `uci_check_interrupt()` runs ~100× more
+often than under a clock.  Until that is understood, **rate at fixed depth, not
+fixed nodes** — fixed nodes would otherwise be the better instrument, since it
+keeps the nodes-to-depth channel that fixed depth discards.
+
+*Operational trap.*  Under `go depth`/`go nodes` Leaf sets `time_limit = MAXT`
+and ignores the clock (`uci.cpp`, the depth/nodes branch) while the driver keeps
+enforcing it: at d12 under `3+0.05` an engine used 2.78 s of a ~6.2 s budget,
+and d14 would exceed it.  `match.py` now selects `-tc inf` automatically
+whenever a depth or node budget is set.
+
+*What this is wired to.*  `match.py --depth N` / `--nodes N`;
+`train.py --gauntlet-depth N`, `--epoch-depth N`, with concurrency defaulting to
+the core count under either.  Because the fixed-depth Elo cannot be read against
+the recorded chain, `train.py` also runs a **`tc-anchor` continuity match** —
+`<tag>-final` against every `--gauntlet-anchors` opponent at `--tc`, 1000 games,
+recorded separately in the sidecar as `tc_anchor_gauntlet`.  That column is what
+keeps the `3+0.05` ladder alive and the only thing that would catch a change
+improving eval-per-node while costing search speed.  Every sidecar now carries a
+`rating_conditions` block; an Elo without its budget is unreadable.
+
+*Not established.*  The ~0.5× compression factor rests on ONE real-signal leg.
+A second is cheap (4.5 min at d8) and should be measured before d8 deltas are
+read quantitatively.
+
 
 ---
 
@@ -507,6 +618,21 @@ for one.
 | Whether the window fix helps SEARCH, beyond removing the substitution, is open | two matches vs a common opponent | 15.8 ± 17.3 (0.9σ), and §5 forbids subtracting them | R8 | **UNMEASURED** — see TODO S1 |
 | Dropping Houdart's fail-high depth reduction HURTS | five paired arms | +2.7 pts alone at 1.15×; removing it from the all-three arm *improved* both resolution and speed | R8 | **ESTABLISHED** |
 | Stub rows are worse than resolved rows and the quiet gate cannot filter them | derived I−J, 4000 games | mean \|cp−gate\| 130.7 vs 111.6 cp; gate-60 pass 39.4% vs 49.1% | R8 | **ESTABLISHED** |
+
+### The rating instrument (2026-09-25)
+
+| claim | evidence | effect | regime | grade |
+|---|---|---|---|---|
+| A fixed-DEPTH match is bit-reproducible and load-immune | §1 P | 0/20 positions differ across repeat runs, solo and under 16-way load | R9 | **ESTABLISHED** |
+| `go nodes` is NOT reproducible in the NNUE build | §1 P | 5–8/20 positions differ, one best-move change; to 7× node count under load; `classic_eval` 0/20 | R9 | **ESTABLISHED** (mechanism open) |
+| Fixed depth moves the `classic_eval` anchor by ~85 Elo | §1 P | +16.7 ± 19 at 3+0.05 vs +101.5 ± 26.8 at d12, same pairing (95%) | R9 | **ESTABLISHED** |
+| `classic_eval` is 1.8× faster per node but needs 1.31× more nodes per ply | §1 P | 2.48 M vs 1.40 M nps; 132,952 vs 101,618 median to d12 | R9 | **ESTABLISHED** |
+| Trained nets prune better — nodes-to-depth falls along the chain | §1 P | `1e5g` 114,843 vs `7e6g` 101,618 median to d12 (−12%; −22% total) | R9 | SUPPORTED (n=20 positions) |
+| The fixed-depth reading is depth-dependent, ~0.5× of TC at d8 | §1 P | same pair: +12.3 (d6), +20.3 (d8), +34.3 (d10), +38.0 (3+0.05) | R9 | SUPPORTED (one leg) |
+| Fixed depth is calibrated at the null | §1 P | `off-g200` vs `7e6g`: +0.7 ± 15.3 at 3+0.05, −0.35 ± 8.9 at d8 (95%) | R9 | **ESTABLISHED** |
+| The d8 chain ladder preserves ORDER but not scale | §1 P | monotone across 7 checkpoints; d8/TC ratio 0.50 → 0.25 → 1.00 | R9 | **ESTABLISHED** |
+| Fixed depth frees concurrency | §1 P | 70 → 95 → 130 pos/s at c=8/12/18, saturating past 18 | R9 | **ESTABLISHED** |
+| d8/4000 games ≈ 3+0.05/1000 games in confidence, at 1/5 the clock | §1 P | SNR 2.25 vs 2.29; 4.5 min vs ~22 min | R9 | **ESTABLISHED** |
 
 ### The loop as a whole
 
@@ -1321,14 +1447,17 @@ outcome labels are harder to fit than cp-derived ones.
 about how the game ends and still be a worse thing to train on [Offline 4.4].
 Never read `--bt-diag` as a training recommendation.
 
-**An anchor Elo is only comparable at the SAME time control.**  `classic_eval`
+**An anchor Elo is only comparable at the SAME rating budget.**  `classic_eval`
 and an NNUE net differ in nodes per second, so the gap between them moves with
 the clock: a number measured at `3+0.05` cannot be read against one measured at
 `1+0.01`.  This binds the chain's recorded `final_gauntlet` anchors (3+0.05,
 `train.py`'s `--tc` default) against anything rated at the epoch-ladder default
 (1+0.01) — including the composite-corpus arms.  Within one programme it costs
 nothing as long as every arm *and its control* are rated identically; across
-programmes it is a trap.  The same caveat applies to `5e6g`'s e2→e3 ladder step
+programmes it is a trap.  A **fixed depth** is a third condition again, not a
+faster TC: it moved the same `classic_eval` pairing by ~85 Elo and compressed a
+family gap by ~2× (§1 P).  Every `train.py` sidecar from 2026-09-25 carries a
+`rating_conditions` block for exactly this reason.  The same caveat applies to `5e6g`'s e2→e3 ladder step
 (−12.7): same TC as the arms, but a different opponent (the pre-offline net,
 not the seed), which is why §6 item 2 measures its null directly instead of
 importing that number.
@@ -1347,13 +1476,23 @@ reports a 95% interval — a factor of 1.96.
   the start.  The 7.12.4 table confirmed both that the intervention worked and that
   the isolation held (ft_w identical to four significant figures) before any
   gauntlet time was spent.  **Any future optimizer arm should do this first.**
+- **Rate eval changes at fixed depth 8, 4000 games — ~4.5 minutes.**  It carries
+  the same confidence as the 1000-game `3+0.05` gauntlet (~22 min), is
+  bit-reproducible, and is immune to concurrency, so it can share the machine
+  with a running trainer.  It answers "did the EVAL improve", not "is the engine
+  stronger": fixed depth quotients out nps and nodes-to-depth, so keep a
+  `tc-anchor` match at `3+0.05` for the strength question and for continuity
+  with the recorded ladder (§1 P).
 - **Match Adam *steps*, not games**, whenever the knob touches aggregation — this
   is what separated 7.15 from 6.16.
-- **Fixed-node matches are hardware-independent, and they are how to price a
+- **Fixed-BUDGET matches are hardware-independent, and they are how to price a
   search budget.**  Play one net against itself at two budgets under a clock that
-  cannot bind (`-tc 600+10 -c 6`).  The result transfers between machines
+  cannot bind (`-tc inf`, or `600+10`).  The result transfers between machines
   unchanged, which a TC-based rating never does — and 600 games gives ±13, tight
-  enough to separate rungs of a budget ladder (§1 N).
+  enough to separate rungs of a budget ladder (§1 N).  ⚠️ **Use fixed DEPTH, not
+  fixed nodes**: `go nodes` is not reproducible in the NNUE build (§1 P), so the
+  transfer claim holds for depth and is unverified for nodes — including for §1
+  N's own ladder, which was measured on the node path.
 - ⚠️ **Both sides of a loss must share the same K.**  Shaping K in `bt_target`
   while `bt_eval_record` and the gradient's sigmoid Jacobian keep a flat one is
   not a temperature change at all — training `sigmoid(score/K_flat)` toward a

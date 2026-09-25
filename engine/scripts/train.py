@@ -195,7 +195,13 @@ def corpus_row_counts(path, gate_cp=0):
 
 def final_anchor_elo(tag, anchors):
     """Elo of <tag>'s promoted net against the first gauntlet anchor it shares
-    with ANCHORS (falling back to its first final-gauntlet entry), or None."""
+    with ANCHORS (falling back to its first final-gauntlet entry), or None.
+
+    Prefer `tc_anchor_gauntlet` when the leg recorded one: this number labels a
+    corpus's generator across the whole chain window, and a fixed-depth
+    gauntlet reports a compressed, depth-dependent scale that cannot be read
+    against a leg rated at the TC.  The continuity leg exists precisely so one
+    scale survives.  (Metadata only — it does not drive the corpus quotas.)"""
     if not tag:
         return None
     p = LEARN_DIR / f"{tag}_final.json"
@@ -203,7 +209,8 @@ def final_anchor_elo(tag, anchors):
         return None
     try:
         with open(p) as f:
-            fg = json.load(f).get("final_gauntlet") or []
+            j = json.load(f)
+        fg = j.get("tc_anchor_gauntlet") or j.get("final_gauntlet") or []
     except (OSError, ValueError):
         return None
     for a in anchors or []:
@@ -670,10 +677,12 @@ def pgn_score(pgn_path, name_substr):
     return W, L, D, elo, err
 
 
-def render_epoch_ladder(tag, opp, games, tc, results):
+def render_epoch_ladder(tag, opp, games, budget, results):
     """Format the epoch-ladder results table as printable lines (used for
-    both stdout and the persisted train.log)."""
-    lines = [f"=== Epoch ladder: {tag} vs {opp} ({games} games at {tc}) ==="]
+    both stdout and the persisted train.log).  BUDGET is the rating condition
+    — a depth or a TC — without which the Elo column cannot be read."""
+    lines = [f"=== Epoch ladder: {tag} vs {opp} "
+             f"({games} games at {budget}) ==="]
     for ep, (W, L, D, elo, err) in results:
         n = W + L + D
         s = 100 * (W + 0.5 * D) / max(n, 1)
@@ -682,9 +691,23 @@ def render_epoch_ladder(tag, opp, games, tc, results):
     return lines
 
 
-def render_gauntlet(label, results):
-    """Format the final-gauntlet results table (stdout + train.log)."""
-    lines = [f"=== Gauntlet results: {label} ==="]
+def budget_args(depth, tc):
+    """match.py arguments for one rating budget: fixed depth if DEPTH is set
+    (match.py then selects `-tc inf` itself), otherwise the time control."""
+    return ["--depth", depth] if depth else ["-tc", tc]
+
+
+def budget_label(depth, tc):
+    """How a rating budget reads in a log line / results table."""
+    return f"depth {depth}" if depth else tc
+
+
+def render_gauntlet(label, results, budget=None, kind="Gauntlet"):
+    """Format a results table (stdout + train.log).  BUDGET is the rating
+    condition — a depth or a TC — and belongs in the header, because an Elo
+    is only comparable against another measured the same way."""
+    head = f"=== {kind} results: {label}"
+    lines = [head + (f"  [{budget}] ===" if budget else " ===")]
     for opp, (W, L, D, elo, err) in results:
         n = W + L + D
         s = 100 * (W + 0.5 * D) / max(n, 1)
@@ -1068,7 +1091,42 @@ def main():
                          "Combined with --gauntlet and (under --continue) "
                          "Leaf_v<PREV_TAG>-final.")
     ap.add_argument("--gauntlet-games", type=int, default=1000)
-    ap.add_argument("--tc", default="3+0.05")
+    ap.add_argument("--tc", default="3+0.05",
+                    help="Time control for the final gauntlet when it is NOT "
+                         "run at a fixed depth, and always for the "
+                         "--tc-anchor continuity match (default 3+0.05)")
+    ap.add_argument("--gauntlet-depth", type=int, default=0, metavar="N",
+                    help="Run the final gauntlet at fixed depth N instead of "
+                         "--tc (0 = off).  Isolates EVAL quality: a fixed "
+                         "depth quotients out both nps and nodes-to-depth, so "
+                         "what is left is how good the evaluation is at a "
+                         "fixed search.  Reproducible and load-immune, so "
+                         "--gauntlet-concurrency can be the full core count.  "
+                         "Measured at depth 8: ~10x cheaper per game than "
+                         "3+0.05, so 4000 games cost ~4.5 min and land the "
+                         "same signal-to-noise the 1000-game 3+0.05 gauntlet "
+                         "gets in ~22 min.  ⚠️ The Elo is on a COMPRESSED, "
+                         "depth-dependent scale (~0.5x of 3+0.05 on the one "
+                         "leg measured, and the ratio vs classic_eval runs "
+                         "0.25-1.0 along the m260720 chain): never mix it "
+                         "with a time-control number.  See "
+                         "docs/Learning_Investigation.md")
+    ap.add_argument("--gauntlet-concurrency", type=int, default=None,
+                    metavar="N",
+                    help="Concurrency for the final gauntlet (default: 8 "
+                         "under --tc, os.cpu_count() under --gauntlet-depth, "
+                         "where contention cannot change the result)")
+    ap.add_argument("--tc-anchor-games", type=int, default=1000, metavar="N",
+                    help="Games for the --tc continuity match that runs "
+                         "<tag>-final against each --gauntlet-anchors "
+                         "opponent at --tc when the main gauntlet is at a "
+                         "fixed depth (default 1000, the historical n).  This "
+                         "is what keeps the chain's recorded 3+0.05 ladder "
+                         "going, and the only thing that would catch a change "
+                         "improving eval-per-node while costing search speed.")
+    ap.add_argument("--no-tc-anchor", action="store_true",
+                    help="Skip the --tc continuity match against the gauntlet "
+                         "anchors (only meaningful with --gauntlet-depth)")
     ap.add_argument("--gauntlet-epochs", action="store_true",
                     help="Fast per-epoch ladder: after each epoch's training, "
                          "rate that snapshot vs the net as it stood BEFORE "
@@ -1090,7 +1148,19 @@ def main():
     ap.add_argument("--epoch-games", type=int, default=1000,
                     help="Games per epoch-ladder match (default 1000)")
     ap.add_argument("--epoch-tc", default="1+0.01",
-                    help="Epoch-ladder time control (default 1+0.01)")
+                    help="Epoch-ladder time control, used when --epoch-depth "
+                         "is not set (default 1+0.01)")
+    ap.add_argument("--epoch-depth", type=int, default=0, metavar="N",
+                    help="Run the epoch ladder at fixed depth N instead of "
+                         "--epoch-tc (0 = off).  Same instrument as "
+                         "--gauntlet-depth; the ladder is a pure within-family "
+                         "contrast, so it is the natural first thing to "
+                         "convert.  The trainer is still SIGSTOPped for the "
+                         "duration of each ladder match.")
+    ap.add_argument("--epoch-concurrency", type=int, default=None, metavar="N",
+                    help="Concurrency for epoch-ladder matches (default: 8 "
+                         "under --epoch-tc, os.cpu_count() under "
+                         "--epoch-depth)")
     ap.add_argument("--no-final-gauntlet", action="store_true",
                     help="Skip the final full gauntlet (with --gauntlet-epochs, "
                          "for ladder-only runs — no --gauntlet opponents needed)")
@@ -1122,6 +1192,18 @@ def main():
         if not 0.0 < args.bt_rescore <= 1.0:
             die(f"--bt-rescore {args.bt_rescore} out of range: expected "
                 f"0 < FRAC <= 1 (bare flag = 1.0 = full retarget)")
+
+    # ---- rating-budget resolution -----------------------------------------
+    # A fixed depth makes a match reproducible and load-immune, so concurrency
+    # is free; a time control does not, so it stays capped at 8.  match.py
+    # picks `-tc inf` on its own once a depth is passed.
+    if args.gauntlet_depth < 0 or args.epoch_depth < 0:
+        die("--gauntlet-depth / --epoch-depth must be >= 0 (0 = use the TC)")
+    all_cores = os.cpu_count() or 8
+    if args.gauntlet_concurrency is None:
+        args.gauntlet_concurrency = all_cores if args.gauntlet_depth else 8
+    if args.epoch_concurrency is None:
+        args.epoch_concurrency = all_cores if args.epoch_depth else 8
 
     if args.no_repeat:
         log("note: --no-repeat is now always on — the flag is a no-op")
@@ -1613,9 +1695,11 @@ def main():
             tdir / f"{args.tag}_ep{ep}.nnue", ver)
         pgn = work / f"match_{ver}_vs_{opp_name.replace('Leaf_v', '')}.pgn"
         log(f"epoch ladder: epoch {ep} vs {opp_name} "
-            f"({args.epoch_games} games at {args.epoch_tc})")
+            f"({args.epoch_games} games at "
+            f"{budget_label(args.epoch_depth, args.epoch_tc)})")
         sh(["python3", SCRIPT_DIR / "match.py", str(bpath), str(opp_bin),
-            "-n", args.epoch_games, "-c", 8, "-tc", args.epoch_tc,
+            "-n", args.epoch_games, "-c", args.epoch_concurrency,
+            *budget_args(args.epoch_depth, args.epoch_tc),
             "--openings", args.openings, "--fischer-random",
             "--pgn-out", pgn], cwd=LEARN_DIR)
         W, L, D, elo, err = pgn_score(pgn, ver)
@@ -1671,8 +1755,9 @@ def main():
 
     if epoch_results:
         print()
-        for line in render_epoch_ladder(args.tag, ladder_opp, args.epoch_games,
-                                        args.epoch_tc, epoch_results):
+        for line in render_epoch_ladder(
+                args.tag, ladder_opp, args.epoch_games,
+                budget_label(args.epoch_depth, args.epoch_tc), epoch_results):
             print(line)
         print()
 
@@ -1716,26 +1801,39 @@ def main():
     rate_bin = compile_binary(f"{args.tag}-final", out_nnue.name,
                               tdleaf=False, force=True)
 
-    def run_gauntlet(bin_name, label):
+    def run_matches(bin_name, label, opponents, games, depth, tc,
+                    concurrency, kind="gauntlet", suffix=""):
         """Rate Leaf_v<label> (binary bin_name in learn/) against every
-        opponent in gauntlet_list under the shared conditions
-        (--gauntlet-games, --tc).  Returns [(opp, (W,L,D,elo,err)), ...]."""
+        opponent in OPPONENTS under one shared budget.  SUFFIX distinguishes
+        PGNs when the same pairing is rated under two budgets.
+        Returns [(opp, (W,L,D,elo,err)), ...]."""
         res = []
-        for opp in gauntlet_list:
+        for opp in opponents:
             if not (LEARN_DIR / opp).is_file():
                 log(f"WARNING: opponent {opp} not found in learn/ — skipping")
                 continue
-            pgn = work / f"match_{label}_vs_{opp.replace('Leaf_v','')}.pgn"
-            log(f"gauntlet: {label} vs {opp} ({args.gauntlet_games} games)")
+            pgn = (work /
+                   f"match_{label}_vs_{opp.replace('Leaf_v','')}{suffix}.pgn")
+            log(f"{kind}: {label} vs {opp} ({games} games at "
+                f"{budget_label(depth, tc)})")
             sh(["python3", SCRIPT_DIR / "match.py", bin_name, opp,
-                "-n", args.gauntlet_games, "-c", 8, "-tc", args.tc,
+                "-n", games, "-c", concurrency,
+                *budget_args(depth, tc),
                 "--openings", args.openings, "--fischer-random",
                 "--pgn-out", pgn], cwd=LEARN_DIR)
             res.append((opp, pgn_score(pgn, label)))
         return res
 
+    def run_gauntlet(bin_name, label):
+        """The final gauntlet: every opponent in gauntlet_list under the
+        shared conditions (--gauntlet-games, --gauntlet-depth or --tc)."""
+        return run_matches(bin_name, label, gauntlet_list,
+                           args.gauntlet_games, args.gauntlet_depth, args.tc,
+                           args.gauntlet_concurrency)
+
     results = []
     tdleaf_results = []
+    tc_anchor_results = []
     if not gauntlet_list:
         log("no gauntlet opponents (--gauntlet/--gauntlet-anchors): "
             "skipping final gauntlet matches.")
@@ -1750,26 +1848,56 @@ def main():
                                           f"{args.tag}-tdleaf")
         results = run_gauntlet(rate_bin.name, f"{args.tag}-final")
 
+        # Continuity leg: the fixed-depth gauntlet reports eval quality on a
+        # compressed, depth-dependent scale that cannot be read against the
+        # chain's recorded 3+0.05 ladder.  Rate <tag>-final against the
+        # ANCHORS (not the whole gauntlet list) at --tc to keep that ladder
+        # going — usually classic_eval, but whatever the anchors are, and all
+        # of them if there are several.
+        if args.gauntlet_depth and not args.no_tc_anchor:
+            if args.gauntlet_anchors:
+                tc_anchor_results = run_matches(
+                    rate_bin.name, f"{args.tag}-final",
+                    list(args.gauntlet_anchors), args.tc_anchor_games,
+                    0, args.tc, 8, kind="tc-anchor", suffix="_tc")
+            else:
+                log("--gauntlet-depth with no --gauntlet-anchors: "
+                    "no TC continuity match to run.")
+
+        gb = budget_label(args.gauntlet_depth, args.tc)
         print()
         if tdleaf_results:
-            for line in render_gauntlet(tdleaf_rate_bin.name, tdleaf_results):
+            for line in render_gauntlet(tdleaf_rate_bin.name, tdleaf_results,
+                                        gb):
                 print(line)
             print()
-        for line in render_gauntlet(rate_bin.name, results):
+        for line in render_gauntlet(rate_bin.name, results, gb):
             print(line)
         print()
+        if tc_anchor_results:
+            for line in render_gauntlet(rate_bin.name, tc_anchor_results,
+                                        args.tc, kind="TC anchor"):
+                print(line)
+            print()
 
     # ---- persisted log: append the tables that were only ever on stdout ---
     with open(tdir / "train.log", "a") as f:
+        gb = budget_label(args.gauntlet_depth, args.tc)
         if epoch_results:
             f.write("\n" + "\n".join(render_epoch_ladder(
-                args.tag, ladder_opp, args.epoch_games, args.epoch_tc,
+                args.tag, ladder_opp, args.epoch_games,
+                budget_label(args.epoch_depth, args.epoch_tc),
                 epoch_results)) + "\n")
         if tdleaf_results:
             f.write("\n" + "\n".join(render_gauntlet(
-                tdleaf_rate_bin.name, tdleaf_results)) + "\n")
+                tdleaf_rate_bin.name, tdleaf_results, gb)) + "\n")
         if results:
-            f.write("\n" + "\n".join(render_gauntlet(rate_bin.name, results)) + "\n")
+            f.write("\n" + "\n".join(render_gauntlet(
+                rate_bin.name, results, gb)) + "\n")
+        if tc_anchor_results:
+            f.write("\n" + "\n".join(render_gauntlet(
+                rate_bin.name, tc_anchor_results, args.tc,
+                kind="TC anchor")) + "\n")
 
     # ---- sidecar: the self-describing handoff unit for --continue ---------
     games_this_iter = 0 if args.skip_online else args.games
@@ -1811,6 +1939,27 @@ def main():
             for (tag, _, elo), size, used in zip(sources, sizes, per_source)
         ],
         "gauntlet_anchors": args.gauntlet_anchors,
+        # Measurement conditions.  An Elo is only comparable against another
+        # measured the same way, so every rating in this sidecar carries the
+        # budget it was taken under.
+        "rating_conditions": {
+            "gauntlet_depth": args.gauntlet_depth,
+            "gauntlet_tc": None if args.gauntlet_depth else args.tc,
+            "gauntlet_games": args.gauntlet_games,
+            "gauntlet_concurrency": args.gauntlet_concurrency,
+            "epoch_depth": args.epoch_depth,
+            "epoch_tc": None if args.epoch_depth else args.epoch_tc,
+            "epoch_games": args.epoch_games,
+            "epoch_concurrency": args.epoch_concurrency,
+            "tc_anchor_tc": args.tc if tc_anchor_results else None,
+            "tc_anchor_games": (args.tc_anchor_games if tc_anchor_results
+                                else None),
+            "openings": args.openings,
+        },
+        "tc_anchor_gauntlet": [
+            {"opponent": opp, "W": W, "L": L, "D": D, "elo": elo, "err": err}
+            for opp, (W, L, D, elo, err) in tc_anchor_results
+        ],
         "epoch_ladder": [
             {"epoch": ep, "W": W, "L": L, "D": D, "elo": elo, "err": err}
             for ep, (W, L, D, elo, err) in epoch_results

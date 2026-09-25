@@ -298,9 +298,10 @@ def main():
                              "picks up the latest weights each time")
     parser.add_argument("-c", "--concurrency", type=int, default=default_concurrency,
                         help=f"Simultaneous games (default: {default_concurrency})")
-    parser.add_argument("-tc", "--time-control", default="3+0.05",
+    parser.add_argument("-tc", "--time-control", default=None,
                         help="Time control for both engines: 'moves/time+inc' or 'time+inc' "
-                             "in seconds (default: 3+0.05)")
+                             "in seconds, or 'inf' for no clock (default: 3+0.05, or "
+                             "'inf' when a fixed depth/node budget is set)")
     parser.add_argument("--tc1", default=None, metavar="TC",
                         help="Override time control for engine1 only (default: same as -tc)")
     parser.add_argument("--tc2", default=None, metavar="TC",
@@ -342,16 +343,33 @@ def main():
                              "A -maxmoves 400 cap is still applied as a safety net.")
     parser.add_argument("--fischer-random", action="store_true", default=False,
                         help="Use Chess960 / Fischer Random starting positions")
+    parser.add_argument("--depth", type=int, default=None, metavar="N",
+                        help="Limit BOTH engines to depth N: the fixed-budget match.  "
+                             "Reproducible and load-immune (verified 0/20 positions "
+                             "differ across repeat runs, solo and under load), so "
+                             "concurrency can be raised to the core count without "
+                             "changing the result.  Implies -tc inf unless -tc is "
+                             "given.  NOTE: this measures eval quality at a fixed "
+                             "search, NOT playing strength -- it quotients out both "
+                             "nps and nodes-to-depth, and the Elo it reports is on a "
+                             "compressed, depth-dependent scale that is NOT comparable "
+                             "with a time-control rating.  See docs/"
+                             "Learning_Investigation.md")
+    parser.add_argument("--nodes", type=int, default=None, metavar="N",
+                        help="Limit BOTH engines to N nodes per move.  WARNING: `go "
+                             "nodes` is NOT reproducible in the NNUE build (5-8 of 20 "
+                             "positions differ across repeat runs, and up to 7x in "
+                             "node count under load); prefer --depth until that is "
+                             "fixed.  Implies -tc inf unless -tc is given")
     parser.add_argument("--depth1", type=int, default=None, metavar="N",
                         help="Limit engine1 search to depth N (default: no limit)")
     parser.add_argument("--depth2", type=int, default=None, metavar="N",
                         help="Limit engine2 search to depth N (default: no limit)")
     parser.add_argument("--nodes1", type=int, default=None, metavar="N",
                         help="Limit engine1 to N nodes per move (`go nodes N`). "
-                             "Unlike a time control this is deterministic and "
-                             "load-independent, so matches can run at any "
-                             "concurrency and stay comparable; unlike fixed "
-                             "depth it spends effort where the position needs it")
+                             "Unlike fixed depth it spends effort where the position "
+                             "needs it -- but see the --nodes warning: this path is "
+                             "not currently reproducible in the NNUE build")
     parser.add_argument("--nodes2", type=int, default=None, metavar="N",
                         help="Limit engine2 to N nodes per move")
     parser.add_argument("--ponder", action="store_true", default=False,
@@ -389,6 +407,31 @@ def main():
         for o in opts:
             if "=" not in o:
                 parser.error(f"--{label} expects KEY=VALUE, got: {o!r}")
+
+    # --depth/--nodes are the both-engines form of --depth1/--depth2 etc.
+    if args.depth is not None:
+        if args.depth1 is not None or args.depth2 is not None:
+            parser.error("--depth conflicts with --depth1/--depth2")
+        args.depth1 = args.depth2 = args.depth
+    if args.nodes is not None:
+        if args.nodes1 is not None or args.nodes2 is not None:
+            parser.error("--nodes conflicts with --nodes1/--nodes2")
+        args.nodes1 = args.nodes2 = args.nodes
+
+    # A fixed depth/node budget makes the clock meaningless to the ENGINE --
+    # Leaf sets time_limit = MAXT and ignores it (uci.cpp, `go depth`/`go
+    # nodes` branch) -- but the driver keeps enforcing it and will flag a
+    # forfeit once the budget outruns the clock (measured: depth 12 uses 2.8s
+    # of a 3+0.05 game's ~6.2s, depth 14 exceeds it).  Default to no clock.
+    fixed_budget = any(x is not None for x in
+                       (args.depth1, args.depth2, args.nodes1, args.nodes2))
+    if args.time_control is None:
+        args.time_control = "inf" if fixed_budget else "3+0.05"
+    elif fixed_budget and args.time_control != "inf":
+        print(f"[match.py] NOTE: fixed depth/node budget with -tc "
+              f"{args.time_control}: the engine ignores the clock but the "
+              f"driver does not, so a deep budget can forfeit on time.",
+              file=sys.stderr)
 
     # -----------------------------------------------------------------------
     # Interactive mode: fill in missing engines and options
@@ -533,6 +576,10 @@ def main():
         d1 = str(args.depth1) if args.depth1 is not None else "unlimited"
         d2 = str(args.depth2) if args.depth2 is not None else "unlimited"
         depth_str = f"   Depth: {name1}={d1} / opponent={d2}"
+    if args.nodes1 is not None or args.nodes2 is not None:
+        n1 = str(args.nodes1) if args.nodes1 is not None else "unlimited"
+        n2 = str(args.nodes2) if args.nodes2 is not None else "unlimited"
+        depth_str += f"   Nodes: {name1}={n1} / opponent={n2}"
     tc_display = (args.time_control if not args.tc1 and not args.tc2
                   else f"{args.tc1 or args.time_control} / {args.tc2 or args.time_control}")
     print(f"Games: {args.games}   Iterations: {args.iterations}   "

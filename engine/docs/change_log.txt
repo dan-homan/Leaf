@@ -1,5 +1,48 @@
 Changes since 2017_12_24
 
+2026_09_25 -- Fixed-depth rating: match.py --depth/--nodes, train.py
+               --gauntlet-depth/--epoch-depth, tc-anchor continuity match.
+
+               A fixed depth isolates EVAL quality: it quotients out both nps
+               and nodes-to-depth, leaving how good the evaluation is at a fixed
+               search.  Measured (M5 Pro, m260720 binaries, docs/
+               Learning_Investigation.md section 1 P): bit-reproducible and
+               load-immune (0/20 positions differ across repeat runs, solo and
+               under 16-way load), ~10x cheaper per game at depth 8, and
+               concurrency is free (70 -> 95 -> 130 pos/s at c=8/12/18).  4000
+               games at d8 take ~4.5 min and carry the same signal-to-noise the
+               1000-game 3+0.05 gauntlet gets in ~22 min.
+
+               match.py: --depth N / --nodes N set both engines; either one now
+               defaults -tc to `inf`, because the engine sets time_limit = MAXT
+               and ignores the clock under `go depth`/`go nodes` while the
+               driver keeps enforcing it (at d12 under 3+0.05 an engine used
+               2.78s of a ~6.2s budget; d14 would forfeit).
+
+               train.py: --gauntlet-depth / --epoch-depth, each with its own
+               --*-concurrency defaulting to os.cpu_count() when a depth is set
+               and 8 under a TC.  The epoch-ladder SIGSTOP of the trainer is
+               unchanged.  Because a fixed-depth Elo is on a compressed,
+               depth-dependent scale (~0.5x of 3+0.05 on the one leg measured;
+               the classic_eval ratio runs 0.25-1.00 along the chain), a
+               tc-anchor continuity match rates <tag>-final at --tc against
+               EVERY --gauntlet-anchors opponent (--tc-anchor-games, default
+               1000; --no-tc-anchor to skip), recorded in the sidecar as
+               tc_anchor_gauntlet.  That column keeps the recorded 3+0.05 ladder
+               going and is the only thing that would catch a change improving
+               eval-per-node while costing search speed.  Sidecars now carry a
+               rating_conditions block, and elo_vs_anchor() prefers the
+               tc_anchor column so a corpus window's generator_elo stays on one
+               scale.
+
+               WARNING recorded, not fixed: `go nodes` is NOT reproducible in
+               the NNUE build (5-8 of 20 positions differ across repeat runs,
+               one changing the best move; to 7x in node count under load;
+               classic_eval is clean at 0/20).  This contradicts the comment at
+               uci.cpp:452 and bears on the fixed-node budget ladder in
+               Learning_Investigation.md section 1 N.  Use --depth until it is
+               understood.
+
 2026_09_24b -- Two-sided PSQT hypotheses: one opening per game by default.
 
                The measurement arms played each opening twice with colours

@@ -140,11 +140,17 @@ pruning for one run. A failed run's `<tag>_work/` is never touched. See
 | `--gauntlet OPP …`                           | none                                                   | One-off opponent binaries in `learn/` for this run's final gauntlet (combined with `--gauntlet-anchors`) |
 | `--gauntlet-anchors OPP …`                   | inherited from `--continue`'s sidecar, or empty        | Fixed opponent list carried forward automatically across a `--continue` chain (e.g. `Leaf_vclassic_eval`). Pass with no arguments to explicitly clear an inherited list |
 | `--gauntlet-games N`                         | 1000                                                   | Games per opponent                                           |
-| `--tc TC`                                    | `3+0.05`                                               | Gauntlet time control                                        |
+| `--tc TC`                                    | `3+0.05`                                               | Gauntlet time control when `--gauntlet-depth` is not set, and always for the `tc-anchor` continuity match |
+| `--gauntlet-depth N`                         | 0 (off)                                                | Run the final gauntlet at fixed depth N instead of `--tc`.  Isolates **eval quality**: fixed depth quotients out nps and nodes-to-depth, leaving how good the evaluation is at a fixed search.  Reproducible and load-immune, so concurrency is free.  At depth 8, ~10× cheaper per game than `3+0.05`: 4000 games ≈ 4.5 min and carry the same signal-to-noise the 1000-game `3+0.05` gauntlet gets in ~22 min.  ⚠️ Compressed, depth-dependent scale — never mix with a TC number (`Learning_Investigation.md` §1 P) |
+| `--gauntlet-concurrency N`                   | 8 under `--tc`, `os.cpu_count()` under `--gauntlet-depth` | Concurrency for final-gauntlet matches |
+| `--tc-anchor-games N`                        | 1000                                                   | Games for the `tc-anchor` continuity match: with `--gauntlet-depth`, `<tag>-final` is additionally rated at `--tc` against **every `--gauntlet-anchors` opponent** (usually `classic_eval`, but whatever the anchors are, and all of them if several).  This is what keeps the chain's recorded `3+0.05` ladder going and the only thing that catches a change improving eval-per-node while costing search speed.  Recorded in the sidecar as `tc_anchor_gauntlet` |
+| `--no-tc-anchor`                             | off                                                    | Skip the `tc-anchor` continuity match |
 | `--gauntlet-epochs`                          | off                                                    | Per-epoch ladder: rate each epoch snapshot vs the net as it stood before offline training, as soon as that epoch finishes; the trainer is paused (SIGSTOP/SIGCONT) during each match so games never contend with training for cores; prints an epoch table and promotes the best epoch as the final net |
-| `--gauntlet-tdleaf`                          | off                                                    | Also rate the net as it *entered* offline training (post-online checkpoint, or the incoming state under `--skip-online`): saves it permanently to `learn/` as `<tag>-tdleaf.nnue` + `Leaf_v<tag>-tdleaf` and runs it through the same final gauntlet (opponents, `--gauntlet-games`, `--tc`), recorded in the sidecar as `tdleaf_gauntlet`. Gives every run a same-conditions baseline so per-iteration deltas read directly. Under `TDLEAF_FREEZE` this net equals the incoming seed — the gauntlet still measures the baseline under *this run's* conditions |
+| `--gauntlet-tdleaf`                          | off                                                    | Also rate the net as it *entered* offline training (post-online checkpoint, or the incoming state under `--skip-online`): saves it permanently to `learn/` as `<tag>-tdleaf.nnue` + `Leaf_v<tag>-tdleaf` and runs it through the same final gauntlet (opponents, `--gauntlet-games`, and the same `--gauntlet-depth`/`--tc` budget), recorded in the sidecar as `tdleaf_gauntlet`. Gives every run a same-conditions baseline so per-iteration deltas read directly. Under `TDLEAF_FREEZE` this net equals the incoming seed — the gauntlet still measures the baseline under *this run's* conditions |
 | `--epoch-games N`                            | 1000                                                   | Games per epoch-ladder match                                 |
-| `--epoch-tc TC`                              | `1+0.01`                                               | Epoch-ladder time control                                    |
+| `--epoch-tc TC`                              | `1+0.01`                                               | Epoch-ladder time control, used when `--epoch-depth` is not set |
+| `--epoch-depth N`                            | 0 (off)                                                | Run the epoch ladder at fixed depth N instead of `--epoch-tc`.  Same instrument as `--gauntlet-depth`; the ladder is a pure within-family contrast, so it is the natural first thing to convert.  The trainer is still SIGSTOPped for each ladder match |
+| `--epoch-concurrency N`                      | 8 under `--epoch-tc`, `os.cpu_count()` under `--epoch-depth` | Concurrency for epoch-ladder matches |
 | `--no-final-gauntlet`                        | off                                                    | Skip the final full gauntlet matches (the rating binary is still always built) |
 | `--force`                                    | off                                                    | Reuse an existing `<tag>_work` directory                     |
 | `--recompile`                                | off                                                    | Force recompile of helper binaries                           |
@@ -328,7 +334,9 @@ opponents, so the programme is internally consistent — but `classic_eval` is a
 classical-eval engine with a different nps profile, so its column cannot be
 compared against anchor Elos recorded at another TC (the chain's
 `final_gauntlet` figures are `3+0.05`).  The paired column, against the seed, is
-the primary reading and is unaffected.
+the primary reading and is unaffected.  A **fixed depth** is a third condition
+again, not a TC at all: it moves the `classic_eval` gap by ~85 Elo and rescales
+family gaps too (`Learning_Investigation.md` §1 P).
 
 Everything is resumable: an arm whose `_ep1.nnue` exists is not retrained, a
 match whose PGN exists is not replayed, and pass-1 corpus counts are cached.
@@ -402,7 +410,7 @@ etc.) without manual `dir=` configuration.
 | `-n`, `--games` | 100 | Games per iteration per opponent |
 | `-i`, `--iterations` | 1 | Iterations per opponent; engines restart between each |
 | `-c`, `--concurrency` | cpu_count/2 | Simultaneous games |
-| `-tc`, `--time-control` | `3+0.05` | Time control for both engines (`moves/time+inc` or `time+inc`, seconds) |
+| `-tc`, `--time-control` | `3+0.05`, or `inf` under a fixed budget | Time control for both engines (`moves/time+inc` or `time+inc`, seconds), or `inf` for no clock |
 | `--tc1` / `--tc2` | (from `-tc`) | Override time control for engine1/engine2 only |
 | `--proto` | `uci` | Protocol for both engines (`uci` or `xboard`; fastchess requires `uci` for both) |
 | `--proto1` / `--proto2` | (from `--proto`) | Override protocol for engine1/engine2 only |
@@ -412,8 +420,10 @@ etc.) without manual `dir=` configuration.
 | `--no-adjudication` | off | Disable score-based early adjudication (`-draw`/`-resign`); games run to a natural ending (mate/stalemate/repetition/50-move/insufficient material), capped by `-maxmoves 400`. Useful early in training when evals are noisy. |
 | `--ponder` | off | Enable pondering (cutechess only; fastchess doesn't expose it — a warning is printed if combined with `--driver=fastchess`) |
 | `--wait MS` | 0 | Milliseconds between games (a legacy throttle from the multi-writer era; not needed for gauntlets) |
-| `--depth1 N` / `--depth2 N` | — | Limit engine1/engine2 search to depth N |
-| `--nodes1 N` / `--nodes2 N` | none | Limit each engine to N nodes/move (`go nodes N`).  Deterministic and **load-independent**, so matches can run at any concurrency and stay comparable — unlike a time control (`history/Online_Learning_Investigation.md` 7.8) |
+| `--depth N` | — | Limit **both** engines to depth N: the fixed-budget match.  Reproducible and load-immune (0/20 positions differ across repeat runs, solo and under 16-way load), so concurrency can be the full core count without changing the result.  Implies `-tc inf`.  Measures **eval quality at a fixed search**, not playing strength — it quotients out both nps and nodes-to-depth, and its Elo is on a compressed, depth-dependent scale that must never be read against a time-control rating (`Learning_Investigation.md` §1 P) |
+| `--nodes N` | — | Limit **both** engines to N nodes/move.  ⚠️ `go nodes` is **not reproducible** in the NNUE build — 5–8 of 20 positions differ across repeat runs, one changing the best move, with swings to 7× in node count under load (the classical binary is clean at 0/20).  Prefer `--depth`.  Implies `-tc inf` |
+| `--depth1 N` / `--depth2 N` | — | Limit engine1/engine2 search to depth N (asymmetric form of `--depth`) |
+| `--nodes1 N` / `--nodes2 N` | none | Limit each engine to N nodes/move (`go nodes N`).  Spends effort where the position needs it, unlike fixed depth — but see the `--nodes` reproducibility warning |
 | `--openings FILE` | — | Openings file: `.epd`, `.pgn`, or `.bin` (polyglot book; fastchess doesn't support `.bin`) |
 | `--no-repeat` | off | One game per round (`-rounds N`, no `-games 2 -repeat`): removes the driver's color-swapped duplicate pair per opening, at the cost of per-opening color balance; recommended for symmetric self-play.  Does **not** guarantee opening uniqueness by itself — fastchess cycles a shuffled book order, so openings recycle once total games exceed the book size. |
 | `--noswap` | off | Pass `-noswap` to the driver; engine1 always plays white.  Off by default (correct for training). |
