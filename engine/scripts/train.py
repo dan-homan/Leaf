@@ -1234,6 +1234,21 @@ def main():
         args.gauntlet_anchors = (continue_json["gauntlet_anchors"]
                                   if continue_json else [])
 
+    # Anchors carry the chain: they are the only ratings comparable across
+    # legs, so a missing anchor binary silently costs a leg its continuity.
+    # Check BEFORE generation — the gauntlet-time warning arrives hours late,
+    # after the games it was supposed to guard have already been played, and
+    # it scrolls past in a long run (m260925-1e5g lost Leaf_vmaterial_eval
+    # exactly this way).  One-off --gauntlet opponents stay a warning.
+    missing_anchors = [a for a in args.gauntlet_anchors
+                       if not (LEARN_DIR / a).is_file()]
+    if missing_anchors:
+        die(f"gauntlet anchor(s) not found in {LEARN_DIR}: "
+            f"{', '.join(missing_anchors)}.  Anchors are the chain's only "
+            f"cross-leg comparable rating, so this is fatal rather than a "
+            f"warning.  Build the binary (e.g. `perl comp.pl material_eval "
+            f"MATERIAL_ONLY=1`), or drop it from --gauntlet-anchors.")
+
     net_path = LEARN_DIR / args.net
     netbase = args.net[:-5] if args.net.endswith(".nnue") else args.net
     live_td = LEARN_DIR / f"{netbase}.tdleaf.bin"
