@@ -31,7 +31,7 @@ Changes since 2017_12_24
                tc_anchor_gauntlet.  That column keeps the recorded 3+0.05 ladder
                going and is the only thing that would catch a change improving
                eval-per-node while costing search speed.  Sidecars now carry a
-               rating_conditions block, and elo_vs_anchor() prefers the
+               rating_conditions block, and final_anchor_elo() prefers the
                tc_anchor column so a corpus window's generator_elo stays on one
                scale.
 
