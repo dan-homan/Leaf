@@ -53,8 +53,8 @@ as the net matures.
 - **The time-control anchor is too noisy for these effects.**  Two of eight
   3+0.05 anchor matches were ~2σ excursions (n25 final −59, n50 tdleaf −25) that
   depth 8 did not reproduce.  At equal depth the final nets sit between −5 and
-−13 against `classic_eval`; most of the 3+0.05 deficit is classic's speed.  Sibling
-  comparisons are now rated at fixed depth 8 with `match.py --srand` (§5).
+−13 against `classic_eval`; most of the 3+0.05 deficit is classic's speed.  Evaluations are now rated at fixed depth 8 (§1 P) — `train.py
+  --gauntlet-depth`, or `match.py --depth 8 --srand` for sibling comparisons.
 
 **The live question.**  Is the flat anchor at 3M games saturation of the d8
 bootstrap (§1 G), or a slow patch?  `m260720` was also slow at this point (+17.5
@@ -79,6 +79,7 @@ the records began.
 |---|---|
 | **The loop and its measurement** | |
 | A | The loop; the foreign anchor is the only figure of merit |
+| P | Fixed depth is an eval instrument, not a strength measurement; its scale is depth-dependent |
 | **The online phase** | |
 | B | Online cost is a one-time HANDOFF, not a per-step cost |
 | C | Around the optimum is an Elo-flat noise ball; η sets its radius |
@@ -96,7 +97,7 @@ the records began.
 | Q | The root window collapse, and depth-D labels restored |
 | **The offline phase** | |
 | H | Row type matters; game diversity helped a mature chain, not a young one |
-| P | The offline target sits in a broad λ optimum |
+| U | The offline target sits in a broad λ optimum |
 | O | Corpus statistics are not training hyperparameters |
 | **Exploration and the 3M-game siblings** | |
 | S | Exploration knobs: what `eval_noise` and PSQT hypotheses do |
@@ -108,6 +109,41 @@ the records began.
 learning on, dumping a quiet-gated corpus; `--batch-train` then consolidates that
 corpus into the promoted net.  The only figure of merit is the leg total against
 a **foreign anchor** — family matches are non-transitive in both directions (§5).
+
+**P. FIXED DEPTH IS AN EVAL INSTRUMENT, NOT A STRENGTH MEASUREMENT — and its
+scale is depth-dependent (2026-09-25).**  `classic_eval` runs 1.8× the NNUE
+net's nodes per second but needs 1.31× more nodes per ply; at a clock the two
+nearly cancel, and trained nets also prune better than young ones (−12% median
+nodes to depth 12 from `1e5g` to `7e6g`).  A fixed depth quotients out both, so
+what survives is **how good the evaluation is at a fixed search**.  Measured on
+`m260720` binaries [Detail D11]:
+
+- **It moves the anchor**: the same pairing reads +16.7 ± 19 at 3+0.05 and
+  +101.5 ± 26.8 at depth 12 (95%).  At depth 8 the `m260921` nets sit at −5 to
+  −13 against `classic_eval`, where 3+0.05 reads −33 to −59 (§1 T).
+- **Its scale grows with depth**: one family pair reads +12 (d6), +20 (d8), +34
+  (d10), +38 (3+0.05) — **a d8 reading is ~0.5× the time-control reading** on
+  that leg, and the ratio against `classic_eval` runs 0.25–1.00 along the chain.
+  The two scales are not convertible: re-baseline once and never mix them.
+- **It is calibrated at the null** (−0.35 ± 8.9 at d8 where 3+0.05 read
+  +0.7 ± 15.3), **bit-reproducible and load-immune** (0/20 positions differ across
+  repeat runs, also under 16-way load), and frees concurrency.  4000 games at d8
+  carry the same confidence as 1000 at 3+0.05 in a fifth of the clock.
+- **Anchor differencing under-reads family gains**: `m260720` 2.2M → 2.5M reads
+  as nothing by differencing against `classic_eval` at d8, where the direct
+  head-to-head says +20.3 ± 9.0.
+- ⚠️ **`go nodes` is NOT reproducible in the NNUE build** (5–8 of 20 positions
+  differ across repeat runs, up to 7× in node count under load; `classic_eval`
+  is clean) — contrary to the comment at `uci.cpp:452`.  Rate at fixed depth,
+  not fixed nodes, until that is understood.
+
+`match.py --depth N` sets both engines and defaults to `-tc inf`;
+`train.py --gauntlet-depth N` / `--epoch-depth N` rate a leg this way and add a
+`tc-anchor` continuity match at 3+0.05, so the recorded ladder continues and a
+change that improves eval-per-node while costing speed is still caught.  Every
+sidecar carries a `rating_conditions` block.  The ~0.5× compression rests on one
+real-signal leg.
+
 
 ### The online phase
 
@@ -199,8 +235,8 @@ patch is the live question (§6 item 1).
 `--depth D --nodes N` means "search to at least D, then stop at the first
 iteration past N nodes" (`selfplay.cpp:470`, `search.cpp:548`).  Depth must be
 paid in every position; the node budget only extends past it, and only where the
-position is cheap.  Measured with fixed-node self-matches (hardware-independent)
-[Detail D2]:
+position is cheap.  Measured with fixed-node self-matches [Detail D2] — ⚠️ a path §1 P has since
+found not reproducible in the NNUE build, so treat the rungs as indicative:
 
 | config | clock | Elo over `d6/800` | Elo per unit of ADDED clock |
 |---|---|---|---|
@@ -264,8 +300,8 @@ four-corpus window was worth **+36 anchor / +45 paired** [Offline 2.4]; on the
 young R9 chain the same manipulation reads −9.2 ± 8.8 paired / −12.1 ± 9.9 anchor.
 Do not carry the +36/+45 into current work.  Full arms: [Detail D4, D6].
 
-**P. The offline target sits in a broad λ optimum, and the slope above it is
-steep.**  (Lettered M before 2026-09-27.)  `--bt-td-lambda` sets the outcome's
+**U. The offline target sits in a broad λ optimum, and the slope above it is
+steep.**  (Lettered M before 2026-09-27; P now belongs to the rating instrument.)  `--bt-td-lambda` sets the outcome's
 weight as `λ^(N−ply)`.  λ 0.970–0.985 is flat within resolution; **0.9925 is
 worse by −20.5 ± 9.1 paired and −20.1 ± 9.9 on the anchor** — two instruments
 within 0.4 Elo, the most replicated number in this document — and it costs on
@@ -353,7 +389,9 @@ on differences:
   5%.  Material is stable to ±6 cp in every leg.  No leg showed output-bias
   drift.
 
-Caution before generalising: `m260720` was also slow at this point (+17.5 on the
+Two cautions before generalising.  §1 P found the same pattern on `m260720` —
+anchor differencing reading nothing across a leg that gained +20 head-to-head —
+so "no anchor movement" is partly the instrument.  And `m260720` was also slow at this point (+17.5 on the
 anchor from 2.5M to 3M) and gained in bursts across legs, so one leg per knob is
 thin evidence.
 
@@ -431,8 +469,8 @@ mature net; assume they are untested on a young one unless the row says otherwis
 | The 60 cp quiet gate is correct; removing it hurts | Offline 4.3 | −27.9 ± 11.3, replicated | R4 | **ESTABLISHED** |
 | Game diversity is worth ~+40 at identical compute — on a mature chain | Offline 2.4 | +36 anchor / +45 paired | R4 | **ESTABLISHED** (R4 only) |
 | …and is not helpful on the young chain | `cons1` base vs null | −9.2 ± 8.8 paired, −12.1 ± 9.9 anchor | R9 | SUPPORTED |
-| Outcome weight above the default costs ~20 Elo | §1 P | −20.5 ± 9.1 paired, −20.1 ± 9.9 anchor | R9 | **ESTABLISHED** |
-| λ is flat across 0.970–0.985 | §1 P | ~5 Elo spread; instruments disagree on order | R9 | SUPPORTED |
+| Outcome weight above the default costs ~20 Elo | §1 U | −20.5 ± 9.1 paired, −20.1 ± 9.9 anchor | R9 | **ESTABLISHED** |
+| λ is flat across 0.970–0.985 | §1 U | ~5 Elo spread; instruments disagree on order | R9 | SUPPORTED |
 | Calibration-derived changes lose: 7 arms, 3 parameters | §1 O | anchor −5.7 to −33.5; none positive | R9 | **ESTABLISHED** |
 | More outcome weight loses in proportion to how much is added | §1 O | `npB` −33.5; `nout` −20.1; `bout` −20.4 | R9 | **ESTABLISHED** |
 | The game trajectory carries signal | §1 O | `npA` −5.7 vs `nwA` −19.0 at matched mean | R9 | SUPPORTED |
@@ -460,6 +498,21 @@ mature net; assume they are untested on a young one unless the row says otherwis
 | Antithetic hypotheses at 0.25 give a gentler, better online phase | §1 T; d8 and 3+0.05 | +18.2 ± 6.4 vs 3e6g online net on the parent; +17 ± 11.4 at TC | R10 | SUPPORTED (one leg, two instruments) |
 | Final-net gain against the parent falls with PSQT noise | §1 T | +12.9 / +8.4 / +0.1 at 0 / 0.25 / 0.5 | R10 | SUPPORTED (three points) |
 | At equal depth the final nets sit at −5 to −13 vs `classic_eval`; most of the 3+0.05 deficit is speed | `learn/d8eval/` | d8 −5 to −32; 3+0.05 −33 to −59 | R10 | SUPPORTED |
+
+### The rating instrument (2026-09-25)
+
+| claim | evidence | effect | regime | grade |
+|---|---|---|---|---|
+| A fixed-DEPTH match is bit-reproducible and load-immune | §1 P | 0/20 positions differ, solo and under 16-way load | R9 | **ESTABLISHED** |
+| `go nodes` is NOT reproducible in the NNUE build | §1 P | 5–8/20 differ; to 7× node count under load; `classic_eval` 0/20 | R9 | **ESTABLISHED** (mechanism open) |
+| Fixed depth moves the `classic_eval` anchor by ~85 Elo | §1 P | +16.7 ± 19 at 3+0.05 vs +101.5 ± 26.8 at d12 (95%) | R9 | **ESTABLISHED** |
+| `classic_eval` is 1.8× faster per node but needs 1.31× more nodes per ply | §1 P | 2.48 M vs 1.40 M nps; 132,952 vs 101,618 median to d12 | R9 | **ESTABLISHED** |
+| Trained nets prune better — nodes-to-depth falls along the chain | §1 P | −12% median, −22% total, `1e5g` → `7e6g` | R9 | SUPPORTED (n=20 positions) |
+| The fixed-depth reading is depth-dependent, ~0.5× of TC at d8 | §1 P | +12.3 (d6), +20.3 (d8), +34.3 (d10), +38.0 (3+0.05) | R9 | SUPPORTED (one leg) |
+| Fixed depth is calibrated at the null | §1 P | −0.35 ± 8.9 at d8 vs +0.7 ± 15.3 at 3+0.05 (95%) | R9 | **ESTABLISHED** |
+| The d8 chain ladder preserves ORDER but not scale | §1 P | monotone over 7 checkpoints; d8/TC ratio 0.50 → 0.25 → 1.00 | R9 | **ESTABLISHED** |
+| d8 / 4000 games ≈ 3+0.05 / 1000 games in confidence, at 1/5 the clock | §1 P | SNR 2.25 vs 2.29 | R9 | **ESTABLISHED** |
+| Two of eight 3+0.05 anchor matches in the sibling programme were ~2σ excursions d8 did not reproduce | §1 T, §5 | n25 final −59.3, n50 tdleaf −24.7 | R10 | SUPPORTED |
 
 ### The loop as a whole
 
@@ -677,7 +730,10 @@ limit on its independence.  **When the tests do not show a clear win, elegance,
 simplicity and expected correctness decide**; complexity must be earned by a
 clear win.
 
-**Rate sibling legs at FIXED DEPTH with a seeded opening order (2026-09-25).**
+**Rate eval changes and sibling legs at FIXED DEPTH 8 (2026-09-25).**  It answers
+"did the evaluation improve", not "is the engine stronger" (§1 P); keep a
+3+0.05 `tc-anchor` match for the strength question.  For siblings, add a seeded
+opening order.
 `match.py -tc inf --depth1 8 --depth2 8 --srand <seed>`, 4,000 games per match
 (~7 minutes at 15 concurrent), gives ±5 per match and removes nodes-per-second
 from the comparison entirely.  Two of eight 3+0.05 anchor matches in the sibling
@@ -687,9 +743,12 @@ to compare evaluations.  Pairing openings did **not** tighten the differences
 (paired ±6.9 against ~±7.0 independent) — at depth 8 the two nets' games diverge
 too quickly for shared openings to correlate the results.
 
-**An anchor Elo is only comparable at the same time control.**  `classic_eval`
-searches faster than an NNUE net, so the gap moves with the clock: the final nets read
-−5 to −13 at depth 8 and −33 to −59 at 3+0.05.
+**An anchor Elo is only comparable at the same RATING BUDGET.**  `classic_eval`
+and an NNUE net differ in nodes per second and nodes per ply, so the gap moves
+with the budget: the `m260921` finals read −5 to −13 at depth 8 and −33 to −59 at
+3+0.05, and `1+0.01` is different again.  Fixed depth is a third condition, not a
+faster clock (§1 P).  Every `train.py` sidecar from 2026-09-25 carries a
+`rating_conditions` block for this reason.
 
 **Before blaming machine load, read the depth record.**  fastchess writes every
 move's depth into the PGN; at a fixed clock, a node-rate drop shows up as lost
@@ -756,8 +815,11 @@ signal.**
   positional parts on real positions; with several nets it tracks composition
   across a chain.
 - **Match Adam steps, not games**, whenever a knob touches aggregation.
-- **Fixed-node matches are hardware-independent** — how §1 N was priced.  A
-  node-only match drops the depth floor; pass both `--depth` and `--nodes`.
+- **Fixed-budget matches are hardware-independent** — how §1 N was priced.  ⚠️
+  Use fixed DEPTH: `go nodes` is not reproducible in the NNUE build (§1 P), so
+  the transfer claim is unverified for nodes, §1 N's own ladder included.  A
+  node-only match also drops the depth floor; pass both `--depth` and `--nodes`
+  if nodes are needed at all.
 - **Decompose every leg** with `--gauntlet-tdleaf`; recompute from the
   `_final.json` sidecars, not from notes.
 - **Pre-commit the reading of an arm**, and state its validity checks separately.
@@ -848,6 +910,7 @@ to confirm Σ positively rather than by elimination.
 | Offline 1–4 | 09-02/03 | R4 | 5.5M | root rows; the 60 cp gate; game diversity worth ~+40 on a mature chain |
 | Detail D6 (`m260916`, `cons1`) | 09-15 → 09-21 | R9 | young → 7M | handoff scales with maturity; calibration closed; diversity reverses |
 | §1 Q (PV resolution) | 09-21 | R8 → R10 | 7M | the root window collapse; +298 of generation strength |
+| Detail D11 (rating instrument) | 09-25 | R9 | `m260720` ladder | fixed depth measures eval; `go nodes` not reproducible |
 | Detail D7–D8 (exploration) | 09-20 → 09-24 | R9, R10 | 2.5M, 7M | `eval_noise` adds no signal; PSQT hypotheses enact, not test |
 | §1 T (siblings) | 09-24 → 09-27 | R10 | 2.5 → 3M | four knobs, no anchor movement at d8 |
 
