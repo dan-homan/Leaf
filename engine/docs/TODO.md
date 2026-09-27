@@ -61,7 +61,8 @@ STM + game-ply λ^Δ), and **Phases D and E have since landed:**
 
 ### Generation sharpness and depth (2026-09-21)
 
-Rationale: `Learning_Investigation.md` §1 M and §6 item 7.  Self-play sharpens
+Rationale: `Learning_Investigation.md` §1 M (the old §6 item 7 is preserved in
+`history/Learning_Investigation_Detail.md` D10).  Self-play sharpens
 its own games while the net is young and then saturates; **depth sets the level
 it saturates at** (d6 ~22–27% draws, d8 ~36%, d10 43%).  `m260916` has run all
 7M of its games at d6/800 and so has spent its entire life at 22–25% — outside
@@ -72,10 +73,10 @@ canary is written for d8.
       --nodes 0`).**  Read the DRAW RATE first, before Elo.  Near 36% = the
       6e6→7e6 leg was paying for a regime transition and its +15.6 should not be
       read as "depth bought nothing"; near 30% = d8/2000 has its own lower
-      equilibrium.  Note this runs with NO node budget while §6 item 1
-      recommends `d8/2000`; the difference is the endgame extension only, which
-      does not move the draw rate, so the leg still answers the question — but
-      see §6 item 7 before choosing the config for the leg after it.
+      equilibrium.  Note this runs with NO node budget while `Learning_Investigation.md` §1 N
+      prices `d8/2000`; the difference is the endgame extension only, which
+      does not move the draw rate, so the leg still answers the question — but see `history/Learning_Investigation_Detail.md` D10 before choosing the
+      config for the leg after it.
 - [ ] **D0 — the m260916 leg-yield decay is CONFOUNDED with the PV defect.**
       `scripts/leg_summary.py m260916` shows the fraction of recorded results
       below the depth floor grew monotonically across the chain — 6.5% at 1e5,
@@ -95,8 +96,8 @@ canary is written for d8.
       reading of what d8 does on this chain, and neither is the 7e6g leg's
       29.89%.  Re-read the draw rate against `m260720`'s d8 band (35.3–36.1%)
       only on a leg generated with the current defaults.
-- [ ] **D1a — reconcile the draw-rate discrepancy.**  §6 item 1 says the chain
-      is at "32–33%"; a direct count of generation games (actor logs and
+- [ ] **D1a — reconcile the draw-rate discrepancy.**  The old §6 item 1 (now `history/Learning_Investigation_Detail.md`
+      D10) said the chain was at "32–33%"; a direct count of generation games (actor logs and
       generation PGNs, agreeing to 0.01% over 1M games/leg) says 22.5% at
       `6e6g`.  The two measure different things.  Find out which before either
       is quoted again.
@@ -404,8 +405,7 @@ demonstrations, `Learning_Investigation.md` §1 D).  The online LR dropped 4× u
 the 2026-09-15 restart as a by-product of unifying the two phases' LR sets, not as
 an experiment.
 
-**What replaced it as the live magnitude-adjacent line is Σ** — see
-`Learning_Investigation.md` §6 items 1–3.
+**What replaced it as the live magnitude-adjacent line is Σ** — see `Learning_Investigation.md` §1 E and §6 item 8 (attack Σ directly).
 
 ### Search parameter tuning
 The search's pruning parameters (null-move margins, futility thresholds, aspiration

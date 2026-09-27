@@ -22,6 +22,12 @@ from the two chronological investigation records that now sit in here).
   Read them for reproduction, never for conclusions — both are blow-by-blow and
   several of their confident intermediate readings were overturned by their own
   later sections.
+- **`Learning_Investigation_Detail.md`** — full tables, arm designs and write-ups
+  moved verbatim out of `docs/Learning_Investigation.md` on 2026-09-27 when it was
+  restructured for readability: the `m260916` chain record and `cons1` arms, the
+  calibration fits and the seven calibration arms, the search-budget price list,
+  the full `eval_noise` and PSQT-hypothesis records, and the §6 rationale that
+  has since been acted on.  The synthesis cites it as `[Detail D1]` … `[Detail D10]`.
 - **`TRAINING_HISTORY.md`** — the training-system experiment log: the retired
   dense-piece-value channel and its gauge-anchoring machinery, the PSQT-freezing
   failure, the offline-consolidation sweep history (gen-1 through gen-3+), K/λ
