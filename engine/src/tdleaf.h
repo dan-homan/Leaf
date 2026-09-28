@@ -277,6 +277,19 @@ static const int   TDLEAF_BATCH_SIZE    = TDLEAF_BATCH_SIZE_DEFAULT;
 #define TDLEAF_REFRESH_DIAG 0
 #endif
 
+// Walked PV carried per record for the root-row `pv` column of the TSV dump
+// (and in the .tdg trajectory, v3).  Longer PVs are truncated to this many
+// moves and the dump marks them with a trailing "...".
+#define TDLEAF_PV_MAX 64
+// pv_flags[k] bits for PV move k, computed by the actor during the PV walk
+// (where the game's castling state is exact), so the dump needs no replay.
+#define TDPV_F_CAPTURE  0x01   // captures (incl. en passant)
+#define TDPV_F_CHECK    0x02   // gives check
+#define TDPV_F_PROMOTE  0x04
+#define TDPV_F_CASTLE   0x08
+#define TDPV_F_EP       0x10
+#define TDPV_F_CAPT_SHIFT 5    // bits 5-7: captured piece type (PAWN..QUEEN)
+
 struct TDRecord {
     int16_t acc [2][NNUE_HALF_DIMS];   // raw accumulator [perspective][dim]
     int32_t psqt[2][NNUE_PSQT_BKTS];  // PSQT sums [perspective][bucket]
@@ -314,6 +327,14 @@ struct TDRecord {
     position root_pos;
     int      root_static;
     int8_t   id_depth;    // ID iteration count ≈ achieved search depth
+    // The PV as walked from root_pos to the leaf (the legal prefix the walk
+    // executed), with per-move TDPV_F_* flags.  Filled with root_pos; dumped
+    // as the root row's `pv` column.  pv_trunc: the walk had more than
+    // TDLEAF_PV_MAX moves.
+    int32_t  pv_move[TDLEAF_PV_MAX];
+    uint8_t  pv_flags[TDLEAF_PV_MAX];
+    int8_t   pv_n;
+    bool     pv_trunc;
     // NOT a .tdg field: recomputed by tdleaf_rebuild_record on the learner side.
     // Anything derived that the learner needs MUST be recomputed there or added
     // to the trajectory format -- the learner never calls tdleaf_record_ply.

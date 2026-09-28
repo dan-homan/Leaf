@@ -150,6 +150,11 @@ def open_corpus(path):
 # --bt-rows -> index into the (total, root, leaf) count triple.
 ROW_KIND = {"both": 0, "root": 1, "leaf": 2}
 
+# |cp| cap on training rows.  The dump applied it until 2026-09-28; root rows
+# are now dumped ungated (every root, with a `pv` column), so the cap moved
+# here.  Older dumps never hold a row beyond it, so their counts are unchanged.
+CORPUS_MAX_CP = 1500
+
 
 def corpus_row_counts(path, gate_cp=0):
     """(total, root, leaf) data rows, cached alongside the corpus as
@@ -177,6 +182,8 @@ def corpus_row_counts(path, gate_cp=0):
                 continue
             col = line.rstrip("\n").split("\t")
             if len(col) < 5:
+                continue
+            if abs(int(col[1])) > CORPUS_MAX_CP:
                 continue
             if gate_cp > 0 and len(col) >= 8 and \
                abs(int(col[1]) - int(col[7])) > gate_cp:
@@ -383,6 +390,8 @@ def write_corpus(corpus_path, sources, sizes, quota, game_ply_axis, row_kind=0,
                         # every row carries its `gate`, so the width that
                         # actually trains is chosen HERE.  Pre-2026-09-03
                         # corpora have no gate column and were gated at dump.
+                        if abs(int(p[1])) > CORPUS_MAX_CP:
+                            continue
                         if gate_cp > 0 and len(p) >= 8 and \
                            abs(int(p[1]) - int(p[7])) > gate_cp:
                             continue
@@ -390,6 +399,9 @@ def write_corpus(corpus_path, sources, sizes, quota, game_ply_axis, row_kind=0,
                         if acc < size:
                             continue
                         acc -= size
+                        # The training corpus carries the first 8 columns;
+                        # the root dump's `pv` (9) stays in the raw dump.
+                        p = p[:8]
                         # fen cp result ply depth gid endply — drop gid (5)
                         key = int.from_bytes(hashlib.blake2b(
                             "\t".join(p[:5] + p[6:]).encode(),

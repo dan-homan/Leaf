@@ -5,11 +5,11 @@
 // The learner (--learn-stream DIR) consumes them in arrival order and runs the
 // exact online update (tdleaf_update_after_game) with ONE optimizer.
 //
-// Only search outputs and POV/gate metadata are stored; accumulators, active
-// features, and stack indices are rebuilt by the learner from the positions
-// (tdleaf_rebuild_record) — integer accumulator rebuilds are exact, so the
-// learner reproduces the online gradients bit-for-bit when run with the same
-// starting state, env, and game order.
+// Only search outputs, POV/gate metadata and the walked PV are stored;
+// accumulators, active features, and stack indices are rebuilt by the learner
+// from the positions (tdleaf_rebuild_record) — integer accumulator rebuilds
+// are exact, so the learner reproduces the online gradients bit-for-bit when
+// run with the same starting state, env, and game order.
 //
 // Native-endian, same-machine format: guarded by magic/version and the v10
 // source-.nnue content hash (actor and learner must load the same base net —
@@ -23,7 +23,7 @@
 #define SELFPLAY_TRAJ_H
 
 static const uint32_t TDTRAJ_MAGIC   = 0x31474454;  // "TDG1"
-static const uint32_t TDTRAJ_VERSION = 2;           // v2: dropped hybrid-target gate keys
+static const uint32_t TDTRAJ_VERSION = 3;           // v3: walked PV + per-move flags
 
 struct TDTrajHeader {
     uint32_t magic;
@@ -46,6 +46,13 @@ struct TDTrajRecord {
     uint8_t  wtm;                 // leaf STM
     uint8_t  root_wtm;            // root STM (alternates under self-play)
     uint8_t  _pad;
+    // v3: the PV as the actor walked it (root -> leaf), for the root-row `pv`
+    // dump column.  Flags are computed on the actor side, where the game's
+    // castling state is exact; the learner only formats them.
+    int32_t  pv_move[TDLEAF_PV_MAX];
+    uint8_t  pv_flags[TDLEAF_PV_MAX];
+    int8_t   pv_n;
+    uint8_t  pv_trunc;
 };
 
 #endif // SELFPLAY_TRAJ_H

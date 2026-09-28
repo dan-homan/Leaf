@@ -98,11 +98,22 @@ def opener(path):
         else open(path, "r", newline="")
 
 
+# |cp| cap, as train.py's CORPUS_MAX_CP.  Root rows are dumped ungated since
+# 2026-09-28, so the cap the dump used to apply lives in the assemblers.
+MAX_CP = 1500
+
+
 def eligible(parts, gate_cp):
-    """The trainer's load-time quiet gate, reproduced exactly.
+    """The trainer's load-time quiet gate, reproduced exactly, plus the |cp|
+    cap train.py applies at assembly.
 
     Rows without the 8th 'gate' column are kept: their gate is unknowable and
     the trainer keeps them too (nnue_batch_train.cpp, bt_load_file)."""
+    try:
+        if abs(int(parts[1])) > MAX_CP:
+            return False
+    except (ValueError, IndexError):
+        pass
     if gate_cp <= 0 or len(parts) < 8:
         return True
     try:

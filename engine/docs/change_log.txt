@@ -1,5 +1,56 @@
 Changes since 2017_12_24
 
+2026_09_28 -- PV dump: every root row carries its walked PV, and the root
+               dump is ungated.
+
+               The root-row TSV gains a 9th column, `pv`: the PV the actor
+               walked from the root to its leaf, one token per move,
+               <from><to>[promo][x<captured>][+][c][e] (tdleaf_format_pv).  The
+               flags are computed in tdleaf_record_ply during the existing PV
+               walk, where the game's castling state is exact, so no consumer
+               has to replay moves (the dump FEN carries no castling rights).
+               TDRecord gains pv_move/pv_flags/pv_n/pv_trunc (TDLEAF_PV_MAX 64);
+               .tdg goes to v3 to carry them actor -> learner (v2 files are
+               rejected -- actors and learner are always the same binary).
+
+               Root rows are no longer gated at the dump: the 1000 cp residual
+               cap and the 1500 cp |cp| cap no longer drop any root.  The |cp|
+               cap moved to corpus assembly (train.py CORPUS_MAX_CP,
+               sample_corpus.py MAX_CP), and train.py strips `pv` from the
+               assembled corpus.tsv, so the training corpora of the current
+               recipe are unchanged.  Leaf rows are untouched.  A direct
+               `--batch-train` on a raw root dump applies only --bt-quiet-cp,
+               not the |cp| cap.
+
+               Why: the quiet gate |root static - root search| <= 60 conditions
+               on the label's residual.  On the 4e6g dump (paired root/leaf,
+               67.7M rows) it rejects mostly positions with no immediate
+               capture (31% of all rows are capture-quiet by qsearch yet fail
+               it; half of all endgame capture-quiet rows).  Choosing a better
+               definition needs the PV, recorded from here on.
+
+               Verified: actor/learner smoke test (4 actors, d6, 60 games,
+               --refresh-scores) and a direct --selfplay dump.  Every root
+               row has a PV; replaying all 47,720 + 6,277 PV moves with
+               python-chess from the root FEN finds every move legal and zero
+               capture / captured-piece / check / ep flag mismatches, and all
+               6,620 + 955 PVs that have a paired leaf row end EXACTLY at that
+               leaf.  Every recorded ply of all 60 games is present in the
+               root dump.  train.py assembly of the new dump matches an
+               independent count of the cap + 60 cp gate exactly (8 columns
+               out); the trainer loads the 9-column dump with 0 skipped.
+
+2026_09_28 -- --qs-label (src/qslabel.cpp, any NNUE build): batch quietness
+               labels for a corpus dump.  Per FEN: static, full-window qsearch
+               (captures; evasions in check), and both again after a null move
+               (the threat side).  Depends only on the position, not on the
+               row's search label; TT cutoffs suppressed via PV_NO_TT_CUTOFF.
+               ~120k rows/s single-threaded.  On the 4e6g root dump: the
+               one-sided measure tracks PV captures (zero-capture PVs 48.8%
+               quiet vs 18.5% loud), the null-move side over-flags (threats are
+               usually answerable and barely predict the label residual).
+               Kept as an offline tool; not part of the pipeline.
+
 2026_09_27b -- Retire the PV_NO_ALPHA_RAISE / PV_NO_BETA_LOWER stopgap.
 
                Both flags are DELETED (not defaulted off) and search.cpp is back

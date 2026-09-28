@@ -566,6 +566,15 @@ int main(int argc, char *argv[])
       close_hash();
       return 0;
     }
+#if NNUE
+    // Batch quietness labels for a corpus dump (qslabel.cpp); exits when done.
+    if(!strcmp(argv[argi], "--qs-label")) {
+      int qslabel_main(int argc, char *argv[]);
+      int ql_ret = qslabel_main(argc, argv);
+      close_hash();
+      return ql_ret;
+    }
+#endif
 #if NNUE && TDLEAF
     // Internal self-play training driver (selfplay.cpp); exits when done.
     // Like `test`, any hash/cores args must precede --selfplay.

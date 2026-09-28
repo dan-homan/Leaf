@@ -655,10 +655,13 @@ distance-decayed result weight):
 | `<prefix>.<pid>.root.tsv` | played root of each recorded ply | root **search** score (search-amplified) | achieved ID depth |
 | `<prefix>.<pid>.leaf.tsv` | PV leaf of each recorded ply | leaf **static** eval (self-distillation — the outcome label carries the signal) | 0 |
 
-Quietness filters (both files): |static − search| ≤ `TDLEAF_DUMP_QUIET_CP`
-(default 60 cp — unresolved tactics show up as static-vs-search disagreement) and
-|cp| ≤ `TDLEAF_DUMP_MAX_CP` (default 1500). Only games that feed the TD update
-are dumped, with the same outcome labels. The batch trainer gives `depth == 0`
+Filters: **root rows are ungated** (since 2026-09-28) — every recorded root is
+written, and the quiet re-cut (`--bt-quiet-cp` on |cp − `gate`|) and the |cp| ≤
+1500 cap are applied at corpus assembly (`train.py`, `sample_corpus.py`).  Root
+rows also carry a 9th `pv` column (below).  Leaf rows keep the leaf-match gate,
+|static − search| ≤ `TDLEAF_DUMP_QUIET_CP` (default 1000) and |cp| ≤
+`TDLEAF_DUMP_MAX_CP` (default 1500). Only games that feed the TD update are
+dumped, with the same outcome labels. The batch trainer gives `depth == 0`
 records their own outcome-weight ceiling (`--bt-leaf-lambda`, default = the root
 λ), so root and leaf corpora mix freely in one run.
 
@@ -879,6 +882,7 @@ fen  cp  result  ply  depth  gid  [endply]
 | `gid` | stable game id — the trainer splits train/validation **by game** |
 | `endply` | *(optional)* the game's true final ply — exact distance base for the result decay. When absent, the trainer falls back to the per-`gid` max ply seen in the corpus (short by the quiet-filtered game tail, a mild ~uniform over-weighting of the result). Both corpus producers write it since 2026-07-04. |
 | `gate` | *(optional, in-engine dumps since 2026-09-03)* the value the dump-time quietness test compared `cp` against, in the **same POV as `cp`** — root static for root rows, the propagated root search score for leaf rows. The dump gate was exactly `|cp − gate| ≤ TDLEAF_DUMP_QUIET_CP`, so **the gate is re-cuttable offline** with `--bt-quiet-cp` (see below). Consumers that know only 7 columns ignore it. |
+| `pv` | *(root rows only, since 2026-09-28)* the PV the actor walked from this root to its leaf, space-separated tokens `<from><to>[promo][x<captured>][+][c][e]` — e.g. `e4d5xp+`.  Squares are Leaf's internal from/to, so a castle is the **king's** move to its destination (from == to is possible in Chess960), marked `c`; `e` = en passant; promotion and captured pieces are lowercase letters.  `-` = empty PV; a trailing `...` = longer than 64 moves.  The flags are computed on the actor from the real game state, so no consumer needs to replay the moves (the FEN has no castling rights).  Carried actor → learner in `.tdg` v3.  The trainer ignores it, and `train.py` strips it from the assembled `corpus.tsv`. |
 
 **Ply units:** both corpus producers write true **game plies** (every half-move)
 in the `ply`/`endply` columns (game-ply λ^Δ era, since 2026-07-07) — the
@@ -926,15 +930,16 @@ TDLEAF_DUMP_TSV=iter2 python3 match.py Leaf_vtrain_a Leaf_vtrain_b ...
 writes two per-process files at game end:
 
 - `iter2.<pid>.root.tsv` — played root positions, **search-score labels**
-  (white POV), `depth` = achieved ID depth. Root quietness test:
-  |root static − root search| ≤ `TDLEAF_DUMP_QUIET_CP` (default 60 cp) — an
-  operational filter (unresolved tactics show up as static-vs-search
-  disagreement).
+  (white POV), `depth` = achieved ID depth.  **Every** recorded root, ungated
+  (since 2026-09-28); the quietness choice — |root static − root search| ≤
+  `--bt-quiet-cp` today — is made at assembly, with the walked PV (`pv`
+  column) available for other definitions.
 - `iter2.<pid>.leaf.tsv` — PV-leaf positions, static labels, `depth` 0. Leaves
   are distribution-matched to what the net actually evaluates in search; their
   training signal is the outcome label.
 
-`TDLEAF_DUMP_MAX_CP` (default 1500) caps |eval| for both. Results are labelled
+`TDLEAF_DUMP_MAX_CP` (default 1500) caps |eval| for leaf rows; root rows are
+capped at assembly instead. Results are labelled
 via the engine's normal game-outcome path (protocol result or UCI
 self-adjudication), so only games that feed the TD update are dumped.
 

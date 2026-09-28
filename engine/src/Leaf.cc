@@ -35,4 +35,7 @@
 #include "../src/setup.cpp"
 #include "../src/game_rec.cpp"
 #include "../src/tree_search_functions.cpp"
+#if NNUE
+#include "../src/qslabel.cpp"
+#endif
 

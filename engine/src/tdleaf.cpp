@@ -513,12 +513,28 @@ void tdleaf_record_ply(TDGameRecord &rec,
     position prev_pos = root_pos;
     int pv_len = 0;
     int walk_stop = TDPV_STOP_NOMOVE;   // why the walk ended (telemetry only)
+    int32_t pv_move[TDLEAF_PV_MAX];     // walked PV + flags for the root-row dump
+    uint8_t pv_flags[TDLEAF_PV_MAX];
 
     for (int k = 0; k < MAXD && pv[k].t != NOMOVE; k++) {
         position next = cur;
         if (!next.exec_move(pv[k], 0)) {   // illegal — stop here
             walk_stop = TDPV_STOP_ILLEGAL;
             break;
+        }
+        if (k < TDLEAF_PV_MAX) {
+            int ty = pv[k].b.type;
+            uint8_t fl = 0;
+            if (ty & CAPTURE) {
+                int capt = (ty & EP) ? PAWN : PTYPE(cur.sq[pv[k].b.to]);
+                fl |= TDPV_F_CAPTURE | (uint8_t)(capt << TDPV_F_CAPT_SHIFT);
+            }
+            if (ty & EP)      fl |= TDPV_F_EP;
+            if (ty & PROMOTE) fl |= TDPV_F_PROMOTE;
+            if (ty & CASTLE)  fl |= TDPV_F_CASTLE;
+            if (next.check)   fl |= TDPV_F_CHECK;
+            pv_move[k] = pv[k].t;
+            pv_flags[k] = fl;
         }
         nnue_record_delta(acc_b, cur, next, pv[k]);
         nnue_apply_delta(acc_b, acc_a, next);
@@ -734,6 +750,7 @@ void tdleaf_record_ply(TDGameRecord &rec,
         if (!r.leaf_ok) td_pv.gate_skipped++;
         td_pv.gate_seen++;
     }
+    r.pv_n = 0; r.pv_trunc = false;
     if (tdleaf_dump_wanted() || tdleaf_capture_root) {
         // Root snapshot + static eval for the root-row TSV dump and the .tdg
         // trajectory format.
@@ -744,6 +761,10 @@ void tdleaf_record_ply(TDGameRecord &rec,
                 pc_root += root_pos.plist[sd][pt][0];
         pc_root = (pc_root < 1) ? 1 : (pc_root > 32) ? 32 : pc_root;
         r.root_static = nnue_evaluate(root_acc, (int)root_pos.wtm, pc_root);
+        r.pv_n     = (int8_t)(pv_len < TDLEAF_PV_MAX ? pv_len : TDLEAF_PV_MAX);
+        r.pv_trunc = pv_len > TDLEAF_PV_MAX;
+        memcpy(r.pv_move,  pv_move,  r.pv_n * sizeof(int32_t));
+        memcpy(r.pv_flags, pv_flags, r.pv_n);
     }
 
     // Enumerate active features at the leaf position for FT/PSQT backprop.
@@ -929,17 +950,20 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
 //   <prefix>.<pid>.root.tsv — the root (played) position of every recorded
 //     ply.  cp = root SEARCH score (white POV) — a search-amplified label,
 //     the same kind the PGN extraction pipeline produces; depth column =
-//     achieved ID depth.  Quietness: |root static − root search| <= QUIET_CP
-//     (an operational test — unresolved tactics show up as static-vs-search
-//     disagreement).
+//     achieved ID depth.  UNGATED since 2026-09-28: every root is written,
+//     with no quiet test and no |cp| cap.  Both are applied at corpus
+//     assembly (train.py: --bt-quiet-cp on |cp − gate|, and |cp| <= 1500),
+//     so a quietness definition chosen later can use every row.  Column 9,
+//     "pv", is the walked PV with per-move capture/check/promotion/castle
+//     flags (tdleaf_format_pv).
 //
-// Both apply |cp| <= TDLEAF_DUMP_MAX_CP (default 1500).  QUIET_CP
-// (TDLEAF_DUMP_QUIET_CP) defaults to 1000 — effectively open, see below.
+// Leaf rows apply |cp| <= TDLEAF_DUMP_MAX_CP (default 1500) and QUIET_CP
+// (TDLEAF_DUMP_QUIET_CP, default 1000 — effectively open, see below).
 //
-// Column 8, "gate": the value the quietness test compared cp against, in the
+// Column 8, "gate": the value the quietness test compares cp against, in the
 // SAME POV as cp — root static for root rows, the propagated root search score
 // for leaf rows.  The gate condition is therefore exactly
-//     |cp - gate| <= TDLEAF_DUMP_QUIET_CP
+//     |cp - gate| <= QUIET_CP
 // for both files, which makes the gate RE-CUTTABLE OFFLINE: dump once with a
 // wide QUIET_CP and every narrower gate is a filter over the same rows.  That
 // turns the gate-width question into a paired offline experiment (same games,
@@ -968,6 +992,36 @@ static void tdleaf_dump_fen(const position &pos, bool wtm, char *out)
         if (ry) out[fi++] = '/';
     }
     snprintf(out + fi, 16, " %c - - 0 1", wtm ? 'w' : 'b');
+}
+
+// Root-row `pv` column: space-separated tokens, one per walked PV move,
+//     <from><to>[promo][x<captured>][+][c][e]
+// e.g. "e4d5xp+".  Squares are Leaf's internal from/to, so a castle is the
+// KING's move to its destination (from == to is possible in Chess960) and is
+// marked `c`; `e` marks en passant; promo and captured pieces are lowercase
+// letters.  "-" for an empty PV; a trailing "..." means the PV was longer
+// than TDLEAF_PV_MAX.  The flags come from the actor's own walk, so no
+// consumer has to replay the moves (the FEN carries no castling rights).
+static void tdleaf_format_pv(const TDRecord &r, char *out)
+{
+    static const char pc[] = " pnbrqk";
+    char *o = out;
+    for (int k = 0; k < r.pv_n; k++) {
+        move m; m.t = r.pv_move[k];
+        uint8_t fl = r.pv_flags[k];
+        if (k) *o++ = ' ';
+        *o++ = (char)('a' + FILE(m.b.from)); *o++ = (char)('1' + RANK(m.b.from));
+        *o++ = (char)('a' + FILE(m.b.to));   *o++ = (char)('1' + RANK(m.b.to));
+        if ((fl & TDPV_F_PROMOTE) && m.b.promote >= KNIGHT && m.b.promote <= QUEEN)
+            *o++ = pc[m.b.promote];
+        if (fl & TDPV_F_CAPTURE) { *o++ = 'x'; *o++ = pc[(fl >> TDPV_F_CAPT_SHIFT) & 7]; }
+        if (fl & TDPV_F_CHECK)  *o++ = '+';
+        if (fl & TDPV_F_CASTLE) *o++ = 'c';
+        if (fl & TDPV_F_EP)     *o++ = 'e';
+    }
+    if (r.pv_n == 0) *o++ = '-';
+    if (r.pv_trunc) { memcpy(o, " ...", 4); o += 4; }
+    *o = '\0';
 }
 
 static void tdleaf_dump_game(const TDGameRecord &rec, float result)
@@ -1006,7 +1060,8 @@ static void tdleaf_dump_game(const TDGameRecord &rec, float result)
                         // axis off this line; legacy corpora without it use the
                         // old record-index axis.
                         fprintf(f, "# tdleaf-corpus axis=game-ply\n");
-                        fprintf(f, "fen\tcp\tresult\tply\tdepth\tgid\tendply\tgate\n");
+                        fprintf(f, "fen\tcp\tresult\tply\tdepth\tgid\tendply\tgate%s\n",
+                                strcmp(kind, "root") ? "" : "\tpv");
                     }
                 } else {
                     fprintf(stderr, "TDLeaf: cannot open dump file %s\n", path);
@@ -1028,7 +1083,7 @@ static void tdleaf_dump_game(const TDGameRecord &rec, float result)
 #endif
             if (leaf_f && root_f)
                 fprintf(stderr, "TDLeaf: dumping leaf+root positions to %s.%d.{leaf,root}.tsv "
-                                "(quiet<=%d cp, max=%d cp)\n",
+                                "(leaf quiet<=%d cp, max=%d cp; root rows ungated, with pv)\n",
                         prefix, (int)getpid(), dump_quiet_cp, dump_max_cp);
             // gid layout: 12-bit pid tag in the high bits, 20-bit per-process
             // game counter in the low bits.  The corpus's train/val split and
@@ -1109,33 +1164,33 @@ static void tdleaf_dump_game(const TDGameRecord &rec, float result)
 #endif
 
         // ---- Root row: search-score label, depth = achieved ID depth -----
+        // UNGATED (2026-09-28): every recorded root is dumped, with no quiet
+        // or |cp| cap -- both are applied at corpus assembly (train.py), so
+        // the dump keeps what a later quietness definition may want.
         if (root_f) {
-            if (abs(r.root_static - r.score_root_stm) <= dump_quiet_cp) {
-                int cp_white = root_wtm ? r.score_root_stm : -r.score_root_stm;
-                // Column 8 "gate": the root STATIC eval, same POV as cp.  The
-                // gate was |cp - gate| <= QUIET_CP, so a wide dump re-cuts to
-                // any narrower gate offline.  This is the quantity Part 1 found
-                // the label's value is proportional to.
-                int gate_white = root_wtm ? r.root_static : -r.root_static;
-                if (cp_white <= dump_max_cp && cp_white >= -dump_max_cp) {
-                    tdleaf_dump_fen(r.root_pos, (bool)root_wtm, fen);
-                    fprintf(root_f, "%s\t%d\t%s\t%d\t%d\t%u\t%d\t%d\n",
-                            fen, cp_white, res_str, r.game_ply, (int)r.id_depth,
-                            dump_gid, final_game_ply, gate_white);
+            int cp_white = root_wtm ? r.score_root_stm : -r.score_root_stm;
+            // Column 8 "gate": the root STATIC eval, same POV as cp.  The
+            // quiet gate is |cp - gate| <= QUIET_CP, applied offline.  This
+            // is the quantity Part 1 found the label's value is proportional
+            // to.  Column 9 "pv": the walked PV (tdleaf_format_pv).
+            int gate_white = root_wtm ? r.root_static : -r.root_static;
+            char pvs[TDLEAF_PV_MAX * 12 + 8];
+            tdleaf_format_pv(r, pvs);
+            tdleaf_dump_fen(r.root_pos, (bool)root_wtm, fen);
+            fprintf(root_f, "%s\t%d\t%s\t%d\t%d\t%u\t%d\t%d\t%s\n",
+                    fen, cp_white, res_str, r.game_ply, (int)r.id_depth,
+                    dump_gid, final_game_ply, gate_white, pvs);
 #if TDLEAF_REFRESH_DIAG
-                    // Same row, same gate decision, ACTOR-VINTAGE label — the
-                    // paired control that isolates the score refresh from the
-                    // quietness-gate change.
-                    if (stale_f) {
-                        int cp_stale = root_wtm ? r.score_root_stm_actor
-                                                : -r.score_root_stm_actor;
-                        fprintf(stale_f, "%s\t%d\t%s\t%d\t%d\t%u\t%d\n",
-                                fen, cp_stale, res_str, r.game_ply,
-                                (int)r.id_depth, dump_gid, final_game_ply);
-                    }
-#endif
-                }
+            // Same row, ACTOR-VINTAGE label — the paired control that
+            // isolates the score refresh from the quietness-gate change.
+            if (stale_f) {
+                int cp_stale = root_wtm ? r.score_root_stm_actor
+                                        : -r.score_root_stm_actor;
+                fprintf(stale_f, "%s\t%d\t%s\t%d\t%d\t%u\t%d\n",
+                        fen, cp_stale, res_str, r.game_ply,
+                        (int)r.id_depth, dump_gid, final_game_ply);
             }
+#endif
         }
     }
     if (leaf_f) fflush(leaf_f);   // survive process kills at match end

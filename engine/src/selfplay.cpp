@@ -239,6 +239,10 @@ static bool selfplay_write_traj(const SelfplayConfig &cfg, const TDGameRecord &r
         tr.id_depth          = r.id_depth;
         tr.wtm               = (uint8_t)r.wtm;
         tr.root_wtm          = (uint8_t)r.root_wtm;
+        tr.pv_n              = r.pv_n;
+        tr.pv_trunc          = (uint8_t)r.pv_trunc;
+        memcpy(tr.pv_move,  r.pv_move,  r.pv_n * sizeof(int32_t));
+        memcpy(tr.pv_flags, r.pv_flags, r.pv_n);
         ok = fwrite(&tr, sizeof(tr), 1, f) == 1;
     }
     fclose(f);
@@ -945,6 +949,10 @@ static bool learner_process_file(const char *path, TDGameRecord *grec,
         r.id_depth          = tr.id_depth;
         r.wtm               = (bool)tr.wtm;
         r.root_wtm          = (bool)tr.root_wtm;
+        r.pv_n              = (tr.pv_n < 0 || tr.pv_n > TDLEAF_PV_MAX) ? 0 : tr.pv_n;
+        r.pv_trunc          = tr.pv_trunc != 0;
+        memcpy(r.pv_move,  tr.pv_move,  r.pv_n * sizeof(int32_t));
+        memcpy(r.pv_flags, tr.pv_flags, r.pv_n);
         tdleaf_rebuild_record(r, cfg.refresh_scores);
     }
     fclose(f);
