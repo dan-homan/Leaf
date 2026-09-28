@@ -28,10 +28,13 @@ Changes since 2017_12_24
                100% -- at -6.08 +- 10.74 Elo and +0.3% clock.  It fires on 5.68%
                of searches (more than the 1.7% stub rate: it also rescues
                intermediate iterations) and 0 are still unresolved afterwards.
-               Best label quality of the three arms: leaf-match gate retention
-               97.41% -> 97.90%, overall bias sd 20.6 -> 18.2, and 3.6% more
-               records kept (the plies that used to be skipped).  The one-shot
-               guard (window not already full) bounds the loop.
+               The one-shot guard (window not already full) bounds the loop.
+               On a single seed it also looked like the best arm for label
+               quality; a second seed retracted that -- gate retention and bias
+               sd both land on the wrong side of baseline on seed 31337, and the
+               record count tracks game length rather than the recovered plies.
+               What this buys is the structural fact, for free: every recorded
+               ply now comes from a resolved search.
 
                PVTRUNC_DIAG gains pvt_widen_try / pvt_widen_fail and a
                "PV widen-unresolved" report line in selfplay.cpp.
@@ -41,10 +44,17 @@ Changes since 2017_12_24
                before any match was run.  Use it to decide whether to spend the
                match, not in place of it.
 
-               NOT done: PV_NO_ALPHA_RAISE / PV_NO_BETA_LOWER (Q's stopgap) are
-               left in place.  They are not redundant with this change -- they
-               reduce how OFTEN the sequential break happens, where this handles
-               it once it has.  Retiring them is untested.
+               PV_NO_ALPHA_RAISE / PV_NO_BETA_LOWER (Q's stopgap) are left
+               in place, but they are NOT dead machinery under this change --
+               they control how often the sequential break happens, where this
+               handles it once it has.  Built with both at 0, the full-width
+               re-search fires on 98-100% of searches instead of ~5%.  That is
+               strength-neutral too (-8.17 +- 11.97, n=2000) and 4.5% faster,
+               and it is the only arm whose label noise moves consistently
+               (bias sd 12.5/16.5 vs baseline 20.6/20.8 on two seeds).  Not
+               adopted: the payoff is label noise, which only shows up in what
+               gets learned, and 2000 games at +-12 cannot exclude a -15 Elo
+               generator regression.  Needs a learning leg.
 
 2026_09_25 -- Fixed-depth rating: match.py --depth/--nodes, train.py
                --gauntlet-depth/--epoch-depth, tc-anchor continuity match.

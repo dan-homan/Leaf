@@ -417,24 +417,32 @@ guard `beta>alpha+1`) are all disabled or always-true at `alpha = -MATE`.
 iteration did not resolve and the window is not already full, set ∓MATE and
 re-search ONCE.  Stubs 1.7% → 0 and searches resolved → 100% exactly as in arm 1,
 at **−6.08 ± 10.74 Elo** (49.12%, n=2000) and +0.3% clock.  The re-search fired on
-5.68% of searches — more than the 1.7% stub rate, because it also rescues
-intermediate iterations — and **0 were still unresolved after it**, so one
-full-width pass always resolves.  Label quality is the best of the three arms:
-gate retention 97.41% → **97.90%**, overall bias sd 20.6 → **18.2**, and 38,826
-records kept per 300 games against the baseline's 37,466 (+3.6%, the plies that
-used to be skipped).
+5.68% / 5.13% of searches (two seeds) — more than the 1.7% stub rate, because it
+also rescues intermediate iterations — and **0 were still unresolved after it**,
+so one full-width pass always resolves.  ⚠️ Arm 2 buys **no measurable label-quality
+improvement**: on a second seed, gate retention and bias sd both land on the
+wrong side of baseline (97.90/97.20% against baseline 97.41/97.66%; sd 18.2/21.2
+against 20.6/20.8), and the record count follows game length rather than the
+recovered plies (+3.6% on one seed, −2.4% on the other).  What arm 2 delivers is
+the structural fact — every recorded ply now comes from a resolved search — for
+free.  (The single-seed version of this paragraph claimed arm 2 had the best
+label quality of the three; a second seed retracted it.)
 
-| metric | baseline | arm 1 (∓MATE always) | arm 2 (widen-if-unresolved) |
-|---|---|---|---|
-| searches resolved | 98.3% | 100.0% | 100.0% |
-| stub plies skipped | 635 (1.7%) | 0 | 0 |
-| records kept / 300 games | 37,466 | 34,962 | **38,826** |
-| leaf-match gate retained | 97.41% | 96.79% | **97.90%** |
-| label bias / sd (cp) | +0.14 / 20.6 | +0.50 / 19.6 | **+0.14 / 18.2** |
-| PV shorter than depth | 14.36% | **2.41%** | 13.78% |
-| draw rate (300 games) | 38.3% | 18.0% | 30.7% |
-| clock / 300 games | 204.9 s | **166.1 s** | 205.5 s |
-| **Elo vs baseline, d8, n=2000** | — | **−444.74 ± 26.25** | **−6.08 ± 10.74** |
+Two seeds (777 / 31337) where a metric proved seed-sensitive; arm 1 was measured
+on seed 777 only, having already been settled by the match.
+
+| metric | baseline | arm 1 (∓MATE always) | arm 2 (widen-if-unresolved) | arm 3 (arm 2, stopgap retired) |
+|---|---|---|---|---|
+| searches resolved | 98.3% / 98.3% | 100.0% | 100.0% / 100.0% | 100.0% / 100.0% |
+| stub plies skipped | 635 / 631 (1.7%) | 0 | 0 | 0 |
+| full-width re-searches | — | — | 5.68% / 5.13% | **100.1% / 98.2%** |
+| …still unresolved after | — | — | 0 | 0 |
+| leaf-match gate retained | 97.41 / 97.66% | 96.79% | 97.90 / 97.20% | **97.84 / 97.81%** |
+| label bias sd (cp) | 20.6 / 20.8 | 19.6 | 18.2 / 21.2 | **12.5 / 16.5** |
+| PV shorter than depth | 14.36% | **2.41%** | 13.78% | 14.32% |
+| draw rate (300 games) | 38.3 / 38.3% | 18.0% | 30.7 / 39.7% | 31.7 / 34.7% |
+| clock / 300 games | 204.9 s | **166.1 s** | 205.5 s | 196.2 s |
+| **Elo vs baseline, d8, n=2000** | — | **−444.74 ± 26.25** | **−6.08 ± 10.74** | **−8.17 ± 11.97** |
 
 ⚠️ **Arm 1's PV-length win was a symptom, not a benefit.**  Its
 shorter-than-depth 2.41% did not come from resolving iterations — arm 2 resolves
@@ -447,19 +455,34 @@ aspiration problem, and closing them is a separate question.
 
 **The draw rate called it before the Elo did.**  38.3% → 18.0% for arm 1 is 5.7σ
 on 300 games and far below `TRAINING.md`'s healthy 35–40% band at d8; arm 2's
-30.7% is 2.0σ, weak evidence, and the 2000-game match then found no strength
-difference.  This is the canary of §1 M and the online-stability rules working
+30.7% is 2.0σ, weak evidence, the 2000-game match then found no strength
+difference, and a second seed read 39.7% — noise, as a 2σ result on 300 games
+usually is.  This is the canary of §1 M and the online-stability rules working
 exactly as specified, on a 3-minute run, ahead of a 2000-game match.  ⚠️ It is a
 *detector*, not a measurement: use it to decide whether to spend the match, not
 in place of it.
 
-*Open.*  Whether `PV_NO_ALPHA_RAISE` / `PV_NO_BETA_LOWER` (Q's stopgap) can now be
-retired is **untested**.  They are not redundant with arm 2: they reduce how
-OFTEN the sequential break happens, where arm 2 handles it once it has.  Removing
-them would restore `alpha = beta` on a fail-high, make the fail-low likely again,
-and turn the common path into narrow → collapsed re-search → full-width
-re-search — three searches where there are now two.  Cost and strength both
-unmeasured.
+*Arm 3 — can Q's stopgap now be retired?*  `PV_NO_ALPHA_RAISE` /
+`PV_NO_BETA_LOWER` are **not** dead machinery under arm 2: they control how OFTEN
+the sequential break happens, where arm 2 handles it once it has.  Building arm 2
+with both at 0 makes the full-width re-search fire on **100.1% / 98.2% of
+searches** instead of ~5% — i.e. essentially every search now resolves its final
+iteration at ∓MATE.  That is structurally close to arm 1, so the strength result
+is the surprise: **−8.17 ± 11.97 Elo** (48.83%, n=2000), indistinguishable both
+from baseline and from arm 2 (Δ = 2.1 ± 16.1).  Only the FINAL iteration runs
+full width — the earlier ones still shape the TT and move ordering through the
+narrow window — and that is apparently enough to keep arm 1's collapse away.
+Arm 3 is also 4.5% faster (196.2 s vs 205.5 s: a collapsed re-search plus a
+full-width one is cheaper than the wide re-search the stopgap produces), and it
+is the **only arm whose label quality moves consistently** — bias sd 12.5/16.5
+against baseline's 20.6/20.8 and gate retention 97.84/97.81% against
+97.41/97.66%, same direction on both seeds, though the sd magnitude is unstable.
+
+Not adopted, on purpose.  The payoff is label NOISE, which by construction shows
+up only in what gets learned, and §1 P's lesson applies in reverse here: a
+2000-game fixed-depth match is an eval instrument, and 2000 games at ±12 cannot
+exclude a −15 Elo generator regression.  What it needs before adoption is a
+longer match and a real learning leg, not another telemetry run.  Regime R10.
 
 
 ---
@@ -574,10 +597,13 @@ mature net; assume they are untested on a young one unless the row says otherwis
 | …and costs almost everything | §1 R arm 1 | −444.74 ± 26.25 Elo at d8, n=2000 | R10 | **ESTABLISHED** |
 | Opening it ONLY where the iteration stubs is strength-neutral | §1 R arm 2 (`PV_WIDEN_UNRESOLVED`) | −6.08 ± 10.74 Elo at d8, n=2000; +0.3% clock | R10 | **ESTABLISHED** |
 | One full-width re-search always resolves | §1 R arm 2 | fired on 5.68% of searches, 0 unresolved after | R10 | **ESTABLISHED** |
-| It is also the best arm for label quality | §1 R arm 2 | gate 97.41 → 97.90%, bias sd 20.6 → 18.2, +3.6% records | R10 | **ESTABLISHED** |
+| Arm 2 buys no measurable label-quality gain | §1 R arm 2, two seeds | gate 97.90/97.20% vs baseline 97.41/97.66%; sd 18.2/21.2 vs 20.6/20.8 | R10 | **ESTABLISHED** (retracts a single-seed claim) |
+| Q's stopgap is what keeps the sequential break rare | §1 R arm 3 | full-width re-searches 5.1-5.7% with it, 98-100% without | R10 | **ESTABLISHED** |
+| Retiring the stopgap under arm 2 is strength-neutral | §1 R arm 3 | −8.17 ± 11.97 vs baseline; Δ vs arm 2 = 2.1 ± 16.1 | R10 | SUPPORTED (2000 games cannot exclude −15) |
+| …and is the only arm whose label noise moves consistently | §1 R arm 3, two seeds | sd 12.5/16.5 vs 20.6/20.8; gate 97.84/97.81% vs 97.41/97.66% | R10 | SUPPORTED, magnitude unstable |
 | Arm 1's PV-length gain was a symptom of weaker play | §1 R | shorter-than-depth 2.41% vs arm 2's 13.78% at equal resolution; repetition returns 47.6k → 31.8k | R10 | SUPPORTED |
 | The draw rate detected arm 1's collapse on 300 games | §1 R | 38.3% → 18.0%, 5.7σ, before any match was run | R10 | **ESTABLISHED** |
-| Retiring `PV_NO_ALPHA_RAISE`/`PV_NO_BETA_LOWER` after arm 2 | — | not measured | R10 | **OPEN** |
+| Whether arm 3's label-noise gain survives a learning leg | — | needs a leg, not telemetry | R10 | **OPEN** |
 
 ### The rating instrument (2026-09-25)
 
