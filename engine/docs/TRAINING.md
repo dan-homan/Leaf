@@ -805,7 +805,8 @@ binary is unaffected and a TDLEAF binary can be rated with `--no-pv-learning`.
 
 | flag (`define.h` / `tdleaf.h`) | default | what it does |
 |---|---|---|
-| `PV_LAST_RESOLVED` | 1 | When an aspiration iteration ends **unresolved**, hand back the PV, score and depth of the last iteration that DID resolve, instead of the root fail-high stub |
+| `PV_LAST_RESOLVED` | **0** | When an aspiration iteration ends **unresolved**, hand back the PV, score and depth of the last iteration that DID resolve, instead of the root fail-high stub.  Default 0 since 2026-09-21: it hands back a shallower iteration's MOVE and cost 282.6 ± 12.1 Elo.  Moot since 2026-09-27 — `PV_WIDEN_UNRESOLVED` leaves no unresolved iteration to substitute for |
+| `PV_WIDEN_UNRESOLVED` | 1 | Learning play only: when the aspiration loop would exit with the iteration unresolved (the sequential fail-high/fail-low break), widen to `(-MATE,+MATE)` ONCE and re-search.  Takes stubs to 0 and resolution to 100% at −6.08 ± 10.74 Elo.  Replaced the `PV_NO_ALPHA_RAISE`/`PV_NO_BETA_LOWER` stopgap, deleted 2026-09-27.  ⚠️ Widening EVERY iteration instead costs −444.74 ± 26.25 Elo (`Learning_Investigation.md` §1 R) |
 | `PV_NO_TT_CUTOFF` | 1 | Suppress TT **cutoffs** at PV nodes (all three probe sites, main search and qsearch).  TT stores, move hints and ordering are untouched |
 | `TDLEAF_LEAF_MATCH_CP` | 10 | A record contributes a gradient — and its leaf row is dumped — only when `\|leaf_static − propagated root search\| ≤ 10 cp` |
 
@@ -1904,7 +1905,7 @@ See [Adam Optimizer](#adam-optimizer) above.
 | `TDLEAF_LEAF_MATCH_CP_DEFAULT=N` | Override the leaf-match gate (0 disables) |
 | `SCORE_HASH_OFF=1` | Force every score-hash probe to miss.  Used to rule the score hash **out** as a cause of the leaf/root mismatch — it was not the cause |
 | `FAIL_SOFT_DIAG=1` | Return the true best score instead of clamping to `[alpha,beta]`.  Also ruled **out** |
-| `WIDEWIN=N` | Root aspiration half-window in cp (default 15).  ⚠️ `search.cpp` records the narrow window as load-bearing for strength — replacing it with `(-MATE,+MATE)` loses ~6:1 in self-play |
+| `WIDEWIN=N` | Root aspiration half-window in cp (default 15).  ⚠️ The narrow window is load-bearing for strength: replacing it with `(-MATE,+MATE)` for every iteration measured **−444.74 ± 26.25 Elo** at fixed d8 (~13:1), confirming the `search.cpp` warning (`Learning_Investigation.md` §1 R arm 1) |
 
 **Runtime environment** — this is the *entire* allowlist.  `tdleaf_check_env()`
 runs at `main()` entry in every TDLEAF build, logs the effective training config

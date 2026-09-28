@@ -139,8 +139,8 @@
 // Elo of LEARNING play (4000 games, fixed d8) -- it hands back a shallower
 // iteration's MOVE, not just its PV, and it fired on 54.3% of searches.  The
 // comment in search.cpp calling it "slightly WEAKER" was badly wrong.  With
-// PV_NO_ALPHA_RAISE + PV_NO_BETA_LOWER only 11.9% of iterations fail to
-// resolve, and those plies are dropped by TDLEAF_SKIP_STUB_PV instead.
+// PV_WIDEN_UNRESOLVED no iteration fails to resolve at all, so there is nothing
+// left for a fallback to substitute.
 #ifndef PV_LAST_RESOLVED
  #define PV_LAST_RESOLVED 0
 #endif
@@ -257,19 +257,6 @@
  #define PV_NO_FAILHIGH_REDUCTION 0
 #endif
 
-// PV_NO_ALPHA_RAISE: on a root fail-high during LEARNING play, widen beta but
-// do NOT raise alpha to the old beta.  Measured mechanism: 100% of unresolved
-// iterations at d8/0 are the sequential fail-high-then-fail-low break, and
-// `root_alpha = root_beta` is what makes the fail-low likely -- futility
-// pruning keys on alpha (`premove_score+MARGIN<alpha`), so an alpha raised to
-// the just-exceeded bound prunes away the very line that caused the fail-high
-// and the re-search comes back at or below it.  Keeping alpha where it was
-// leaves the re-search room to resolve.  Costs a wider (but still bounded)
-// re-search window; gated on pv_learning_mode so competitive play is untouched.
-#ifndef PV_NO_ALPHA_RAISE
- #define PV_NO_ALPHA_RAISE 1
-#endif
-
 // PV_WIDEN_UNRESOLVED: when the aspiration loop is about to give up with the
 // iteration UNRESOLVED (the sequential fail-high/fail-low `} else break;`),
 // widen to the full (-MATE,+MATE) window ONCE and re-search instead, during
@@ -284,15 +271,22 @@
 #ifndef PV_WIDEN_UNRESOLVED
  #define PV_WIDEN_UNRESOLVED 1
 #endif
-
-// PV_NO_BETA_LOWER: the mirror of PV_NO_ALPHA_RAISE on the fail-LOW side.
-// `root_beta = root_alpha` collapses beta down onto the bound just undershot,
-// which can provoke the opposite sequential break (fail-low then fail-high).
-// Root-only: internal nodes are textbook PVS and never collapse the window
-// (search.cpp:1080 re-searches with the SAME alpha).  Learning play only.
-#ifndef PV_NO_BETA_LOWER
- #define PV_NO_BETA_LOWER 1
-#endif
+//
+// RETIRED 2026-09-27 in favour of the above: PV_NO_ALPHA_RAISE and
+// PV_NO_BETA_LOWER, which suppressed the `alpha = beta` / `beta = alpha`
+// collapse after a root fail-high/fail-low during learning play.  They were Q's
+// stopgap -- they made the sequential break RARE, because the collapse is what
+// lets futility pruning cut the very line that just failed high.  Re-searching
+// once at full width handles that break directly, so suppressing it is no
+// longer the point: the collapsed re-search becomes a cheap probe and the
+// full-width one is definitive.  Measured over two seeds (300 self-play games
+// each, d8, m260925-1e5g_final) plus a 2000-game fixed-depth match: full-width
+// re-searches rise from ~5% of searches to 98-100%, none is left unresolved,
+// strength is unchanged (-8.17 +- 11.97 Elo against the stopgap build's
+// -6.08 +- 10.74, both against the pre-R baseline), the clock is 4.5% FASTER,
+// and the label bias sd falls from 20.6/20.8 to 12.5/16.5 -- the only label
+// metric in the whole R programme that moved the same way on both seeds.
+// Full write-up: Learning_Investigation.md section 1 R, arm 3.
 
 // define 64 bit integers and zero values for unsigned long long
 #if MSVC 

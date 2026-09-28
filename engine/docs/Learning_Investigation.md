@@ -478,11 +478,20 @@ is the **only arm whose label quality moves consistently** — bias sd 12.5/16.5
 against baseline's 20.6/20.8 and gate retention 97.84/97.81% against
 97.41/97.66%, same direction on both seeds, though the sd magnitude is unstable.
 
-Not adopted, on purpose.  The payoff is label NOISE, which by construction shows
-up only in what gets learned, and §1 P's lesson applies in reverse here: a
-2000-game fixed-depth match is an eval instrument, and 2000 games at ±12 cannot
-exclude a −15 Elo generator regression.  What it needs before adoption is a
-longer match and a real learning leg, not another telemetry run.  Regime R10.
+**Adopted 2026-09-27; `PV_NO_ALPHA_RAISE`/`PV_NO_BETA_LOWER` deleted** (D. Homan's
+call, over a recommendation to gate it behind a learning leg first).  The
+argument is mechanism, not the measurement: the collapse is what *creates* the
+fail-low — futility pruning keys on alpha, so `alpha = beta` prunes the very line
+that just failed high — and the stopgap only made that rarer.  Re-searching the
+break at full width addresses it directly, which leaves the collapsed search as
+a cheap probe and the full-width one as definitive.  The measurement cannot
+settle a ±15 Elo question at n=2000, and a 5,000-game handoff test measures
+handoff damage rather than generator strength, so no cheap experiment was going
+to decide it; the theory does.  Verified after deletion: the shipped source
+reproduces the flagged build's telemetry exactly on both seeds (bias sd 12.5 /
+16.5, widen 100.12% / 98.17%, 0 unresolved).  What remains open is whether the
+label-noise reduction shows up in a net — visible only in a real leg.  Regime
+R10.
 
 
 ---
@@ -599,11 +608,11 @@ mature net; assume they are untested on a young one unless the row says otherwis
 | One full-width re-search always resolves | §1 R arm 2 | fired on 5.68% of searches, 0 unresolved after | R10 | **ESTABLISHED** |
 | Arm 2 buys no measurable label-quality gain | §1 R arm 2, two seeds | gate 97.90/97.20% vs baseline 97.41/97.66%; sd 18.2/21.2 vs 20.6/20.8 | R10 | **ESTABLISHED** (retracts a single-seed claim) |
 | Q's stopgap is what keeps the sequential break rare | §1 R arm 3 | full-width re-searches 5.1-5.7% with it, 98-100% without | R10 | **ESTABLISHED** |
-| Retiring the stopgap under arm 2 is strength-neutral | §1 R arm 3 | −8.17 ± 11.97 vs baseline; Δ vs arm 2 = 2.1 ± 16.1 | R10 | SUPPORTED (2000 games cannot exclude −15) |
+| Retiring the stopgap under arm 2 is strength-neutral | §1 R arm 3 | −8.17 ± 11.97 vs baseline; Δ vs arm 2 = 2.1 ± 16.1 | R10 | SUPPORTED (2000 games cannot exclude −15) — **adopted on mechanism, not on this number** |
 | …and is the only arm whose label noise moves consistently | §1 R arm 3, two seeds | sd 12.5/16.5 vs 20.6/20.8; gate 97.84/97.81% vs 97.41/97.66% | R10 | SUPPORTED, magnitude unstable |
 | Arm 1's PV-length gain was a symptom of weaker play | §1 R | shorter-than-depth 2.41% vs arm 2's 13.78% at equal resolution; repetition returns 47.6k → 31.8k | R10 | SUPPORTED |
 | The draw rate detected arm 1's collapse on 300 games | §1 R | 38.3% → 18.0%, 5.7σ, before any match was run | R10 | **ESTABLISHED** |
-| Whether arm 3's label-noise gain survives a learning leg | — | needs a leg, not telemetry | R10 | **OPEN** |
+| Whether arm 3's label-noise gain reaches the NET | — | needs a leg; telemetry and a 2000-game match cannot see it | R10 | **OPEN** (shipped anyway, on mechanism) |
 
 ### The rating instrument (2026-09-25)
 

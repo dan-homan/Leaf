@@ -1,5 +1,46 @@
 Changes since 2017_12_24
 
+2026_09_27b -- Retire the PV_NO_ALPHA_RAISE / PV_NO_BETA_LOWER stopgap.
+
+               Both flags are DELETED (not defaulted off) and search.cpp is back
+               to the textbook `root_alpha = root_beta` / `root_beta =
+               root_alpha` collapse on a root fail-high / fail-low.
+               PV_WIDEN_UNRESOLVED (2026_09_27) handles what the collapse
+               causes: the sequential fail-high/fail-low break now gets one
+               full-width re-search instead of being made rare.
+
+               Rationale is mechanism.  The collapse is what CREATES the
+               fail-low -- futility pruning keys on alpha, so `alpha = beta`
+               prunes the very line that just failed high -- and the stopgap
+               only lowered its frequency.  Re-searching the break at full width
+               addresses it directly: the collapsed search becomes a cheap probe
+               and the full-width one is definitive.
+
+               Measured (two seeds, 300 self-play games each at d8 on
+               m260925-1e5g_final, plus a 2000-game fixed-depth match): the
+               full-width re-search fires on 98-100% of searches rather than
+               ~5%, none is left unresolved, strength is unchanged
+               (-8.17 +- 11.97 Elo, against the stopgap build's -6.08 +- 10.74,
+               both vs the pre-R baseline), the clock is 4.5% FASTER, and the
+               label bias sd falls from 20.6/20.8 to 12.5/16.5 -- the only label
+               metric in the R programme that moved the same way on both seeds.
+               After deletion the shipped source reproduces the flagged build's
+               telemetry exactly on both seeds.
+
+               NOTE: a 2000-game fixed-depth match cannot exclude a -15 Elo
+               generator regression, and a 5,000-game handoff test would measure
+               handoff damage rather than generator strength, so this was
+               adopted on the mechanism rather than on the number.  Whether the
+               lower label noise reaches the NET is visible only in a real leg
+               and is still open (Learning_Investigation.md section 1 R arm 3).
+
+               Docs: CLAUDE.md and TRAINING.md flag tables corrected --
+               PV_LAST_RESOLVED has been default 0 since 2026-09-21 and both
+               tables still said 1; PV_WIDEN_UNRESOLVED added; the WIDEWIN
+               warning now carries the measured -444.74 +- 26.25 instead of
+               "~6:1".  TODO S1 rewritten: the arm it proposed (build with the
+               stopgap flags ungated) no longer exists.
+
 2026_09_27 -- PV_WIDEN_UNRESOLVED: resolve the root iteration where it stubs,
                instead of opening the root window everywhere.
 

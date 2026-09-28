@@ -38,26 +38,26 @@ STM + game-ply λ^Δ), and **Phases D and E have since landed:**
 
 ### Search (not learning) — candidates from the PV-resolution work
 
-- [ ] **S1 — does the root window fix help COMPETITIVE search?**  The
-      aspiration loop collapses `root_alpha = root_beta` on a fail-high and
-      `root_beta = root_alpha` on a fail-low.  Not collapsing either took
-      resolved iterations 45.67% → 88.45% and is now default for learning play
-      (gated on `pv_learning_mode`).  The learning-play numbers hint it may be
-      worth something as plain search too, but that is **not measured**: the
-      hint is 15.8 ± 17.3 (0.9σ) from two separate matches against a common
-      opponent, which §5 says do not subtract.  **Arm:** build with
-      `PV_NO_ALPHA_RAISE`/`PV_NO_BETA_LOWER` UNGATED (remove the
-      `pv_learning_mode` test) and play it directly against an unmodified build
-      — plain `NNUE=1`, no TDLEAF, so no PV repairs are in play — at a real time
-      control as well as fixed depth.  **Precondition:** re-read the
-      `search.cpp:423` warning first.  The narrow window is documented as
-      load-bearing for strength via futility pruning, the singular-extension
-      guard and the non-first-move re-search guard, with `(-MATE,+MATE)`
-      measured at ~6:1 against.  This change is far milder than that, but it is
-      the same coupling, and it costs ~1.45× clock in learning play — under a
-      **clock** rather than fixed depth that cost buys less depth, which fixed-
-      depth arms cannot see.  A time-control match is therefore the one that
-      decides it, and the fixed-depth result may well not survive.
+- [ ] **S1 — does the root window fix help COMPETITIVE search?**  ⚠️ **Rewritten
+      2026-09-27**: the arm this item used to propose no longer exists.
+      `PV_NO_ALPHA_RAISE`/`PV_NO_BETA_LOWER` were deleted when
+      `PV_WIDEN_UNRESOLVED` replaced them (§1 R arm 3), so the collapse is back
+      on by default and the unresolved break is caught by one full-width
+      re-search instead of being avoided.  The competitive question survives in
+      that new form.  **Arm:** build with `PV_WIDEN_UNRESOLVED` UNGATED (drop
+      the `pv_learning_mode` test) and play it directly against an unmodified
+      build — plain `NNUE=1`, no TDLEAF, so no PV repairs are in play — at a
+      real time control as well as fixed depth.  In learning play it is
+      strength-neutral at fixed depth (−6.08 ± 10.74 with the stopgap,
+      −8.17 ± 11.97 without) and *faster*, so unlike the old arm there is no
+      clock penalty for a time control to punish.  **Precondition:** re-read the
+      warning above the root window in `search.cpp`.  The narrow window is
+      load-bearing via futility pruning, the singular-extension guard and the
+      non-first-move re-search guard, and §1 R arm 1 priced widening it for
+      every iteration at **−444.74 ± 26.25**.  Widening only the unresolved
+      iteration is a far smaller intervention — it now fires on ~98–100% of
+      searches but only on the FINAL one — yet it is the same coupling, so a
+      time-control match is still the one that decides it.
 
 ### Generation sharpness and depth (2026-09-21)
 

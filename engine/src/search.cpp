@@ -45,8 +45,9 @@ int tdleaf_pv_is_stub = 1;
 //   1. "slightly WEAKER" was wrong about PV_LAST_RESOLVED.  Handing back a
 //      shallower iteration's MOVE cost 282.6 +/- 12.1 Elo at fixed d8 over
 //      4000 games, and it fired on 54.3% of searches.  It is now OFF by
-//      default; PV_NO_ALPHA_RAISE + PV_NO_BETA_LOWER take the unresolved rate
-//      to 11.9% and TDLEAF_SKIP_STUB_PV drops what remains.
+//      default.  Its replacement is PV_WIDEN_UNRESOLVED, which re-searches the
+//      unresolved iteration once at full width and takes the unresolved rate
+//      to ZERO (measured: 0 of ~40k searches over two seeds).
 //   2. "UCI/xboard play in a TDLEAF build is bit-for-bit unaffected" was wrong.
 //      main.cpp sets pv_learning_mode = 1 in EVERY TDLEAF build regardless of
 //      protocol (deliberately -- the record/update hooks fire under UCI too),
@@ -506,19 +507,11 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
 #endif
       if(g == -TIME_FLAG) break;
       if(g <= root_alpha && !fail_high) {
-#if PV_NO_BETA_LOWER
-	if (!pv_learning_mode) root_beta = root_alpha;
-#else
 	root_beta = root_alpha;
-#endif
 	fail_low = 1;
 	root_alpha = MAX(-MATE,g+1.5*(root_alpha-g_last));
       } else if(g >= root_beta && !fail_low) { 
-#if PV_NO_ALPHA_RAISE
-	if (!pv_learning_mode) root_alpha = root_beta;
-#else
 	root_alpha = root_beta;
-#endif
 	fail_high = 1;
 	// resort root moves if we changed our mind
         //  about the best move.
