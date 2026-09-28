@@ -85,6 +85,9 @@ unsigned long long asp_exit[3] = {0,0,0}, asp_stub[3] = {0,0,0};
 // a resolved pc_update?
 unsigned long long pvt_fh_stub = 0, pvt_resolved = 0, pvt_searches = 0;
 int pvt_pc_is_stub = 0;
+// How often PV_WIDEN_UNRESOLVED rescued an otherwise-unresolved iteration,
+// and how often that full-width re-search still failed to resolve.
+unsigned long long pvt_widen_try = 0, pvt_widen_fail = 0;
 #endif
 
 
@@ -525,6 +528,22 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
 	root_beta = MIN(+MATE,g+1.5*(root_beta-g_last));
       } else {
         bool resolved = (g > root_alpha && g < root_beta);
+#if PV_WIDEN_UNRESOLVED
+        // Learning play only: rather than break with a stub, re-search once at
+        // full width.  Bounded -- the guard is false once the window is
+        // already (-MATE,+MATE), so this fires at most once per iteration.
+        if (pv_learning_mode && !resolved &&
+            (root_alpha != -MATE || root_beta != +MATE)) {
+#if PVTRUNC_DIAG
+          pvt_widen_try++;
+#endif
+          root_alpha = -MATE; root_beta = +MATE;
+          continue;
+        }
+#if PVTRUNC_DIAG
+        if (pv_learning_mode && !resolved) pvt_widen_fail++;
+#endif
+#endif
 #if PVTRUNC_DIAG
         asp_last_exit = resolved ? 0 : 2;
 #endif

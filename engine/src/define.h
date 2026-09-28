@@ -270,6 +270,21 @@
  #define PV_NO_ALPHA_RAISE 1
 #endif
 
+// PV_WIDEN_UNRESOLVED: when the aspiration loop is about to give up with the
+// iteration UNRESOLVED (the sequential fail-high/fail-low `} else break;`),
+// widen to the full (-MATE,+MATE) window ONCE and re-search instead, during
+// LEARNING play only.  Targeted alternative to opening the root window for
+// every iteration: that recovers the PV just as well (stubs -> 0, PV shorter
+// than depth 14.4% -> 2.4%) but costs -444.7 +- 26.3 Elo at fixed depth,
+// because the narrow window is load-bearing for the futility / singular-ext /
+// re-search guards along the PV (see the WARNING above the root window in
+// search.cpp).  Firing only on the ~1.7% of searches that actually stub leaves
+// the narrow window intact on the normal path.  The one-shot guard (the window
+// is not already full) also bounds the loop.
+#ifndef PV_WIDEN_UNRESOLVED
+ #define PV_WIDEN_UNRESOLVED 1
+#endif
+
 // PV_NO_BETA_LOWER: the mirror of PV_NO_ALPHA_RAISE on the fail-LOW side.
 // `root_beta = root_alpha` collapses beta down onto the bound just undershot,
 // which can provoke the opposite sequential break (fail-low then fail-high).

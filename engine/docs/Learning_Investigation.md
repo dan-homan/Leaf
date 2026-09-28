@@ -394,6 +394,73 @@ anchor differencing reading nothing across a leg that gained +20 head-to-head �
 so "no anchor movement" is partly the instrument.  And `m260720` was also slow at this point (+17.5 on the
 anchor from 2.5M to 3M) and gained in bursts across legs, so one leg per knob is
 thin evidence.
+**R. The root window can be opened WHERE IT STUBS but not EVERYWHERE — the
+narrow aspiration window is load-bearing, and the draw rate saw it first
+(2026-09-27).**  Q left 1.7% of searches exiting on the sequential
+fail-high/fail-low break with the PV a stub and the ply skipped.  Two ways to
+close that were measured head to head, both learning-play only, both on
+`m260925-1e5g_final` at d8, 300 self-play games for telemetry and a 2000-game
+fixed-depth match for strength.
+
+*Arm 1 — open the root window for every iteration* (`root_alpha/root_beta =
+∓MATE` whenever `pv_learning_mode`).  It works on the stated metric: stubs
+1.7% → 0, searches resolved 98.3% → 100%, PV shorter than depth 14.36% → 2.41%,
+mean pv_len 8.68 → 9.21, and it is 19% FASTER (166 s vs 205 s / 300 games).
+And it costs **−444.74 ± 26.25 Elo** (7.17%, n=2000).  That is the WARNING above
+the root window in `search.cpp` cashing out — it predicted ~6:1 in self-play and
+this is ~13:1.  The three couplings it names (futility pruning keyed on alpha,
+the internal singular-ext guard `hscore>alpha`, the non-first-move re-search
+guard `beta>alpha+1`) are all disabled or always-true at `alpha = -MATE`.
+
+*Arm 2 — open it only where the iteration would otherwise stub*
+(`PV_WIDEN_UNRESOLVED`, default 1): at the `} else break;` exit, if the
+iteration did not resolve and the window is not already full, set ∓MATE and
+re-search ONCE.  Stubs 1.7% → 0 and searches resolved → 100% exactly as in arm 1,
+at **−6.08 ± 10.74 Elo** (49.12%, n=2000) and +0.3% clock.  The re-search fired on
+5.68% of searches — more than the 1.7% stub rate, because it also rescues
+intermediate iterations — and **0 were still unresolved after it**, so one
+full-width pass always resolves.  Label quality is the best of the three arms:
+gate retention 97.41% → **97.90%**, overall bias sd 20.6 → **18.2**, and 38,826
+records kept per 300 games against the baseline's 37,466 (+3.6%, the plies that
+used to be skipped).
+
+| metric | baseline | arm 1 (∓MATE always) | arm 2 (widen-if-unresolved) |
+|---|---|---|---|
+| searches resolved | 98.3% | 100.0% | 100.0% |
+| stub plies skipped | 635 (1.7%) | 0 | 0 |
+| records kept / 300 games | 37,466 | 34,962 | **38,826** |
+| leaf-match gate retained | 97.41% | 96.79% | **97.90%** |
+| label bias / sd (cp) | +0.14 / 20.6 | +0.50 / 19.6 | **+0.14 / 18.2** |
+| PV shorter than depth | 14.36% | **2.41%** | 13.78% |
+| draw rate (300 games) | 38.3% | 18.0% | 30.7% |
+| clock / 300 games | 204.9 s | **166.1 s** | 205.5 s |
+| **Elo vs baseline, d8, n=2000** | — | **−444.74 ± 26.25** | **−6.08 ± 10.74** |
+
+⚠️ **Arm 1's PV-length win was a symptom, not a benefit.**  Its
+shorter-than-depth 2.41% did not come from resolving iterations — arm 2 resolves
+just as many and stays at 13.78%.  It came from reaching far fewer draw-by-rule
+early returns at PV nodes (repetition 47,648 → 31,805, fifty-move 7,364 → 788,
+against arm 2's 48,784 / 5,510): the wide window was steering into a different
+and much weaker class of position.  A PV-length metric can improve because the
+search got worse.  The short PVs that remain are draw-rule early returns, not an
+aspiration problem, and closing them is a separate question.
+
+**The draw rate called it before the Elo did.**  38.3% → 18.0% for arm 1 is 5.7σ
+on 300 games and far below `TRAINING.md`'s healthy 35–40% band at d8; arm 2's
+30.7% is 2.0σ, weak evidence, and the 2000-game match then found no strength
+difference.  This is the canary of §1 M and the online-stability rules working
+exactly as specified, on a 3-minute run, ahead of a 2000-game match.  ⚠️ It is a
+*detector*, not a measurement: use it to decide whether to spend the match, not
+in place of it.
+
+*Open.*  Whether `PV_NO_ALPHA_RAISE` / `PV_NO_BETA_LOWER` (Q's stopgap) can now be
+retired is **untested**.  They are not redundant with arm 2: they reduce how
+OFTEN the sequential break happens, where arm 2 handles it once it has.  Removing
+them would restore `alpha = beta` on a fail-high, make the fail-low likely again,
+and turn the common path into narrow → collapsed re-search → full-width
+re-search — three searches where there are now two.  Cost and strength both
+unmeasured.
+
 
 ---
 
@@ -498,6 +565,19 @@ mature net; assume they are untested on a young one unless the row says otherwis
 | Antithetic hypotheses at 0.25 give a gentler, better online phase | §1 T; d8 and 3+0.05 | +18.2 ± 6.4 vs 3e6g online net on the parent; +17 ± 11.4 at TC | R10 | SUPPORTED (one leg, two instruments) |
 | Final-net gain against the parent falls with PSQT noise | §1 T | +12.9 / +8.4 / +0.1 at 0 / 0.25 / 0.5 | R10 | SUPPORTED (three points) |
 | At equal depth the final nets sit at −5 to −13 vs `classic_eval`; most of the 3+0.05 deficit is speed | `learn/d8eval/` | d8 −5 to −32; 3+0.05 −33 to −59 | R10 | SUPPORTED |
+
+### PV resolution, round 2 (2026-09-27)
+
+| claim | evidence | effect | regime | grade |
+|---|---|---|---|---|
+| Opening the root window for EVERY iteration recovers the PV | §1 R arm 1 | stubs 1.7% → 0, resolved → 100%, 19% faster | R10 | **ESTABLISHED** |
+| …and costs almost everything | §1 R arm 1 | −444.74 ± 26.25 Elo at d8, n=2000 | R10 | **ESTABLISHED** |
+| Opening it ONLY where the iteration stubs is strength-neutral | §1 R arm 2 (`PV_WIDEN_UNRESOLVED`) | −6.08 ± 10.74 Elo at d8, n=2000; +0.3% clock | R10 | **ESTABLISHED** |
+| One full-width re-search always resolves | §1 R arm 2 | fired on 5.68% of searches, 0 unresolved after | R10 | **ESTABLISHED** |
+| It is also the best arm for label quality | §1 R arm 2 | gate 97.41 → 97.90%, bias sd 20.6 → 18.2, +3.6% records | R10 | **ESTABLISHED** |
+| Arm 1's PV-length gain was a symptom of weaker play | §1 R | shorter-than-depth 2.41% vs arm 2's 13.78% at equal resolution; repetition returns 47.6k → 31.8k | R10 | SUPPORTED |
+| The draw rate detected arm 1's collapse on 300 games | §1 R | 38.3% → 18.0%, 5.7σ, before any match was run | R10 | **ESTABLISHED** |
+| Retiring `PV_NO_ALPHA_RAISE`/`PV_NO_BETA_LOWER` after arm 2 | — | not measured | R10 | **OPEN** |
 
 ### The rating instrument (2026-09-25)
 

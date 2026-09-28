@@ -842,6 +842,11 @@ int selfplay_main(int argc, char *argv[])
           fprintf(stderr, "PV last-resolved fallback: used=%llu  unavailable"
                   "(stub on first iteration)=%llu\n",
                   pv_fallback_used, pv_fallback_unavail); }
+        { extern unsigned long long pvt_widen_try, pvt_widen_fail;
+          fprintf(stderr, "PV widen-unresolved: full-width re-searches=%llu "
+                  "(%.2f%% of searches), still unresolved after=%llu\n",
+                  pvt_widen_try, 100.0*pvt_widen_try/(double)pvt_searches,
+                  pvt_widen_fail); }
         extern unsigned long long asp_exit[3], asp_stub[3];
         const char *nm[3] = {"resolved","interrupted(node/clock)","seq fail-hi/lo"};
         for (int i = 0; i < 3; i++)

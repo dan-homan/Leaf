@@ -1,5 +1,51 @@
 Changes since 2017_12_24
 
+2026_09_27 -- PV_WIDEN_UNRESOLVED: resolve the root iteration where it stubs,
+               instead of opening the root window everywhere.
+
+               Q left 1.7% of searches exiting on the sequential
+               fail-high/fail-low break with the PV a stub and the ply skipped.
+               Two closures measured head to head on m260925-1e5g_final at d8
+               (300 self-play games for telemetry, 2000-game fixed-depth match
+               for strength); full write-up in Learning_Investigation.md
+               section 1 R.
+
+               Opening the root window for EVERY iteration under
+               pv_learning_mode works on the stated metric -- stubs 1.7% -> 0,
+               resolved 98.3% -> 100%, PV shorter than depth 14.36% -> 2.41%,
+               19% faster -- and costs -444.74 +- 26.25 Elo.  That is the
+               WARNING above the root window in search.cpp cashing out: futility
+               pruning, the singular-ext guard and the non-first-move re-search
+               guard all key on the propagated root alpha/beta.  Its PV-length
+               gain was a symptom, not a benefit -- it came from reaching far
+               fewer draw-rule early returns at PV nodes (repetition 47,648 ->
+               31,805), i.e. from steering into weaker positions.
+
+               PV_WIDEN_UNRESOLVED (define.h, default 1, learning play only)
+               instead widens to (-MATE,+MATE) ONCE at the `} else break;` exit
+               when the iteration did not resolve, then re-searches.  Same
+               result on the metric that mattered -- stubs -> 0, resolved ->
+               100% -- at -6.08 +- 10.74 Elo and +0.3% clock.  It fires on 5.68%
+               of searches (more than the 1.7% stub rate: it also rescues
+               intermediate iterations) and 0 are still unresolved afterwards.
+               Best label quality of the three arms: leaf-match gate retention
+               97.41% -> 97.90%, overall bias sd 20.6 -> 18.2, and 3.6% more
+               records kept (the plies that used to be skipped).  The one-shot
+               guard (window not already full) bounds the loop.
+
+               PVTRUNC_DIAG gains pvt_widen_try / pvt_widen_fail and a
+               "PV widen-unresolved" report line in selfplay.cpp.
+
+               The draw rate detected the bad arm first: 38.3% -> 18.0% on 300
+               games (5.7σ, against TRAINING.md's healthy 35-40% band at d8)
+               before any match was run.  Use it to decide whether to spend the
+               match, not in place of it.
+
+               NOT done: PV_NO_ALPHA_RAISE / PV_NO_BETA_LOWER (Q's stopgap) are
+               left in place.  They are not redundant with this change -- they
+               reduce how OFTEN the sequential break happens, where this handles
+               it once it has.  Retiring them is untested.
+
 2026_09_25 -- Fixed-depth rating: match.py --depth/--nodes, train.py
                --gauntlet-depth/--epoch-depth, tc-anchor continuity match.
 
