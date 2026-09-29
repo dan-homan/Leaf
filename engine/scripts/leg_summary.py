@@ -62,6 +62,18 @@ COLUMNS
               and made 45-56% of its labels shallower than requested
               (change_log 2026_09_21a).
 
+  inst        The instrument the leg's anchor / anc/Mg / on@a / par/Mg / on
+              columns are measured with: `d<N>` = fixed depth N (train.py
+              --gauntlet-depth, a COMPRESSED eval-quality scale, §1 P) or `tc`
+              = the time control (3+0.05 unless noted).  Never compare
+              numbers across instruments: anc/Mg and on@a are left blank
+              (`--`) when a leg's instrument differs from its parent's.
+
+  anc@tc      The anchor at the TIME CONTROL on every leg -- the main gauntlet
+              on a `tc` leg, the --tc continuity match (tc_anchor_gauntlet) on a
+              fixed-depth leg.  The one series comparable across chains and
+              across the instrument switch.
+
   quiet       Gated root rows per game divided by mean ply: the fraction of
               plies that survive the quiet filter and become training rows.
               ⚠️ Legs since 2026-09-29 use the PV rule (train.py
@@ -90,6 +102,25 @@ def vs(lst, pat):
         if pat in e.get("opponent", ""):
             return e["elo"], e["err"]
     return None, None
+
+
+def instrument(j):
+    """'d<N>' for a fixed-depth main gauntlet, else 'tc' (sidecars from before
+    rating_conditions existed were all rated at the time control)."""
+    rc = j.get("rating_conditions") or {}
+    d = rc.get("gauntlet_depth") or 0
+    if d:
+        return f"d{d}"
+    tc = rc.get("gauntlet_tc") or "3+0.05"
+    return "tc" if tc == "3+0.05" else f"tc{tc}"
+
+
+def anchor_tc(j):
+    """classic_eval at the time control: the main gauntlet on a tc leg, the
+    continuity match on a fixed-depth leg (None if neither ran)."""
+    if instrument(j).startswith("tc"):
+        return vs(j.get("final_gauntlet"), "classic")[0]
+    return vs(j.get("tc_anchor_gauntlet"), "classic")[0]
 
 
 def draw_rate(tag):
@@ -186,19 +217,26 @@ def main():
     args = ap.parse_args()
     sample = args.sample
 
+    chain_insts = {}
     for chain in args.chains:
         legs = sidecars(chain)
+        chain_insts[chain] = {instrument(j) for j in legs}
         if not legs:
             print(f"\n{chain}: no sidecars found"); continue
         print(f"\n=== {chain} ===")
-        print(f"{'leg':>7} {'cum':>9} {'d/nod':>7} {'anchor':>9} {'anc/Mg':>7} "
-              f"{'par/Mg':>7} {'on':>7} {'on@a':>7} {'off':>7} {'draw%':>7} {'ply':>6} "
+        print(f"{'leg':>7} {'cum':>9} {'d/nod':>7} {'inst':>5} {'anchor':>9} {'anc/Mg':>7} "
+              f"{'par/Mg':>7} {'on':>7} {'on@a':>7} {'off':>7} {'anc@tc':>7} {'draw%':>7} {'ply':>6} "
               f"{'depth':>6} {'<floor':>7} {'quiet':>6}")
-        prev_tag = None; prev_anc = None
+        prev_tag = None; prev_anc = None; prev_inst = None
+        insts = set()
         for j in legs:
             tag, cum = j["tag"], j.get("cumulative_games", 0)
             gi = j.get("games_this_iter", 0) or 0
+            inst = instrument(j); insts.add(inst)
+            if prev_inst is not None and inst != prev_inst:
+                prev_anc = None          # never difference across instruments
             anc, _ = vs(j.get("final_gauntlet"), "classic")
+            atc = anchor_tc(j)
             tot, _ = vs(j.get("final_gauntlet"), prev_tag) if prev_tag else (None, None)
             onl, _ = vs(j.get("tdleaf_gauntlet"), prev_tag) if prev_tag else (None, None)
             tda, _ = vs(j.get("tdleaf_gauntlet"), "classic")
@@ -213,15 +251,24 @@ def main():
             quiet = (rr / gi / ply) if (rr and gi and ply) else None
             f = lambda v, w, p=1, s="": f"{v:>{w}.{p}f}{s}" if v is not None else f"{'--':>{w}}"
             print(f"{tag.split('-')[-1]:>7} {cum:>9,} "
-                  f"{str(j.get('depth'))+'/'+str(j.get('nodes')):>7} "
+                  f"{str(j.get('depth'))+'/'+str(j.get('nodes')):>7} {inst:>5} "
                   f"{f(anc,9)} {f(ancM,7,0)} {f(perM,7,0)} {f(onl,7)} {f(ona,7)} {f(off,7)} "
-                  f"{f(dr,7,2)} {f(ply,6,1)} {f(dep,6,2)} {f(blw,6,1,'%')} {f(quiet,6,3)}")
-            prev_tag = tag
+                  f"{f(atc,7)} {f(dr,7,2)} {f(ply,6,1)} {f(dep,6,2)} {f(blw,6,1,'%')} {f(quiet,6,3)}")
+            prev_tag = tag; prev_inst = inst
             if anc is not None: prev_anc = anc
+        if len(insts) > 1:
+            print(f"  ⚠️ this chain mixes instruments ({', '.join(sorted(insts))}): "
+                  "anchor/anc/Mg/on@a are per-instrument; anc@tc is the continuous series.")
         print("  TRIGGER is anc/Mg, not par/Mg: m260720 switched d6->d8 at 73 "
-              "and its next two legs gave 122 and 177.")
+              "and its next two legs gave 122 and 177 (both at tc -- a fixed-depth "
+              "anc/Mg runs on a compressed scale, so that threshold does not carry over).")
         print("  <floor MUST be 0.0% — anything else means results are recorded "
               "from an iteration other than the one searched.")
+
+    if len(args.chains) > 1 and len({frozenset(v) for v in chain_insts.values() if v}) > 1:
+        print("\n⚠️ the chains were rated with different instruments ("
+              + "; ".join(f"{c}: {', '.join(sorted(v))}" for c, v in chain_insts.items() if v)
+              + ") -- compare them on anc@tc, not anchor.")
 
 
 if __name__ == "__main__":
