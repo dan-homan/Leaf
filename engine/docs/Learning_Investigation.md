@@ -29,6 +29,12 @@ they disagree about status, `TODO.md` is the one to fix.
 
 ## Where things stand (2026-09-27)
 
+> **Update 2026-09-29.**  The PV is now dumped on every root row, and selecting
+> offline rows by PV quietness instead of the 60 cp residual gate is worth
+> **+24.9 ± 5.0** on the anchor at depth 8 (§1 V).  It is the `train.py` default,
+> and a fresh chain starts on it.  `m260921` reached +4.2 against `classic_eval`
+> at 3+0.05 at 4.5M games — its first positive anchor reading.
+
 **The chain.**  `m260921` is a fresh chain started 2026-09-21 on the current
 recipe (R7 + R8 + R10, §3): one LR set for both phases, batch 50, PV repairs,
 and the root-window fix that finally makes `--depth 8` mean depth-8 labels.  It
@@ -293,8 +299,10 @@ one.**  At a fixed row budget **root rows beat leaf rows** — +35.6 ± 11.0 pai
 on the mature chain [Offline 3.2], and the same sign on an R8 corpus with the
 game set held fixed (`nleaf`, −3.8 paired / −18.4 anchor).  Adding all leaf rows
 on top of root rows at 2.2× the dose does not help either (anchor −9.4 ± 10.0;
-ordering root > root+leaf > leaf is monotone).  The **60 cp quiet gate is
-correct**: 60/120/200 are flat, removing it costs −27.9 ± 11.3 [Offline 4.3].
+ordering root > root+leaf > leaf is monotone).  Among *residual* gates the 60 cp
+gate was the right width: 60/120/200 are flat, removing it costs −27.9 ± 11.3
+[Offline 4.3].  ⚠️ **Superseded by §1 V (2026-09-29)**: the residual is the wrong
+axis — selecting rows by PV quietness beats every residual gate by ~25 Elo.
 **Game diversity reverses with regime**: on the mature `m260720` chain a
 four-corpus window was worth **+36 anchor / +45 paired** [Offline 2.4]; on the
 young R9 chain the same manipulation reads −9.2 ± 8.8 paired / −12.1 ± 9.9 anchor.
@@ -307,6 +315,36 @@ worse by −20.5 ± 9.1 paired and −20.1 ± 9.9 on the anchor** — two instru
 within 0.4 Elo, the most replicated number in this document — and it costs on
 the composite corpus too.  More outcome weight is the wrong direction, and the
 cp labels carry more usable signal than the default credits [Detail D5].
+
+**V. QUIET MEANS NO TACTIC AT THE ROOT MOVE OR THE REPLY — not a small
+residual (2026-09-29).**  The 60 cp gate keeps a root row when |search − static|
+≤ 60, i.e. it conditions on the label's own residual.  With the PV now dumped on
+every root row, the `m260921-4.5e6g` corpus was re-consolidated four ways from
+the SAME post-online state, games, trainer seed and epoch-ladder protocol, and
+rated at depth 8, 8000 games each against `classic_eval` on identical `--srand`
+openings (±3.5 one sigma):
+
+| arm | rows | ladder e1 / e2 | anchor (d8) |
+|---|---|---|---|
+| tdleaf (no offline) | — | — | +2.0 |
+| G60 control (the leg's own run) | 34.9M | +25.8 / +32.1 | +8.3 |
+| **P1**: no capture/check/promotion in PV plies 1–2, no residual gate | 34.9M of 41.6M | +101.8 / +89.1 | **+33.2** |
+| **P2**: P1 and residual ≤ 200 | 34.9M of 37.8M | +65.4 / +75.9 | **+31.6** |
+| P1 ∩ G60 | 24.1M (all) | +2.4 / +15.6 | +4.4 |
+| G60 subsample (equal-dose control) | 24.1M | +8.3 / +19.8 | +5.8 |
+
+**P1 beats the gate by +24.9 ± 5.0**; the offline phase goes from +6 to +31 over
+the same net.  The gain is entirely in the rows the residual gate *rejected*
+while quiet at k = 2 (24.6% of all rows): removing the gate's own loud rows is
+neutral (P1 ∩ G60 vs its equal-dose control, −1.4 ± 5), and the >200 cp
+residual rows are neutral too (P2 ≈ P1) though they move the net further.  This
+also explains [Offline 4.3]: "no gate" admitted the valuable quiet rows *and* the
+26% that are loud with a large residual, and those cost more than the others
+gave.  Loss curves agree: the control's validation blend MSE moves −1.1% in an
+epoch (its rows are where static already ≈ search) and its outcome MSE not at
+all; P1 moves −16% and −1.8%.  `train.py --bt-quiet-pv 2` (P1) is the default
+from here.  One leg, one seed, depth-8 scale only — the time-control size and a
+chain replication are open (§6).
 
 **O. CORPUS STATISTICS ARE NOT TRAINING HYPERPARAMETERS.**  Seven arms fitted K,
 λ or the outcome weight to the corpus; **seven lost on the anchor** (−5.7 to
@@ -565,7 +603,9 @@ mature net; assume they are untested on a young one unless the row says otherwis
 |---|---|---|---|---|
 | Root rows beat leaf rows at a fixed row budget | Offline 3.2; `cons1` `nleaf` | +35.6 ± 11.0 paired; R8: −3.8 paired / −18.4 anchor | R4, R9 | **ESTABLISHED** |
 | Leaf rows do not help as a supplement at 2.2× dose | `cons1` `nboth` | anchor −9.4 ± 10.0; monotone in leaf share | R9 | SUPPORTED |
-| The 60 cp quiet gate is correct; removing it hurts | Offline 4.3 | −27.9 ± 11.3, replicated | R4 | **ESTABLISHED** |
+| The 60 cp quiet gate is the right *residual* width; removing it hurts | Offline 4.3 | −27.9 ± 11.3, replicated | R4 | **ESTABLISHED** — but superseded by the next row |
+| PV quietness (no tactic in plies 1–2, no residual gate) beats the 60 cp gate | §1 V | +24.9 ± 5.0 at d8, 8000 g, same state/games/budget | R11 | SUPPORTED (one leg) |
+| The gain is the gate-rejected quiet rows; the gate's loud rows and >200 cp rows are neutral | §1 V | P1∩G60 vs G60s −1.4 ± 5; P2 vs P1 −1.6 ± 5 | R11 | SUPPORTED |
 | Game diversity is worth ~+40 at identical compute — on a mature chain | Offline 2.4 | +36 anchor / +45 paired | R4 | **ESTABLISHED** (R4 only) |
 | …and is not helpful on the young chain | `cons1` base vs null | −9.2 ± 8.8 paired, −12.1 ± 9.9 anchor | R9 | SUPPORTED |
 | Outcome weight above the default costs ~20 Elo | §1 U | −20.5 ± 9.1 paired, −20.1 ± 9.9 anchor | R9 | **ESTABLISHED** |
@@ -725,11 +765,24 @@ games):
 | `2e6g` | 2M | 8 | −89.9 | 6 | 35.0 | 0.483 |
 | `2.5e6g` | 2.5M | 8 | −58.6 | 63 | 35.0 | 0.454 |
 | `3e6g` | 3M | 8 | −32.8 | 52 | 35.1 | 0.440 |
+| `3.5e6g` | 3.5M | 8 | −33.8 | 47 | 35.1 | 0.432 |
+| `4e6g` | 4M | 8 | −21.2 | 25 | 34.8 | 0.467 |
+| `4.5e6g` | 4.5M | 8 | +4.2 | 51 | 35.0 | 0.465 |
 
 The d6 → d8 switch was made at 1.5M, when the anchor's yield had fallen to 33 per
 million (the parent match still read 166 — §5).  The first d8 leg was a
-transition leg (+6); the second paid (+63).  The quiet fraction keeps falling
-at d8.  The 3e6g siblings are §1 T.
+transition leg (+6); the second paid (+63).  The quiet fraction kept falling at
+d8 until 4e6g, where `PV_WIDEN_UNRESOLVED` (§1 R) stopped ~10% of plies being
+skipped as unresolved stubs — the step up is recording, not calmer games.  The
+3e6g siblings are §1 T.  4e6g and 4.5e6g are the first two legs with every
+search resolved; on@a was +20.9 on both.
+
+**R11 — the PV dump and PV-quiet offline rows (2026-09-28/29, current).**  Every
+root row carries the walked PV (`pv` column, `.tdg` v3); root rows are dumped
+ungated, the |cp| ≤ 1500 cap moved to assembly; offline rows are selected by
+`train.py --bt-quiet-pv 2` (no capture/check/promotion in PV plies 1–2, no
+residual gate) instead of the 60 cp residual gate (§1 V).  First measured on
+`m260921-4.5e6g`'s corpus; a fresh chain starts on it.
 
 ---
 
@@ -787,7 +840,8 @@ if** the rescored leaf comes from a shallow **re-search** rather than a static
 eval.
 
 **Widening the quiet gate (Offline 1 → 4).**  Removing the gate costs 27.9 ±
-11.3.  **Reopens for a gate *tighter* than 60** (§6).
+11.3.  ⚠️ Reopened and resolved differently (§1 V): the loss came from the loud
+rows "no gate" also admitted; a PV-quiet filter admits the rest and gains ~25.
 
 **The wide consolidation window (A1 +36/+45 on R4; `cons1` closed it on R9).**
 The clearest reversal in the record; the staleness mechanism proposed for it also
@@ -991,8 +1045,10 @@ games with older labels.  `sample_corpus.py --quota 17` over one leg's ~1M games
 draws the same dose from 4× the games at the same label age — separating the two
 cleanly and cheaply.
 
-**7. A quiet gate tighter than 60 cp.**  The one offline knob never tested;
-`--bt-diag` hints the label information sits below 40 cp.
+**7. ~~A quiet gate tighter than 60 cp.~~**  Superseded by §1 V: the residual
+is the wrong axis.  What is open instead is **PV quietness at time control and on
+a chain** — the +25 is one leg at depth 8 — and its parameters (k = 1 and 3;
+P2's residual cap as the conservative variant).
 
 **8. Attack Σ directly.**  Shuffle records across a pool of games before forming
 a learner batch — the offline-style decorrelation, never tried, and the only way

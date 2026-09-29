@@ -1,5 +1,34 @@
 Changes since 2017_12_24
 
+2026_09_29 -- train.py: PV quietness is the default offline row filter
+               (--bt-quiet-pv 2).
+
+               A root row carrying the dump's `pv` column trains iff its PV has
+               no capture, check or promotion in the first K plies (K=2: the
+               root move and the reply), with NO residual gate.  Rows without a
+               `pv` column (pre-2026-09-28 dumps, leaf rows) keep the
+               --bt-quiet-cp 60 residual gate.  --bt-quiet-pv-cap CP adds a
+               residual cap (0 = off); --bt-quiet-pv 0 restores the old gate for
+               every row.  Counting and assembly share one row_quiet(), so the
+               budget still means "rows trained on"; each filter has its own
+               row-count cache (.rows.g60.pv2 ...).  The sidecar records
+               bt_quiet_pv / bt_quiet_pv_cap, and leg_summary.py's `quiet`
+               column reads the cache of the filter the leg used.
+
+               Measured on the m260921-4.5e6g corpus, four offline arms from
+               the same post-online state, games, trainer seed and ladder
+               protocol, rated at depth 8, 8000 games each vs classic_eval on
+               identical --srand openings (+-3.5): tdleaf +2.0, 60 cp gate
+               (the leg's own run) +8.3, PV-quiet k=2 (P1) +33.2, P1 + 200 cp
+               cap (P2) +31.6, P1 AND the gate at 24.1M rows +4.4 vs the gate
+               subsampled to the same 24.1M +5.8.  P1 - gate = +24.9 +- 5.0.
+               The gain is the quiet rows the residual gate rejected (24.6% of
+               all rows); removing the gate's loud rows alone is neutral.
+               Verified: the new default counts exactly P1's 41,566,682 rows on
+               that dump, the cap-200 variant P2's 37,762,646, and
+               --bt-quiet-pv 0 the gate's 34,936,140.
+               docs/Learning_Investigation.md 1 V; regime R11.
+
 2026_09_28 -- PV dump: every root row carries its walked PV, and the root
                dump is ungated.
 

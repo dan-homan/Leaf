@@ -156,18 +156,67 @@ ROW_KIND = {"both": 0, "root": 1, "leaf": 2}
 CORPUS_MAX_CP = 1500
 
 
-def corpus_row_counts(path, gate_cp=0):
+def pv_quiet(pv, k):
+    """True if the root dump's `pv` column shows no capture, check or
+    promotion in its first K plies (tdleaf_format_pv tokens:
+    <from><to>[promo][x<captured>][+][c][e])."""
+    if pv == "-":
+        return True
+    for t in pv.split()[:k]:
+        if t == "...":
+            break
+        body = t[4:]
+        if "x" in body or "+" in body or body[:1] in ("n", "b", "r", "q"):
+            return False
+    return True
+
+
+def row_quiet(col, quiet):
+    """The training-row filter, shared by counting and assembly so a budget
+    always means "rows actually trained on".  QUIET = (gate_cp, pv_k, pv_cap):
+
+    * |cp| > CORPUS_MAX_CP never trains.
+    * PV mode (pv_k > 0) on a row that carries a `pv` column (root rows dumped
+      since 2026-09-28): quiet iff no capture/check/promotion in the first
+      pv_k PV plies, optionally also |cp - gate| <= pv_cap.  No residual gate --
+      the 4.5e6g arms found the residual gate rejects valuable quiet rows
+      (P1 +33.2 vs G60 +8.3 at depth 8, docs/Learning_Investigation.md).
+    * Otherwise (no `pv` column: older dumps, leaf rows) the residual gate
+      |cp - gate| <= gate_cp, as before.  Rows with no `gate` column either
+      (dumped before 2026-09-03) were gated at dump time and pass through."""
+    gate_cp, pv_k, pv_cap = quiet
+    cp = int(col[1])
+    if abs(cp) > CORPUS_MAX_CP:
+        return False
+    if pv_k > 0 and len(col) >= 9:
+        if pv_cap > 0 and abs(cp - int(col[7])) > pv_cap:
+            return False
+        return pv_quiet(col[8], pv_k)
+    if gate_cp > 0 and len(col) >= 8:
+        return abs(cp - int(col[7])) <= gate_cp
+    return True
+
+
+def quiet_suffix(quiet):
+    """Row-count cache suffix naming the filter, so each rule keeps its own
+    cache and the legacy <path>.rows.g<cp> files stay valid."""
+    gate_cp, pv_k, pv_cap = quiet
+    s = f".g{gate_cp}" if gate_cp > 0 else ""
+    if pv_k > 0:
+        s += f".pv{pv_k}" + (f".c{pv_cap}" if pv_cap > 0 else "")
+    return s
+
+
+def corpus_row_counts(path, quiet=(0, 0, 0)):
     """(total, root, leaf) data rows, cached alongside the corpus as
     <path>.rows.  Counting a multi-GB .gz costs a full decompress and the
     window re-reads the same archives every iteration, so it is paid once.
     A one-field cache from before the root/leaf split is ignored and rewritten.
 
-    GATE_CP > 0 counts only rows that survive the quiet re-cut (|cp - gate| <=
-    GATE_CP), so a budget built from these numbers means "rows actually trained
-    on".  Rows with no `gate` column (corpora dumped before 2026-09-03) were
-    already gated at dump time and pass through.  Each gate width gets its own
-    cache file so the unfiltered <path>.rows stays valid."""
-    cache = Path(str(path) + (f".rows.g{gate_cp}" if gate_cp > 0 else ".rows"))
+    Only rows passing row_quiet(QUIET) are counted, so a budget built from
+    these numbers means "rows actually trained on".  Each filter gets its own
+    cache file (quiet_suffix) so the unfiltered <path>.rows stays valid."""
+    cache = Path(str(path) + ".rows" + quiet_suffix(quiet))
     if cache.is_file():
         parts = cache.read_text().split()
         if len(parts) >= 3:
@@ -181,12 +230,7 @@ def corpus_row_counts(path, gate_cp=0):
             if line.startswith("#") or line.startswith("fen\t"):
                 continue
             col = line.rstrip("\n").split("\t")
-            if len(col) < 5:
-                continue
-            if abs(int(col[1])) > CORPUS_MAX_CP:
-                continue
-            if gate_cp > 0 and len(col) >= 8 and \
-               abs(int(col[1]) - int(col[7])) > gate_cp:
+            if len(col) < 5 or not row_quiet(col, quiet):
                 continue
             total += 1
             if col[4] == "0":
@@ -331,7 +375,7 @@ def share_quotas(sizes, total, mode="source"):
 
 
 def write_corpus(corpus_path, sources, sizes, quota, game_ply_axis, row_kind=0,
-                 gate_cp=0):
+                 quiet=(0, 0, 0)):
     """Sample, renumber and dedup SOURCES into CORPUS_PATH.
 
     SOURCES is [(label, [files], generator_elo)] and QUOTA[i] rows are taken
@@ -385,15 +429,11 @@ def write_corpus(corpus_path, sources, sizes, quota, game_ply_axis, row_kind=0,
                             continue
                         if row_kind == 2 and p[4] != "0":
                             continue
-                        # Quiet re-cut, for the same reason and at the same
-                        # point: generation now dumps wide (--quiet-cp 1000) and
-                        # every row carries its `gate`, so the width that
-                        # actually trains is chosen HERE.  Pre-2026-09-03
-                        # corpora have no gate column and were gated at dump.
-                        if abs(int(p[1])) > CORPUS_MAX_CP:
-                            continue
-                        if gate_cp > 0 and len(p) >= 8 and \
-                           abs(int(p[1]) - int(p[7])) > gate_cp:
+                        # Quiet filter, for the same reason and at the same
+                        # point: the dump is wide (root rows ungated, with
+                        # `gate` and `pv`), so what actually trains is chosen
+                        # HERE (row_quiet).
+                        if not row_quiet(p, quiet):
                             continue
                         acc += want
                         if acc < size:
@@ -986,7 +1026,24 @@ def main():
                          "Budget and quotas count only surviving rows.  0 "
                          "disables the re-cut and trains on the dump as-is.  "
                          "Corpora dumped before 2026-09-03 have no gate column "
-                         "and pass through — they were gated at dump time")
+                         "and pass through — they were gated at dump time.  "
+                         "Since 2026-09-29 it applies only to rows WITHOUT a "
+                         "`pv` column unless --bt-quiet-pv 0 (see there)")
+    ap.add_argument("--bt-quiet-pv", type=int, default=2, metavar="K",
+                    help="PV quietness for root rows that carry the dump's `pv` "
+                         "column (dumped since 2026-09-28): train a row iff its "
+                         "PV has no capture, check or promotion in the first K "
+                         "plies (the root move and the reply at K=2), with NO "
+                         "residual gate.  Default 2 since 2026-09-29: on the "
+                         "4.5e6g corpus this (arm P1) scored +33.2 vs the 60 cp "
+                         "residual gate's +8.3 (depth 8, 8000 games vs "
+                         "classic_eval, same start state/games/budget).  Rows "
+                         "without a `pv` column fall back to --bt-quiet-cp.  "
+                         "0 = the old residual gate for every row")
+    ap.add_argument("--bt-quiet-pv-cap", type=int, default=0, metavar="CP",
+                    help="Under --bt-quiet-pv, also require |cp - gate| <= CP "
+                         "(0 = no cap, the default).  200 is arm P2: +31.6, "
+                         "indistinguishable from P1 while moving the net less")
     ap.add_argument("--bt-rescore", nargs="?", type=float, const=1.0, default=None,
                     metavar="FRAC",
                     help="Retarget every root label to its PV leaf, re-evaluated "
@@ -1537,13 +1594,19 @@ def main():
     # budget: with --bt-rows root over a natural corpus, filtering after
     # sampling would have delivered ~45% of the requested rows.
     row_kind = ROW_KIND[args.bt_rows]
-    gate_cp = args.bt_quiet_cp
+    quiet = (args.bt_quiet_cp, args.bt_quiet_pv, args.bt_quiet_pv_cap)
     log("counting corpus rows (cached as <corpus>.rows) ...")
-    sizes = [sum(corpus_row_counts(c, gate_cp)[row_kind] for c in files)
+    sizes = [sum(corpus_row_counts(c, quiet)[row_kind] for c in files)
              for _, files, _ in sources]
-    if gate_cp > 0:
-        log(f"--bt-quiet-cp {gate_cp}: budget and quotas count only rows within "
-            f"the gate (dump gate was --quiet-cp {args.quiet_cp})")
+    if args.bt_quiet_pv > 0:
+        log(f"--bt-quiet-pv {args.bt_quiet_pv}: rows with a `pv` column train iff "
+            f"no capture/check/promotion in the first {args.bt_quiet_pv} PV plies"
+            + (f" and |cp - gate| <= {args.bt_quiet_pv_cap}"
+               if args.bt_quiet_pv_cap > 0 else "")
+            + f"; rows without one use --bt-quiet-cp {args.bt_quiet_cp}")
+    elif args.bt_quiet_cp > 0:
+        log(f"--bt-quiet-cp {args.bt_quiet_cp}: budget and quotas count only rows "
+            f"within the gate (dump gate was --quiet-cp {args.quiet_cp})")
     if row_kind:
         log(f"--bt-rows {args.bt_rows}: budget and quotas count {args.bt_rows} "
             f"rows only")
@@ -1618,7 +1681,7 @@ def main():
         f"(axis={'game-ply' if game_ply_axis else 'legacy record-index'}, "
         f"dedup) ...")
     rows, gid_next, dropped, per_source = write_corpus(
-        corpus_path, sources, sizes, quota, game_ply_axis, row_kind, gate_cp)
+        corpus_path, sources, sizes, quota, game_ply_axis, row_kind, quiet)
     log(f"{rows:,} positions assembled from {gid_next:,} distinct games "
         f"({dropped:,} duplicate rows dropped)")
 
@@ -1956,6 +2019,8 @@ def main():
         "bt_td_lambda": args.bt_td_lambda,
         "bt_rows": args.bt_rows,
         "bt_quiet_cp": args.bt_quiet_cp,
+        "bt_quiet_pv": args.bt_quiet_pv,
+        "bt_quiet_pv_cap": args.bt_quiet_pv_cap,
         "bt_rescore": args.bt_rescore,
         "corpus_rows": rows,
         "corpus_weight": args.corpus_weight,

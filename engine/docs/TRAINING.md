@@ -931,9 +931,10 @@ writes two per-process files at game end:
 
 - `iter2.<pid>.root.tsv` — played root positions, **search-score labels**
   (white POV), `depth` = achieved ID depth.  **Every** recorded root, ungated
-  (since 2026-09-28); the quietness choice — |root static − root search| ≤
-  `--bt-quiet-cp` today — is made at assembly, with the walked PV (`pv`
-  column) available for other definitions.
+  (since 2026-09-28); the quietness choice is made at assembly — PV quietness
+  (`--bt-quiet-pv`, no tactic in the first two PV plies) by default since
+  2026-09-29, the |root static − root search| ≤ `--bt-quiet-cp` gate for rows
+  without a `pv` column.
 - `iter2.<pid>.leaf.tsv` — PV-leaf positions, static labels, `depth` 0. Leaves
   are distribution-matched to what the net actually evaluates in search; their
   training signal is the outcome label.
@@ -1102,6 +1103,26 @@ this matters: assembling a wide corpus without the re-cut reproduces the `gnone`
 arm and costs ~28 Elo.  Corpora dumped before 2026-09-03 have no `gate` column
 and pass through untouched — they were already gated at dump time, so a window
 that mixes old and new corpora is gated consistently at 60 either way.
+
+#### PV quietness — `train.py --bt-quiet-pv` (the default since 2026-09-29)
+
+The residual gate conditions on the label's own error: it keeps positions where
+the net already agrees with the search.  Root rows dumped since 2026-09-28 carry
+their PV, so `train.py` now selects them by **what happens at the board**
+instead: a root row trains iff its PV has **no capture, check or promotion in the
+first K plies** (`--bt-quiet-pv K`, default 2 = the root move and the reply), with
+**no residual gate**.  `--bt-quiet-pv-cap CP` adds a residual cap on top (off by
+default); `--bt-quiet-pv 0` restores the 60 cp gate for every row.  Rows with no
+`pv` column (older dumps, leaf rows) always use `--bt-quiet-cp`, so a window that
+mixes old and new corpora stays well defined.  The budget and quotas count rows
+passing the filter, exactly as for the gate (one shared `row_quiet()`), and each
+filter keeps its own row-count cache (`<dump>.rows.g60.pv2`, …).
+
+Measured on `m260921-4.5e6g` (same post-online state, games, 34.9M-row budget and
+seed; depth 8, 8000 games vs `classic_eval`, ±3.5): 60 cp gate **+8.3**, PV-quiet
+k=2 **+33.2**, PV-quiet + 200 cp cap +31.6.  The gain is the quiet rows the gate
+rejected; removing the gate's loud rows alone is neutral.  See
+`docs/Learning_Investigation.md` §1 V.
 
 > **Current defaults:** `--bt-K 220` cp with the default pure λ-return target —
 > `--bt-lambda` and `--bt-leaf-lambda` default to `1.0` and stay dormant scale knobs;

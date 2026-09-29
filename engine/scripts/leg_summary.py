@@ -63,7 +63,10 @@ COLUMNS
               (change_log 2026_09_21a).
 
   quiet       Gated root rows per game divided by mean ply: the fraction of
-              plies that survive the quiet gate and become training rows.
+              plies that survive the quiet filter and become training rows.
+              ⚠️ Legs since 2026-09-29 use the PV rule (train.py
+              --bt-quiet-pv), which admits ~1.19x the rows of the 60 cp gate,
+              so this column steps up there by construction.
               Fell 0.562 -> 0.499 across m260916 at constant depth.
 """
 import argparse, glob, gzip, json, os, re, subprocess, sys
@@ -150,9 +153,15 @@ def pgn_stats(tag, sample):
 
 
 def root_rows(j):
-    """Gated root rows for THIS leg — never the windowed corpus."""
+    """Gated root rows for THIS leg — never the windowed corpus.  Uses the
+    row-count cache of the filter the leg trained with: the PV rule
+    (.rows.g60.pv<k>[.c<cap>], train.py default since 2026-09-29) when the
+    sidecar records one, else the 60 cp residual gate (.rows.g60)."""
     tag = j["tag"]
-    for f in glob.glob(os.path.join(LEARN, f"{tag}_work", "*root.tsv*.rows.g60")):
+    pv_k, pv_cap = j.get("bt_quiet_pv") or 0, j.get("bt_quiet_pv_cap") or 0
+    suffix = ".rows.g60" + ((f".pv{pv_k}" + (f".c{pv_cap}" if pv_cap else ""))
+                            if pv_k else "")
+    for f in glob.glob(os.path.join(LEARN, f"{tag}_work", f"*root.tsv*{suffix}")):
         parts = open(f).read().split()
         if len(parts) >= 2 and int(parts[1]) > 0:
             return int(parts[1])
