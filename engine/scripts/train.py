@@ -1548,9 +1548,9 @@ def main():
         log(f"--bt-rows {args.bt_rows}: budget and quotas count {args.bt_rows} "
             f"rows only")
         log(f"NOTE: {work.name}/corpus.tsv.gz will archive {args.bt_rows} rows "
-            f"only — the other row type is dropped at assembly and this run's "
-            f"raw dumps are pruned at end of run.  Use --bt-rows both (or "
-            f"--keep-work) to retain the full mix for later re-analysis.")
+            f"only — the other row type is dropped at assembly.  The raw "
+            f"dumps (both row types, root `pv` column included) are kept, "
+            f"gzipped in place, at end of run.")
     if args.corpus_rows > 0:
         budget = args.corpus_rows
     elif len(sources) > 1:
