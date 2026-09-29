@@ -227,14 +227,22 @@ def main():
         print(f"{'leg':>7} {'cum':>9} {'d/nod':>7} {'inst':>5} {'anchor':>9} {'anc/Mg':>7} "
               f"{'par/Mg':>7} {'on':>7} {'on@a':>7} {'off':>7} {'anc@tc':>7} {'draw%':>7} {'ply':>6} "
               f"{'depth':>6} {'<floor':>7} {'quiet':>6}")
-        prev_tag = None; prev_anc = None; prev_inst = None
+        # Offline re-runs (--skip-online) have no games and no parent leg --
+        # they are listed separately below, never differenced against.
+        reruns = [j for j in legs if j.get("gen_mode") == "skip-online"]
+        legs = [j for j in legs if j.get("gen_mode") != "skip-online"]
+        by_tag = {j["tag"]: j for j in legs}
         insts = set()
         for j in legs:
             tag, cum = j["tag"], j.get("cumulative_games", 0)
             gi = j.get("games_this_iter", 0) or 0
             inst = instrument(j); insts.add(inst)
-            if prev_inst is not None and inst != prev_inst:
-                prev_anc = None          # never difference across instruments
+            # Differences are against the RECORDED parent (siblings share one),
+            # and never across instruments.
+            prev_tag = j.get("parent_tag")
+            pj = by_tag.get(prev_tag)
+            prev_anc = (vs(pj.get("final_gauntlet"), "classic")[0]
+                        if pj is not None and instrument(pj) == inst else None)
             anc, _ = vs(j.get("final_gauntlet"), "classic")
             atc = anchor_tc(j)
             tot, _ = vs(j.get("final_gauntlet"), prev_tag) if prev_tag else (None, None)
@@ -254,8 +262,14 @@ def main():
                   f"{str(j.get('depth'))+'/'+str(j.get('nodes')):>7} {inst:>5} "
                   f"{f(anc,9)} {f(ancM,7,0)} {f(perM,7,0)} {f(onl,7)} {f(ona,7)} {f(off,7)} "
                   f"{f(atc,7)} {f(dr,7,2)} {f(ply,6,1)} {f(dep,6,2)} {f(blw,6,1,'%')} {f(quiet,6,3)}")
-            prev_tag = tag; prev_inst = inst
-            if anc is not None: prev_anc = anc
+        if reruns:
+            print("  offline re-runs (--skip-online; not chain legs, no differences):")
+            for j in reruns:
+                anc, _ = vs(j.get("final_gauntlet"), "classic")
+                f = lambda v, w, p=1: f"{v:>{w}.{p}f}" if v is not None else f"{'--':>{w}}"
+                print(f"    {j['tag'][len(chain) + 1:]:<22} {instrument(j):>5} "
+                      f"anchor {f(anc, 7)}  anc@tc {f(anchor_tc(j), 7)}  "
+                      f"rows {j.get('corpus_rows') or 0:,}")
         if len(insts) > 1:
             print(f"  ⚠️ this chain mixes instruments ({', '.join(sorted(insts))}): "
                   "anchor/anc/Mg/on@a are per-instrument; anc@tc is the continuous series.")

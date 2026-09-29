@@ -765,7 +765,7 @@ games):
 | `2e6g` | 2M | 8 | −89.9 | 6 | 35.0 | 0.483 |
 | `2.5e6g` | 2.5M | 8 | −58.6 | 63 | 35.0 | 0.454 |
 | `3e6g` | 3M | 8 | −32.8 | 52 | 35.1 | 0.440 |
-| `3.5e6g` | 3.5M | 8 | −33.8 | 47 | 35.1 | 0.432 |
+| `3.5e6g` | 3.5M | 8 | −33.8 | −2 | 35.1 | 0.432 |
 | `4e6g` | 4M | 8 | −21.2 | 25 | 34.8 | 0.467 |
 | `4.5e6g` | 4.5M | 8 | +4.2 | 51 | 35.0 | 0.465 |
 
@@ -775,7 +775,11 @@ transition leg (+6); the second paid (+63).  The quiet fraction kept falling at
 d8 until 4e6g, where `PV_WIDEN_UNRESOLVED` (§1 R) stopped ~10% of plies being
 skipped as unresolved stubs — the step up is recording, not calmer games.  The
 3e6g siblings are §1 T.  4e6g and 4.5e6g are the first two legs with every
-search resolved; on@a was +20.9 on both.
+search resolved; on@a was +20.9 on both, after 3.5e6g's −24.7 (on@a by leg from
+2.5e6g: +15.1, +8.9, −24.7, +20.9, +20.9).  ⚠️ Before 2026-09-29 `leg_summary.py`
+differenced each leg against the previous ROW, which for 3.5e6g was the `n50`
+sibling: it printed anc/Mg 47 and on@a 0.0 there.  It now uses the recorded
+`parent_tag`.
 
 **R11 — the PV dump and PV-quiet offline rows (2026-09-28/29, current).**  Every
 root row carries the walked PV (`pv` column, `.tdg` v3); root rows are dumped
