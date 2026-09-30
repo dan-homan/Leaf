@@ -1,5 +1,31 @@
 Changes since 2017_12_24
 
+2026_09_29b -- train.py: keep the pre-offline net when the offline phase
+               loses.
+
+               With --gauntlet-epochs, if no epoch beats the pre-offline net
+               (best ladder Elo <= 0), the final is the pre-offline net: the
+               trainer's untouched starting state + the baked <tag>_pretrain
+               .nnue.  Sidecar: picked_epoch 0, offline_rejected true; the
+               final's gauntlet reuses the --gauntlet-tdleaf results (same net)
+               and the --tc continuity match still runs; the best losing
+               epoch's .nnue is kept.  --offline-accept-negative restores the
+               old rule (promote the best epoch regardless).
+
+               Why: m260929-2e5g's offline phase read ep1 -32.8 / ep2 -30.3
+               (+-4.7) on the depth-8 ladder and -15.7 +- 7.5 on the depth-8
+               anchor (tdleaf -119.4 -> final -135.1), and the old rule
+               promoted ep2 into 5e5g.  That leg was killed; 2e5g's final was
+               re-promoted to its pre-offline state by hand (ep2 kept as
+               m260929-2e5g_final-ep2.*, the change recorded in its sidecar
+               and train.log) and its 3+0.05 continuity matches re-run.
+
+               Tested on an isolated throwaway net: a positive ladder (+7)
+               promotes epoch 1 as before; sign-flipped labels (ladder -402)
+               promote the pre-offline net -- final .tdleaf.bin / .nnue
+               byte-identical to the starting state / pretrain net, sidecar
+               picked 0 / rejected true, tdleaf gauntlet reused.
+
 2026_09_29 -- train.py: PV quietness is the default offline row filter
                (--bt-quiet-pv 2).
 

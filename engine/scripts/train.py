@@ -1202,6 +1202,15 @@ def main():
                          "offline training (post-online checkpoint, or the "
                          "incoming state under --skip-online) — measures what "
                          "consolidation added.  Independent of --gauntlet.")
+    ap.add_argument("--offline-accept-negative", action="store_true",
+                    help="Promote the best ladder epoch even when NO epoch beats "
+                         "the pre-offline net.  Default (since 2026-09-29): keep "
+                         "the pre-offline net as the final (picked_epoch 0, "
+                         "offline_rejected in the sidecar) -- m260929-2e5g's "
+                         "offline phase lost ~31 on the ladder and ~16 on the "
+                         "depth-8 anchor and the old rule promoted it anyway.  "
+                         "Needs --gauntlet-epochs; without the ladder the last "
+                         "epoch is promoted as before")
     ap.add_argument("--gauntlet-tdleaf", action="store_true",
                     help="Also rate the net as it ENTERED offline training "
                          "(post-online checkpoint, or the incoming state "
@@ -1855,16 +1864,35 @@ def main():
     # Elo; ties → later epoch) — both gen-2 runs peaked at epoch 4 of 6, so the
     # last epoch is not automatically best.  Without the ladder, use the last
     # epoch.  Each snapshot is a complete net (single process, no merge needed).
+    #
+    # If NO epoch beats the pre-offline net on the ladder, keep the pre-offline
+    # net instead (picked_epoch 0) unless --offline-accept-negative.  m260929-
+    # 2e5g read ep1 -32.8 / ep2 -30.3 and the depth-8 anchor agreed (-15.7):
+    # promoting the "best" epoch carried a loss into the next leg.
+    offline_rejected = False
+    best_ep = None
     if epoch_results:
         best_ep, (_, _, _, best_elo, _) = max(
             epoch_results, key=lambda r: (r[1][3], r[0]))
-        log(f"final = epoch {best_ep} of {args.epochs} "
-            f"(ladder best, Elo {best_elo:+.0f})")
-        pick_ep = best_ep
+        if best_elo <= 0 and not args.offline_accept_negative:
+            offline_rejected = True
+            log(f"final = PRE-OFFLINE net: no epoch beat it on the ladder "
+                f"(best epoch {best_ep}, Elo {best_elo:+.1f}) — offline phase "
+                f"rejected (--offline-accept-negative to promote anyway)")
+            pick_ep = 0
+        else:
+            log(f"final = epoch {best_ep} of {args.epochs} "
+                f"(ladder best, Elo {best_elo:+.0f})")
+            pick_ep = best_ep
     else:
         pick_ep = args.epochs
-    src_nnue = tdir / f"{args.tag}_ep{pick_ep}.nnue"
-    src_td   = tdir / f"{args.tag}_ep{pick_ep}.tdleaf.bin"
+    if offline_rejected:
+        # The trainer's untouched starting state and the baked pre-offline net.
+        src_nnue = tdir / f"{args.tag}_pretrain.nnue"
+        src_td   = tdir / f"{netbase}.tdleaf.bin"
+    else:
+        src_nnue = tdir / f"{args.tag}_ep{pick_ep}.nnue"
+        src_td   = tdir / f"{args.tag}_ep{pick_ep}.tdleaf.bin"
     if not src_nnue.is_file() or not src_td.is_file():
         die(f"epoch {pick_ep} snapshot missing in {tdir} — see train.log")
     out_nnue = LEARN_DIR / f"{args.tag}_final.nnue"
@@ -1936,7 +1964,13 @@ def main():
         if tdleaf_rate_bin is not None:
             tdleaf_results = run_gauntlet(tdleaf_rate_bin.name,
                                           f"{args.tag}-tdleaf")
-        results = run_gauntlet(rate_bin.name, f"{args.tag}-final")
+        if offline_rejected and tdleaf_results:
+            # Same net: the final's gauntlet IS the tdleaf gauntlet.
+            log("offline phase rejected: final == tdleaf net, reusing its "
+                "gauntlet results")
+            results = tdleaf_results
+        else:
+            results = run_gauntlet(rate_bin.name, f"{args.tag}-final")
 
         # Continuity leg: the fixed-depth gauntlet reports eval quality on a
         # compressed, depth-dependent scale that cannot be read against the
@@ -2013,6 +2047,7 @@ def main():
         "grad_norm": args.grad_norm,
         "epochs": args.epochs,
         "picked_epoch": pick_ep,
+        "offline_rejected": offline_rejected,
         "bt_lr": args.bt_lr,
         "bt_lambda": args.bt_lambda,
         "bt_K": args.bt_K,
@@ -2073,7 +2108,7 @@ def main():
 
     # ---- end-of-run archive pruning (only on success, unless --keep-work) -
     if not args.keep_work:
-        prune_work_dir(work, tdir, epoch_bin_dir, args.tag, pick_ep,
+        prune_work_dir(work, tdir, epoch_bin_dir, args.tag, pick_ep or best_ep,
                        args.keep_epoch_states)
         for stray in (LEARN_DIR / f"{netbase}.tdleaf.bin-pre{args.tag}",
                       LEARN_DIR / f"{netbase}.tdleaf.bin-{args.tag}-online"):

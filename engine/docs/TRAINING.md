@@ -1564,6 +1564,14 @@ this script encodes.
    with the games for cores.
 6. **Best-epoch promotion** — with the ladder, the epoch with the best Elo is
    promoted (ties → later epoch); without it, the last epoch is used.
+   **If no epoch beats the pre-offline net (best ladder Elo ≤ 0), the
+   pre-offline net itself is promoted** (since 2026-09-29): `picked_epoch` 0 and
+   `offline_rejected: true` in the sidecar, the final's gauntlet reuses the
+   `--gauntlet-tdleaf` results (same net), and the losing epochs' `.nnue` are
+   kept for inspection.  `--offline-accept-negative` restores the old
+   always-promote rule.  Motivation: `m260929-2e5g` read ep1 −32.8 / ep2 −30.3
+   on the ladder, the depth-8 anchor agreed (−15.7), and the old rule carried the
+   loss into the next leg.
 7. **Compile** — a TDLEAF-off rating binary `Leaf_v<tag>-final` is compiled from
    the promoted net.
 8. **Gauntlet** — the promoted net plays `--gauntlet-games` (default 1000) games
