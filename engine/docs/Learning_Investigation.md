@@ -1054,6 +1054,20 @@ is the wrong axis.  What is open instead is **PV quietness at time control and o
 a chain** — the +25 is one leg at depth 8 — and its parameters (k = 1 and 3;
 P2's residual cap as the conservative variant).
 
+**9. Does the offline phase make the net cheaper to search?**  `m260929-2e5g`'s
+offline phase (PV-quiet rows) LOST at fixed depth — ladder ep1 −32.8 / ep2 −30.3
+(±4.7), depth-8 anchor −15.7 ± 7.5 — yet the same ep2 net GAINED at 3+0.05:
+continuity anchor −218.9 ± 11.6 vs the pre-offline net's −276.7 ± 12.7
+(+57.8 ± 17.2), and a head-to-head stopped at 244 games read +37.2 ± 17.3.
+Opposite signs, not compression.  The candidate is search efficiency: depth 8
+quotients out nodes-to-depth (the eval also shapes pruning, so depth 8 is not a
+pure eval measure either).  The chain keeps deciding on depth 8 — it generates at
+fixed depth, so a net that is cheaper to search but evaluates worse gives it
+nothing — and `train.py` rejected ep2 on that basis.  Open for later, because a
+reliable offline effect on search cost would matter for the SHIPPED net: measure
+nodes-to-depth (or time-to-depth) for the two 2e5g nets on a fixed position set,
+and whether the sign split recurs on other rejected legs.
+
 **8. Attack Σ directly.**  Shuffle records across a pool of games before forming
 a learner batch — the offline-style decorrelation, never tried, and the only way
 to confirm Σ positively rather than by elimination.
