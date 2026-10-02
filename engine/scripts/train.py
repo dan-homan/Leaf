@@ -181,6 +181,11 @@ def row_quiet(col, quiet):
       pv_k PV plies, optionally also |cp - gate| <= pv_cap.  No residual gate --
       the 4.5e6g arms found the residual gate rejects valuable quiet rows
       (P1 +33.2 vs G60 +8.3 at depth 8, docs/Learning_Investigation.md).
+      Rows that also carry `leaf_ok` (dumped since 2026-10-02) must have it
+      set: the PV judged must be the line the score came from.  ~3% of rows
+      fail it -- mostly short draw lines in endgames, which the PV test
+      would otherwise pass by default -- and dropping them was Elo-neutral
+      on 3e6g (-0.7 +- 5 at depth 8), so this is for correctness.
     * Otherwise (no `pv` column: older dumps, leaf rows) the residual gate
       |cp - gate| <= gate_cp, as before.  Rows with no `gate` column either
       (dumped before 2026-09-03) were gated at dump time and pass through."""
@@ -189,6 +194,8 @@ def row_quiet(col, quiet):
     if abs(cp) > CORPUS_MAX_CP:
         return False
     if pv_k > 0 and len(col) >= 9:
+        if len(col) >= 10 and col[9] != "1":
+            return False
         if pv_cap > 0 and abs(cp - int(col[7])) > pv_cap:
             return False
         return pv_quiet(col[8], pv_k)
@@ -440,7 +447,8 @@ def write_corpus(corpus_path, sources, sizes, quota, game_ply_axis, row_kind=0,
                             continue
                         acc -= size
                         # The training corpus carries the first 8 columns;
-                        # the root dump's `pv` (9) stays in the raw dump.
+                        # the root dump's `pv` / `leaf_ok` (9, 10) stay in
+                        # the raw dump.
                         p = p[:8]
                         # fen cp result ply depth gid endply — drop gid (5)
                         key = int.from_bytes(hashlib.blake2b(

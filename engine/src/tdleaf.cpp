@@ -955,7 +955,9 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
 //     assembly (train.py: --bt-quiet-cp on |cp − gate|, and |cp| <= 1500),
 //     so a quietness definition chosen later can use every row.  Column 9,
 //     "pv", is the walked PV with per-move capture/check/promotion/castle
-//     flags (tdleaf_format_pv).
+//     flags (tdleaf_format_pv); column 10, "leaf_ok" (since 2026-10-02), is 1
+//     when that PV's leaf reproduces the root score within
+//     TDLEAF_LEAF_MATCH_CP, the test that gates the leaf row.
 //
 // Leaf rows apply |cp| <= TDLEAF_DUMP_MAX_CP (default 1500) and QUIET_CP
 // (TDLEAF_DUMP_QUIET_CP, default 1000 — effectively open, see below).
@@ -1061,7 +1063,7 @@ static void tdleaf_dump_game(const TDGameRecord &rec, float result)
                         // old record-index axis.
                         fprintf(f, "# tdleaf-corpus axis=game-ply\n");
                         fprintf(f, "fen\tcp\tresult\tply\tdepth\tgid\tendply\tgate%s\n",
-                                strcmp(kind, "root") ? "" : "\tpv");
+                                strcmp(kind, "root") ? "" : "\tpv\tleaf_ok");
                     }
                 } else {
                     fprintf(stderr, "TDLeaf: cannot open dump file %s\n", path);
@@ -1173,13 +1175,17 @@ static void tdleaf_dump_game(const TDGameRecord &rec, float result)
             // quiet gate is |cp - gate| <= QUIET_CP, applied offline.  This
             // is the quantity Part 1 found the label's value is proportional
             // to.  Column 9 "pv": the walked PV (tdleaf_format_pv).
+            // Column 10 "leaf_ok": 1 if the PV leaf's static matches the root
+            // score propagated to it (TDLEAF_LEAF_MATCH_CP), i.e. the PV is
+            // the line the score came from -- the same test that gates the
+            // leaf row and the online trace.
             int gate_white = root_wtm ? r.root_static : -r.root_static;
             char pvs[TDLEAF_PV_MAX * 12 + 8];
             tdleaf_format_pv(r, pvs);
             tdleaf_dump_fen(r.root_pos, (bool)root_wtm, fen);
-            fprintf(root_f, "%s\t%d\t%s\t%d\t%d\t%u\t%d\t%d\t%s\n",
+            fprintf(root_f, "%s\t%d\t%s\t%d\t%d\t%u\t%d\t%d\t%s\t%d\n",
                     fen, cp_white, res_str, r.game_ply, (int)r.id_depth,
-                    dump_gid, final_game_ply, gate_white, pvs);
+                    dump_gid, final_game_ply, gate_white, pvs, (int)r.leaf_ok);
 #if TDLEAF_REFRESH_DIAG
             // Same row, ACTOR-VINTAGE label — the paired control that
             // isolates the score refresh from the quietness-gate change.

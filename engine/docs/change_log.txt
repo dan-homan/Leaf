@@ -1,5 +1,36 @@
 Changes since 2017_12_24
 
+2026_10_02 -- Root dump rows carry leaf_ok; PV-quiet selection requires it.
+
+               Column 10 of the root-row TSV, `leaf_ok`: 1 when the PV leaf's
+               static reproduces the root score propagated to it within
+               TDLEAF_LEAF_MATCH_CP (10 cp) -- the same r.leaf_ok that gates
+               the leaf row and the online trace, recomputed by the learner in
+               tdleaf_rebuild_record.  train.py's row_quiet() in PV mode
+               (--bt-quiet-pv) rejects rows with leaf_ok != 1 when the column is
+               present; older dumps without it are unchanged.  Stripped from
+               the assembled corpus.tsv like `pv`.
+
+               Why: on m260929-3e6g, 3.1% of P1-selected rows (1.23M) have no
+               confirming leaf.  They are concentrated: 66% have PVs of <= 5
+               moves (vs 0.4% of confirmed rows), 88% come from drawn games,
+               63% are endgames, ~half carry a search score within +-5 cp --
+               draw lines (repetition / perpetual / fifty) whose PV stops at
+               the draw detection, and which the PV test passes by default.
+               Re-consolidating 3e6g on P1 AND leaf-confirmed rows (38.7M vs
+               the leg's 40.0M, same state / games / seed / d8 ladder): ladder
+               +12.7 / +20.3 vs +19.6 / +20.8; depth 8, 8000 games vs
+               classic_eval on identical openings, +36.0 vs +36.7 (+-3.6).
+               Elo-neutral; adopted for correctness.
+
+               Verified: actor/learner smoke test (4 actors, d6, 60 games,
+               --refresh-scores): every root row has 10 columns; leaf_ok=0
+               rows never have a leaf row (517/517); leaf_ok=1 rows have one
+               except where |cp| > 1490 hits the leaf row's cap (336, 0
+               unexpected); train.py's default count equals an independent
+               P1 & leaf_ok & cap count (4,145); the trainer loads the 10-column
+               dump with 0 skipped.
+
 2026_09_29b -- train.py: keep the pre-offline net when the offline phase
                loses.
 

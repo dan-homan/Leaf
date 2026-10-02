@@ -606,6 +606,7 @@ mature net; assume they are untested on a young one unless the row says otherwis
 | The 60 cp quiet gate is the right *residual* width; removing it hurts | Offline 4.3 | −27.9 ± 11.3, replicated | R4 | **ESTABLISHED** — but superseded by the next row |
 | PV quietness (no tactic in plies 1–2, no residual gate) beats the 60 cp gate | §1 V | +24.9 ± 5.0 at d8, 8000 g, same state/games/budget | R11 | SUPPORTED (one leg) |
 | The gain is the gate-rejected quiet rows; the gate's loud rows and >200 cp rows are neutral | §1 V | P1∩G60 vs G60s −1.4 ± 5; P2 vs P1 −1.6 ± 5 | R11 | SUPPORTED |
+| Requiring the PV to be confirmed by its leaf (`leaf_ok`) is Elo-neutral | `m260929-3e6g-pvok` | −0.7 ± 5 at d8, 8000 g; 3.1% of P1 rows dropped, mostly short draw PVs | R11 | SUPPORTED — adopted for correctness |
 | Game diversity is worth ~+40 at identical compute — on a mature chain | Offline 2.4 | +36 anchor / +45 paired | R4 | **ESTABLISHED** (R4 only) |
 | …and is not helpful on the young chain | `cons1` base vs null | −9.2 ± 8.8 paired, −12.1 ± 9.9 anchor | R9 | SUPPORTED |
 | Outcome weight above the default costs ~20 Elo | §1 U | −20.5 ± 9.1 paired, −20.1 ± 9.9 anchor | R9 | **ESTABLISHED** |

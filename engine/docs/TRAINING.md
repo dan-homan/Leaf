@@ -883,6 +883,7 @@ fen  cp  result  ply  depth  gid  [endply]
 | `endply` | *(optional)* the game's true final ply — exact distance base for the result decay. When absent, the trainer falls back to the per-`gid` max ply seen in the corpus (short by the quiet-filtered game tail, a mild ~uniform over-weighting of the result). Both corpus producers write it since 2026-07-04. |
 | `gate` | *(optional, in-engine dumps since 2026-09-03)* the value the dump-time quietness test compared `cp` against, in the **same POV as `cp`** — root static for root rows, the propagated root search score for leaf rows. The dump gate was exactly `|cp − gate| ≤ TDLEAF_DUMP_QUIET_CP`, so **the gate is re-cuttable offline** with `--bt-quiet-cp` (see below). Consumers that know only 7 columns ignore it. |
 | `pv` | *(root rows only, since 2026-09-28)* the PV the actor walked from this root to its leaf, space-separated tokens `<from><to>[promo][x<captured>][+][c][e]` — e.g. `e4d5xp+`.  Squares are Leaf's internal from/to, so a castle is the **king's** move to its destination (from == to is possible in Chess960), marked `c`; `e` = en passant; promotion and captured pieces are lowercase letters.  `-` = empty PV; a trailing `...` = longer than 64 moves.  The flags are computed on the actor from the real game state, so no consumer needs to replay the moves (the FEN has no castling rights).  Carried actor → learner in `.tdg` v3.  The trainer ignores it, and `train.py` strips it from the assembled `corpus.tsv`. |
+| `leaf_ok` | *(root rows only, since 2026-10-02)* `1` if the PV's leaf static reproduces the root score propagated to it within `TDLEAF_LEAF_MATCH_CP` (10 cp) — the PV is the line the score came from; the same test that gates the leaf row and the online trace.  ~3% of rows read `0`, mostly short draw lines in endgames.  `train.py --bt-quiet-pv` requires `1` when the column is present.  Stripped from `corpus.tsv` like `pv`. |
 
 **Ply units:** both corpus producers write true **game plies** (every half-move)
 in the `ply`/`endply` columns (game-ply λ^Δ era, since 2026-07-07) — the
@@ -1114,7 +1115,12 @@ first K plies** (`--bt-quiet-pv K`, default 2 = the root move and the reply), wi
 **no residual gate**.  `--bt-quiet-pv-cap CP` adds a residual cap on top (off by
 default); `--bt-quiet-pv 0` restores the 60 cp gate for every row.  Rows with no
 `pv` column (older dumps, leaf rows) always use `--bt-quiet-cp`, so a window that
-mixes old and new corpora stays well defined.  The budget and quotas count rows
+mixes old and new corpora stays well defined.  Root rows that also carry
+`leaf_ok` (dumped since 2026-10-02) must have it set: the PV being judged has to
+be the line the score came from.  On 3e6g the ~3% of P1 rows that fail it were
+short draw lines (two-thirds have PVs of ≤5 moves, 88% from drawn games), which
+the PV test passes by default; dropping them was Elo-neutral (−0.7 ± 5 at depth 8,
+8000 games), so the requirement is for correctness.  The budget and quotas count rows
 passing the filter, exactly as for the gate (one shared `row_quiet()`), and each
 filter keeps its own row-count cache (`<dump>.rows.g60.pv2`, …).
 
