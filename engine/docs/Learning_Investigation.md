@@ -1069,6 +1069,18 @@ reliable offline effect on search cost would matter for the SHIPPED net: measure
 nodes-to-depth (or time-to-depth) for the two 2e5g nets on a fixed position set,
 and whether the sign split recurs on other rejected legs.
 
+*Supporting evidence across legs (2026-10-04).*  Generation searches get cheaper
+as the net matures.  From the generation PGNs' per-move times (wall clock, 14
+actors, every 10th game): m260929's depth-8 legs ran 9.34 → 8.63 → 8.35 → 8.14 →
+8.16 → 8.13 → 7.98 ms per move (2e6g → 5e6g, **−14.6%**), while games shortened
+only 147.2 → 144.0 plies (−2.2%) and the draw rate stayed at 34.8–35.5%.  Time
+per game fell 16%, almost all of it from a smaller depth-8 tree.  m260921 shows
+the same signature (8.75 → 8.22 ms over its d8 legs, one noisy 9.78), and both
+chains converge near 8.0–8.2 ms — a property of maturing nets, not of the R11
+recipe.  It is invisible to the depth-8 instrument and would show at a time
+control.  Caveats: wall clock under a constant actor load, not node counts.  The
+clean measurement is nodes to depth 8 on a fixed position set per leg's final.
+
 **8. Attack Σ directly.**  Shuffle records across a pool of games before forming
 a learner batch — the offline-style decorrelation, never tried, and the only way
 to confirm Σ positively rather than by elimination.
