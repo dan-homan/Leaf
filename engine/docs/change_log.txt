@@ -1,5 +1,27 @@
 Changes since 2017_12_24
 
+2026_10_06 -- train.py: --assemble-only, and a bounded-memory corpus dedup.
+
+               --assemble-only assembles <tag>_work/corpus.tsv, stages the
+               trainer inputs in <tag>_work/train/ (Leaf_vbt, net, starting
+               state), prints the exact --batch-train command and exits, so a
+               large window's trainer runs as its own process.  The command
+               comes from one trainer_cmd() helper shared with the normal path.
+
+               write_corpus's dedup no longer holds a Python set of keys (~80
+               B/row measured: it OOM-killed a 382M-row window at 26 GB of a
+               30 GB box -- the old comment's ~37 B/row was wrong).  Keys go
+               into a flat uint64 array (8 B/row); repeats are found with one
+               numpy sort; a rewrite pass keeps each key's FIRST occurrence and
+               renumbers gids in first-kept-row order.  Skipped when there are
+               no duplicates (the usual case).
+
+               Verified: byte-identical corpus and identical (rows, games,
+               dropped, per-source) against the previous implementation on
+               three cases -- no duplicates, duplicates within one source, and
+               duplicates across two sources; --assemble-only and the normal
+               path both exercised on a small corpus.
+
 2026_10_02 -- Root dump rows carry leaf_ok; PV-quiet selection requires it.
 
                Column 10 of the root-row TSV, `leaf_ok`: 1 when the PV leaf's

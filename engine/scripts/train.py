@@ -102,7 +102,9 @@ Run from engine/learn/.  Artifacts land in learn/ and <tag>_work/:
 """
 
 import argparse
+import array
 import gzip
+import itertools
 import hashlib
 import json
 import math
@@ -400,15 +402,19 @@ def write_corpus(corpus_path, sources, sizes, quota, game_ply_axis, row_kind=0,
       gid) come from replayed games — worst case a frozen deterministic pair,
       one unique game per opening — and straddle the trainer's by-game split,
       both overfitting and leaking validation.  Keys are 8-byte blake2b of the
-      gid-stripped row stored as ints (~5 GB at 134M rows vs ~9 GB for full
-      digests); a truncation collision costs one falsely-dropped row with
-      probability ~5e-4 per 134M-row corpus.  Dedup runs AFTER sampling, so the
-      set is sized by the budget, not by the union of every window corpus.
+      gid-stripped row; a truncation collision costs one falsely-dropped row
+      with probability ~5e-4 per 134M-row corpus.  Dedup runs AFTER sampling.
+      Memory: keys go into a flat uint64 array (8 B/row) and duplicates are
+      found afterwards with one numpy sort (another 8 B/row), then removed in
+      a rewrite pass that keeps each key's FIRST occurrence and renumbers gids
+      in first-kept-row order -- byte-identical to the old in-loop Python set,
+      which cost ~80 B/row and OOM-killed a 382M-row window at 26 GB.  With no
+      duplicates (the usual case) the rewrite is skipped.
 
     Returns (rows_written, distinct_games, duplicates_dropped, rows_per_source).
     """
     rows = dropped = gid_next = 0
-    seen = set()
+    keys = array.array("Q")      # one 8-byte dedup key per written row
     per_source = []
     with open(corpus_path, "w") as out:
         if game_ply_axis:
@@ -451,13 +457,9 @@ def write_corpus(corpus_path, sources, sizes, quota, game_ply_axis, row_kind=0,
                         # the raw dump.
                         p = p[:8]
                         # fen cp result ply depth gid endply — drop gid (5)
-                        key = int.from_bytes(hashlib.blake2b(
+                        keys.append(int.from_bytes(hashlib.blake2b(
                             "\t".join(p[:5] + p[6:]).encode(),
-                            digest_size=8).digest(), "little")
-                        if key in seen:
-                            dropped += 1
-                            continue
-                        seen.add(key)
+                            digest_size=8).digest(), "little"))
                         g = gmap.get(p[5])
                         if g is None:
                             g = gid_next
@@ -468,6 +470,49 @@ def write_corpus(corpus_path, sources, sizes, quota, game_ply_axis, row_kind=0,
                         rows += 1
                         taken += 1
             per_source.append(taken)
+
+    # ---- dedup: find repeated keys, drop all but the first occurrence ------
+    import numpy as np
+    k = np.frombuffer(keys, dtype=np.uint64)
+    srt = np.sort(k)
+    rep = srt[1:][srt[1:] == srt[:-1]]
+    del srt
+    if rep.size == 0:
+        return rows, gid_next, dropped, per_source
+    dup_vals = set(np.unique(rep).tolist())
+    del rep
+    bounds = list(itertools.accumulate(per_source))      # row-index ends per source
+    tmp = Path(str(corpus_path) + ".dedup")
+    seen_dup = set()
+    gmap = {}
+    gid_next = rows = 0
+    per_source = [0] * len(bounds)
+    src_i = 0
+    i = 0
+    with open(corpus_path) as fin, open(tmp, "w") as fout:
+        for line in fin:
+            if line.startswith("#"):
+                fout.write(line)
+                continue
+            while src_i < len(bounds) - 1 and i >= bounds[src_i]:
+                src_i += 1
+            kv = int(k[i]); i += 1
+            if kv in dup_vals:
+                if kv in seen_dup:
+                    dropped += 1
+                    continue
+                seen_dup.add(kv)
+            p = line.rstrip("\n").split("\t")
+            g = gmap.get(p[5])
+            if g is None:
+                g = gid_next
+                gmap[p[5]] = g
+                gid_next += 1
+            p[5] = str(g)
+            fout.write("\t".join(p) + "\n")
+            rows += 1
+            per_source[src_i] += 1
+    os.replace(tmp, corpus_path)
     return rows, gid_next, dropped, per_source
 
 
@@ -1069,6 +1114,13 @@ def main():
                          "bootstrap was saturated — untested below saturation")
     ap.add_argument("--skip-train", action="store_true",
                     help="Skip offline training (generate-only)")
+    ap.add_argument("--assemble-only", action="store_true",
+                    help="Assemble <tag>_work/corpus.tsv and stage the trainer "
+                         "inputs in <tag>_work/train/ (binary, net, starting "
+                         "state), print the exact --batch-train command, and "
+                         "exit -- for windows too large to hold the assembly's "
+                         "dedup set and the trainer's records in RAM at once "
+                         "(~37 + 40 B/row).  No ladder, promotion or gauntlet")
     ap.add_argument("--corpus", action="append", default=[],
                     help="Extra corpus TSV(s) to include in training (repeatable)")
     ap.add_argument("--corpus-window", type=int, default=0, metavar="N",
@@ -1702,12 +1754,46 @@ def main():
     log(f"{rows:,} positions assembled from {gid_next:,} distinct games "
         f"({dropped:,} duplicate rows dropped)")
 
+    def trainer_cmd(rows):
+        """The --batch-train invocation, run from <work>/train/ on ../corpus.tsv.
+        Shared by the normal path and --assemble-only so the printed command is
+        exactly the one train.py would have run."""
+        cmd = ["./Leaf_vbt", "--batch-train", "../corpus.tsv",
+               "--bt-epochs", str(args.epochs), "--bt-out", args.tag,
+               "--bt-threads", str(args.bt_threads),
+               "--bt-lr", str(args.bt_lr), "--bt-lambda", str(args.bt_lambda),
+               "--bt-K", str(args.bt_K), "--bt-batch", str(args.bt_batch),
+               # Exact row count -> the trainer reserves once instead of growing the
+               # record vector by doubling.  The doubling peak (old + new buffer
+               # live simultaneously) is ~1.5x the final size and is what actually
+               # caps corpus size on a 30 GB box: ~16 GB of transient just to reach
+               # 190M rows.  Assembly counted the rows, so hand them over.
+               "--bt-max", str(rows),
+               "--bt-seed", "1000"]
+        if args.bt_leaf_lambda is not None:
+            cmd += ["--bt-leaf-lambda", str(args.bt_leaf_lambda)]
+        if args.bt_td_lambda is not None:
+            cmd += ["--bt-td-lambda", str(args.bt_td_lambda)]
+        if args.bt_loss_gamma is not None:
+            cmd += ["--bt-loss-gamma", str(args.bt_loss_gamma)]
+        if args.bt_rows != "both":
+            cmd += ["--bt-rows", args.bt_rows]
+        return cmd
+
     # ---- Phase 5: offline consolidation (single threaded process) ---------
     tdir = work / "train"
     tdir.mkdir(exist_ok=True)
     shutil.copy2(bt_bin, tdir / "Leaf_vbt")
     shutil.copy2(net_path, tdir / args.net)
     shutil.copy2(live_td, tdir / f"{netbase}.tdleaf.bin")
+    if args.assemble_only:
+        # The trainer is left to run as its own process: on a big window the
+        # dedup set this process just built (~37 B/row) plus the trainer's
+        # records (40 B/row) do not both fit in RAM.
+        log(f"--assemble-only: corpus and trainer inputs ready in {tdir}; "
+            f"run from there:")
+        log("  " + " ".join(trainer_cmd(rows)) + " 2> train.log")
+        return
 
     # Per-epoch rating binaries are single-use (needed only for their one
     # ladder match) and relocate here rather than living flat in learn/ —
@@ -1768,26 +1854,7 @@ def main():
 
     log(f"training: {args.bt_threads} threads x {args.epochs} epochs "
         f"(lr {args.bt_lr}, lambda {args.bt_lambda}, K {args.bt_K})")
-    cmd = ["./Leaf_vbt", "--batch-train", "../corpus.tsv",
-           "--bt-epochs", str(args.epochs), "--bt-out", args.tag,
-           "--bt-threads", str(args.bt_threads),
-           "--bt-lr", str(args.bt_lr), "--bt-lambda", str(args.bt_lambda),
-           "--bt-K", str(args.bt_K), "--bt-batch", str(args.bt_batch),
-           # Exact row count -> the trainer reserves once instead of growing the
-           # record vector by doubling.  The doubling peak (old + new buffer
-           # live simultaneously) is ~1.5x the final size and is what actually
-           # caps corpus size on a 30 GB box: ~16 GB of transient just to reach
-           # 190M rows.  Assembly counted the rows, so hand them over.
-           "--bt-max", str(rows),
-           "--bt-seed", "1000"]
-    if args.bt_leaf_lambda is not None:
-        cmd += ["--bt-leaf-lambda", str(args.bt_leaf_lambda)]
-    if args.bt_td_lambda is not None:
-        cmd += ["--bt-td-lambda", str(args.bt_td_lambda)]
-    if args.bt_loss_gamma is not None:
-        cmd += ["--bt-loss-gamma", str(args.bt_loss_gamma)]
-    if args.bt_rows != "both":
-        cmd += ["--bt-rows", args.bt_rows]
+    cmd = trainer_cmd(rows)
     logf = open(tdir / "train.log", "w")
     proc = subprocess.Popen(cmd, cwd=str(tdir),
                             stdout=subprocess.DEVNULL, stderr=logf)
