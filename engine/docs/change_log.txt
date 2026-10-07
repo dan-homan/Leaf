@@ -1,5 +1,19 @@
 Changes since 2017_12_24
 
+2026_10_07 -- Whole-history offline consolidation of m260929 (Learning_
+               Investigation 1 W).  Ten legs' raw dumps (2e6g -> 6e6g, incl. the
+               sibling and soup legs; 5M games) paired root-to-leaf, filtered to
+               the R11 training rows (PV-quiet k=2, leaf-confirmed, |cp|<=1500),
+               every root label re-scored to its PV leaf's static on
+               6e6g-final, and trained from 6e6g-final for two epochs (seeds
+               1000, 1001): 382,524,119 rows, 3.1 h and 17.9 GB per epoch.
+               Depth 8, 8000 games vs classic_eval on paired openings: 6e6g
+               +127.6, epoch 1 +167.0, epoch 2 +187.9; 3+0.05, 1000 games:
+               6e6g +141.0, epoch 2 +183.5 +- 10.8.  Ingredients (diversity,
+               fresh labels, step count) not yet separated -- open line 10.
+               Artifacts: m260929-w26_final.* (epoch 1), m260929-w26e2_final.*
+               (epoch 2); one-off scripts in learn/w26/.
+
 2026_10_06 -- train.py: --assemble-only, and a bounded-memory corpus dedup.
 
                --assemble-only assembles <tag>_work/corpus.tsv, stages the

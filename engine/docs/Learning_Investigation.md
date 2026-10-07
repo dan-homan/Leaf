@@ -29,6 +29,15 @@ they disagree about status, `TODO.md` is the one to fix.
 
 ## Where things stand (2026-09-27)
 
+> **Update 2026-10-07.**  `m260929` (fresh 2026-09-29 on R11) reached +141.0 vs
+> `classic_eval` at 3+0.05 at 6M games, ~+21–27 per 500k-game d8 leg, against
+> `m260921`'s +4.2 best.  Its depth-8 gain slowed to ~+7 per leg over 5–6M.  One
+> offline consolidation over the WHOLE 2M→6M history (10 legs, 382.5M PV-quiet
+> leaf-confirmed root rows, every label re-scored on the current net, 2 epochs)
+> added **+60.3 at depth 8 and +42.5 ± 14.6 at 3+0.05** over 6e6g-final (§1 W) —
+> about eight recent legs' worth at d8, from ~7 h of offline compute and no new
+> games.
+
 > **Update 2026-09-29.**  The PV is now dumped on every root row, and selecting
 > offline rows by PV quietness instead of the 60 cp residual gate is worth
 > **+24.9 ± 5.0** on the anchor at depth 8 (§1 V).  It is the `train.py` default,
@@ -346,6 +355,48 @@ all; P1 moves −16% and −1.8%.  `train.py --bt-quiet-pv 2` (P1) is the defaul
 from here.  One leg, one seed, depth-8 scale only — the time-control size and a
 chain replication are open (§6).
 
+**W. A MATURE CHAIN'S WHOLE HISTORY, RE-LABELLED, IS WORTH MORE THAN ANOTHER
+LEG (2026-10-07).**  At 6M games `m260929`'s depth-8 anchor was gaining ~+7 per
+leg.  Its last ten legs' raw dumps (2e6g → 6e6g incl. the sibling 5e6g and the
+soup leg 5e6gS; 5M distinct games) were consolidated in one offline run from
+`6e6g-final`:
+
+- **Rows:** every root row that trains under R11 — PV-quiet (k=2), `leaf_ok` (or,
+  pre-`leaf_ok`, a paired leaf row), |cp| ≤ 1500 — 383,977,887 paired; 382,524,119
+  after the |cp| cap on the new labels and dedup (964 dropped).
+- **Labels:** each root's label replaced by its PV leaf's static on the START net
+  (`--bt-rescore`, the retargeting of §4).  Staleness grew with age: mean
+  |new − old| 24.5 cp on 6e6g up to 88.6 cp on 2e6g (30.6% moved > 100 cp), with
+  no signed bias (±0.4 cp) on any leg.
+- **Training:** standard trainer and LRs, 8 threads, one epoch at seed 1000
+  (747k optimizer steps, ~5× a normal two-epoch leg), then a second epoch from
+  its state at seed 1001.  3.1 h per epoch; 17.9 GB resident.
+
+| net | d8 vs classic (8000 g, paired openings) | d8 head-to-head | 3+0.05 vs classic | held-out MSE blend / outcome |
+|---|---|---|---|---|
+| 6e6g-final (start) | +127.6 ± 3.7 | — | +141.0 ± 9.8 | 0.011545 / 0.090481 |
+| window, epoch 1 | +167.0 ± 3.9 | +43.7 ± 4.5 vs start | — | 0.011012 / 0.089745 |
+| **window, epoch 2** | **+187.9 ± 4.0** | +31.0 ± 4.4 vs epoch 1 | **+183.5 ± 10.8** | 0.010765 / 0.089244 |
+
+**+60.3 at depth 8 and +42.5 ± 14.6 at the time control** — the instruments agree
+within error, so this is strength, not a depth-8 artefact.  The in-epoch loss
+(first-epoch rows are unseen when trained on) fell steadily through all 363M rows
+and was still falling at the end; epoch 2 halved the Elo increment (+39 → +21)
+with train MSE dipping just below validation — a third pass is probably near the
+point of diminishing returns.
+
+**What it does NOT separate**, all moved at once: (1) game diversity and dose —
+10× the rows from 5M games, which §1 H found worth ~+36 on a mature chain;
+(2) fresh labels — without re-scoring, the oldest legs' labels were 60–90 cp
+stale; (3) optimization length — ~5× the steps per epoch.  §6 item 10.
+
+Practicalities: `train.py --assemble-only` and a bounded-memory dedup were added
+for this (the in-loop Python dedup set cost ~80 B/row and was OOM-killed at 26 GB);
+the pairing/re-labelling ran as one-off scripts (`learn/w26/pair_leg.py`,
+`rescore_all.sh`, `relabel.py`), not yet part of `train.py`.  15 trainer threads
+were measured SLOWER than 8 (the serial clip-norm tail, 64–71% of batch time,
+does not parallelise).
+
 **O. CORPUS STATISTICS ARE NOT TRAINING HYPERPARAMETERS.**  Seven arms fitted K,
 λ or the outcome weight to the corpus; **seven lost on the anchor** (−5.7 to
 −33.5), across three parameters, both scale and shape, and both directions,
@@ -607,6 +658,10 @@ mature net; assume they are untested on a young one unless the row says otherwis
 | PV quietness (no tactic in plies 1–2, no residual gate) beats the 60 cp gate | §1 V | +24.9 ± 5.0 at d8, 8000 g, same state/games/budget | R11 | SUPPORTED (one leg) |
 | The gain is the gate-rejected quiet rows; the gate's loud rows and >200 cp rows are neutral | §1 V | P1∩G60 vs G60s −1.4 ± 5; P2 vs P1 −1.6 ± 5 | R11 | SUPPORTED |
 | Requiring the PV to be confirmed by its leaf (`leaf_ok`) is Elo-neutral | `m260929-3e6g-pvok` | −0.7 ± 5 at d8, 8000 g; 3.1% of P1 rows dropped, mostly short draw PVs | R11 | SUPPORTED — adopted for correctness |
+| A whole-history window (10 legs, 382.5M rows, labels re-scored on the start net) beats another generation leg | §1 W | +60.3 at d8 (8000 g, paired), +42.5 ± 14.6 at 3+0.05, vs ~+7 per recent leg | R11 | SUPPORTED (one run; ingredients not separated) |
+| A second epoch over that window still pays | §1 W | +31.0 ± 4.4 head-to-head; +20.9 ± 5.6 on the d8 anchor | R11 | SUPPORTED |
+| Two sibling legs from one parent agree within error; their weight average is at least as good as the better one | `m260929-4.5e6g` / `-5e6g` / soup | siblings +88.9 / +97.0; soup +100.7 (d8, 8000 g) | R11 | SUPPORTED |
+| The trainer does not scale past 8 threads | 3M-row benchmark | 8 thr 32.8k rows/s, 15 thr 25.8k (serial tail 64% → 71%) | — | **ESTABLISHED** |
 | Game diversity is worth ~+40 at identical compute — on a mature chain | Offline 2.4 | +36 anchor / +45 paired | R4 | **ESTABLISHED** (R4 only) |
 | …and is not helpful on the young chain | `cons1` base vs null | −9.2 ± 8.8 paired, −12.1 ± 9.9 anchor | R9 | SUPPORTED |
 | Outcome weight above the default costs ~20 Elo | §1 U | −20.5 ± 9.1 paired, −20.1 ± 9.9 anchor | R9 | **ESTABLISHED** |
@@ -787,7 +842,33 @@ root row carries the walked PV (`pv` column, `.tdg` v3); root rows are dumped
 ungated, the |cp| ≤ 1500 cap moved to assembly; offline rows are selected by
 `train.py --bt-quiet-pv 2` (no capture/check/promotion in PV plies 1–2, no
 residual gate) instead of the 60 cp residual gate (§1 V).  First measured on
-`m260921-4.5e6g`'s corpus; a fresh chain starts on it.
+`m260921-4.5e6g`'s corpus; a fresh chain starts on it.  Root rows also carry
+`leaf_ok` from 2026-10-02 (required in PV mode), and an offline phase whose ladder
+is all ≤ 0 keeps the pre-offline net (`train.py`, from 2026-09-29).
+
+`m260929`, from `--init-nnue material` on R11 (d6 to 1.5M, then d8; depth-8
+gauntlets with a 3+0.05 continuity match per leg):
+
+| games | 3+0.05 vs classic | `m260921` same games | d8 vs classic (final) | note |
+|---|---:|---:|---:|---|
+| 100k | −300.0 | −364.1 | −192.5 | |
+| 200k | −276.7 | −259.9 | −119.4 | offline rejected |
+| 500k | −220.9 | −165.4 | −84.1 | offline rejected |
+| 1M | −122.2 | −109.5 | −57.6 | |
+| 1.5M | −101.8 | −92.8 | −28.7 | offline rejected |
+| 2M | −57.9 | −89.9 | −3.6 | switch to d8 |
+| 2.5M | −12.2 | −58.6 | +30.9 | |
+| 3M | +14.3 | −32.8 | +33.1 | |
+| 3.5M | +25.1 | −33.8 | +57.5 | |
+| 4M | +48.6 | −21.2 | +72.2 | |
+| 4.5M | +78.1 | +4.2 | +82.3 | sibling 5e6g +87.3 / +86.4; soup +100.7 (d8, 8000 g) |
+| 5M | +89.5 | — | +108.1 | from the soup |
+| 5.5M | +93.6 | — | +115.8 | |
+| 6M | +141.0 | — | +122.3 | |
+| window (§1 W) | **+183.5** | — | **+187.9** (8000 g) | 2 epochs over 2M→6M, re-labelled |
+
+Draw rate 34.8 → 35.9% over the d8 legs; depth-8 search time per move fell
+9.34 → 7.93 ms (§6 item 9).
 
 ---
 
@@ -1080,6 +1161,15 @@ chains converge near 8.0–8.2 ms — a property of maturing nets, not of the R1
 recipe.  It is invisible to the depth-8 instrument and would show at a time
 control.  Caveats: wall clock under a constant actor load, not node counts.  The
 clean measurement is nodes to depth 8 on a fixed position set per leg's final.
+
+**10. Separate the window's ingredients (§1 W).**  The +60 at depth 8 moved three
+things at once.  Paired offline arms from the same start (6e6g-final), each rated
+at d8 8000 g on the same openings, would separate them: (a) the same window
+WITHOUT re-labelling (stale labels, same rows and steps); (b) re-labelled, but
+only the most recent 2–3 legs at the same step count (diversity vs freshness);
+(c) the last leg alone at ~5× its usual steps (optimization length).  Worth doing
+before the window becomes a routine step in the loop — and the pairing/re-label
+scripts belong in `train.py` if it does.
 
 **8. Attack Σ directly.**  Shuffle records across a pool of games before forming
 a learner batch — the offline-style decorrelation, never tried, and the only way
