@@ -103,6 +103,8 @@ Run from engine/learn/.  Artifacts land in learn/ and <tag>_work/:
 
 import argparse
 import array
+import concurrent.futures
+import functools
 import gzip
 import itertools
 import hashlib
@@ -516,12 +518,26 @@ def write_corpus(corpus_path, sources, sizes, quota, game_ply_axis, row_kind=0,
     return rows, gid_next, dropped, per_source
 
 
-def _split_rows(files, root_out, leaf_out):
+def root_row_trainable(col, pv_k):
+    """The label-INDEPENDENT part of row_quiet() in PV mode: the `pv` test and
+    `leaf_ok`.  Safe to apply before re-labelling (the |cp| cap, which depends on
+    the label, is applied at assembly on the new label).  Rows without a `pv`
+    column pass -- the residual gate decides them at assembly."""
+    if len(col) >= 10 and col[9] != "1":
+        return False
+    if len(col) >= 9:
+        return pv_quiet(col[8], pv_k)
+    return True
+
+
+def _split_rows(files, root_out, leaf_out, keep_root=None):
     """Stream SOURCE files into separate root/leaf files, preserving order.
 
     Handles both shapes a source can take: the raw dumps, already separate
     (<tag>.<pid>.root.tsv[.gz] and .leaf.tsv[.gz]), and a single assembled
-    corpus.tsv.gz holding both types interleaved by block.  Returns
+    corpus.tsv.gz holding both types interleaved by block.  KEEP_ROOT, if
+    given, is a predicate on a root row's columns; rows failing it are not
+    written (they would be dropped at assembly anyway).  Returns
     (n_root, n_leaf, game_ply_axis)."""
     nr = nl = 0
     axis = False
@@ -540,7 +556,8 @@ def _split_rows(files, root_out, leaf_out):
                         continue
                     if col[4] == "0":
                         lo.write(line); nl += 1
-                    else:
+                    elif keep_root is None or \
+                            keep_root(line.rstrip("\n").split("\t")):
                         ro.write(line); nr += 1
     return nr, nl, axis
 
@@ -573,7 +590,7 @@ def _merge_join(root_in, leaf_in, pairs_root, pairs_leaf):
     return n
 
 
-def retarget_source(label, files, rt_dir, frac):
+def retarget_source(label, files, rt_dir, frac, keep_root=None, threads=8):
     """Rebuild a source's root rows with labels taken from their PV leaf,
     re-evaluated on the CURRENT weights (D. Homan's retargeting proposal).
 
@@ -592,7 +609,7 @@ def retarget_source(label, files, rt_dir, frac):
     safe = re.sub(r"[^A-Za-z0-9_.-]", "_", label)
     root_in  = rt_dir / f"{safe}.root.tsv"
     leaf_in  = rt_dir / f"{safe}.leaf.tsv"
-    nr, nl, axis = _split_rows(files, root_in, leaf_in)
+    nr, nl, axis = _split_rows(files, root_in, leaf_in, keep_root)
     if nr == 0 or nl == 0:
         root_in.unlink(missing_ok=True); leaf_in.unlink(missing_ok=True)
         return None
@@ -608,7 +625,7 @@ def retarget_source(label, files, rt_dir, frac):
     cp_out = rt_dir / f"{safe}.leaf_cp.txt"
     sh(["./Leaf_vbt", "--batch-train", str(pl.resolve()),
         "--bt-rescore", str(cp_out.resolve()),
-        "--bt-threads", 8, "--bt-max", npair + 1000], cwd=rt_dir)
+        "--bt-threads", threads, "--bt-max", npair + 1000], cwd=rt_dir)
     with open(cp_out) as f:
         ncp = sum(1 for _ in f)
     if ncp != npair:
@@ -1114,6 +1131,22 @@ def main():
                          "bootstrap was saturated — untested below saturation")
     ap.add_argument("--skip-train", action="store_true",
                     help="Skip offline training (generate-only)")
+    ap.add_argument("--consolidate", type=int, default=0, metavar="N",
+                    help="Whole-history offline consolidation: no new games; "
+                         "the last N legs of the --continue chain (raw dumps, "
+                         "the --continue leg included) are paired root-to-leaf, "
+                         "every root label is re-scored to its PV leaf on the "
+                         "starting net (the --continue leg's final), and ALL "
+                         "training rows are consolidated.  Shorthand for "
+                         "--skip-online --corpus-window N --bt-rescore 1.0 "
+                         "--corpus-weight game --corpus-rows all --bt-rows root; "
+                         "the sidecar records gen_mode 'consolidation' so the "
+                         "run is a chain step.  Measured (Learning_Investigation "
+                         "1 W): 10 legs, 382.5M rows, two epochs: +60 at depth 8 "
+                         "and +42 at 3+0.05 over the starting net")
+    ap.add_argument("--retarget-jobs", type=int, default=8, metavar="J",
+                    help="Sources re-labelled in parallel under --bt-rescore "
+                         "(default 8)")
     ap.add_argument("--assemble-only", action="store_true",
                     help="Assemble <tag>_work/corpus.tsv and stage the trainer "
                          "inputs in <tag>_work/train/ (binary, net, starting "
@@ -1152,12 +1185,14 @@ def main():
                          "'game' stops a small stale leg outweighing a large "
                          "fresh one.  Does not change how many distinct games "
                          "reach the corpus, only their relative weight")
-    ap.add_argument("--corpus-rows", type=int, default=0, metavar="N",
+    ap.add_argument("--corpus-rows", type=lambda v: -1 if v == "all" else int(v),
+                    default=0, metavar="N|all",
                     help="Total row budget for the assembled corpus, split "
                          "evenly across this run's dump and each window corpus. "
                          "0 (default) = auto: match this run's own dump row "
                          "count, so the window changes WHICH games the rows "
-                         "come from without changing how many there are")
+                         "come from without changing how many there are.  "
+                         "'all' = every eligible row of every source")
     ap.add_argument("--corpus-window-max-stale", type=float, default=0.0,
                     metavar="ELO",
                     help="Drop window corpora whose GENERATOR rates more than "
@@ -1318,6 +1353,18 @@ def main():
                          "stays uncompressed) — <tag>_work/ is never deleted "
                          "either way, this only controls pruning aggressiveness")
     args = ap.parse_args()
+
+    if args.consolidate:
+        if not args.continue_tag:
+            die("--consolidate needs --continue: it consolidates the last N legs "
+                "of that chain, starting from that leg's final net")
+        args.skip_online = True
+        args.corpus_window = args.consolidate
+        if args.bt_rescore is None:
+            args.bt_rescore = 1.0
+        args.corpus_weight = "game"
+        args.corpus_rows = -1
+        args.bt_rows = "root"
 
     # Validate before anything has side effects — promoting --state to the live
     # state happens further down, and a run that dies after that has already
@@ -1636,9 +1683,24 @@ def main():
         shutil.copy2(live_td, rt_dir / f"{netbase}.tdleaf.bin")
         log(f"--bt-rescore {args.bt_rescore:g}: relabelling root rows from their "
             f"PV leaf on the seed weights ({live_td.name})")
+        # Pre-filter root rows on the label-independent part of the training
+        # rule (PV mode only), so ~45% fewer rows are paired and rescored, and
+        # retarget the sources in parallel -- each is an independent stream of
+        # gzip + Python, ~10-15 min alone for a 500k-game leg.
+        keep = (functools.partial(root_row_trainable, pv_k=args.bt_quiet_pv)
+                if args.bt_quiet_pv > 0 else None)
+        jobs = max(1, min(len(sources), args.retarget_jobs))
+        log(f"  retargeting {len(sources)} source(s), {jobs} in parallel")
+        with concurrent.futures.ProcessPoolExecutor(max_workers=jobs) as ex:
+            outs = list(ex.map(retarget_source,
+                               [t for t, _, _ in sources],
+                               [f for _, f, _ in sources],
+                               [rt_dir] * len(sources),
+                               [args.bt_rescore] * len(sources),
+                               [keep] * len(sources),
+                               [max(2, 16 // jobs)] * len(sources)))
         retargeted, unpairable = [], []
-        for tag, files, elo in sources:
-            out = retarget_source(tag, files, rt_dir, args.bt_rescore)
+        for (tag, files, elo), out in zip(sources, outs):
             if out is None:
                 unpairable.append(tag)
             else:
@@ -1683,7 +1745,9 @@ def main():
             f"only — the other row type is dropped at assembly.  The raw "
             f"dumps (both row types, root `pv` column included) are kept, "
             f"gzipped in place, at end of run.")
-    if args.corpus_rows > 0:
+    if args.corpus_rows == -1:
+        budget = sum(sizes)    # --corpus-rows all
+    elif args.corpus_rows > 0:
         budget = args.corpus_rows
     elif len(sources) > 1:
         budget = sizes[0]      # auto: hold the total at this run's own dump size
@@ -2109,7 +2173,9 @@ def main():
         "date": time.strftime("%Y-%m-%d"),
         "games_this_iter": games_this_iter,
         "cumulative_games": cumulative_games,
-        "gen_mode": ("skip-online" if args.skip_online else "actor-learner"),
+        "gen_mode": ("consolidation" if args.consolidate else
+                     "skip-online" if args.skip_online else "actor-learner"),
+        "consolidate_window": args.consolidate or None,
         "depth": args.depth,
         "nodes": args.nodes,
         "eval_noise": args.eval_noise,

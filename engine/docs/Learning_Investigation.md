@@ -393,7 +393,8 @@ stale; (3) optimization length — ~5× the steps per epoch.  §6 item 10.
 Practicalities: `train.py --assemble-only` and a bounded-memory dedup were added
 for this (the in-loop Python dedup set cost ~80 B/row and was OOM-killed at 26 GB);
 the pairing/re-labelling ran as one-off scripts (`learn/w26/pair_leg.py`,
-`rescore_all.sh`, `relabel.py`), not yet part of `train.py`.  15 trainer threads
+`rescore_all.sh`, `relabel.py`); it is now `train.py --consolidate N` (2026-10-08,
+verified row-for-row against an independent reimplementation).  15 trainer threads
 were measured SLOWER than 8 (the serial clip-norm tail, 64–71% of batch time,
 does not parallelise).
 

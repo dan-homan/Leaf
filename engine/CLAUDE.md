@@ -237,6 +237,10 @@ python3 scripts/train.py --tag iter1 --games 188000 --depth 8 \
 # Chained iteration: --continue reads the previous run's sidecar JSON
 python3 scripts/train.py --tag iter2 --continue iter1 --games 188000 --depth 8
 
+# Whole-history consolidation (no new games): last N legs re-labelled on the
+# --continue leg's final net and consolidated in one offline run (TRAINING.md)
+python3 scripts/train.py --tag iter2-cons6 --continue iter2 --consolidate 6 --epochs 2
+
 # Standalone actor/learner run (what train.py's generation phase wraps; from learn/)
 python3 scripts/selfplay_run.py --binary Leaf_vtrain_hl_a --epd training_openings.epd \
     --actors 8 --depth 8 --games-per-actor 1000 --total-games 100000 \

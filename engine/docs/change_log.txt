@@ -1,5 +1,26 @@
 Changes since 2017_12_24
 
+2026_10_08 -- train.py --consolidate N: whole-history consolidation as a
+               regular chain step.
+
+               Shorthand for --skip-online --corpus-window N --bt-rescore 1.0
+               --corpus-weight game --corpus-rows all --bt-rows root, requiring
+               --continue: the last N legs' raw dumps are paired root-to-leaf,
+               root labels re-scored to their PV leaf on the --continue leg's
+               final, and every training row consolidated.  Supporting changes:
+               --corpus-rows all; root rows pre-filtered on the label-
+               independent part of the rule (PV-quiet, leaf_ok) before pairing
+               (root_row_trainable), so ~45% fewer rows are paired and
+               rescored; legs re-labelled in parallel (--retarget-jobs, default
+               8); sidecar gen_mode 'consolidation' + consolidate_window;
+               leg_summary.py sorts a consolidation after its parent.
+
+               Verified on a throwaway three-leg chain built from slices of the
+               6.5e6g/7e6g/7.5e6g dumps: the assembled corpus equals an
+               independent reimplementation of the rule (pair, PV-quiet +
+               leaf_ok, re-score on the same state, cap on the new label) as a
+               multiset of (fen, label) -- 235,062 rows, 0 missing, 0 extra.
+
 2026_10_07 -- Whole-history offline consolidation of m260929 (Learning_
                Investigation 1 W).  Ten legs' raw dumps (2e6g -> 6e6g, incl. the
                sibling and soup legs; 5M games) paired root-to-leaf, filtered to

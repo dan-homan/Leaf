@@ -1105,6 +1105,30 @@ arm and costs ~28 Elo.  Corpora dumped before 2026-09-03 have no `gate` column
 and pass through untouched — they were already gated at dump time, so a window
 that mixes old and new corpora is gated consistently at 60 either way.
 
+#### Whole-history consolidation — `train.py --consolidate N` (since 2026-10-08)
+
+An offline-only chain step: no new games.  The last N legs of the `--continue`
+chain (raw dumps, the `--continue` leg included) are paired root-to-leaf, every
+root label is re-scored to its PV leaf's static on the STARTING net (the
+`--continue` leg's final), and ALL training rows are consolidated:
+
+```sh
+python3 train.py --tag m260929-7.5e6g-cons6 --continue m260929-7.5e6g --consolidate 6 \
+    --epochs 2 --gauntlet-epochs --gauntlet-tdleaf --gauntlet-depth 8 ... (usual rating flags)
+```
+
+`--consolidate N` is shorthand for `--skip-online --corpus-window N --bt-rescore 1.0
+--corpus-weight game --corpus-rows all --bt-rows root`.  Root rows are pre-filtered
+on the label-independent part of the training rule (PV-quiet, `leaf_ok`) before
+pairing, the legs are re-labelled in parallel (`--retarget-jobs`, default 8), and
+the |cp| ≤ 1500 cap applies to the NEW label at assembly.  The sidecar records
+`gen_mode: consolidation`, so `leg_summary.py` shows it as a chain step (sorted after
+its parent) and the next leg continues from it as usual.  Memory: the assembly
+dedup is 8 B/row (bounded), the trainer 40 B/row — ~18 GB at 380M rows; use
+`--assemble-only` and run the printed trainer command separately if both would not
+fit.  Measured first by hand (`Learning_Investigation.md` §1 W): 10 legs, 382.5M
+rows, two epochs → +60 at depth 8 and +42 at 3+0.05 over the starting net.
+
 #### PV quietness — `train.py --bt-quiet-pv` (the default since 2026-09-29)
 
 The residual gate conditions on the label's own error: it keeps positions where

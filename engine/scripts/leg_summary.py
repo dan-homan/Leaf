@@ -93,7 +93,10 @@ def sidecars(chain):
             out.append(json.load(open(f)))
         except Exception:
             pass
-    out.sort(key=lambda j: (j.get("cumulative_games", 0), j.get("tag", "")))
+    # A consolidation (train.py --consolidate) adds no games, so it shares its
+    # parent's cumulative count -- it must still sort AFTER that parent.
+    out.sort(key=lambda j: (j.get("cumulative_games", 0),
+                            j.get("gen_mode") == "consolidation", j.get("tag", "")))
     return out
 
 
