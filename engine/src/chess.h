@@ -433,6 +433,8 @@ struct tree_search {
   int start_depth;              // start depth of search  
   int last_depth;               // depth of previous search
   int g_last;                   // last returned score of search
+  move pv_done[MAXD];           // root PV of the last COMPLETED iteration
+  const move *record_pv;        // PV for tdleaf_record_ply (pc[0] or pv_done)
   static const int TD_ID_HIST = 4; // number of ID depth scores to track
   int id_scores[TD_ID_HIST];   // last TD_ID_HIST iterative-deepening scores (cp)
   int id_score_count;          // valid entries in id_scores (0..TD_ID_HIST)

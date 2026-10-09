@@ -142,6 +142,10 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
   // trustworthy: it may be last search's, a book/singular stub, or a fail-high
   // stub.  See TDLEAF_SKIP_STUB_PV.
   tdleaf_pv_is_stub = 1;
+  // PV handed to tdleaf_record_ply: the live PV unless the search ends on an
+  // ABORTED iteration, in which case the last completed iteration's snapshot
+  // (pv_done, set with g_last).  See the completed-iteration block below.
+  record_pv = tdata[0].pc[0];
 #if PV_LAST_RESOLVED
   pv_saved_valid = 0;   // per-search: never carry a PV across positions
 #endif
@@ -572,6 +576,27 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
       // last_depth: its old use as a start_depth hint is dead, overridden by
       // the forced start_depth = 1 above.
       last_depth = max_ply;
+      // The same trap applied to g_last, the ID score history and the root PV:
+      // they were updated at the bottom of the loop, after the break checks,
+      // so a node budget (soft limit, checked after a completed iteration) or
+      // a clock left g_last ONE ITERATION STALE while pc[0] held the newer
+      // PV -- the recorded score did not belong to the recorded line.  Under
+      // --nodes 5000 only 42% of records passed the leaf-match test (vs ~97%
+      // at fixed depth, which exits through the normal end of the loop).
+      // Update them here, for every completed iteration, and snapshot the PV
+      // so a later aborted iteration cannot overwrite the recorded one.
+      g_last = g;
+      if (id_score_count < TD_ID_HIST) id_score_count++;
+      for (int _i = 0; _i < id_score_count - 1; _i++)
+          id_scores[_i] = id_scores[_i + 1];
+      id_scores[id_score_count - 1] = g;
+      last_best_move = tdata[0].pc[0][0].t;
+      for (int _i = 0; _i < MAXD; _i++) {
+          pv_done[_i] = tdata[0].pc[0][_i];
+          if (!pv_done[_i].t) break;
+      }
+      pv_done[MAXD - 1].t = NOMOVE;
+      record_pv = pv_done;
     }
 
     // check total time used in this search
@@ -614,13 +639,8 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
       search_cfg.check_inter -= 1;
     }
 
-    g_last = g;
-    // push this depth's score into the ID history ring (oldest dropped when full)
-    if (id_score_count < TD_ID_HIST) id_score_count++;
-    for (int _i = 0; _i < id_score_count - 1; _i++)
-        id_scores[_i] = id_scores[_i + 1];
-    id_scores[id_score_count - 1] = g;
-    last_best_move = tdata[0].pc[0][0].t;
+    // (g_last, the ID score history, last_best_move and the recorded PV are
+    // updated above, as soon as the iteration completes.)
 
     // keep track of how many iterations we've had the
     // same mate score for
@@ -635,6 +655,12 @@ move tree_search::search(position p, int time_limit, int T, game_rec *gr)
     if((g == 0 && max_ply > MAXD-3) || (mate_iteration_count > 1)) break;
 
   }
+
+  // Ended on a completed iteration: record the live PV (as before, so the
+  // PV_LAST_RESOLVED substitution below still reaches the record).  Ended on
+  // an aborted one: keep record_pv = pv_done, the line g_last belongs to.  The
+  // move PLAYED is unchanged either way -- the partial iteration's best.
+  if (g != -TIME_FLAG) record_pv = tdata[0].pc[0];
 
   //------------------------------------------------------------------
   //  Clean up after search, record time used and proto.post/log results

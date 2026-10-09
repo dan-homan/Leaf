@@ -663,6 +663,7 @@ mature net; assume they are untested on a young one unless the row says otherwis
 | A second epoch over that window still pays | §1 W | +31.0 ± 4.4 head-to-head; +20.9 ± 5.6 on the d8 anchor | R11 | SUPPORTED |
 | Two sibling legs from one parent agree within error; their weight average is at least as good as the better one | `m260929-4.5e6g` / `-5e6g` / soup | siblings +88.9 / +97.0; soup +100.7 (d8, 8000 g) | R11 | SUPPORTED |
 | The trainer does not scale past 8 threads | 3M-row benchmark | 8 thr 32.8k rows/s, 15 thr 25.8k (serial tail 64% → 71%) | — | **ESTABLISHED** |
+| Under a node budget the recorded score and PV came from different iterations (fixed 2026-10-08) | `m260929-8e6g` (stopped), smoke test | leaf_ok 41.9% live / 40.2% smoke → 95.2% fixed; d8 rows 47 → 97% | R11 | **ESTABLISHED** — any node-budget corpus before the fix is suspect |
 | Game diversity is worth ~+40 at identical compute — on a mature chain | Offline 2.4 | +36 anchor / +45 paired | R4 | **ESTABLISHED** (R4 only) |
 | …and is not helpful on the young chain | `cons1` base vs null | −9.2 ± 8.8 paired, −12.1 ± 9.9 anchor | R9 | SUPPORTED |
 | Outcome weight above the default costs ~20 Elo | §1 U | −20.5 ± 9.1 paired, −20.1 ± 9.9 anchor | R9 | **ESTABLISHED** |

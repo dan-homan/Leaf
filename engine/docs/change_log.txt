@@ -1,5 +1,35 @@
 Changes since 2017_12_24
 
+2026_10_08b -- search.cpp: under a node budget the recorded score and PV
+               no longer come from different iterations.
+
+               Two bugs, both invisible at fixed depth (which leaves the ID loop
+               through its normal end):
+               (1) g_last, the ID score history and last_best_move were updated
+                   at the bottom of the loop, AFTER the break checks.  The node
+                   budget's soft limit (checked after a completed iteration) and
+                   a clock both break there, so the recorded score was the
+                   PREVIOUS iteration's while pc[0] held the newer PV -- the trap
+                   last_depth was already moved out of.  They are now updated in
+                   the completed-iteration block.
+               (2) The budget's hard ceiling aborts an iteration midway, after
+                   root pc_updates of the partial iteration have rewritten pc[0].
+                   The completed iteration's PV is now snapshotted (pv_done) and
+                   tree_search::record_pv hands it to tdleaf_record_ply when the
+                   search ends on an abort; otherwise it is pc[0] as before.  The
+                   move PLAYED is unchanged (the partial iteration's best).
+
+               m260929-8e6g (--depth 8 --nodes 5000) was stopped after ~15 min:
+               only 41.9% of root rows passed leaf_ok (fixed depth: ~97%).  The
+               actor/learner smoke test at the same settings: leaf_ok 40.2% ->
+               95.2% (d8 47.0 -> 97.2, d9 36.4 -> 96.7, d10 32.1 -> 92.9, d11+
+               28.3 -> 79.8); all 44,929 replayed PV moves legal, all 4,072
+               paired PVs end at their leaf.  Play is unchanged: with a fresh
+               hash per game the old and new binaries play identical moves in
+               6/6 openings under --nodes 5000 and 6/6 games at fixed depth (only
+               score adjudication in direct --selfplay, which reads the
+               corrected scores, can end a game at a different ply).
+
 2026_10_08 -- train.py --consolidate N: whole-history consolidation as a
                regular chain step.
 

@@ -871,7 +871,7 @@ void make_move()
        tdleaf_record_ply(game.td_game,
                          game.pos,
                          game.ts.tdata[0].n[0].acc,
-                         game.ts.tdata[0].pc[0],
+                         game.ts.record_pv,
                          game.ts.g_last,
                          game.ts.id_scores,
                          game.ts.id_score_count,
