@@ -320,14 +320,21 @@ def chain_corpora(continue_tag, window, anchors):
     out, tag, seen = [], continue_tag, set()
     while tag and len(out) < window and tag not in seen:
         seen.add(tag)
-        parent = None
+        parent, mode = None, None
         sc = LEARN_DIR / f"{tag}_final.json"
         if sc.is_file():
             try:
                 with open(sc) as f:
-                    parent = json.load(f).get("parent_tag")
+                    j = json.load(f)
+                parent, mode = j.get("parent_tag"), j.get("gen_mode")
             except (OSError, ValueError):
                 parent = None
+        # A consolidation step played no games: its work dir holds only the
+        # assembled window corpus.tsv.gz, which is older legs' rows again.
+        # Walk through it to its parent without counting it against WINDOW.
+        if mode == "consolidation":
+            tag = parent
+            continue
         files = chain_corpus_files(LEARN_DIR / f"{tag}_work")
         if files:
             out.append((tag, files, final_anchor_elo(parent, anchors)))

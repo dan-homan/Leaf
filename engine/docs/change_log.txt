@@ -1,5 +1,17 @@
 Changes since 2017_12_24
 
+2026_10_13 -- train.py: the --corpus-window / --consolidate chain walk now
+               steps through consolidation legs instead of counting them.
+
+               A consolidation plays no games; its work dir holds only the
+               assembled window corpus.tsv.gz (older legs' rows, relabelled,
+               root only).  chain_corpus_files fell back to that file, so a
+               window walked back across a consolidation re-used those legs'
+               rows and spent one window slot on them -- and under
+               --bt-rescore the run died, the corpus having no leaf rows to
+               pair.  chain_corpora now skips any leg whose sidecar gen_mode is
+               "consolidation" without counting it against the window.
+
 2026_10_08b -- search.cpp: under a node budget the recorded score and PV
                no longer come from different iterations.
 
