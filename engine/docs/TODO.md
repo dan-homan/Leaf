@@ -82,6 +82,17 @@ inflation that comes with it is harmless.
   does (+7.5 ± 4.3 vs +2.3), and it frees the learner core.  Risk: generation no
   longer learns from outcomes, and offline targets are nearly all search scores.
 
+- [ ] **O3 — sparse online updates (branch `sparse-online-updates`, 2026-11-14).**
+  Data efficiency: apply only each step's most robust components
+  (`--sparse-snr F`, `--sparse-agree TAU`; TRAINING.md "Sparse online updates").
+  Implemented and verified; no Elo yet.  Rate on two beds with the O1 probe
+  protocol (100k online-only games, d8 4000-game head-to-head vs the start):
+  mature `m260929-9e6g-cons6` (does the −35 online loss shrink?) and a younger
+  net such as `m260929-3e6g` final (more Elo per game?).  First arms: baseline,
+  `--sparse-snr 0.1`, `--sparse-agree 0.2` — the last against a PSQT-frozen
+  reading, since the strict AND-mask keeps ~0.1% of PSQT.  Run beside O1: robust
+  ≠ correct if the online loss is a target bias (§1 X).
+
 ### Generation sharpness and depth (2026-09-21)
 
 Rationale: `Learning_Investigation.md` §1 M (the old §6 item 7 is preserved in

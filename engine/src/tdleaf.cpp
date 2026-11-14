@@ -879,6 +879,11 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
         }
     }
 
+    // Sparse variant 2: the game accumulates into its own buffer so its
+    // per-weight gradient signs can be counted before it joins the batch sum.
+    // nullptr (variant 2 off) = the global batch accumulator, as always.
+    NNUEGradBuf *game_gb = nnue_sparse_game_buf();
+
     for (int t = 0; t < T; t++) {
         float sig_grad = d[t] * (1.0f - d[t]) / TDLEAF_K;
         // wtm_sign converts ∂d_t/∂w (white-POV utility we want to ascend)
@@ -927,10 +932,11 @@ static void tdleaf_accumulate_game(TDGameRecord &rec, float result)
                 act.piece_count_diff[pt - 1] = (int8_t)(rec.plies[ix[t]].pos.plist[stm_p][pt][0]
                                                        - rec.plies[ix[t]].pos.plist[stm_p ^ 1][pt][0]);
 
-            nnue_accumulate_gradients(act, grad_scale);
+            nnue_accumulate_gradients(act, grad_scale, game_gb);
             td_grad_samples++;
         }
     }
+    if (game_gb) nnue_sparse_game_end();
 }
 
 // ---------------------------------------------------------------------------

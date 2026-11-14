@@ -162,6 +162,16 @@ def main():
                     help="Normalise the accumulated gradient by positions in the "
                          "step (mean, not batch sum), so the scale no longer "
                          "depends on batch size (7.10)")
+    ap.add_argument("--sparse-snr", type=float, default=0.0, metavar="F",
+                    help="Learner: apply only the top fraction F of each weight "
+                         "section, ranked by Adam |m/sqrt(v)| (0 = off).  See "
+                         "TRAINING.md 'Sparse online updates'")
+    ap.add_argument("--sparse-agree", type=float, default=0.0, metavar="TAU",
+                    help="Learner: apply only weights whose per-game gradient "
+                         "signs agree, |pos-neg| >= TAU x denominator (0 = off)")
+    ap.add_argument("--sparse-agree-min", type=int, default=0, metavar="N",
+                    help="--sparse-agree denominator: 0 = games in the batch "
+                         "(strict AND-mask), N = max(games touching, N)")
     ap.add_argument("--lr-scale", type=float, default=1.0,
                     help="Uniform multiplier on every online Adam/RMSProp step "
                          "(default 1.0 = unchanged), mirroring --bt-lr offline. "
@@ -215,6 +225,12 @@ def main():
         learner_cmd += ["--refresh-scores"]
     if args.lr_scale != 1.0:
         learner_cmd += ["--lr-scale", str(args.lr_scale)]
+    if args.sparse_snr > 0:
+        learner_cmd += ["--sparse-snr", str(args.sparse_snr)]
+    if args.sparse_agree > 0:
+        learner_cmd += ["--sparse-agree", str(args.sparse_agree)]
+        if args.sparse_agree_min > 0:
+            learner_cmd += ["--sparse-agree-min", str(args.sparse_agree_min)]
     if args.opt_reset:
         learner_cmd += ["--opt-reset"]
     if args.grad_norm:

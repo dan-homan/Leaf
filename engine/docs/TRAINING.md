@@ -447,6 +447,59 @@ Set `TDLEAF_BATCH_SIZE = 1` to restore the original per-game update behaviour.
 
 ---
 
+### Sparse online updates (experimental, branch `sparse-online-updates`)
+
+**The question.**  A human takes one or two strong lessons from a game; the
+gradient step applies every component the batch offers and relies on repetition
+to cancel the noise.  Does an online step that applies only its most *robust*
+components learn more per game?  Learner-only, all off by default — off, the
+apply path is the unchanged `nnue_apply_gradients` (verified bit-identical).
+
+| flag (learner; also `selfplay_run.py` / `train.py`) | variant | rule |
+|---|---|---|
+| `--sparse-snr F` | 1 — reliability over time | apply only the top fraction F of each section's touched weights, ranked by Adam's signal-to-noise \|m̂\|/√v̂ |
+| `--sparse-agree TAU` | 2 — agreement across games | apply only weights whose per-game gradient signs agree: \|#pos − #neg\| ≥ TAU × denominator |
+| `--sparse-agree-min N` | variant 2 denominator | 0 (default) = games in the batch (a strict AND-mask, Parascandolo et al. 2020); N > 0 = max(games touching the weight, N) |
+
+Both on = both tests must pass.  Each section is ranked separately (FC0, FC1,
+FC2 weights; the three FC bias sets; FT weights; FT biases; PSQT).  A masked
+weight still updates its moments and count — so a lesson that keeps recurring
+passes later — but gets no step and no weight decay.
+
+Mechanics (`nnue_training.cpp`, `nnue_apply_gradients_sparse`):
+
+- **Variant 1** computes every touched weight's Adam step first, then applies
+  only those above the section's (1 − F) quantile of |step| = |m̂|/√v̂.  FT
+  weights use RMSProp (no persisted first moment), so a **session-only** FT
+  first moment (~92 MB, never saved) is kept just for the score; it is
+  bias-corrected by v's sample count, so a warm row reads low for its first ~10
+  touches of a session.  The FT step itself is the usual g/√v̂.
+- **Variant 2** accumulates each game into a scratch gradient buffer
+  (`nnue_sparse_game_buf`), counts each weight's gradient sign at game end
+  (`nnue_sparse_game_end`), then merges the game into the batch sum.  Summing
+  per game changes floating-point order, so variant 2 is not bit-comparable to a
+  plain run even at a vanishing threshold.
+- The learner prints `sparse: kept % of touched` per section after the first
+  step and every 20 steps.
+
+Verified on 199 actor games from `m260929-9e6g-cons6` (depth 5): `--sparse-snr 1.0`
+(keep all) reproduces the plain step with FT, PSQT and every bias bit-identical
+and the weight-decayed FC weights within 3 ulps after one step (compiler
+contraction of `lr·step + decay` under `-ffast-math`); under `--sparse-snr 0.1`
+every moved FT weight equals the plain step's value exactly and masked weights do
+not move.  Learner cost: at most +26% (both variants), ~70 games/s against the
+~7.5 games/s 14 depth-8 actors produce.
+
+⚠️ **The strict AND-mask nearly freezes FT and PSQT.**  At TAU 0.2 (net agreement
+from ≥10 of 50 games) it kept 21–37% of FC weights but 0.2% of FT and 0.1% of
+PSQT on the test set: most piece-square features appear in only a few games per
+batch.  That is itself a confound — PSQT carries the largest share of the mature
+online damage (`Learning_Investigation.md` §1 X) — so read a variant-2 arm
+against a PSQT-frozen control, or use `--sparse-agree-min` to judge FT/PSQT by
+the games that actually touch them.
+
+---
+
 ### LR Warmup
 
 A linear warmup ramps the learning rate from 0 to its full value over the first

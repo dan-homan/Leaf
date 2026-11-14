@@ -297,6 +297,24 @@ void nnue_scale_gradients(float s);
 // the number of positions in the step.  Default false = historical behaviour.
 extern bool nnue_grad_normalize;
 
+// Sparse online updates (learner only; all off by default -- the apply path is
+// then unchanged).  See docs/TRAINING.md "Sparse online updates".
+//   nnue_sparse_snr_keep   variant 1: apply only the top FRACTION (0,1] of each
+//                          section's touched weights, ranked by Adam |m̂|/√v̂
+//   nnue_sparse_agree      variant 2: apply only weights whose per-game gradient
+//                          signs agree: |#pos − #neg| >= tau × denominator
+//   nnue_sparse_agree_min  variant 2 denominator: 0 = games in the batch (strict
+//                          AND-mask), N > 0 = max(games touching the weight, N)
+extern float nnue_sparse_snr_keep;
+extern float nnue_sparse_agree;
+extern int   nnue_sparse_agree_min;
+bool nnue_sparse_active();
+// Variant 2: per-game scratch buffer (nullptr when variant 2 is off).  Accumulate
+// one game into it, then nnue_sparse_game_end() counts each weight's gradient
+// sign and merges the game into the batch accumulator.
+NNUEGradBuf *nnue_sparse_game_buf();
+void nnue_sparse_game_end();
+
 // Parallel apply for the offline batch trainer: the FC-stack and FT/PSQT-row
 // Adam (the per-batch bottleneck) are split across nthreads via the
 // caller-supplied `run`, which must execute its argument fn(tid) for tid in

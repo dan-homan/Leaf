@@ -994,6 +994,12 @@ int learner_main(int argc, char *argv[])
             tdleaf_lr_scale = (float)atof(argv[++ai]);
         else if (!strcmp(argv[ai], "--opt-reset"))  opt_reset  = true;
         else if (!strcmp(argv[ai], "--grad-norm"))  nnue_grad_normalize = true;
+        else if (!strcmp(argv[ai], "--sparse-snr") && ai + 1 < argc)
+            nnue_sparse_snr_keep = (float)atof(argv[++ai]);
+        else if (!strcmp(argv[ai], "--sparse-agree") && ai + 1 < argc)
+            nnue_sparse_agree = (float)atof(argv[++ai]);
+        else if (!strcmp(argv[ai], "--sparse-agree-min") && ai + 1 < argc)
+            nnue_sparse_agree_min = atoi(argv[++ai]);
     }
 
     if (!cfg.dir) { fprintf(stderr, "learner: --learn-stream <dir> is required\n"); return 1; }
@@ -1007,6 +1013,27 @@ int learner_main(int argc, char *argv[])
     if (tdleaf_lr_scale != 1.0f)
         fprintf(stderr, "learner: online LR scaled by %.4g (all categories)\n",
                 (double)tdleaf_lr_scale);
+    // Sparse online updates (nnue_training.cpp): keep fraction in (0,1],
+    // agreement threshold in (0,1].  0 = off.
+    if (nnue_sparse_snr_keep < 0.0f || nnue_sparse_snr_keep > 1.0f ||
+        nnue_sparse_agree < 0.0f || nnue_sparse_agree > 1.0f || nnue_sparse_agree_min < 0) {
+        fprintf(stderr, "learner: --sparse-snr / --sparse-agree expect 0..1, "
+                        "--sparse-agree-min >= 0\n");
+        return 1;
+    }
+    if (nnue_sparse_snr_keep > 0.0f)
+        fprintf(stderr, "learner: sparse variant 1 -- apply the top %.3g of each section "
+                        "by Adam |m/sqrt(v)|\n", (double)nnue_sparse_snr_keep);
+    if (nnue_sparse_agree > 0.0f) {
+        if (nnue_sparse_agree_min > 0)
+            fprintf(stderr, "learner: sparse variant 2 -- apply where per-game gradient signs "
+                            "agree: |pos-neg| >= %.3g x max(games touching, %d)\n",
+                    (double)nnue_sparse_agree, nnue_sparse_agree_min);
+        else
+            fprintf(stderr, "learner: sparse variant 2 -- apply where per-game gradient signs "
+                            "agree: |pos-neg| >= %.3g x games in the batch\n",
+                    (double)nnue_sparse_agree);
+    }
     // Must run AFTER the .tdleaf.bin has been loaded (weights + moments come in
     // together at NNUE init), and before the first trajectory is consumed.
     if (opt_reset) nnue_reset_optimizer_state();

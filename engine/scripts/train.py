@@ -1035,6 +1035,16 @@ def main():
     ap.add_argument("--grad-norm", action="store_true",
                     help="Normalise gradients per position in BOTH phases so the "
                          "accumulated scale is batch-size independent.  See 7.10")
+    ap.add_argument("--sparse-snr", type=float, default=0.0, metavar="F",
+                    help="Online phase only: the learner applies just the top "
+                         "fraction F of each weight section by Adam |m/sqrt(v)| "
+                         "(0 = off).  TRAINING.md 'Sparse online updates'")
+    ap.add_argument("--sparse-agree", type=float, default=0.0, metavar="TAU",
+                    help="Online phase only: the learner applies just the weights "
+                         "whose per-game gradient signs agree (0 = off)")
+    ap.add_argument("--sparse-agree-min", type=int, default=0, metavar="N",
+                    help="--sparse-agree denominator: 0 = games in the batch "
+                         "(strict AND-mask), N = max(games touching, N)")
     ap.add_argument("--lr-scale", type=float, default=1.0,
                     help="Uniform multiplier on every online TDLeaf step during "
                          "generation (default 1.0 = unchanged).  The offline "
@@ -1587,6 +1597,10 @@ def main():
             "--tdleaf-out", f"{netbase}.tdleaf.bin",
             "--delete-consumed", "--refresh-scores",
             "--lr-scale", args.lr_scale,
+            *(["--sparse-snr", args.sparse_snr] if args.sparse_snr > 0 else []),
+            *(["--sparse-agree", args.sparse_agree,
+               "--sparse-agree-min", args.sparse_agree_min]
+              if args.sparse_agree > 0 else []),
             *(["--publish", str(work / f"{args.tag}-ladder.nnue"),
                "--publish-every", str(args.ladder), "--publish-stamped"]
               if args.ladder else []),
@@ -2189,6 +2203,9 @@ def main():
         "psqt_noise": args.psqt_noise,
         "psqt_opponent": args.psqt_opponent if args.psqt_noise > 0 else None,
         "lr_scale": args.lr_scale,
+        "sparse_snr": args.sparse_snr,
+        "sparse_agree": args.sparse_agree,
+        "sparse_agree_min": args.sparse_agree_min,
         "seed": (args.seed if args.seed is not None
                  else zlib.crc32(args.tag.encode()) & 0x7FFFFFFF),
         "opt_reset": args.opt_reset,

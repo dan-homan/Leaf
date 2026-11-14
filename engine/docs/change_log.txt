@@ -1,5 +1,20 @@
 Changes since 2017_12_24
 
+2026_11_14 -- (branch sparse-online-updates) learner: sparse online updates,
+               --sparse-snr / --sparse-agree / --sparse-agree-min.
+
+               Experimental data-efficiency line: apply only the most robust
+               components of each online step.  Variant 1 keeps the top
+               fraction of each weight section by Adam |m/sqrt(v)| (FT gets a
+               session-only first moment for the score); variant 2 counts each
+               weight's per-game gradient sign (each game accumulates into a
+               scratch NNUEGradBuf before merging) and applies only weights
+               whose signs agree.  Masked weights update their moments but get
+               no step or decay.  Off by default and then bit-identical to the
+               plain learner; --sparse-snr 1.0 reproduces it to <= 3 ulps after
+               one step.  Passed through selfplay_run.py and train.py (recorded
+               in the sidecar).  See TRAINING.md "Sparse online updates".
+
 2026_10_13 -- train.py: the --corpus-window / --consolidate chain walk now
                steps through consolidation legs instead of counting them.
 
