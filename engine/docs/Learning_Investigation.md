@@ -29,6 +29,19 @@ they disagree about status, `TODO.md` is the one to fix.
 
 ## Where things stand (2026-09-27)
 
+> **Update 2026-10-14.**  `m260929` reached **+286.8 ± 12.9 vs `classic_eval` at
+> 3+0.05 and +237.9 at depth 8** at 9M games — but only through consolidation.
+> From 7e6g on, four ordinary legs (d8, d8 with a 5000-node budget twice, d10)
+> each finished level with their parent head-to-head (−2.2, −1.7, +2.3, −2.9),
+> while two six-leg consolidations gave +31.7 and ~+18 (§1 W).  On a mature net
+> the online phase is now a damage-and-repair cycle: −33 to −40 head-to-head per
+> leg, recovered by the offline phase, and an offline-only re-run from the
+> undamaged parent lands in the same place (§1 X).  The online step points the
+> same way every leg; the damage is spread over all weight groups, PSQT the
+> largest share, and is not the eval-scale inflation that accompanies it.  The
+> live question is whether the online loss is step noise (it would scale with
+> the LR) or a bias of the online objective (§6 item 11).
+
 > **Update 2026-10-07.**  `m260929` (fresh 2026-09-29 on R11) reached +141.0 vs
 > `classic_eval` at 3+0.05 at 6M games, ~+21–27 per 500k-game d8 leg, against
 > `m260921`'s +4.2 best.  Its depth-8 gain slowed to ~+7 per leg over 5–6M.  One
@@ -199,7 +212,10 @@ reading are all exhausted (§4).  The current recipe runs batch 50.
 runs' displacement from one offline start: fc2_b 0.836 … fc0_w 0.361, against
 ft_w 0.206 and psqt_w 0.040 [7.13.2] — isotropic noise would give ≈0.0002.  It
 is **not** the additive per-bucket constants: the undamaged arm moves them more
-[7.13.5].
+[7.13.5].  ⚠️ **R11 reading (§1 X, 2026-10-14):** a consistent direction is not
+where the Elo is.  On `m260929-9e6g` the FC1/FC2 online steps repeat leg to leg
+at cos 0.87–0.91, yet reverting them recovers ~2 of 33 Elo; PSQT, which R6 found
+barely shared (0.040), now repeats at 0.40–0.44 and carries the largest share.
 
 **J. There are two kinds of weight section, and only one obeys a magnitude LR
 rule** [7.12.2].  **Stationary** — `fc0_w`, `ft_w`, `psqt_w`, 99.99% of
@@ -225,6 +241,74 @@ mature `m260720` chain paid at 4× the LR.  Neither ladder shows a
 dip-then-recovery shape (χ² against a constant non-significant): a flat offset
 from the moment the net leaves the offline optimum.  How much of the shrinkage
 is the LR cut (η-scaling predicts ~−32) and how much is R8 is not separated.
+
+**X. AT MATURITY THE ONLINE PHASE IS A DAMAGE-AND-REPAIR CYCLE (2026-10-09 →
+10-14).**  On `m260929` from 7.5M games, every head-to-head below is at depth 8,
+4000 games, against the leg's parent (start net):
+
+| leg | search | online | offline ladder (e1 / e2) | final | d8 vs classic | 3+0.05 vs classic |
+|---|---|---|---|---|---|---|
+| 7e6g | d8 | +6.2 | +17 / +26 | +11.7 | 198.3 | 245.8 |
+| 7.5e6g | d8 | −7.6 | +21 / +15 | −2.2 | 202.6 | 239.7 |
+| 7.5e6g-cons6 | — | — | +23 / +33 | +31.7 | 211.4 | 254.7 |
+| 8e6g | d8 + 5000 nodes | −34.9 | +35 / +32 | −1.7 | 226.9 | 265.2 |
+| 8.5e6g | d8 + 5000 nodes | −39.7 | +23 / +39 | +2.3 | 215.2 | 270.0 |
+| 9e6g | d10 | −32.6 | +37 / +19 | −2.9 | 224.2 | 259.3 |
+| 9e6g-cons6 | — | — | +20 / +22 | +14.9 | 237.9 | 286.8 |
+
+- **The search change is not the cause.**  The −35 online loss arrived on the
+  first leg after the consolidation, which was also the first node-budget leg;
+  9e6g dropped the budget for plain d10 and lost the same.  The d10 games drew
+  46.1% (flat across the leg; d6→d8 had added the same ~9 points) and gave a
+  larger PV-quiet share (0.552 vs 0.480 under the budget), but no gain.
+- **A leg's data is worth ~+5–8 to the parent it was played from.**  `8.5e6g-off`
+  re-ran 8.5e6g's offline phase with no online phase — from `8e6g-final`, labels
+  re-scored on it (`--bt-rescore`), same rows: **+7.5 ± 4.3** head-to-head vs
+  8e6g-final, anchor +215.8 vs the real leg's +215.2.  The online −40 and the
+  offline +42 cancel; the online phase cost nothing net and bought nothing.
+- **The online step points the same way every leg, and offline now reverses
+  it.**  From each leg's post-online state (`<tag>_work/train/m260929.tdleaf.bin`
+  = start + exactly 10,000 Adam steps), cosine between consecutive legs' online
+  steps — isotropic noise would give ~0.0002 in FT:
+
+  | | FT | PSQT | FC0 | FC1 | FC2 + biases |
+  |---|---|---|---|---|---|
+  | 3e6g → 4.5e6g | 0.44–0.45 | 0.55–0.57 | 0.64–0.65 | 0.80–0.82 | 0.82–0.84 |
+  | 8e6g → 9e6g | 0.30–0.32 | 0.40–0.44 | 0.63–0.64 | 0.87–0.88 | 0.90–0.91 |
+
+  The persistence is old — it was there while the online phase still gained.
+  What changed is the within-leg cosine between the online and offline steps,
+  which drifted from agreement to reversal over the chain: 2e6g +0.31 / +0.32 /
+  +0.31 / −0.19 / −0.35 (FT / PSQT / FC0 / FC1 / FC2+b) → 9e6g +0.08 / **−0.33** /
+  −0.19 / −0.56 / **−0.81**.  Projecting out the weight vector (AdamW decay)
+  changes none of this.  The consolidation steps are mildly *aligned* with the
+  online steps (FT 0.14–0.19), so a consolidation is not just a larger repair.
+- **The online step inflates the positional eval scale, and that is harmless.**
+  |FC2 weights| grows 10–19% in every online phase and is cut back offline
+  (9e6g: 92.4k → 102.1k → 92.8k); across the chain it has still doubled (46k at
+  2e6g), consolidations stepping it up too.  Rescaling the 9e6g post-online net's
+  FC2 (weights and bias, exact for the linear output layer) back to its start
+  norm: **−31.2 ± 4.5** vs −32.6 ± 4.4 unscaled, anchor +193.1 vs +192.1.
+- **The damage is spread, PSQT the largest share.**  The 9e6g post-online net
+  with ONE group reverted to its start values, vs 8.5e6g-final:
+
+  | reverted | none | PSQT | FT (+bias) | FC0 (+bias) | FC1 (+bias) | FC2 (+bias) |
+  |---|---|---|---|---|---|---|
+  | Elo (±4.5) | −32.6 | **−21.7** | −25.8 | −27.0 | −30.8 | −32.1 |
+  | recovered | — | **+10.9** | +6.8 | +5.6 | +1.8 | +0.5 |
+
+  Roughly additive (+25.6 of 33).  The groups whose direction repeats most
+  (FC1, FC2) matter least to strength; PSQT — the only linear channel, where a
+  systematic bias in the TD targets would land first — matters most, ~1.5σ ahead
+  of FT.  Method: `merge_tdleaf.py` reads and rewrites a state bit-identically;
+  `Leaf_vbt --write-nnue` bakes it, reproducing the leg's own `-tdleaf.nnue`.
+
+How this sits with §1 K: K measured a ~13 Elo flat offset on `m260916` at 5M
+games; here the offset is −33 to −40 per leg from 8M, against −8 to +6 at 7–7.5M
+on the same chain, so it either grew past a threshold or was raised by the
+consolidated start net — the two coincide at 8e6g and are not separated.
+Whether it is step noise (§1 C: damage ∝ η, so it would shrink 4× at
+`--lr-scale 0.25`) or a bias of the online objective is open (§6 item 11).
 
 **I. FRAMING, not mechanism — online play as hypothesis generation.**  Batch-Adam
 steps revalue features on a handful of games; that changes how the engine plays,
@@ -397,6 +481,23 @@ the pairing/re-labelling ran as one-off scripts (`learn/w26/pair_leg.py`,
 verified row-for-row against an independent reimplementation).  15 trainer threads
 were measured SLOWER than 8 (the serial clip-norm tail, 64–71% of batch time,
 does not parallelise).
+
+*Repeated as a chain step (2026-10-08, 10-13).*  `train.py --consolidate 6`
+twice, each over the last six legs' raw dumps (3M games), re-labelled on the
+start net, two epochs, rated as a leg (d8 4000 g + 3+0.05):
+
+| consolidation | rows | ladder e1 / e2 | head-to-head vs start | d8 vs classic (start → final) | 3+0.05 |
+|---|---|---|---|---|---|
+| 7.5e6g-cons6 (5e6gS → 7.5e6g) | 227.4M | +23 / +33 | +31.7 | 208.7 → 211.4 | 254.7 |
+| 9e6g-cons6 (6.5e6g → 9e6g) | 226.8M | +20 / +22 | +14.9 (ladder e2: +22.1) | 216.0 → 237.9 | 286.8 ± 12.9 |
+
+Each consolidation is the only step of its stretch that moved the chain (§1 X),
+and the second gained less head-to-head (~+18 pooling ladder e2 and the final
+gauntlet).  Half of each window had been consolidated before.  The d8 anchor
+re-reads a fixed net up to ~8 apart between sessions (9e6g-final: 224.2 in its
+own gauntlet, 216.0 as the consolidation's baseline) — compare consolidations
+head-to-head.  The chain walk now steps through a consolidation leg instead of
+counting it (it has no games of its own; 2026-10-13).
 
 **O. CORPUS STATISTICS ARE NOT TRAINING HYPERPARAMETERS.**  Seven arms fitted K,
 λ or the outcome weight to the corpus; **seven lost on the anchor** (−5.7 to
@@ -615,6 +716,13 @@ mature net; assume they are untested on a young one unless the row says otherwis
 | The 2→4 epoch switch does not explain the decline | [Detail D6] | timing and `picked_epoch` | R9 | **ESTABLISHED** |
 | Bias sections grow monotonically on a mature chain | 7.12.2 | fc0_b ×15.9, fc2_b ×8.9 at 7M | R5 | SUPPORTED, unexplained |
 | Online play as hypothesis generation | 6.14.1 | — | R3 | **FRAMING** (§1 I) |
+| At 8–9M games each online phase loses −33 to −40 head-to-head, recovered offline; legs net ~0 | §1 X, 8e6g / 8.5e6g / 9e6g | −34.9 / −39.7 / −32.6; finals −1.7 / +2.3 / −2.9 | R11 | **ESTABLISHED** (three legs) |
+| …independent of the search setting (d8 + 5000 nodes, d10) | §1 X | 9e6g at d10 −32.6 | R11 | SUPPORTED |
+| An offline-only re-run from the undamaged parent ends level with the full leg | §1 X, `8.5e6g-off` | +7.5 ± 4.3 vs parent; anchor 215.8 vs 215.2 | R11 | SUPPORTED |
+| The online step repeats its direction leg to leg | §1 X, cosines over 15 legs | FC2+b 0.90, FC1 0.88, PSQT 0.42, FT 0.31 (8e6g→9e6g) | R11 | **ESTABLISHED** |
+| Offline drifted from continuing to reversing the online step | §1 X | PSQT +0.32 → −0.33, FC2+b −0.35 → −0.81 (2e6g → 9e6g) | R11 | **ESTABLISHED** |
+| The online phase inflates FC2 scale 10–19% per leg; undoing it is worth nothing | §1 X, FC2 rescale | −31.2 vs −32.6 (±4.5) | R11 | SUPPORTED |
+| The online damage is spread across groups; PSQT the largest share | §1 X, revert-one-group | PSQT +10.9, FT +6.8, FC0 +5.6, FC1 +1.8, FC2 +0.5 (±6.3) | R11 | SUPPORTED |
 
 ### Nulls — measured and found not to matter
 
@@ -661,6 +769,8 @@ mature net; assume they are untested on a young one unless the row says otherwis
 | Requiring the PV to be confirmed by its leaf (`leaf_ok`) is Elo-neutral | `m260929-3e6g-pvok` | −0.7 ± 5 at d8, 8000 g; 3.1% of P1 rows dropped, mostly short draw PVs | R11 | SUPPORTED — adopted for correctness |
 | A whole-history window (10 legs, 382.5M rows, labels re-scored on the start net) beats another generation leg | §1 W | +60.3 at d8 (8000 g, paired), +42.5 ± 14.6 at 3+0.05, vs ~+7 per recent leg | R11 | SUPPORTED (one run; ingredients not separated) |
 | A second epoch over that window still pays | §1 W | +31.0 ± 4.4 head-to-head; +20.9 ± 5.6 on the d8 anchor | R11 | SUPPORTED |
+| A six-leg re-labelled consolidation is the only step that moves a mature chain | §1 W, §1 X | +31.7 and ~+18 head-to-head vs four legs at −2.2…+2.3 | R11 | **ESTABLISHED** (two runs) |
+| …with diminishing returns when half the window was consolidated before | §1 W | +31.7 → ~+18 | R11 | SUPPORTED |
 | Two sibling legs from one parent agree within error; their weight average is at least as good as the better one | `m260929-4.5e6g` / `-5e6g` / soup | siblings +88.9 / +97.0; soup +100.7 (d8, 8000 g) | R11 | SUPPORTED |
 | The trainer does not scale past 8 threads | 3M-row benchmark | 8 thr 32.8k rows/s, 15 thr 25.8k (serial tail 64% → 71%) | — | **ESTABLISHED** |
 | Under a node budget the recorded score and PV came from different iterations (fixed 2026-10-08) | `m260929-8e6g` (stopped), smoke test | leaf_ok 41.9% live / 40.2% smoke → 95.2% fixed; d8 rows 47 → 97% | R11 | **ESTABLISHED** — any node-budget corpus before the fix is suspect |
@@ -868,9 +978,18 @@ gauntlets with a 3+0.05 continuity match per leg):
 | 5.5M | +93.6 | — | +115.8 | |
 | 6M | +141.0 | — | +122.3 | |
 | window (§1 W) | **+183.5** | — | **+187.9** (8000 g) | 2 epochs over 2M→6M, re-labelled |
+| 6.5M | +238.7 | — | +187.9 | from the window |
+| 7M | +245.8 | — | +198.3 | |
+| 7.5M | +239.7 | — | +202.6 | |
+| 7.5e6g-cons6 | +254.7 | — | +211.4 | 6 legs, 227.4M rows, re-labelled |
+| 8M | +265.2 | — | +226.9 | d8 + 5000 nodes |
+| 8.5M | +270.0 | — | +215.2 | d8 + 5000 nodes |
+| 9M | +259.3 | — | +224.2 | d10 (46.1% draws) |
+| 9e6g-cons6 | **+286.8** | — | **+237.9** | 6 legs, 226.8M rows, re-labelled |
 
-Draw rate 34.8 → 35.9% over the d8 legs; depth-8 search time per move fell
-9.34 → 7.93 ms (§6 item 9).
+Draw rate 34.8 → 37.7% over the d8 legs (38.3% under the node budget, 46.1% at
+d10); depth-8 search time per move fell 9.34 → 7.93 ms (§6 item 9).  From 7M the
+anchor moves only at consolidations (§1 X).
 
 ---
 
@@ -1113,7 +1232,10 @@ gains came in bursts across several legs, so a single leg is thin evidence
 against the LR hypothesis.  A second `lr4` leg continuing from `lr4_final`,
 rated like item 1, would show whether the larger online walk compounds.
 
-**3. Search budget beyond plain d8.**  §1 N prices `d8/2000` at nearly the cost
+**3. Search budget beyond plain d8.**  *Tried 2026-10-09 → 10-13 (§1 X):* two
+legs at d8 + 5000 nodes and one at d10 each netted ~0 head-to-head, as plain d8
+legs did; the deeper data consolidates no worse.  Not closed — one d10 leg — but
+not the lever while the online phase costs ~35 per leg.  Original note: §1 N prices `d8/2000` at nearly the cost
 of plain d8, since 2000 nodes binds only in cheap positions, and it extends
 endgame depth for free.  If item 1 reads saturation, the next depth-margin step
 is here — watching the draw-rate gate, since d10's 43% draws regressed.
@@ -1172,6 +1294,17 @@ only the most recent 2–3 legs at the same step count (diversity vs freshness);
 (c) the last leg alone at ~5× its usual steps (optimization length).  Worth doing
 before the window becomes a routine step in the loop — and the pairing/re-label
 scripts belong in `train.py` if it does.
+
+**11. Is the mature online loss step noise or objective bias? (§1 X.)**  Two
+100k-game online-only probes from `9e6g-cons6` at `--lr-scale 1.0` and `0.25`,
+each tdleaf net rated head-to-head at d8 against the start.  §1 C predicts the
+damage scales with η (≈ 4× smaller at 0.25) if it is noise; if it does not
+shrink, the online targets are biased, and PSQT is where to look first (a
+PSQT-only LR cut would recover at most ~1/3 on the revert numbers).  If the
+online phase cannot be made positive, the alternative is structural: frozen
+generation from the best net plus a rolling `--consolidate` every leg — the
+8.5e6g-off result says it lands where the full leg does, at a learner core's
+saving.
 
 **8. Attack Σ directly.**  Shuffle records across a pool of games before forming
 a learner batch — the offline-style decorrelation, never tried, and the only way

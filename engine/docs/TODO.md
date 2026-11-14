@@ -59,6 +59,29 @@ STM + game-ply λ^Δ), and **Phases D and E have since landed:**
       searches but only on the FINAL one — yet it is the same coupling, so a
       time-control match is still the one that decides it.
 
+### Mature-chain online loss (2026-10-14)
+
+Rationale: `Learning_Investigation.md` §1 X and §6 item 11.  From 8M games every
+`m260929` online phase loses −33 to −40 head-to-head and the offline phase only
+repairs it (legs net ~0); the step repeats its direction leg to leg, the damage is
+spread over all weight groups (PSQT the largest share, ~1/3), and the FC2 scale
+inflation that comes with it is harmless.
+
+- [ ] **O1 — LR probes: is the loss step noise or objective bias?**  Two 100k-game
+  online-only probes from `m260929-9e6g-cons6` (`--skip-train`), `--lr-scale 1.0`
+  and `0.25`, each tdleaf net rated head-to-head at depth 8 (4000 games) against
+  the start net.  §1 C predicts ~4× less damage at 0.25 if it is noise; no
+  shrinkage means the online targets are biased — look at PSQT first.  ⚠️ The
+  closed LR line below found η cuts signal and noise together at the leg FINAL
+  (`lr25` vs `lr100` −0.7 ± 8.3, R5); O1 measures the online damage itself, and a
+  smaller loss only pays if the leg final follows — confirm with a full leg.
+- [ ] **O2 — (contingent on O1) frozen generation + rolling consolidation.**  If
+  the online phase cannot be made positive: 500k games from the best net with the
+  learner frozen (verify `--lr-scale 0` is a true no-op first), then
+  `--consolidate 4` every leg.  `8.5e6g-off` says it lands where the full leg
+  does (+7.5 ± 4.3 vs +2.3), and it frees the learner core.  Risk: generation no
+  longer learns from outcomes, and offline targets are nearly all search scores.
+
 ### Generation sharpness and depth (2026-09-21)
 
 Rationale: `Learning_Investigation.md` §1 M (the old §6 item 7 is preserved in
