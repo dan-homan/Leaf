@@ -227,7 +227,7 @@ def main():
         if not legs:
             print(f"\n{chain}: no sidecars found"); continue
         print(f"\n=== {chain} ===")
-        print(f"{'leg':>7} {'cum':>9} {'d/nod':>7} {'inst':>5} {'anchor':>9} {'anc/Mg':>7} "
+        print(f"{'leg':>12} {'cum':>9} {'d/nod':>7} {'inst':>5} {'anchor':>9} {'anc/Mg':>7} "
               f"{'par/Mg':>7} {'on':>7} {'on@a':>7} {'off':>7} {'anc@tc':>7} {'draw%':>7} {'ply':>6} "
               f"{'depth':>6} {'<floor':>7} {'quiet':>6}")
         # Offline re-runs (--skip-online) have no games and no parent leg --
@@ -261,7 +261,9 @@ def main():
             rr = root_rows(j)
             quiet = (rr / gi / ply) if (rr and gi and ply) else None
             f = lambda v, w, p=1, s="": f"{v:>{w}.{p}f}{s}" if v is not None else f"{'--':>{w}}"
-            print(f"{tag.split('-')[-1]:>7} {cum:>9,} "
+            # The chain prefix stripped, not just the last '-' field: a
+            # consolidation's own field ("cons6") repeats across the chain.
+            print(f"{tag[len(chain) + 1:]:>12} {cum:>9,} "
                   f"{str(j.get('depth'))+'/'+str(j.get('nodes')):>7} {inst:>5} "
                   f"{f(anc,9)} {f(ancM,7,0)} {f(perM,7,0)} {f(onl,7)} {f(ona,7)} {f(off,7)} "
                   f"{f(atc,7)} {f(dr,7,2)} {f(ply,6,1)} {f(dep,6,2)} {f(blw,6,1,'%')} {f(quiet,6,3)}")
