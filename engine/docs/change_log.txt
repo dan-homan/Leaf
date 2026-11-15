@@ -1,5 +1,22 @@
 Changes since 2017_12_24
 
+2026_11_16 -- (branch sparse-online-updates) learner: --sparse-z K, a noise-
+               calibrated sparse cutoff on session-local scoring moments.
+
+               A weight's step is applied only if its |m/sqrt(v)| beats zero-
+               mean iid noise at K sigma for its update count (thresholds from a
+               fixed-seed simulation of the bias-corrected score at learner
+               start; >= 10 session updates required).  The score uses
+               session-local m, v and count, not Adam's persisted moments: a leg
+               starts from an offline-trained state whose v is 40-120x below the
+               online gradient scale in the dense sections, which inflated the
+               persisted-moment score for ~1000 steps.  The applied step stays
+               plain Adam; --sparse-snr keeps its original score.  Learner
+               telemetry adds per-section score median/p90 and the share beating
+               noise at 2 and 3 sigma, split by update count for FT and PSQT.
+               100k-game probes from m260929-9e6g-cons6: --sparse-z 3 +17.8 and
+               --sparse-z 2 +17.0 vs the start net, plain online -13.5 / -5.7.
+
 2026_11_14 -- (branch sparse-online-updates) learner: sparse online updates,
                --sparse-snr / --sparse-agree / --sparse-agree-min.
 

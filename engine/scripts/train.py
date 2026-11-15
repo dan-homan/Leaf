@@ -1042,6 +1042,9 @@ def main():
     ap.add_argument("--sparse-agree", type=float, default=0.0, metavar="TAU",
                     help="Online phase only: the learner applies just the weights "
                          "whose per-game gradient signs agree (0 = off)")
+    ap.add_argument("--sparse-z", type=float, default=0.0, metavar="K",
+                    help="Learner: apply only weights whose Adam |m/sqrt(v)| beats "
+                         "zero-mean noise at K sigma for their update count (0 = off)")
     ap.add_argument("--sparse-agree-min", type=int, default=0, metavar="N",
                     help="--sparse-agree denominator: 0 = games in the batch "
                          "(strict AND-mask), N = max(games touching, N)")
@@ -1601,6 +1604,7 @@ def main():
             *(["--sparse-agree", args.sparse_agree,
                "--sparse-agree-min", args.sparse_agree_min]
               if args.sparse_agree > 0 else []),
+            *(["--sparse-z", args.sparse_z] if args.sparse_z > 0 else []),
             *(["--publish", str(work / f"{args.tag}-ladder.nnue"),
                "--publish-every", str(args.ladder), "--publish-stamped"]
               if args.ladder else []),
@@ -2206,6 +2210,7 @@ def main():
         "sparse_snr": args.sparse_snr,
         "sparse_agree": args.sparse_agree,
         "sparse_agree_min": args.sparse_agree_min,
+        "sparse_z": args.sparse_z,
         "seed": (args.seed if args.seed is not None
                  else zlib.crc32(args.tag.encode()) & 0x7FFFFFFF),
         "opt_reset": args.opt_reset,

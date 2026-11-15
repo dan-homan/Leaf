@@ -169,6 +169,9 @@ def main():
     ap.add_argument("--sparse-agree", type=float, default=0.0, metavar="TAU",
                     help="Learner: apply only weights whose per-game gradient "
                          "signs agree, |pos-neg| >= TAU x denominator (0 = off)")
+    ap.add_argument("--sparse-z", type=float, default=0.0, metavar="K",
+                    help="Learner: apply only weights whose Adam |m/sqrt(v)| beats "
+                         "zero-mean noise at K sigma for their update count (0 = off)")
     ap.add_argument("--sparse-agree-min", type=int, default=0, metavar="N",
                     help="--sparse-agree denominator: 0 = games in the batch "
                          "(strict AND-mask), N = max(games touching, N)")
@@ -231,6 +234,8 @@ def main():
         learner_cmd += ["--sparse-agree", str(args.sparse_agree)]
         if args.sparse_agree_min > 0:
             learner_cmd += ["--sparse-agree-min", str(args.sparse_agree_min)]
+    if args.sparse_z > 0:
+        learner_cmd += ["--sparse-z", str(args.sparse_z)]
     if args.opt_reset:
         learner_cmd += ["--opt-reset"]
     if args.grad_norm:

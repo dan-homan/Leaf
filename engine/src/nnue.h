@@ -308,6 +308,9 @@ extern bool nnue_grad_normalize;
 extern float nnue_sparse_snr_keep;
 extern float nnue_sparse_agree;
 extern int   nnue_sparse_agree_min;
+//   nnue_sparse_z          variant 1z: apply only weights whose |m̂|/√v̂ beats
+//                          zero-mean noise at K sigma for their update count
+extern float nnue_sparse_z;
 bool nnue_sparse_active();
 // Variant 2: per-game scratch buffer (nullptr when variant 2 is off).  Accumulate
 // one game into it, then nnue_sparse_game_end() counts each weight's gradient

@@ -1000,6 +1000,8 @@ int learner_main(int argc, char *argv[])
             nnue_sparse_agree = (float)atof(argv[++ai]);
         else if (!strcmp(argv[ai], "--sparse-agree-min") && ai + 1 < argc)
             nnue_sparse_agree_min = atoi(argv[++ai]);
+        else if (!strcmp(argv[ai], "--sparse-z") && ai + 1 < argc)
+            nnue_sparse_z = (float)atof(argv[++ai]);
     }
 
     if (!cfg.dir) { fprintf(stderr, "learner: --learn-stream <dir> is required\n"); return 1; }
@@ -1016,14 +1018,18 @@ int learner_main(int argc, char *argv[])
     // Sparse online updates (nnue_training.cpp): keep fraction in (0,1],
     // agreement threshold in (0,1].  0 = off.
     if (nnue_sparse_snr_keep < 0.0f || nnue_sparse_snr_keep > 1.0f ||
-        nnue_sparse_agree < 0.0f || nnue_sparse_agree > 1.0f || nnue_sparse_agree_min < 0) {
+        nnue_sparse_agree < 0.0f || nnue_sparse_agree > 1.0f || nnue_sparse_agree_min < 0 ||
+        nnue_sparse_z < 0.0f || nnue_sparse_z > 6.0f) {
         fprintf(stderr, "learner: --sparse-snr / --sparse-agree expect 0..1, "
-                        "--sparse-agree-min >= 0\n");
+                        "--sparse-agree-min >= 0, --sparse-z 0..6\n");
         return 1;
     }
     if (nnue_sparse_snr_keep > 0.0f)
         fprintf(stderr, "learner: sparse variant 1 -- apply the top %.3g of each section "
                         "by Adam |m/sqrt(v)|\n", (double)nnue_sparse_snr_keep);
+    if (nnue_sparse_z > 0.0f)
+        fprintf(stderr, "learner: sparse variant 1z -- apply where |m/sqrt(v)| beats zero-mean "
+                        "noise at %.3g sigma for the weight's update count\n", (double)nnue_sparse_z);
     if (nnue_sparse_agree > 0.0f) {
         if (nnue_sparse_agree_min > 0)
             fprintf(stderr, "learner: sparse variant 2 -- apply where per-game gradient signs "

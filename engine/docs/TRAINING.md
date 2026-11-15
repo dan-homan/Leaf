@@ -460,8 +460,30 @@ apply path is the unchanged `nnue_apply_gradients` (verified bit-identical).
 | `--sparse-snr F` | 1 — reliability over time | apply only the top fraction F of each section's touched weights, ranked by Adam's signal-to-noise \|m̂\|/√v̂ |
 | `--sparse-agree TAU` | 2 — agreement across games | apply only weights whose per-game gradient signs agree: \|#pos − #neg\| ≥ TAU × denominator |
 | `--sparse-agree-min N` | variant 2 denominator | 0 (default) = games in the batch (a strict AND-mask, Parascandolo et al. 2020); N > 0 = max(games touching the weight, N) |
+| `--sparse-z K` | 1z — reliability, tested against noise | apply only weights whose \|m̂\|/√v̂ beats zero-mean iid noise at K σ (two-sided tail erfc(K/√2)) **for that weight's update count** |
 
-Both on = both tests must pass.  Each section is ranked separately (FC0, FC1,
+All set = all tests must pass.
+
+**Why a count-aware cutoff (2026-11-15).**  The score |m̂|/√v̂ has a natural noise
+scale: for zero-mean iid gradients it is half-normal with σ = √((1−β1)/(1+β1)) =
+0.229 in steady state, and far wider for a weight with few updates (the K=3
+threshold is 1.00 / 0.84 / 0.67 / 0.69 at 1 / 10 / 60 / 2048 updates).  The
+learner builds these thresholds at start from a fixed-seed simulation of its own
+bias-corrected score (100k trials, n = 1..2048).  Measured on saved states
+(`m260929` probes and legs): in every **dense** section — FC0, FC1, FC2, the FC
+biases, the FT biases — the score distribution *is* the noise distribution
+(median 0.15, p90 0.38, p99 0.59 against 0.154 / 0.377 / 0.590), so a percentile
+cut there selects noise; **PSQT** carries real excess, ~10× the noise rate above
+0.5 in rows with tens to hundreds of updates and 2–3× in common rows.
+
+**Telemetry** (learner stderr, after the first step and every 20): the kept
+share per section, then per section this step's median / p90 score and the
+window's share beating noise at 2σ and 3σ for its update count (noise alone:
+4.55% / 0.27%), and for FT weights and PSQT the 3σ share split by update count
+(< 60, 60–2047, ≥ 2048).  FT weights are scored on the session first moment, so
+they read low for the first ~10 touches of a session; and a session that starts
+from an offline-trained state carries the offline trainer's first moment for
+its first ~20 steps, which inflates the early dense-section scores.  Each section is ranked separately (FC0, FC1,
 FC2 weights; the three FC bias sets; FT weights; FT biases; PSQT).  A masked
 weight still updates its moments and count — so a lesson that keeps recurring
 passes later — but gets no step and no weight decay.

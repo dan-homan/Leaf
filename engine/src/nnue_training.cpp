@@ -6,6 +6,7 @@
 // ===========================================================================
 #if TDLEAF
 
+#include <random>
 #include <cmath>
 #include <vector>
 #include <sys/file.h>   // flock, LOCK_EX, LOCK_SH, LOCK_UN
@@ -1723,7 +1724,25 @@ static void nnue_apply_ft_bias(const NNUEApplyParams &p, float &smax, uint64_t &
 // 2020).  Denominator: games in the batch (strict: a weight must be pushed
 // the same way by a tau share of ALL games), or max(touching games, N).
 //
-// Both on = both tests must pass.  Masked weights still update m, v and count
+// Variant 1z (nnue_sparse_z = K): apply only weights whose score |m̂|/√v̂ beats
+// pure noise at the K-sigma level (two-sided normal tail erfc(K/√2)), judged
+// against the noise distribution AT THAT WEIGHT'S UPDATE COUNT -- the score of
+// zero-mean iid gradients is far wider after 10 updates than after 10,000.  The
+// thresholds come from a fixed-seed simulation of the engine's own bias-corrected
+// Adam score at learner start (sparse_build_ztab).  The score it tests is taken
+// on SESSION-LOCAL moments (sparse_ss: m, v and an update count, all zero at
+// learner start), not on Adam's persisted ones: a chain leg starts from an
+// offline-trained state whose v is 40-120x below the online gradient scale in
+// the dense sections (measured 2026-11-15), which inflated the persisted-moment
+// score for the first ~1000 steps of every session and made a noise test
+// meaningless there.  The applied step is still plain Adam.  The --sparse-snr
+// percentile keeps its original score (|Adam step|; FT: session m over the
+// persisted v), so earlier runs stay reproducible.  Measured 2026-11-15: in the
+// dense sections (FC, FT biases) the score distribution IS the noise
+// distribution, so a percentile cut there selects noise; PSQT carries real
+// excess, in rows with tens to hundreds of updates.
+//
+// All set = all tests must pass.  Masked weights still update m, v and count
 // (so a lesson that keeps recurring passes later) but receive no step and no
 // weight decay.  Every section uses the same rule: FC0/FC1/FC2 weights, the
 // three FC bias sets, FT weights, FT biases, PSQT.
@@ -1731,8 +1750,58 @@ static void nnue_apply_ft_bias(const NNUEApplyParams &p, float &smax, uint64_t &
 float nnue_sparse_snr_keep  = 0.0f;
 float nnue_sparse_agree     = 0.0f;
 int   nnue_sparse_agree_min = 0;
+float nnue_sparse_z         = 0.0f;
 
-bool nnue_sparse_active() { return nnue_sparse_snr_keep > 0.0f || nnue_sparse_agree > 0.0f; }
+bool nnue_sparse_active()
+{
+    return nnue_sparse_snr_keep > 0.0f || nnue_sparse_agree > 0.0f || nnue_sparse_z > 0.0f;
+}
+
+// Noise thresholds by update count: ztab[n] = the score that iid zero-mean
+// gradients exceed with probability erfc(K/√2) after n updates (n = 1..ZTAB_N;
+// beyond that the last entry -- v's bias correction has long converged).
+// Built for the run's K and, for telemetry, for K = 2 and 3.
+static const int ZTAB_N = 2048;
+static std::vector<float> sparse_ztab_k, sparse_ztab_2, sparse_ztab_3;
+static inline float sparse_zthr(const std::vector<float> &tab, uint32_t eff)
+{
+    return tab[eff < 1 ? 1 : (eff > (uint32_t)ZTAB_N ? ZTAB_N : eff)];
+}
+static void sparse_build_ztab()
+{
+    if (!sparse_ztab_2.empty()) return;
+    const int T = 100000;                        // trials; the K=3 tail holds ~270
+    std::mt19937_64 rng(20261115);
+    std::normal_distribution<float> nd(0.0f, 1.0f);
+    std::vector<float> m(T, 0.0f), v(T, 0.0f), sc(T);
+    const double ks[3] = { 2.0, 3.0, nnue_sparse_z > 0.0f ? (double)nnue_sparse_z : 3.0 };
+    std::vector<float> *tabs[3] = { &sparse_ztab_2, &sparse_ztab_3, &sparse_ztab_k };
+    size_t qi[3];
+    for (int j = 0; j < 3; j++) {
+        tabs[j]->assign(ZTAB_N + 1, 0.0f);
+        double tail = erfc(ks[j] / sqrt(2.0));
+        qi[j] = (size_t)std::min((double)(T - 1), std::ceil((1.0 - tail) * T));
+    }
+    for (int n = 1; n <= ZTAB_N; n++) {
+        // Same score as nnue_adam_step: bias-corrected m̂/√v̂, bc1 skipped from 60.
+        const float bc1 = (n >= 60) ? 1.0f : 1.0f - powf(TDLEAF_ADAM_BETA1, (float)n);
+        const float bc2 = 1.0f - powf(TDLEAF_ADAM_BETA2, (float)n);
+        for (int t = 0; t < T; t++) {
+            float g = nd(rng);
+            m[t] = TDLEAF_ADAM_BETA1 * m[t] + (1.0f - TDLEAF_ADAM_BETA1) * g;
+            v[t] = TDLEAF_ADAM_BETA2 * v[t] + (1.0f - TDLEAF_ADAM_BETA2) * g * g;
+            sc[t] = fabsf(m[t] / bc1) / (sqrtf(v[t] / bc2) + TDLEAF_ADAM_EPS);
+        }
+        for (int j = 0; j < 3; j++) {
+            std::nth_element(sc.begin(), sc.begin() + qi[j], sc.end());
+            (*tabs[j])[n] = sc[qi[j]];
+        }
+    }
+    fprintf(stderr, "sparse: noise thresholds (K=%.2g) at 1/10/60/300/2048 updates: "
+                    "%.3f %.3f %.3f %.3f %.3f\n", ks[2],
+            sparse_ztab_k[1], sparse_ztab_k[10], sparse_ztab_k[60], sparse_ztab_k[300],
+            sparse_ztab_k[ZTAB_N]);
+}
 
 struct SparseSigns { int16_t *net = nullptr; uint16_t *touch = nullptr; size_t n = 0; };
 enum { SP_FC0W, SP_FC0B, SP_FC1W, SP_FC1B, SP_FC2W, SP_FC2B, SP_FTW, SP_FTB, SP_PSQT, SP_N };
@@ -1743,6 +1812,75 @@ static int          sparse_batch_games = 0;     // games merged since the last a
 static NNUEGradBuf *sparse_game_buf    = nullptr;
 static float       *sparse_m_ft        = nullptr; // session-only FT first moment (variant 1)
 static uint64_t     sparse_touched[SP_N] = {}, sparse_kept[SP_N] = {};
+// Session-local scoring moments, one set per section (see the header): zeroed at
+// learner start and updated with the same raw gradient Adam sees, so the score
+// is exactly the quantity the noise table simulates.  n saturates at 65535
+// (the table stops at ZTAB_N anyway).  FT: ~230 MB, allocated on first use.
+struct SparseSess { float *m = nullptr, *v = nullptr; uint16_t *n = nullptr; };
+static SparseSess sparse_ss[SP_N];
+static float sparse_bc1_tab[60];
+static size_t sparse_sec_size(int s)
+{
+    switch (s) {
+    case SP_FC0W: return (size_t)NNUE_LAYER_STACKS * NNUE_L0_SIZE * NNUE_L0_INPUT;
+    case SP_FC0B: return (size_t)NNUE_LAYER_STACKS * NNUE_L0_SIZE;
+    case SP_FC1W: return (size_t)NNUE_LAYER_STACKS * NNUE_L1_SIZE * NNUE_L1_PADDED;
+    case SP_FC1B: return (size_t)NNUE_LAYER_STACKS * NNUE_L1_SIZE;
+    case SP_FC2W: return (size_t)NNUE_LAYER_STACKS * NNUE_L2_PADDED;
+    case SP_FC2B: return (size_t)NNUE_LAYER_STACKS;
+    case SP_FTW:  return (size_t)NNUE_FT_INPUTS * NNUE_HALF_DIMS;
+    case SP_FTB:  return (size_t)NNUE_HALF_DIMS;
+    default:      return (size_t)NNUE_FT_INPUTS * NNUE_PSQT_BKTS;   // SP_PSQT
+    }
+}
+static void sparse_alloc_sess()
+{
+    if (sparse_ss[0].m) return;
+    nnue_init_bc2_table();
+    for (int t = 0; t < 60; t++)
+        sparse_bc1_tab[t] = (t == 0) ? 1.0f : 1.0f - powf(TDLEAF_ADAM_BETA1, (float)t);
+    for (int s = 0; s < SP_N; s++) {
+        size_t n = sparse_sec_size(s);
+        sparse_ss[s].m = new float[n]();
+        sparse_ss[s].v = new float[n]();
+        sparse_ss[s].n = new uint16_t[n]();
+    }
+}
+static inline float sparse_sess_score(int sec, size_t i, float g, uint32_t &cnt)
+{
+    SparseSess &ss = sparse_ss[sec];
+    ss.m[i] = TDLEAF_ADAM_BETA1 * ss.m[i] + (1.0f - TDLEAF_ADAM_BETA1) * g;
+    ss.v[i] = TDLEAF_ADAM_BETA2 * ss.v[i] + (1.0f - TDLEAF_ADAM_BETA2) * g * g;
+    if (ss.n[i] != 0xFFFF) ss.n[i]++;
+    cnt = ss.n[i];
+    const float bc1 = (cnt >= 60) ? 1.0f : sparse_bc1_tab[cnt];
+    return fabsf(ss.m[i] / bc1) / (sqrtf(ss.v[i] / nnue_bc2(cnt)) + TDLEAF_ADAM_EPS);
+}
+
+// Score telemetry over each report window: count beating noise at 2 and 3 sigma
+// (count-aware), and for the sparse row sections a split by update count.
+static uint64_t     sparse_z2[SP_N] = {}, sparse_z3[SP_N] = {};
+enum { SPC_LO, SPC_MID, SPC_HI, SPC_N };          // < 60, 60..2047, >= 2048 session updates
+static uint64_t     sparse_cls_n[SP_N][SPC_N] = {}, sparse_cls_z3[SP_N][SPC_N] = {};
+static std::vector<float> sparse_last_scores[SP_N];   // one step's scores, for quantiles
+// A weight needs this many session updates before the noise test can pass it:
+// after one update the session score is exactly 1 whatever the gradient
+// (m̂ = g, v̂ = g²), and the first few are near-degenerate.  At 10 the K=3
+// threshold is 0.84.
+static const uint32_t SPARSE_Z_MIN_N = 10;
+static inline void sparse_score_tel(int sec, float sc, uint32_t eff)
+{
+    const bool ok = eff >= SPARSE_Z_MIN_N;
+    bool z3 = ok && sc >= sparse_zthr(sparse_ztab_3, eff);
+    sparse_z2[sec] += ok && sc >= sparse_zthr(sparse_ztab_2, eff);
+    sparse_z3[sec] += z3;
+    int c = eff < 60 ? SPC_LO : (eff < (uint32_t)ZTAB_N ? SPC_MID : SPC_HI);
+    sparse_cls_n[sec][c]++; sparse_cls_z3[sec][c] += z3;
+}
+static inline bool sparse_z_ok(float sc, uint32_t eff)
+{
+    return nnue_sparse_z <= 0.0f || (eff >= SPARSE_Z_MIN_N && sc >= sparse_zthr(sparse_ztab_k, eff));
+}
 static int          sparse_apply_calls = 0;
 static const int    SPARSE_REPORT_EVERY = 20;
 
@@ -1825,21 +1963,25 @@ static void sparse_dense_section(int sec, float *w, float *g, float *m, float *v
                                  size_t n, float lr, bool decay, bool clamp127,
                                  float &smax, uint64_t &sclip)
 {
-    static std::vector<uint32_t> idx;
-    static std::vector<float> step, score;
-    idx.clear(); step.clear(); score.clear();
+    static std::vector<uint32_t> idx, zc;
+    static std::vector<float> step, score, zs;
+    idx.clear(); zc.clear(); step.clear(); score.clear(); zs.clear();
     for (size_t i = 0; i < n; i++) {
         if (g[i] == 0.0f) continue;
+        uint32_t c;
+        zs.push_back(sparse_sess_score(sec, i, g[i], c)); zc.push_back(c);
         float s = nnue_adam_step(g[i], m[i], v[i], cnt[i], 1.0f, smax, sclip);
         idx.push_back((uint32_t)i); step.push_back(s); score.push_back(fabsf(s));
+        sparse_score_tel(sec, zs.back(), c);
         g[i] = 0.0f;
     }
+    sparse_last_scores[sec] = zs;
     const float thr = sparse_threshold(score, nnue_sparse_snr_keep);
     for (size_t k = 0; k < idx.size(); k++) {
         size_t i = idx[k];
         cnt[i]++;
         sparse_touched[sec]++;
-        if (score[k] < thr || !sparse_agree_ok(sec, i)) continue;
+        if (score[k] < thr || !sparse_agree_ok(sec, i) || !sparse_z_ok(zs[k], zc[k])) continue;
         // Written exactly as the dense path's statements (dw, then wd, then one
         // subtraction) so --sparse-snr 1.0 reproduces it bit for bit.
         float dw = lr * step[k];
@@ -1860,6 +2002,8 @@ static void sparse_dense_section(int sec, float *w, float *g, float *m, float *v
 static void nnue_apply_gradients_sparse(float lr_scale)
 {
     NNUEApplyParams p = nnue_apply_compute_params(lr_scale);   // advances t_adam etc.
+    sparse_build_ztab();                                         // once per session
+    sparse_alloc_sess();
 
     // ---- FC layers: each section flattened over the 8 stacks --------------
     const size_t S = NNUE_LAYER_STACKS;
@@ -1885,12 +2029,14 @@ static void nnue_apply_gradients_sparse(float lr_scale)
     // ---- FT weights (RMSProp) + PSQT (Adam), dirty rows only ---------------
     static std::vector<int> rows;
     static std::vector<size_t> fidx, pidx;
-    static std::vector<float>  fstep, fscore, pstep, pscore;
-    rows.clear(); fidx.clear(); fstep.clear(); fscore.clear();
-    pidx.clear(); pstep.clear(); pscore.clear();
+    static std::vector<uint32_t> fzc, pzc;
+    static std::vector<float>  fstep, fscore, pstep, pscore, fzs, pzs;
+    rows.clear(); fidx.clear(); fstep.clear(); fscore.clear(); fzc.clear(); fzs.clear();
+    pidx.clear(); pstep.clear(); pscore.clear(); pzc.clear(); pzs.clear();
     g_applied_ft_rows.clear();
-    const bool snr = nnue_sparse_snr_keep > 0.0f;
-    if (snr && !sparse_m_ft && v_ft_w)
+    // The FT score needs a first moment FT does not otherwise keep; allocated
+    // under any sparse mode so FT is in the telemetry too.
+    if (!sparse_m_ft && v_ft_w)
         sparse_m_ft = new float[(size_t)NNUE_FT_INPUTS * NNUE_HALF_DIMS]();
     if (ft_dirty) {
         for (int fi = 0; fi < NNUE_FT_INPUTS; fi++) {
@@ -1922,6 +2068,9 @@ static void nnue_apply_gradients_sparse(float lr_scale)
                         sc = fabsf(m / bc1) / sv;
                     }
                     fidx.push_back(base + d); fstep.push_back(step); fscore.push_back(sc);
+                    uint32_t c;
+                    fzs.push_back(sparse_sess_score(SP_FTW, base + d, gw[d], c)); fzc.push_back(c);
+                    sparse_score_tel(SP_FTW, fzs.back(), c);
                     gw[d] = 0.0f;
                 }
             }
@@ -1930,18 +2079,23 @@ static void nnue_apply_gradients_sparse(float lr_scale)
             for (int b = 0; b < NNUE_PSQT_BKTS; b++) {
                 if (gpw[b] == 0.0f || !m_psqt_w || !v_psqt_w) continue;
                 size_t vi = (size_t)fi * NNUE_PSQT_BKTS + b;
+                uint32_t c;
+                pzs.push_back(sparse_sess_score(SP_PSQT, vi, gpw[b], c)); pzc.push_back(c);
                 float s = nnue_adam_step(gpw[b], m_psqt_w[vi], v_psqt_w[vi], pcnt[b], 1.0f,
                                          step_max_psqt, step_clips_psqt);
                 pidx.push_back(vi); pstep.push_back(s); pscore.push_back(fabsf(s));
+                sparse_score_tel(SP_PSQT, pzs.back(), c);
                 gpw[b] = 0.0f;
             }
         }
+        sparse_last_scores[SP_FTW] = fzs;
+        sparse_last_scores[SP_PSQT] = pzs;
         const float fthr = sparse_threshold(fscore, nnue_sparse_snr_keep);
         for (size_t k = 0; k < fidx.size(); k++) {
             size_t i = fidx[k];
             ft_weights_cnt[i]++;
             sparse_touched[SP_FTW]++;
-            if (fscore[k] < fthr || !sparse_agree_ok(SP_FTW, i)) continue;
+            if (fscore[k] < fthr || !sparse_agree_ok(SP_FTW, i) || !sparse_z_ok(fzs[k], fzc[k])) continue;
             float *fw = ft_weights_f32 + i;
             float dw = p.ft_lr * fstep[k];
             float wd = TDLEAF_WEIGHT_DECAY * p.ft_lr * (*fw);
@@ -1953,7 +2107,7 @@ static void nnue_apply_gradients_sparse(float lr_scale)
             size_t i = pidx[k];
             psqt_weights_cnt[i]++;
             sparse_touched[SP_PSQT]++;
-            if (pscore[k] < pthr || !sparse_agree_ok(SP_PSQT, i)) continue;
+            if (pscore[k] < pthr || !sparse_agree_ok(SP_PSQT, i) || !sparse_z_ok(pzs[k], pzc[k])) continue;
             float dw = p.psqt_lr * pstep[k];
             psqt_weights_f32[i] -= dw;
             sparse_kept[SP_PSQT]++;
@@ -1994,8 +2148,39 @@ static void nnue_apply_gradients_sparse(float lr_scale)
             fprintf(stderr, " %s %.1f", SPARSE_NAMES[s],
                     sparse_touched[s] ? 100.0 * (double)sparse_kept[s] / (double)sparse_touched[s] : 0.0);
         fprintf(stderr, "\n");
+        // Score profile: this step's median / p90 of |m̂|/√v̂, and the window's
+        // share beating noise at 2σ / 3σ for its update count (noise alone:
+        // 4.55% / 0.27%).  Row sections split by update count at 3σ.
+        fprintf(stderr, "sparse: session score (step %d) median/p90, %%>2σ, %%>3σ [noise 4.55, 0.27]:",
+                sparse_apply_calls);
+        for (int s = 0; s < SP_N; s++) {
+            std::vector<float> &v = sparse_last_scores[s];
+            float med = 0.0f, p90 = 0.0f;
+            if (!v.empty()) {
+                std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end()); med = v[v.size() / 2];
+                size_t k9 = (size_t)(0.9 * (double)(v.size() - 1));
+                std::nth_element(v.begin(), v.begin() + k9, v.end()); p90 = v[k9];
+            }
+            double nt = (double)std::max<uint64_t>(sparse_touched[s], 1);
+            fprintf(stderr, " %s %.2f/%.2f %.1f %.2f", SPARSE_NAMES[s], med, p90,
+                    100.0 * sparse_z2[s] / nt, 100.0 * sparse_z3[s] / nt);
+        }
+        fprintf(stderr, "\n");
+        for (int s : { (int)SP_FTW, (int)SP_PSQT }) {
+            fprintf(stderr, "sparse: %s %%>3σ by session update count:", SPARSE_NAMES[s]);
+            const char *cn[SPC_N] = { "<60", "60-2047", ">=2048" };
+            for (int c = 0; c < SPC_N; c++)
+                fprintf(stderr, " %s %.2f (n %llu)", cn[c],
+                        sparse_cls_n[s][c] ? 100.0 * sparse_cls_z3[s][c] / sparse_cls_n[s][c] : 0.0,
+                        (unsigned long long)sparse_cls_n[s][c]);
+            fprintf(stderr, "\n");
+        }
         memset(sparse_touched, 0, sizeof(sparse_touched));
         memset(sparse_kept,    0, sizeof(sparse_kept));
+        memset(sparse_z2, 0, sizeof(sparse_z2));
+        memset(sparse_z3, 0, sizeof(sparse_z3));
+        memset(sparse_cls_n, 0, sizeof(sparse_cls_n));
+        memset(sparse_cls_z3, 0, sizeof(sparse_cls_z3));
     }
     nnue_emit_step_clip_telemetry();
 }
