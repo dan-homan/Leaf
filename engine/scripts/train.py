@@ -1149,6 +1149,15 @@ def main():
                          "MEASURED NULL on a mature chain: -2.5 +- 21.0 Elo "
                          "(Online_Learning_Investigation.md 7.7), where the "
                          "bootstrap was saturated — untested below saturation")
+    ap.add_argument("--no-offline", action="store_true",
+                    help="Generate, then promote the post-online net as the "
+                         "final with no corpus assembly or offline training, "
+                         "and still run the gauntlets and write the sidecar "
+                         "(offline_skipped).  For legs whose online phase "
+                         "gains on its own (sparse online updates, whose "
+                         "offline phase read -9/-10 on m260929-9.5e6g-z3).  "
+                         "The raw dumps are still written and kept, so later "
+                         "--consolidate windows can use the leg")
     ap.add_argument("--skip-train", action="store_true",
                     help="Skip offline training (generate-only)")
     ap.add_argument("--consolidate", type=int, default=0, metavar="N",
@@ -1374,6 +1383,11 @@ def main():
                          "either way, this only controls pruning aggressiveness")
     args = ap.parse_args()
 
+    if args.no_offline and (args.skip_online or args.consolidate or args.skip_train
+                            or args.assemble_only or args.corpus):
+        die("--no-offline promotes this run's post-online net: it needs a "
+            "generation phase and no offline options (--skip-online, "
+            "--consolidate, --skip-train, --assemble-only, --corpus)")
     if args.consolidate:
         if not args.continue_tag:
             die("--consolidate needs --continue: it consolidates the last N legs "
@@ -1643,231 +1657,235 @@ def main():
         log("generate-only mode: done.")
         return
 
-    # ---- Phase 4: assemble corpus ----------------------------------------
-    primary = dump_files + [Path(c) for c in args.corpus]
-    for c in primary:
-        if not c.is_file():
-            die(f"corpus not found: {c}")
+    # --no-offline: no corpus is assembled; the sidecar's corpus fields stay empty.
+    sources, sizes, per_source = [], [], []
+    rows = gid_next = 0
+    if not args.no_offline:
+        # ---- Phase 4: assemble corpus ----------------------------------------
+        primary = dump_files + [Path(c) for c in args.corpus]
+        for c in primary:
+            if not c.is_file():
+                die(f"corpus not found: {c}")
 
-    # Multi-iteration corpus window (arm A1).  Consolidating one iteration's own
-    # dump leaves ~45 Elo on the table: two arms with IDENTICAL row counts,
-    # epochs, optimizer steps and wall clock, differing only in how many
-    # distinct games the rows came from, scored +112.9 (500k games) and +148.7
-    # (2.5M games) against the classical anchor, and the diverse arm won the
-    # head-to-head by +45.4 +- 11.1.  So dilute the fresh dump with archived
-    # corpora from the --continue chain at a FIXED total row count — the window
-    # changes which games the rows come from, not how many.
-    # See docs/history/Offline_Learning_Investigation.md Part 2.
-    window = []
-    if args.corpus_window > 0:
-        if args.continue_tag:
-            window = chain_corpora(args.continue_tag, args.corpus_window,
-                                   args.gauntlet_anchors)
-            if not window:
-                log(f"--corpus-window {args.corpus_window}: no archived corpora "
-                    f"found on the {args.continue_tag} chain")
-        else:
-            log(f"--corpus-window {args.corpus_window} needs --continue to walk "
-                f"the chain — training on this run's corpus alone")
-
-    # Staleness filter.  Corpus labels distil their generator, so a corpus made
-    # by a much weaker net drags the student back through the (1-w) eval
-    # bootstrap term that carries ~70% of the target weight.
-    if window and args.corpus_window_max_stale > 0:
-        known = [e for _, _, e in window if e is not None]
-        if known:
-            best = max(known)
-            kept = []
-            for tag, path, elo in window:
-                if elo is not None and best - elo > args.corpus_window_max_stale:
-                    log(f"  window: dropping {tag} — generator {elo:+.1f} is "
-                        f"{best - elo:.1f} Elo below the freshest "
-                        f"({best:+.1f}), over --corpus-window-max-stale "
-                        f"{args.corpus_window_max_stale:.1f}")
-                else:
-                    kept.append((tag, path, elo))
-            window = kept
-
-    # Sources: this run's dump(s) + --corpus as one unit, then one per window
-    # corpus.  Row quotas are split evenly across sources (capped at each
-    # source's size) so the budget buys as many distinct games as possible.
-    # A window-only run (--skip-online --continue, no --corpus) is legitimate:
-    # it re-consolidates the chain's archived games without generating any.
-    sources = ([("this run", primary, None)] if primary else []) \
-              + [(t, list(f), e) for t, f, e in window]
-    if not sources:
-        die("nothing to train on (no dumps, no --corpus, and no window corpora "
-            "— pass --corpus, or --continue with --corpus-window)")
-
-    # ---- Phase 3.5: retarget root labels to their rescored PV leaves -------
-    if args.bt_rescore is not None:
-        rt_dir = work / "retarget"
-        rt_dir.mkdir(exist_ok=True)
-        shutil.copy2(bt_bin, rt_dir / "Leaf_vbt")
-        shutil.copy2(net_path, rt_dir / args.net)
-        shutil.copy2(live_td, rt_dir / f"{netbase}.tdleaf.bin")
-        log(f"--bt-rescore {args.bt_rescore:g}: relabelling root rows from their "
-            f"PV leaf on the seed weights ({live_td.name})")
-        # Pre-filter root rows on the label-independent part of the training
-        # rule (PV mode only), so ~45% fewer rows are paired and rescored, and
-        # retarget the sources in parallel -- each is an independent stream of
-        # gzip + Python, ~10-15 min alone for a 500k-game leg.
-        keep = (functools.partial(root_row_trainable, pv_k=args.bt_quiet_pv)
-                if args.bt_quiet_pv > 0 else None)
-        jobs = max(1, min(len(sources), args.retarget_jobs))
-        log(f"  retargeting {len(sources)} source(s), {jobs} in parallel")
-        with concurrent.futures.ProcessPoolExecutor(max_workers=jobs) as ex:
-            outs = list(ex.map(retarget_source,
-                               [t for t, _, _ in sources],
-                               [f for _, f, _ in sources],
-                               [rt_dir] * len(sources),
-                               [args.bt_rescore] * len(sources),
-                               [keep] * len(sources),
-                               [max(2, 16 // jobs)] * len(sources)))
-        retargeted, unpairable = [], []
-        for (tag, files, elo), out in zip(sources, outs):
-            if out is None:
-                unpairable.append(tag)
+        # Multi-iteration corpus window (arm A1).  Consolidating one iteration's own
+        # dump leaves ~45 Elo on the table: two arms with IDENTICAL row counts,
+        # epochs, optimizer steps and wall clock, differing only in how many
+        # distinct games the rows came from, scored +112.9 (500k games) and +148.7
+        # (2.5M games) against the classical anchor, and the diverse arm won the
+        # head-to-head by +45.4 +- 11.1.  So dilute the fresh dump with archived
+        # corpora from the --continue chain at a FIXED total row count — the window
+        # changes which games the rows come from, not how many.
+        # See docs/history/Offline_Learning_Investigation.md Part 2.
+        window = []
+        if args.corpus_window > 0:
+            if args.continue_tag:
+                window = chain_corpora(args.continue_tag, args.corpus_window,
+                                       args.gauntlet_anchors)
+                if not window:
+                    log(f"--corpus-window {args.corpus_window}: no archived corpora "
+                        f"found on the {args.continue_tag} chain")
             else:
-                retargeted.append((tag, [out], elo))
-        # A corpus where some labels are retargeted and some are not answers no
-        # question at all, so refuse rather than warn.
-        if unpairable:
-            die(f"--bt-rescore: no leaf rows in {', '.join(unpairable)} — that "
-                f"source is a root-only archive and cannot be paired.  Retarget "
-                f"needs every source paired; lower --corpus-window to exclude "
-                f"it, or drop --bt-rescore")
-        sources = retargeted
+                log(f"--corpus-window {args.corpus_window} needs --continue to walk "
+                    f"the chain — training on this run's corpus alone")
 
-    axes = {_corpus_is_game_ply(c) for _, files, _ in sources for c in files}
-    if len(axes) > 1:
-        die("cannot mix game-ply-axis and legacy record-index corpora in one "
-            "run — the ply column means different things; train them separately")
-    game_ply_axis = axes.pop()
+        # Staleness filter.  Corpus labels distil their generator, so a corpus made
+        # by a much weaker net drags the student back through the (1-w) eval
+        # bootstrap term that carries ~70% of the target weight.
+        if window and args.corpus_window_max_stale > 0:
+            known = [e for _, _, e in window if e is not None]
+            if known:
+                best = max(known)
+                kept = []
+                for tag, path, elo in window:
+                    if elo is not None and best - elo > args.corpus_window_max_stale:
+                        log(f"  window: dropping {tag} — generator {elo:+.1f} is "
+                            f"{best - elo:.1f} Elo below the freshest "
+                            f"({best:+.1f}), over --corpus-window-max-stale "
+                            f"{args.corpus_window_max_stale:.1f}")
+                    else:
+                        kept.append((tag, path, elo))
+                window = kept
 
-    # Quotas are computed over the rows that will actually be TRAINED ON, so a
-    # row-type filter shrinks the corpus rather than silently shrinking the
-    # budget: with --bt-rows root over a natural corpus, filtering after
-    # sampling would have delivered ~45% of the requested rows.
-    row_kind = ROW_KIND[args.bt_rows]
-    quiet = (args.bt_quiet_cp, args.bt_quiet_pv, args.bt_quiet_pv_cap)
-    log("counting corpus rows (cached as <corpus>.rows) ...")
-    sizes = [sum(corpus_row_counts(c, quiet)[row_kind] for c in files)
-             for _, files, _ in sources]
-    if args.bt_quiet_pv > 0:
-        log(f"--bt-quiet-pv {args.bt_quiet_pv}: rows with a `pv` column train iff "
-            f"no capture/check/promotion in the first {args.bt_quiet_pv} PV plies"
-            + (f" and |cp - gate| <= {args.bt_quiet_pv_cap}"
-               if args.bt_quiet_pv_cap > 0 else "")
-            + f"; rows without one use --bt-quiet-cp {args.bt_quiet_cp}")
-    elif args.bt_quiet_cp > 0:
-        log(f"--bt-quiet-cp {args.bt_quiet_cp}: budget and quotas count only rows "
-            f"within the gate (dump gate was --quiet-cp {args.quiet_cp})")
-    if row_kind:
-        log(f"--bt-rows {args.bt_rows}: budget and quotas count {args.bt_rows} "
-            f"rows only")
-        log(f"NOTE: {work.name}/corpus.tsv.gz will archive {args.bt_rows} rows "
-            f"only — the other row type is dropped at assembly.  The raw "
-            f"dumps (both row types, root `pv` column included) are kept, "
-            f"gzipped in place, at end of run.")
-    if args.corpus_rows == -1:
-        budget = sum(sizes)    # --corpus-rows all
-    elif args.corpus_rows > 0:
-        budget = args.corpus_rows
-    elif len(sources) > 1:
-        budget = sizes[0]      # auto: hold the total at this run's own dump size
-    else:
-        budget = sum(sizes)    # no window and no explicit budget -> no thinning
-    quota = share_quotas(sizes, budget, args.corpus_weight)
+        # Sources: this run's dump(s) + --corpus as one unit, then one per window
+        # corpus.  Row quotas are split evenly across sources (capped at each
+        # source's size) so the budget buys as many distinct games as possible.
+        # A window-only run (--skip-online --continue, no --corpus) is legitimate:
+        # it re-consolidates the chain's archived games without generating any.
+        sources = ([("this run", primary, None)] if primary else []) \
+                  + [(t, list(f), e) for t, f, e in window]
+        if not sources:
+            die("nothing to train on (no dumps, no --corpus, and no window corpora "
+                "— pass --corpus, or --continue with --corpus-window)")
 
-    log(f"corpus window: {len(sources)} source(s), budget {budget:,} rows")
-    assembled = []
-    densities = []
-    for (tag, files, elo), size, want in zip(sources, sizes, quota):
-        gen = f"generator {elo:+.1f} Elo" if elo is not None else "generator n/a"
-        via = "" if not any(str(f).endswith("corpus.tsv.gz") for f in files) \
-              else "  [assembled corpus, not raw dumps]"
-        if via:
-            assembled.append(tag)
-        log(f"  {tag:<24} {want:>12,} of {size:>12,} rows "
-            f"({100.0 * want / max(size, 1):5.1f}%)  {gen}{via}")
-        densities.append((tag, want / max(size, 1)))
-    # The sampling density IS the per-game weight, since rows-per-game is near
-    # constant across legs.  A wide spread means some generator vintages carry
-    # several times the weight of others per game -- which under the default
-    # 'source' split lands on the FRESHEST leg when it is the largest.
-    if len(densities) > 1:
-        lo = min(d for _, d in densities)
-        hi = max(d for _, d in densities)
-        if lo > 0 and hi / lo >= 1.5:
-            worst = min(densities, key=lambda x: x[1])[0]
-            best = max(densities, key=lambda x: x[1])[0]
-            log(f"NOTE: --corpus-weight {args.corpus_weight} gives {best} "
-                f"{hi / lo:.1f}x the per-game weight of {worst}.  Use "
-                f"--corpus-weight game to weight every game equally instead")
-    # An assembled corpus.tsv.gz from a leg that used --corpus-window is itself a
-    # mixture of older legs, so drawing it AND those legs double-counts them: the
-    # duplicate rows are deduped, but the quotas are set before dedup (budget
-    # under-delivers) and the re-weighting costs the game diversity A1 valued at
-    # ~45 Elo.  Only legs predating the keep-dumps change hit this.
-    #
-    # Warn only on an ACTUAL overlap: read each assembly's own sidecar and check
-    # whether any other source in this window is inside it.  An assembly of
-    # strictly older legs alongside newer raw dumps is exactly the configuration
-    # that maximises distinct games with no duplication, and must not be flagged
-    # — a warning that cries wolf is one people learn to ignore.
-    live = {t for t, _, _ in sources}
-    for tag in assembled:
-        try:
-            with open(LEARN_DIR / f"{tag}_final.json") as f:
-                inner = {w.get("tag") for w in (json.load(f).get("corpus_window") or [])}
-        except (OSError, ValueError):
-            inner = set()
-        # "this run" in a sidecar names THAT leg's own games, not the current
-        # run's — same label, different games, so it is never an overlap.
-        inner.discard("this run")
-        dup = sorted((inner & live) - {tag, "this run"})
-        if dup:
-            log(f"WARNING: {tag} contributed its ASSEMBLED corpus, which already "
-                f"contains {', '.join(dup)} — those games are drawn twice.  Dedup "
-                f"removes the duplicate rows but the quotas are set before dedup, "
-                f"so the budget under-delivers.  Lower --corpus-window to exclude "
-                f"them")
+        # ---- Phase 3.5: retarget root labels to their rescored PV leaves -------
+        if args.bt_rescore is not None:
+            rt_dir = work / "retarget"
+            rt_dir.mkdir(exist_ok=True)
+            shutil.copy2(bt_bin, rt_dir / "Leaf_vbt")
+            shutil.copy2(net_path, rt_dir / args.net)
+            shutil.copy2(live_td, rt_dir / f"{netbase}.tdleaf.bin")
+            log(f"--bt-rescore {args.bt_rescore:g}: relabelling root rows from their "
+                f"PV leaf on the seed weights ({live_td.name})")
+            # Pre-filter root rows on the label-independent part of the training
+            # rule (PV mode only), so ~45% fewer rows are paired and rescored, and
+            # retarget the sources in parallel -- each is an independent stream of
+            # gzip + Python, ~10-15 min alone for a 500k-game leg.
+            keep = (functools.partial(root_row_trainable, pv_k=args.bt_quiet_pv)
+                    if args.bt_quiet_pv > 0 else None)
+            jobs = max(1, min(len(sources), args.retarget_jobs))
+            log(f"  retargeting {len(sources)} source(s), {jobs} in parallel")
+            with concurrent.futures.ProcessPoolExecutor(max_workers=jobs) as ex:
+                outs = list(ex.map(retarget_source,
+                                   [t for t, _, _ in sources],
+                                   [f for _, f, _ in sources],
+                                   [rt_dir] * len(sources),
+                                   [args.bt_rescore] * len(sources),
+                                   [keep] * len(sources),
+                                   [max(2, 16 // jobs)] * len(sources)))
+            retargeted, unpairable = [], []
+            for (tag, files, elo), out in zip(sources, outs):
+                if out is None:
+                    unpairable.append(tag)
+                else:
+                    retargeted.append((tag, [out], elo))
+            # A corpus where some labels are retargeted and some are not answers no
+            # question at all, so refuse rather than warn.
+            if unpairable:
+                die(f"--bt-rescore: no leaf rows in {', '.join(unpairable)} — that "
+                    f"source is a root-only archive and cannot be paired.  Retarget "
+                    f"needs every source paired; lower --corpus-window to exclude "
+                    f"it, or drop --bt-rescore")
+            sources = retargeted
 
-    corpus_path = work / "corpus.tsv"
-    log(f"assembling -> {corpus_path.name} "
-        f"(axis={'game-ply' if game_ply_axis else 'legacy record-index'}, "
-        f"dedup) ...")
-    rows, gid_next, dropped, per_source = write_corpus(
-        corpus_path, sources, sizes, quota, game_ply_axis, row_kind, quiet)
-    log(f"{rows:,} positions assembled from {gid_next:,} distinct games "
-        f"({dropped:,} duplicate rows dropped)")
+        axes = {_corpus_is_game_ply(c) for _, files, _ in sources for c in files}
+        if len(axes) > 1:
+            die("cannot mix game-ply-axis and legacy record-index corpora in one "
+                "run — the ply column means different things; train them separately")
+        game_ply_axis = axes.pop()
 
-    def trainer_cmd(rows):
-        """The --batch-train invocation, run from <work>/train/ on ../corpus.tsv.
-        Shared by the normal path and --assemble-only so the printed command is
-        exactly the one train.py would have run."""
-        cmd = ["./Leaf_vbt", "--batch-train", "../corpus.tsv",
-               "--bt-epochs", str(args.epochs), "--bt-out", args.tag,
-               "--bt-threads", str(args.bt_threads),
-               "--bt-lr", str(args.bt_lr), "--bt-lambda", str(args.bt_lambda),
-               "--bt-K", str(args.bt_K), "--bt-batch", str(args.bt_batch),
-               # Exact row count -> the trainer reserves once instead of growing the
-               # record vector by doubling.  The doubling peak (old + new buffer
-               # live simultaneously) is ~1.5x the final size and is what actually
-               # caps corpus size on a 30 GB box: ~16 GB of transient just to reach
-               # 190M rows.  Assembly counted the rows, so hand them over.
-               "--bt-max", str(rows),
-               "--bt-seed", "1000"]
-        if args.bt_leaf_lambda is not None:
-            cmd += ["--bt-leaf-lambda", str(args.bt_leaf_lambda)]
-        if args.bt_td_lambda is not None:
-            cmd += ["--bt-td-lambda", str(args.bt_td_lambda)]
-        if args.bt_loss_gamma is not None:
-            cmd += ["--bt-loss-gamma", str(args.bt_loss_gamma)]
-        if args.bt_rows != "both":
-            cmd += ["--bt-rows", args.bt_rows]
-        return cmd
+        # Quotas are computed over the rows that will actually be TRAINED ON, so a
+        # row-type filter shrinks the corpus rather than silently shrinking the
+        # budget: with --bt-rows root over a natural corpus, filtering after
+        # sampling would have delivered ~45% of the requested rows.
+        row_kind = ROW_KIND[args.bt_rows]
+        quiet = (args.bt_quiet_cp, args.bt_quiet_pv, args.bt_quiet_pv_cap)
+        log("counting corpus rows (cached as <corpus>.rows) ...")
+        sizes = [sum(corpus_row_counts(c, quiet)[row_kind] for c in files)
+                 for _, files, _ in sources]
+        if args.bt_quiet_pv > 0:
+            log(f"--bt-quiet-pv {args.bt_quiet_pv}: rows with a `pv` column train iff "
+                f"no capture/check/promotion in the first {args.bt_quiet_pv} PV plies"
+                + (f" and |cp - gate| <= {args.bt_quiet_pv_cap}"
+                   if args.bt_quiet_pv_cap > 0 else "")
+                + f"; rows without one use --bt-quiet-cp {args.bt_quiet_cp}")
+        elif args.bt_quiet_cp > 0:
+            log(f"--bt-quiet-cp {args.bt_quiet_cp}: budget and quotas count only rows "
+                f"within the gate (dump gate was --quiet-cp {args.quiet_cp})")
+        if row_kind:
+            log(f"--bt-rows {args.bt_rows}: budget and quotas count {args.bt_rows} "
+                f"rows only")
+            log(f"NOTE: {work.name}/corpus.tsv.gz will archive {args.bt_rows} rows "
+                f"only — the other row type is dropped at assembly.  The raw "
+                f"dumps (both row types, root `pv` column included) are kept, "
+                f"gzipped in place, at end of run.")
+        if args.corpus_rows == -1:
+            budget = sum(sizes)    # --corpus-rows all
+        elif args.corpus_rows > 0:
+            budget = args.corpus_rows
+        elif len(sources) > 1:
+            budget = sizes[0]      # auto: hold the total at this run's own dump size
+        else:
+            budget = sum(sizes)    # no window and no explicit budget -> no thinning
+        quota = share_quotas(sizes, budget, args.corpus_weight)
+
+        log(f"corpus window: {len(sources)} source(s), budget {budget:,} rows")
+        assembled = []
+        densities = []
+        for (tag, files, elo), size, want in zip(sources, sizes, quota):
+            gen = f"generator {elo:+.1f} Elo" if elo is not None else "generator n/a"
+            via = "" if not any(str(f).endswith("corpus.tsv.gz") for f in files) \
+                  else "  [assembled corpus, not raw dumps]"
+            if via:
+                assembled.append(tag)
+            log(f"  {tag:<24} {want:>12,} of {size:>12,} rows "
+                f"({100.0 * want / max(size, 1):5.1f}%)  {gen}{via}")
+            densities.append((tag, want / max(size, 1)))
+        # The sampling density IS the per-game weight, since rows-per-game is near
+        # constant across legs.  A wide spread means some generator vintages carry
+        # several times the weight of others per game -- which under the default
+        # 'source' split lands on the FRESHEST leg when it is the largest.
+        if len(densities) > 1:
+            lo = min(d for _, d in densities)
+            hi = max(d for _, d in densities)
+            if lo > 0 and hi / lo >= 1.5:
+                worst = min(densities, key=lambda x: x[1])[0]
+                best = max(densities, key=lambda x: x[1])[0]
+                log(f"NOTE: --corpus-weight {args.corpus_weight} gives {best} "
+                    f"{hi / lo:.1f}x the per-game weight of {worst}.  Use "
+                    f"--corpus-weight game to weight every game equally instead")
+        # An assembled corpus.tsv.gz from a leg that used --corpus-window is itself a
+        # mixture of older legs, so drawing it AND those legs double-counts them: the
+        # duplicate rows are deduped, but the quotas are set before dedup (budget
+        # under-delivers) and the re-weighting costs the game diversity A1 valued at
+        # ~45 Elo.  Only legs predating the keep-dumps change hit this.
+        #
+        # Warn only on an ACTUAL overlap: read each assembly's own sidecar and check
+        # whether any other source in this window is inside it.  An assembly of
+        # strictly older legs alongside newer raw dumps is exactly the configuration
+        # that maximises distinct games with no duplication, and must not be flagged
+        # — a warning that cries wolf is one people learn to ignore.
+        live = {t for t, _, _ in sources}
+        for tag in assembled:
+            try:
+                with open(LEARN_DIR / f"{tag}_final.json") as f:
+                    inner = {w.get("tag") for w in (json.load(f).get("corpus_window") or [])}
+            except (OSError, ValueError):
+                inner = set()
+            # "this run" in a sidecar names THAT leg's own games, not the current
+            # run's — same label, different games, so it is never an overlap.
+            inner.discard("this run")
+            dup = sorted((inner & live) - {tag, "this run"})
+            if dup:
+                log(f"WARNING: {tag} contributed its ASSEMBLED corpus, which already "
+                    f"contains {', '.join(dup)} — those games are drawn twice.  Dedup "
+                    f"removes the duplicate rows but the quotas are set before dedup, "
+                    f"so the budget under-delivers.  Lower --corpus-window to exclude "
+                    f"them")
+
+        corpus_path = work / "corpus.tsv"
+        log(f"assembling -> {corpus_path.name} "
+            f"(axis={'game-ply' if game_ply_axis else 'legacy record-index'}, "
+            f"dedup) ...")
+        rows, gid_next, dropped, per_source = write_corpus(
+            corpus_path, sources, sizes, quota, game_ply_axis, row_kind, quiet)
+        log(f"{rows:,} positions assembled from {gid_next:,} distinct games "
+            f"({dropped:,} duplicate rows dropped)")
+
+        def trainer_cmd(rows):
+            """The --batch-train invocation, run from <work>/train/ on ../corpus.tsv.
+            Shared by the normal path and --assemble-only so the printed command is
+            exactly the one train.py would have run."""
+            cmd = ["./Leaf_vbt", "--batch-train", "../corpus.tsv",
+                   "--bt-epochs", str(args.epochs), "--bt-out", args.tag,
+                   "--bt-threads", str(args.bt_threads),
+                   "--bt-lr", str(args.bt_lr), "--bt-lambda", str(args.bt_lambda),
+                   "--bt-K", str(args.bt_K), "--bt-batch", str(args.bt_batch),
+                   # Exact row count -> the trainer reserves once instead of growing the
+                   # record vector by doubling.  The doubling peak (old + new buffer
+                   # live simultaneously) is ~1.5x the final size and is what actually
+                   # caps corpus size on a 30 GB box: ~16 GB of transient just to reach
+                   # 190M rows.  Assembly counted the rows, so hand them over.
+                   "--bt-max", str(rows),
+                   "--bt-seed", "1000"]
+            if args.bt_leaf_lambda is not None:
+                cmd += ["--bt-leaf-lambda", str(args.bt_leaf_lambda)]
+            if args.bt_td_lambda is not None:
+                cmd += ["--bt-td-lambda", str(args.bt_td_lambda)]
+            if args.bt_loss_gamma is not None:
+                cmd += ["--bt-loss-gamma", str(args.bt_loss_gamma)]
+            if args.bt_rows != "both":
+                cmd += ["--bt-rows", args.bt_rows]
+            return cmd
 
     # ---- Phase 5: offline consolidation (single threaded process) ---------
     tdir = work / "train"
@@ -1919,13 +1937,13 @@ def main():
     # doesn't contend with training for cores.
     ladder_opp_bin = ladder_opp_net = ladder_opp = None
     tdleaf_rate_bin = None
-    if args.gauntlet_epochs or args.gauntlet_tdleaf:
+    if args.gauntlet_epochs or args.gauntlet_tdleaf or args.no_offline:
         pre_nnue = tdir / f"{args.tag}_pretrain.nnue"
         log(f"baking pre-offline-training baseline net -> {pre_nnue.name}")
         sh(["./Leaf_vbt", "--write-nnue", pre_nnue.name], cwd=tdir)
         if not pre_nnue.is_file():
             die(f"failed to bake pre-training baseline {pre_nnue}")
-    if args.gauntlet_epochs:
+    if args.gauntlet_epochs and not args.no_offline:
         ladder_opp_bin, ladder_opp_net, ladder_opp = build_rating_binary(
             pre_nnue, f"{args.tag}-pretrain")
         log(f"epoch-ladder opponent: {ladder_opp} (net before offline training)")
@@ -1941,80 +1959,85 @@ def main():
                                          tdleaf=False, force=True)
         log(f"tdleaf-phase net saved: {tdleaf_nnue.name} + {tdleaf_rate_bin.name}")
 
-    log(f"training: {args.bt_threads} threads x {args.epochs} epochs "
-        f"(lr {args.bt_lr}, lambda {args.bt_lambda}, K {args.bt_K})")
-    cmd = trainer_cmd(rows)
-    logf = open(tdir / "train.log", "w")
-    proc = subprocess.Popen(cmd, cwd=str(tdir),
-                            stdout=subprocess.DEVNULL, stderr=logf)
-
-    # Per-epoch ladder: rate each epoch snapshot as soon as its epoch's
-    # training finishes, while the trainer keeps running.  The trainer writes
-    # _epN.nnue then _epN.tdleaf.bin, so the .tdleaf.bin appearing means the
-    # .nnue is complete.
-    def rate_epoch(ep, opp_bin, opp_name):
-        ver = f"{args.tag}-ep{ep}"
-        bpath, npath, bname = build_rating_binary(
-            tdir / f"{args.tag}_ep{ep}.nnue", ver)
-        pgn = work / f"match_{ver}_vs_{opp_name.replace('Leaf_v', '')}.pgn"
-        log(f"epoch ladder: epoch {ep} vs {opp_name} "
-            f"({args.epoch_games} games at "
-            f"{budget_label(args.epoch_depth, args.epoch_tc)})")
-        sh(["python3", SCRIPT_DIR / "match.py", str(bpath), str(opp_bin),
-            "-n", args.epoch_games, "-c", args.epoch_concurrency,
-            *budget_args(args.epoch_depth, args.epoch_tc),
-            "--openings", args.openings, "--fischer-random",
-            "--pgn-out", pgn], cwd=LEARN_DIR)
-        W, L, D, elo, err = pgn_score(pgn, ver)
-        log(f"epoch ladder: epoch {ep}  W/L/D {W}/{L}/{D}  Elo {elo:+.0f} ± {err:.0f}")
-        # single-use: prune this epoch's rating binary + net right after its match
-        bpath.unlink(missing_ok=True)
-        npath.unlink(missing_ok=True)
-        return (W, L, D, elo, err)
-
     epoch_results = []
-    if args.gauntlet_epochs:
-        rated = 0
-        while True:
-            if rated < args.epochs and \
+    if args.no_offline:
+        log("--no-offline: promoting the post-online net as the final "
+            "(no corpus, no offline training)")
+    else:
+        log(f"training: {args.bt_threads} threads x {args.epochs} epochs "
+            f"(lr {args.bt_lr}, lambda {args.bt_lambda}, K {args.bt_K})")
+        cmd = trainer_cmd(rows)
+        logf = open(tdir / "train.log", "w")
+        proc = subprocess.Popen(cmd, cwd=str(tdir),
+                                stdout=subprocess.DEVNULL, stderr=logf)
+
+        # Per-epoch ladder: rate each epoch snapshot as soon as its epoch's
+        # training finishes, while the trainer keeps running.  The trainer writes
+        # _epN.nnue then _epN.tdleaf.bin, so the .tdleaf.bin appearing means the
+        # .nnue is complete.
+        def rate_epoch(ep, opp_bin, opp_name):
+            ver = f"{args.tag}-ep{ep}"
+            bpath, npath, bname = build_rating_binary(
+                tdir / f"{args.tag}_ep{ep}.nnue", ver)
+            pgn = work / f"match_{ver}_vs_{opp_name.replace('Leaf_v', '')}.pgn"
+            log(f"epoch ladder: epoch {ep} vs {opp_name} "
+                f"({args.epoch_games} games at "
+                f"{budget_label(args.epoch_depth, args.epoch_tc)})")
+            sh(["python3", SCRIPT_DIR / "match.py", str(bpath), str(opp_bin),
+                "-n", args.epoch_games, "-c", args.epoch_concurrency,
+                *budget_args(args.epoch_depth, args.epoch_tc),
+                "--openings", args.openings, "--fischer-random",
+                "--pgn-out", pgn], cwd=LEARN_DIR)
+            W, L, D, elo, err = pgn_score(pgn, ver)
+            log(f"epoch ladder: epoch {ep}  W/L/D {W}/{L}/{D}  Elo {elo:+.0f} ± {err:.0f}")
+            # single-use: prune this epoch's rating binary + net right after its match
+            bpath.unlink(missing_ok=True)
+            npath.unlink(missing_ok=True)
+            return (W, L, D, elo, err)
+
+        epoch_results = []
+        if args.gauntlet_epochs:
+            rated = 0
+            while True:
+                if rated < args.epochs and \
+                        (tdir / f"{args.tag}_ep{rated + 1}.tdleaf.bin").exists():
+                    rated += 1
+                    # Freeze the trainer while the ladder match runs: the next
+                    # epoch's training must not contend for cores with the games.
+                    if proc.poll() is None:
+                        proc.send_signal(signal.SIGSTOP)
+                    try:
+                        epoch_results.append(
+                            (rated, rate_epoch(rated, ladder_opp_bin, ladder_opp)))
+                    finally:
+                        if proc.poll() is None:
+                            proc.send_signal(signal.SIGCONT)
+                    # Auto-decider hook: to stop a run that is going poorly,
+                    # decide on epoch_results here, then proc.terminate() + break.
+                    continue
+                if proc.poll() is not None:
+                    break
+                time.sleep(10)
+            rc = proc.wait()
+            logf.close()
+            if rc != 0:
+                die(f"trainer process failed (rc={rc}) — see {tdir}/train.log")
+            # Sweep snapshots that landed between the last check and process exit.
+            while rated < args.epochs and \
                     (tdir / f"{args.tag}_ep{rated + 1}.tdleaf.bin").exists():
                 rated += 1
-                # Freeze the trainer while the ladder match runs: the next
-                # epoch's training must not contend for cores with the games.
-                if proc.poll() is None:
-                    proc.send_signal(signal.SIGSTOP)
-                try:
-                    epoch_results.append(
-                        (rated, rate_epoch(rated, ladder_opp_bin, ladder_opp)))
-                finally:
-                    if proc.poll() is None:
-                        proc.send_signal(signal.SIGCONT)
-                # Auto-decider hook: to stop a run that is going poorly,
-                # decide on epoch_results here, then proc.terminate() + break.
-                continue
-            if proc.poll() is not None:
-                break
-            time.sleep(10)
-        rc = proc.wait()
-        logf.close()
-        if rc != 0:
-            die(f"trainer process failed (rc={rc}) — see {tdir}/train.log")
-        # Sweep snapshots that landed between the last check and process exit.
-        while rated < args.epochs and \
-                (tdir / f"{args.tag}_ep{rated + 1}.tdleaf.bin").exists():
-            rated += 1
-            epoch_results.append(
-                (rated, rate_epoch(rated, ladder_opp_bin, ladder_opp)))
-        # Pretrain baseline is only needed as the fixed ladder opponent —
-        # prune it once the whole ladder is done with it.
-        if ladder_opp_bin is not None:
-            ladder_opp_bin.unlink(missing_ok=True)
-            ladder_opp_net.unlink(missing_ok=True)
-    else:
-        rc = proc.wait()
-        logf.close()
-        if rc != 0:
-            die(f"trainer process failed (rc={rc}) — see {tdir}/train.log")
+                epoch_results.append(
+                    (rated, rate_epoch(rated, ladder_opp_bin, ladder_opp)))
+            # Pretrain baseline is only needed as the fixed ladder opponent —
+            # prune it once the whole ladder is done with it.
+            if ladder_opp_bin is not None:
+                ladder_opp_bin.unlink(missing_ok=True)
+                ladder_opp_net.unlink(missing_ok=True)
+        else:
+            rc = proc.wait()
+            logf.close()
+            if rc != 0:
+                die(f"trainer process failed (rc={rc}) — see {tdir}/train.log")
 
     if epoch_results:
         print()
@@ -2048,9 +2071,11 @@ def main():
             log(f"final = epoch {best_ep} of {args.epochs} "
                 f"(ladder best, Elo {best_elo:+.0f})")
             pick_ep = best_ep
+    elif args.no_offline:
+        pick_ep = 0
     else:
         pick_ep = args.epochs
-    if offline_rejected:
+    if offline_rejected or args.no_offline:
         # The trainer's untouched starting state and the baked pre-offline net.
         src_nnue = tdir / f"{args.tag}_pretrain.nnue"
         src_td   = tdir / f"{netbase}.tdleaf.bin"
@@ -2128,9 +2153,10 @@ def main():
         if tdleaf_rate_bin is not None:
             tdleaf_results = run_gauntlet(tdleaf_rate_bin.name,
                                           f"{args.tag}-tdleaf")
-        if offline_rejected and tdleaf_results:
+        if (offline_rejected or args.no_offline) and tdleaf_results:
             # Same net: the final's gauntlet IS the tdleaf gauntlet.
-            log("offline phase rejected: final == tdleaf net, reusing its "
+            log("final == tdleaf net (offline phase "
+                f"{'skipped' if args.no_offline else 'rejected'}), reusing its "
                 "gauntlet results")
             results = tdleaf_results
         else:
@@ -2215,9 +2241,10 @@ def main():
                  else zlib.crc32(args.tag.encode()) & 0x7FFFFFFF),
         "opt_reset": args.opt_reset,
         "grad_norm": args.grad_norm,
-        "epochs": args.epochs,
+        "epochs": 0 if args.no_offline else args.epochs,
         "picked_epoch": pick_ep,
         "offline_rejected": offline_rejected,
+        "offline_skipped": args.no_offline,
         "bt_lr": args.bt_lr,
         "bt_lambda": args.bt_lambda,
         "bt_K": args.bt_K,

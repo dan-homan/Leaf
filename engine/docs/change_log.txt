@@ -1,5 +1,13 @@
 Changes since 2017_12_24
 
+2026_11_16b -- (branch sparse-online-updates) train.py --no-offline: promote
+               the post-online net as the final, skipping corpus assembly and
+               offline training, with the normal gauntlets and sidecar
+               (offline_skipped).  For sparse-update legs, whose offline phase
+               now loses (m260929-9.5e6g-z3: ladder -9.2 / -10.3).  Verified on
+               a 2000-game test leg: final == tdleaf net byte for byte, ladder
+               snapshots and raw dumps kept, sidecar read by leg_summary.
+
 2026_11_16 -- (branch sparse-online-updates) learner: --sparse-z K, a noise-
                calibrated sparse cutoff on session-local scoring moments.
 

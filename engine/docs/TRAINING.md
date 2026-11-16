@@ -520,6 +520,16 @@ online damage (`Learning_Investigation.md` §1 X) — so read a variant-2 arm
 against a PSQT-frozen control, or use `--sparse-agree-min` to judge FT/PSQT by
 the games that actually touch them.
 
+**Legs without an offline phase — `train.py --no-offline`.**  On
+`m260929-9.5e6g-z3` the online phase gained (+7.8 head-to-head vs its parent)
+and the offline phase lost (ladder −9.2 / −10.3, rejected).  `--no-offline`
+generates, then promotes the post-online net as the final — no corpus assembly,
+no training — and still runs the tdleaf/final gauntlets (one set, reused),
+the continuity match and the sidecar (`offline_skipped: true`, `epochs: 0`,
+`picked_epoch: 0`).  The raw dumps are still written and kept, so a later
+`--consolidate` window can use the leg.  With `--ladder N` it gives a rateable
+trajectory of the online phase (`<tag>_work/<tag>-ladder-<N>g.nnue`).
+
 ---
 
 ### LR Warmup
